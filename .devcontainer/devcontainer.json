@@ -1,0 +1,35 @@
+{
+  "name": "graph-context-mcp",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/graph-context-mcp",
+
+  // The compose file already starts the firewall + keeps the container alive.
+  // Don't let VS Code replace the container command with its own.
+  "overrideCommand": false,
+
+  "remoteUser": "dev",
+
+  // Idempotent: re-applies the same rules if VS Code (re)starts the container itself.
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
+
+  // Your MCP server port, forwarded to the host when attached via VS Code.
+  // (docker-compose.yml also publishes it, so it works without VS Code too.)
+  "forwardPorts": [8000],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.mypy-type-checker",
+        "charliermarsh.ruff",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.testing.pytestEnabled": true,
+        "ruff.lineLength": 100
+      }
+    }
+  }
+}

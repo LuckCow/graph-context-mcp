@@ -1,0 +1,65 @@
+# Standalone runner for the dev container.
+# Start it without VS Code:   docker compose -f .devcontainer/docker-compose.yml up -d --build
+# Stop it:                    docker compose -f .devcontainer/docker-compose.yml down
+# VS Code's Dev Containers extension uses this same file (via devcontainer.json),
+# so "Reopen in Container" attaches to the identical environment.
+
+# Pinned project name: makes the manual CLI and VS Code's "Reopen in Container"
+# target the SAME deployment instead of fighting over the container name.
+# (Pairs with dev.containers.dockerComposeProjectName in .vscode/settings.json.)
+name: graph-context-mcp
+
+services:
+  dev:
+    build:
+      # Context is the PROJECT ROOT so the build can read pyproject.toml
+      # (single source of truth for dev dependencies).
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    container_name: graph-context-mcp-dev
+    user: dev
+    init: true
+
+    # Required for the iptables/ipset egress firewall.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    # Apply the egress lockdown, then keep the container alive.
+    command: ["/bin/sh", "-c", "sudo /usr/local/bin/init-firewall.sh && exec sleep infinity"]
+
+    volumes:
+      # Project root (the directory containing .devcontainer/) -> /workspaces/graph-context-mcp
+      - ..:/workspaces/graph-context-mcp
+      # Persist Claude Code login + settings across rebuilds.
+      - claude-config:/home/dev/.claude
+
+    working_dir: /workspaces/graph-context-mcp
+
+    # Only loopback on the host can reach the published MCP server port.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # Lets the container reach the Anytype desktop app running on your Windows host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      # Anytype desktop's local API (use 31012 if you run anytype-cli instead).
+      ANYTYPE_API_BASE_URL: "http://host.docker.internal:31009"
+      # Path to the mounted secret. App code reads the key from this file,
+      # NOT from an env var (env vars leak via docker inspect / /proc / child procs).
+      ANYTYPE_API_KEY_FILE: "/run/secrets/anytype_api_key"
+
+    secrets:
+      - anytype_api_key
+
+volumes:
+  claude-config:
+
+# The secret's value lives in a host file that is git-ignored and never
+# baked into the image. Create it once (see README), then it's mounted
+# read-only at /run/secrets/anytype_api_key inside the container.
+secrets:
+  anytype_api_key:
+    file: ./secrets/anytype_api_key

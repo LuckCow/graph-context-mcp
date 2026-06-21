@@ -1,0 +1,24 @@
+# Build context is the project root now; keep it lean and safe.
+# Secrets must never enter the build context.
+.devcontainer/secrets/
+secrets/
+.env
+.env.*
+*.key
+
+# VCS + caches
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# Editor/VS Code server cruft
+.vscode-server/

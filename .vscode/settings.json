@@ -1,0 +1,7 @@
+{
+  // Make "Reopen in Container" use the same compose project as the manual
+  // `docker compose -f .devcontainer/docker-compose.yml up -d` command,
+  // so VS Code reuses the running container instead of trying to create
+  // a conflicting duplicate.
+  "dev.containers.dockerComposeProjectName": "graph-context-mcp"
+}
