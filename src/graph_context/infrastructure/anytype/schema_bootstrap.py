@@ -27,9 +27,16 @@ async def ensure_schema(client: AnytypeClient) -> None:
         key = mapping.TYPE_KEYS[node_type]
         if key not in existing_types:
             logger.info("bootstrap: creating type %s", key)
-            await client.create_type(
-                {"key": key, "name": node_type.value, "layout": "basic"}
-            )
+            # plural_name is required by the API (spike). It is cosmetic,
+            # human-editable display data, and bootstrap is create-if-missing,
+            # so a UI rename is never clobbered -- hence a naive plural rather
+            # than a maintained table (dynamic types are WP4 and carry their own).
+            await client.create_type({
+                "key": key,
+                "name": node_type.value,
+                "plural_name": f"{node_type.value}s",
+                "layout": "basic",
+            })
 
     existing_properties = {p["key"] async for p in client.list_properties()}
     for key, fmt in mapping.SCALAR_PROPERTIES.items():

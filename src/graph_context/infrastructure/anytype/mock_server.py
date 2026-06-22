@@ -1,39 +1,46 @@
 """MockAnytype: an in-process simulator of the Anytype local API.
 
-Stands in for a live server (none is available in this environment) by
-implementing the *documented* behavior of API version 2025-11-08 as an
-``httpx.MockTransport`` handler:
+Stands in for a live server as an ``httpx.MockTransport`` handler. Its
+behavior is pinned to what the **WP1 spike measured** against a real
+instance (API version 2025-11-08, 2026-06-21), so the test suite means
+something:
 
 * CRUD on ``/v1/spaces/{space}/objects`` (+ types, properties), with the
-  ``data``/``pagination`` envelope and offset/limit paging.
-* List filtering by ``type`` (type key) and ``last_modified_date[gte]``
-  (the documented dynamic-filter style).
-* DELETE archives (soft delete); archived objects are hidden from lists
-  unless ``archived_visible_in_lists=True`` -- this is spike question S4
-  made into a knob, so tests cover both possible live-server answers.
-* PATCH **replaces** each provided property's value wholesale, including
-  multi-value relation lists (mapping assumption A4 -- also a knob-worthy
-  spike question; replace is the conservative assumption).
+  ``data``/``pagination`` envelope and ``offset``/``limit`` *query* paging.
+* ``GET /objects`` is the **unfiltered** sweep used by hydrate: it returns
+  every non-archived object and honors a large page size (no 100 cap).
+* ``POST /search`` is the **filtered/sorted** endpoint used by resync:
+  ``types`` / ``filters`` / ``sort`` live in the request *body*, paging is
+  via query params, and a page is **hard-capped at ``max_page_limit``**
+  (100 live) regardless of the requested limit.
+* Timestamps are ``date``-format **properties**, not top-level fields:
+  ``created_date`` is stamped at creation; ``last_modified_date`` is stamped
+  only on a *modification* (spike S3 -- it is absent until then). Filtering
+  and sorting compare the *effective* stamp (last_modified else created).
+* DELETE archives (soft delete). Archived objects are invisible to **both**
+  list and search and cannot be enumerated (spike S4), so human deletions
+  are only reconciled by a full hydrate -- there is deliberately no knob to
+  make them visible.
 * 429 ``rate_limit_exceeded`` payloads via ``fail_next`` for retry tests.
 
 This module and ``mapping.py`` are the two places our representation
-assumptions live. When the live-server spike contradicts something here,
-update both in the same PR so the suite keeps meaning something.
+assumptions live; keep them in lockstep with the spike findings.
 
 Test conveniences: ``seed_object`` / ``edit_object_directly`` /
 ``archive_directly`` simulate a *human* editing the space in the Anytype
-UI (they bump ``last_modified_date`` without going through the client),
-and ``request_log`` records every call for budget assertions.
+UI (they stamp timestamps without going through the client), and
+``request_log`` records every call for budget assertions.
 
 The clock is a monotonic microsecond counter rendered as an ISO timestamp,
-so ``last_modified_date`` ordering and ``[gte]`` filters are deterministic
-and comparable as strings.
+so timestamp ordering and ``>=`` filters are deterministic and comparable
+as strings.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from itertools import count
 from typing import Any
 
@@ -41,10 +48,21 @@ import httpx
 
 _OBJECTS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects$")
 _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
+_SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
 _TYPES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types$")
 _PROPERTIES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties$")
 
-MODIFIED_GTE = "last_modified_date[gte]"
+PROP_LAST_MODIFIED = "last_modified_date"
+PROP_CREATED = "created_date"
+
+# Comparison conditions supported by the search filter (only what we use).
+_CONDITIONS: dict[str, Callable[[str, str], bool]] = {
+    "greater_or_equal": lambda a, b: a >= b,
+    "greater": lambda a, b: a > b,
+    "less_or_equal": lambda a, b: a <= b,
+    "less": lambda a, b: a < b,
+    "equal": lambda a, b: a == b,
+}
 
 
 class MockAnytype:
@@ -54,12 +72,10 @@ class MockAnytype:
         self,
         space_id: str = "space-1",
         *,
-        archived_visible_in_lists: bool = False,
         max_page_limit: int = 100,
     ) -> None:
         self.space_id = space_id
-        self.archived_visible_in_lists = archived_visible_in_lists
-        self.max_page_limit = max_page_limit
+        self.max_page_limit = max_page_limit  # the POST /search per-page cap
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
         self._properties: dict[str, dict[str, Any]] = {}
@@ -83,6 +99,7 @@ class MockAnytype:
         for pattern, handler in (
             (_OBJECT, self._handle_object),
             (_OBJECTS, self._handle_objects),
+            (_SEARCH, self._handle_search),
             (_TYPES, self._handle_types),
             (_PROPERTIES, self._handle_properties),
         ):
@@ -96,7 +113,8 @@ class MockAnytype:
     # -- knobs & out-of-band ("human") mutations -----------------------------
 
     def fail_next(self, n: int = 1, status: int = 429) -> None:
-        body = {"code": "rate_limit_exceeded", "message": "Rate limit exceeded",
+        body = {"code": "rate_limit_exceeded",
+                "message": "You have reached maximum request limit.",
                 "object": "error", "status": status}
         self._fail_queue.extend([(status, body)] * n)
 
@@ -113,14 +131,14 @@ class MockAnytype:
             "name": name,
             "type": {"key": type_key},
             "archived": False,
-            "properties": properties or [],
+            "properties": list(properties or []),
             "snippet": "",
-            "last_modified_date": self._now(),
         }
+        self._stamp(self._objects[object_id], PROP_CREATED)
         return object_id
 
     def edit_object_directly(self, object_id: str, **changes: Any) -> None:
-        """Mutate an object as a human edit; bumps last_modified_date.
+        """Mutate an object as a human edit; stamps last_modified_date.
 
         ``changes`` may set ``name`` or ``properties`` (full entries list)
         or ``set_property`` = a single entry dict to upsert by key.
@@ -132,11 +150,11 @@ class MockAnytype:
             obj["properties"] = changes["properties"]
         if "set_property" in changes:
             self._upsert_property_entry(obj, changes["set_property"])
-        obj["last_modified_date"] = self._now()
+        self._stamp(obj, PROP_LAST_MODIFIED)
 
     def archive_directly(self, object_id: str) -> None:
         self._objects[object_id]["archived"] = True
-        self._objects[object_id]["last_modified_date"] = self._now()
+        self._stamp(self._objects[object_id], PROP_LAST_MODIFIED)
 
     def object(self, object_id: str) -> dict[str, Any]:
         return self._objects[object_id]
@@ -145,11 +163,8 @@ class MockAnytype:
 
     def _handle_objects(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
-            items = [
-                o for o in self._objects.values()
-                if (self.archived_visible_in_lists or not o["archived"])
-                and self._passes_filters(o, request.url.params)
-            ]
+            # Hydrate sweep: unfiltered, archived hidden, large pages honored.
+            items = [o for o in self._objects.values() if not o["archived"]]
             return self._paginated(items, request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
@@ -161,12 +176,28 @@ class MockAnytype:
                 "name": body.get("name", ""),
                 "type": {"key": body["type_key"]},
                 "archived": False,
-                "properties": body.get("properties", []),
+                "properties": list(body.get("properties", [])),
                 "snippet": "",
-                "last_modified_date": self._now(),
             }
+            self._stamp(self._objects[object_id], PROP_CREATED)
             return httpx.Response(201, json={"object": self._objects[object_id]})
         return self._error(405, "method_not_allowed")
+
+    def _handle_search(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
+        if request.method != "POST":
+            return self._error(405, "method_not_allowed")
+        body = json.loads(request.content) if request.content else {}
+        items = [o for o in self._objects.values() if not o["archived"]]
+        types = body.get("types")
+        if types:
+            items = [o for o in items if o["type"]["key"] in types]
+        filt = body.get("filters")
+        if filt:
+            items = [o for o in items if self._passes_filter(o, filt)]
+        sort = body.get("sort")
+        if sort and sort.get("property_key") in (PROP_LAST_MODIFIED, PROP_CREATED):
+            items.sort(key=self._effective, reverse=sort.get("direction") == "desc")
+        return self._paginated(items, request.url.params, cap=self.max_page_limit)
 
     def _handle_object(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         obj = self._objects.get(match.group("obj"))
@@ -180,11 +211,11 @@ class MockAnytype:
                 obj["name"] = body["name"]
             for entry in body.get("properties", []):
                 self._upsert_property_entry(obj, entry)  # REPLACE semantics (A4)
-            obj["last_modified_date"] = self._now()
+            self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":
             obj["archived"] = True
-            obj["last_modified_date"] = self._now()
+            self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         return self._error(405, "method_not_allowed")
 
@@ -192,6 +223,9 @@ class MockAnytype:
         if request.method == "GET":
             return self._paginated(list(self._types.values()), request.url.params)
         body = json.loads(request.content)
+        if not body.get("key") or not body.get("plural_name"):
+            # The live API requires both (spike: a missing plural_name 400s).
+            return self._error(400, "bad_request")
         self._types[body["key"]] = {"id": self._new_id(), **body}
         return httpx.Response(201, json={"type": self._types[body["key"]]})
 
@@ -204,16 +238,31 @@ class MockAnytype:
 
     # -- helpers ---------------------------------------------------------------
 
-    def _passes_filters(self, obj: dict[str, Any], params: httpx.QueryParams) -> bool:
-        type_filter = params.get("type")
-        if type_filter and obj["type"]["key"] != type_filter:
-            return False
-        since = params.get(MODIFIED_GTE)
-        return not (since and obj["last_modified_date"] < since)
+    def _passes_filter(self, obj: dict[str, Any], filt: dict[str, Any]) -> bool:
+        if "and" in filt:
+            return all(self._passes_filter(obj, f) for f in filt["and"])
+        if "or" in filt:
+            return any(self._passes_filter(obj, f) for f in filt["or"])
+        if filt.get("property_key") in (PROP_LAST_MODIFIED, PROP_CREATED):
+            compare = _CONDITIONS.get(filt.get("condition", ""))
+            if compare is not None:
+                return compare(self._effective(obj), str(filt.get("value", "")))
+        return True  # unknown property/condition: don't hide the object
 
-    def _paginated(self, items: list[dict[str, Any]], params: httpx.QueryParams) -> httpx.Response:
+    def _effective(self, obj: dict[str, Any]) -> str:
+        dates = {
+            p["key"]: p.get("date")
+            for p in obj["properties"]
+            if p.get("format") == "date"
+        }
+        return str(dates.get(PROP_LAST_MODIFIED) or dates.get(PROP_CREATED) or "")
+
+    def _paginated(
+        self, items: list[dict[str, Any]], params: httpx.QueryParams, *, cap: int | None = None
+    ) -> httpx.Response:
         offset = int(params.get("offset", 0))
-        limit = min(int(params.get("limit", 100)), self.max_page_limit)
+        requested = int(params.get("limit", 100))
+        limit = min(requested, cap) if cap is not None else requested
         page = items[offset : offset + limit]
         return httpx.Response(200, json={
             "data": page,
@@ -222,6 +271,11 @@ class MockAnytype:
                 "has_more": offset + limit < len(items),
             },
         })
+
+    def _stamp(self, obj: dict[str, Any], key: str) -> None:
+        self._upsert_property_entry(
+            obj, {"key": key, "format": "date", "date": self._now()}
+        )
 
     @staticmethod
     def _upsert_property_entry(obj: dict[str, Any], entry: dict[str, Any]) -> None:

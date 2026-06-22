@@ -7,16 +7,21 @@ edges dragged together by hand, missing summaries. We skip what we cannot
 represent (with a warning) instead of failing the whole hydrate; writes,
 by contrast, stay strictly validated.
 
-``last_modified_date`` bookkeeping: we track the maximum value *seen in
-object payloads* rather than wall-clock time, so resync is immune to
-clock skew between this process and anytype-heart. Resync queries
-``last_modified_date[gte]=<watermark>``; re-processing the boundary object
-is harmless because applying changes is idempotent.
+``last_modified_date`` bookkeeping: we track the maximum *effective* stamp
+(``last_modified_date`` if surfaced, else ``created_date``; see
+:func:`mapping.effective_modified`) seen in object payloads, not wall-clock
+time, so resync stays immune to clock skew between this process and
+anytype-heart. Resync issues a ``POST /search`` filtered on
+``last_modified_date >= <watermark>`` (spike S3: ``GET /objects`` takes no
+filters; only search does, and it pages at 100); re-processing the boundary
+second is harmless because applying changes is idempotent.
 
-Known blind spot (spike S4, WP1 Q3): if archived objects do not appear in
-modified-since listings, human *deletions* are invisible to resync and are
-only reconciled by the next full hydrate. ``apply_changes`` handles
-archived objects when they *are* visible, so either spike answer works.
+Known blind spot (spike S4, WP1 Q3 -- now *confirmed*): archived objects do
+not appear in list or search results and cannot be enumerated, so human
+*deletions* are invisible to modified-since resync. They are only reconciled
+by the next full hydrate, which rebuilds the index from the live set. The
+archived branch in ``apply_changes`` is therefore unreachable via live
+search and exists only as defensive cover (and for the mock's tests).
 """
 
 from __future__ import annotations
@@ -32,14 +37,12 @@ from graph_context.infrastructure.anytype.client import AnytypeClient
 
 logger = logging.getLogger(__name__)
 
-MODIFIED_SINCE_PARAM = "last_modified_date[gte]"
-
 
 async def load_index(client: AnytypeClient) -> tuple[GraphIndex, str, dict[NodeId, str]]:
     """Full hydrate: one paged sweep, two in-memory passes (nodes, then edges).
 
     Returns the new index, the last-modified watermark, and the per-node
-    last-modified stamps (used by the repository for self-write
+    effective-modified stamps (used by the repository for self-write
     suppression -- see :meth:`AnytypeGraphRepository.resync`).
     """
     objects = [obj async for obj in client.list_objects()]
@@ -47,10 +50,10 @@ async def load_index(client: AnytypeClient) -> tuple[GraphIndex, str, dict[NodeI
     watermark = ""
     stamps: dict[NodeId, str] = {}
     for obj in objects:
-        stamp = obj.get("last_modified_date", "")
-        watermark = max(watermark, stamp)
         node = mapping.to_node(obj)
         if node is not None:
+            stamp = mapping.effective_modified(obj)
+            watermark = max(watermark, stamp)
             index.upsert_node(node)
             stamps[node.id] = stamp
     for obj in objects:
@@ -66,9 +69,16 @@ async def load_index(client: AnytypeClient) -> tuple[GraphIndex, str, dict[NodeI
 async def fetch_changes(
     client: AnytypeClient, watermark: str
 ) -> list[dict[str, Any]]:
-    """Incremental fetch: typically a single filtered call."""
-    params = {MODIFIED_SINCE_PARAM: watermark} if watermark else {}
-    return [obj async for obj in client.list_objects(**params)]
+    """Incremental fetch via ``POST /search``: our types, modified since ``watermark``.
+
+    When ``watermark`` is empty (no prior sync watermark) the filter is
+    omitted, so the search returns every object of our types.
+    """
+    filters = mapping.modified_since_filter(watermark) if watermark else None
+    return [
+        obj
+        async for obj in client.search(types=mapping.ALL_TYPE_KEYS, filters=filters)
+    ]
 
 
 def apply_changes(
@@ -85,7 +95,7 @@ def apply_changes(
     changed_ids: set[NodeId] = set()
     watermark = ""
     for obj in changed:
-        watermark = max(watermark, obj.get("last_modified_date", ""))
+        watermark = max(watermark, mapping.effective_modified(obj))
         object_id = obj.get("id", "")
         if obj.get("archived"):
             if index.has_node(object_id):

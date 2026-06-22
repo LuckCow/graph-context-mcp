@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from graph_context.domain import schema
 from graph_context.domain.graph import Direction, GraphIndex
@@ -68,12 +69,12 @@ class AnytypeGraphRepository:
         fetched = await sync.fetch_changes(self._client, self._watermark)
         unseen = [
             obj for obj in fetched
-            if obj.get("last_modified_date", "")
+            if mapping.effective_modified(obj)
             > self._seen_stamps.get(obj.get("id", ""), "")
         ]
         changed_ids, watermark = sync.apply_changes(self._graph, unseen)
         for obj in unseen:
-            self._seen_stamps[obj["id"]] = obj.get("last_modified_date", "")
+            self._seen_stamps[obj["id"]] = mapping.effective_modified(obj)
         self._watermark = max(self._watermark, watermark)
         if changed_ids:
             logger.info("resync applied %d out-of-band changes", len(changed_ids))
@@ -216,8 +217,11 @@ class AnytypeGraphRepository:
         except Exception:  # noqa: BLE001
             logger.error("rollback: could not archive orphan node %s", node_id)
 
-    def _track_watermark(self, obj: Mapping[str, object]) -> None:
-        modified = str(obj.get("last_modified_date", ""))
+    def _track_watermark(self, obj: Mapping[str, Any]) -> None:
+        # Spike S3: our own create/PATCH responses carry the timestamps as
+        # date properties (a fresh create has only created_date; a PATCH adds
+        # last_modified_date), so the effective stamp covers both.
+        modified = mapping.effective_modified(obj)
         object_id = str(obj.get("id", ""))
         if modified and object_id:
             self._seen_stamps[object_id] = modified

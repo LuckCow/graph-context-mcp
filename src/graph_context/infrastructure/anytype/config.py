@@ -37,7 +37,12 @@ class AnytypeConfig:
     space_id: str
     base_url: str = "http://localhost:31009"
     api_version: str = API_VERSION
-    page_limit: int = 100  # confirm max against live server (spike S2 addendum)
+    # Spike S2: GET /objects honors large pages (no observed cap <=1000), so the
+    # full hydrate sweep uses a big page and finishes in 2-3 calls for ~2k nodes.
+    page_limit: int = 1000
+    # Spike S2: POST /search (the only filtered endpoint -- used by resync) is
+    # hard-capped at 100/page server-side; requesting more is silently clamped.
+    search_page_limit: int = 100
     max_retries: int = 3
     backoff_base_seconds: float = 0.25
     timeout_seconds: float = 10.0

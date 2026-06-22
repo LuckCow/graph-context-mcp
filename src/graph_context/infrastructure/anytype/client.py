@@ -90,15 +90,28 @@ class AnytypeClient:
         raise last_error
 
     async def paginate(
-        self, path: str, *, params: dict[str, Any] | None = None
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        page_limit: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield every item across all pages of a list endpoint."""
+        """Yield every item across all pages of a list/search endpoint.
+
+        Pagination is always via the ``offset``/``limit`` *query* parameters
+        (spike S2: ``POST /search`` ignores them in the body), so the same
+        loop serves both the GET list endpoints and the POST search endpoint.
+        """
+        limit = page_limit or self._config.page_limit
         offset = 0
         while True:
             page = await self.request(
-                "GET",
+                method,
                 path,
-                params={**(params or {}), "offset": offset, "limit": self._config.page_limit},
+                params={**(params or {}), "offset": offset, "limit": limit},
+                json=json,
             )
             data: list[dict[str, Any]] = page.get("data", [])
             for item in data:
@@ -114,8 +127,37 @@ class AnytypeClient:
     def _space(self) -> str:
         return f"/v1/spaces/{self._config.space_id}"
 
-    def list_objects(self, **filters: Any) -> AsyncIterator[dict[str, Any]]:
-        return self.paginate(f"{self._space}/objects", params=filters)
+    def list_objects(self) -> AsyncIterator[dict[str, Any]]:
+        """Full unfiltered object sweep -- the hydrate path (spike S2: GET
+        ``/objects`` takes no filters and honors a large page size)."""
+        return self.paginate(f"{self._space}/objects")
+
+    def search(
+        self,
+        *,
+        types: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
+        sort: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Filtered/sorted query via ``POST /search`` -- the resync path.
+
+        Spike S3/S5: type-scoping (``types``) and the modified-since filter
+        live in the request *body*; the endpoint pages at 100 max. The body
+        keys are omitted when ``None`` so an empty search returns everything.
+        """
+        body: dict[str, Any] = {}
+        if types is not None:
+            body["types"] = types
+        if filters is not None:
+            body["filters"] = filters
+        if sort is not None:
+            body["sort"] = sort
+        return self.paginate(
+            f"{self._space}/search",
+            method="POST",
+            json=body,
+            page_limit=self._config.search_page_limit,
+        )
 
     async def get_object(self, object_id: str) -> dict[str, Any]:
         payload = await self.request("GET", f"{self._space}/objects/{object_id}")

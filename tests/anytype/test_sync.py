@@ -5,7 +5,6 @@ from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
-from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 
 CHAR = NodeDraft(NodeType.CHARACTER, name="Mira", summary="Engineer.")
@@ -96,26 +95,10 @@ class TestResync:
         await repo.remove_link(edge)
         assert await repo.resync() == frozenset()
 
-    async def test_resync_removes_archived_when_visible_in_lists(self):
-        mock = MockAnytype(archived_visible_in_lists=True)  # spike S4: answer "yes"
-        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
-        client = AnytypeClient(config, transport=mock.transport)
-        from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
-        await ensure_schema(client)
-        repo = AnytypeGraphRepository(client)
-        await repo.hydrate()
-        mira = await repo.create_node(CHAR)
-        mock.archive_directly(mira.id)
-        changed = await repo.resync()
-        assert changed == frozenset({mira.id})
-        assert not repo.graph.has_node(mira.id)
-        await client.aclose()
-
-    async def test_resync_misses_deletions_when_archived_hidden_but_hydrate_reconciles(
-        self, mock, repo
-    ):
-        """Documents the S4 blind spot: with archived objects hidden from
-        lists, resync cannot see deletions; the next full hydrate does."""
+    async def test_resync_misses_deletions_but_hydrate_reconciles(self, mock, repo):
+        """The confirmed S4 behavior: archived objects are invisible to both
+        list and search, so resync cannot see deletions; the next full
+        hydrate rebuilds from the live set and drops them."""
         mira = await repo.create_node(CHAR)
         mock.archive_directly(mira.id)
         assert await repo.resync() == frozenset()      # blind spot, by design

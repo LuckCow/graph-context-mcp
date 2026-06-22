@@ -21,13 +21,21 @@ Representation decisions (ADR-003 + WP1):
 * Object name maps to Anytype's top-level ``name``. Body is reserved for
   Prose text (WP3) and never carries structured data.
 
-ASSUMED-PENDING-SPIKE (validate against a live server, in this order):
-  A1. Relation properties round-trip through create/PATCH (spike S1).
-  A2. List responses include property values inline (spike S2).
+SPIKE-CONFIRMED against a live server (API 2025-11-08, 2026-06-21):
+  A1. Relation properties round-trip through create/PATCH. CONFIRMED.
+  A2. List/search responses include property values inline. CONFIRMED.
   A3. Property value envelope is ``{"key", "format", <format-named field>}``
-      (e.g. ``{"key": "gc_summary", "format": "text", "text": "..."}``).
+      on reads; on *writes* the ``"format"`` field is optional (the server
+      accepts and ignores it), so the entries built here work as-is.
   A4. PATCH with a property entry REPLACES that property's value wholesale
       (multi-value relations included) -- hence read-modify-write upstream.
+      CONFIRMED (sent a one-element list, the prior targets were dropped).
+
+  Timestamps (spike S3): ``created_date`` and ``last_modified_date`` are
+  ``date``-format *properties*, not top-level fields, and
+  ``last_modified_date`` is **absent until an object is first modified**.
+  Sync therefore reads the "effective" stamp (``last_modified_date`` if
+  present, else ``created_date``); see :func:`effective_modified`.
 """
 
 from __future__ import annotations
@@ -50,6 +58,12 @@ PROP_SUMMARY_STALE = "gc_summary_stale"
 PROP_DESCRIPTION = "gc_description"
 PROP_STORY_TIME = "gc_story_time"
 PROP_FIELDS = "gc_fields"
+
+# Anytype built-in timestamp properties (date format), used by sync. These are
+# not ours to write -- read-only. ``last_modified_date`` appears only once an
+# object has been modified at least once (spike S3).
+PROP_LAST_MODIFIED = "last_modified_date"
+PROP_CREATED = "created_date"
 
 SCALAR_PROPERTIES: dict[str, str] = {  # key -> format
     PROP_SUMMARY: "text",
@@ -74,7 +88,16 @@ EDGE_TYPES_BY_PROPERTY: dict[str, EdgeType] = {
     v: k for k, v in EDGE_PROPERTY_KEYS.items()
 }
 
-_VALUE_FIELD = {"text": "text", "number": "number", "checkbox": "checkbox", "objects": "objects"}
+# Every type key we own -- used to scope resync's search to our objects.
+ALL_TYPE_KEYS: list[str] = list(TYPE_KEYS.values())
+
+_VALUE_FIELD = {
+    "text": "text",
+    "number": "number",
+    "checkbox": "checkbox",
+    "objects": "objects",
+    "date": "date",  # read-only here; lets _property_map surface timestamps
+}
 
 
 # -- outbound: domain -> API payloads -----------------------------------
@@ -193,3 +216,32 @@ def to_edges(obj: Mapping[str, Any]) -> list[Edge]:
         for target in entry.get("objects") or []:
             edges.append(Edge(source=obj["id"], type=edge_type, target=target))
     return edges
+
+
+# -- sync helpers: timestamps & the modified-since query -----------------
+
+
+def effective_modified(obj: Mapping[str, Any]) -> str:
+    """The object's change time as a sortable ISO string, or ``""``.
+
+    ``last_modified_date`` if the server has surfaced it, else
+    ``created_date`` (spike S3: the former is omitted until an object is
+    first modified, but the server still filters/sorts by it internally,
+    treating creation time as the modification time). Both are server-clock
+    timestamps, so watermark comparisons stay immune to local clock skew.
+    """
+    props = _property_map(obj)
+    return str(props.get(PROP_LAST_MODIFIED) or props.get(PROP_CREATED) or "")
+
+
+def modified_since_filter(watermark: str) -> dict[str, Any]:
+    """A ``POST /search`` filter selecting objects changed at/after ``watermark``.
+
+    Uses ``>=`` (spike S3: seconds granularity, so re-processing the boundary
+    second is unavoidable -- and harmless, applying changes is idempotent).
+    """
+    return {
+        "property_key": PROP_LAST_MODIFIED,
+        "condition": "greater_or_equal",
+        "value": watermark,
+    }
