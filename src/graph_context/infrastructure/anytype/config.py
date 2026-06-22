@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from graph_context.errors import GraphContextError
 
 API_VERSION = "2025-11-08"  # pinned; bump deliberately (see changelog risk)
+DEFAULT_BASE_URL = "http://localhost:31009"
 
 
 class AnytypeApiError(GraphContextError):
@@ -35,7 +36,7 @@ class AnytypeConfig:
 
     api_key: str
     space_id: str
-    base_url: str = "http://localhost:31009"
+    base_url: str = DEFAULT_BASE_URL
     api_version: str = API_VERSION
     # Spike S2: GET /objects honors large pages (no observed cap <=1000), so the
     # full hydrate sweep uses a big page and finishes in 2-3 calls for ~2k nodes.
@@ -59,5 +60,5 @@ class AnytypeConfig:
         return cls(
             api_key=api_key,
             space_id=space_id,
-            base_url=os.environ.get("ANYTYPE_BASE_URL", cls.base_url),
+            base_url=os.environ.get("ANYTYPE_BASE_URL", DEFAULT_BASE_URL),
         )

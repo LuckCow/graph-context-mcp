@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+def _unwrap(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    """Pull the single envelope key (``object``/``type``/``property``) the
+    write endpoints wrap their result in, typed as a dict (the JSON decoder
+    hands back ``Any``)."""
+    value: dict[str, Any] = payload[key]
+    return value
+
+
 class AnytypeClient:
     """Low-level access to ``/v1`` endpoints, scoped to one configured space."""
 
@@ -161,17 +169,17 @@ class AnytypeClient:
 
     async def get_object(self, object_id: str) -> dict[str, Any]:
         payload = await self.request("GET", f"{self._space}/objects/{object_id}")
-        return payload["object"]
+        return _unwrap(payload, "object")
 
     async def create_object(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/objects", json=body)
-        return payload["object"]
+        return _unwrap(payload, "object")
 
     async def update_object(self, object_id: str, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request(
             "PATCH", f"{self._space}/objects/{object_id}", json=body
         )
-        return payload["object"]
+        return _unwrap(payload, "object")
 
     async def archive_object(self, object_id: str) -> None:
         await self.request("DELETE", f"{self._space}/objects/{object_id}")
@@ -181,14 +189,14 @@ class AnytypeClient:
 
     async def create_type(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/types", json=body)
-        return payload["type"]
+        return _unwrap(payload, "type")
 
     def list_properties(self) -> AsyncIterator[dict[str, Any]]:
         return self.paginate(f"{self._space}/properties")
 
     async def create_property(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/properties", json=body)
-        return payload["property"]
+        return _unwrap(payload, "property")
 
     @staticmethod
     def _to_error(response: httpx.Response, endpoint: str) -> AnytypeApiError:

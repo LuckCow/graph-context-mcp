@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from itertools import count
+from typing import Any
 
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
@@ -31,6 +32,7 @@ class InMemoryGraphRepository:
     def __init__(self) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
+        self._bodies: dict[NodeId, str] = {}
 
     @property
     def graph(self) -> GraphIndex:
@@ -49,12 +51,15 @@ class InMemoryGraphRepository:
             fields=dict(draft.fields),
         )
         self._graph.upsert_node(node)
+        if draft.body:
+            self._bodies[node.id] = draft.body
         try:
             for link in links:
                 self._graph.add_edge(link.to_edge(anchor=node.id))
         except Exception:
             # Composite-create contract: never leave a half-applied write.
             self._graph.remove_node(node.id)
+            self._bodies.pop(node.id, None)
             raise
         return node
 
@@ -69,7 +74,7 @@ class InMemoryGraphRepository:
         story_time: float | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node:
-        changes = {
+        changes: dict[str, Any] = {
             key: value
             for key, value in {
                 "name": name,
@@ -99,3 +104,7 @@ class InMemoryGraphRepository:
     async def resync(self) -> frozenset[NodeId]:
         """No out-of-band editors can exist for an in-memory store."""
         return frozenset()
+
+    async def fetch_body(self, node_id: NodeId) -> str:
+        self._graph.node(node_id)  # NodeNotFound on bad id
+        return self._bodies.get(node_id, "")

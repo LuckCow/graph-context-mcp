@@ -123,6 +123,8 @@ class MockAnytype:
         type_key: str,
         name: str,
         properties: list[dict[str, Any]] | None = None,
+        *,
+        body: str = "",
     ) -> str:
         """Create an object as if a human did it in the UI (no API call)."""
         object_id = self._new_id()
@@ -133,6 +135,7 @@ class MockAnytype:
             "archived": False,
             "properties": list(properties or []),
             "snippet": "",
+            "markdown": body,
         }
         self._stamp(self._objects[object_id], PROP_CREATED)
         return object_id
@@ -178,6 +181,7 @@ class MockAnytype:
                 "archived": False,
                 "properties": list(body.get("properties", [])),
                 "snippet": "",
+                "markdown": body.get("body", ""),  # A5: body in, markdown out
             }
             self._stamp(self._objects[object_id], PROP_CREATED)
             return httpx.Response(201, json={"object": self._objects[object_id]})
@@ -211,6 +215,10 @@ class MockAnytype:
                 obj["name"] = body["name"]
             for entry in body.get("properties", []):
                 self._upsert_property_entry(obj, entry)  # REPLACE semantics (A4)
+            # A6 / spike S6: a body in PATCH is silently ignored (the live
+            # server returns 200 but leaves the content unchanged) -- so we
+            # deliberately do NOT touch obj["markdown"] here. Bodies are
+            # write-once.
             self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":

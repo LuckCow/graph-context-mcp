@@ -12,8 +12,10 @@ Rules:
     * Pinned entries are never evicted by overflow; if everything is
       pinned the stack may temporarily exceed ``max_size`` (the user asked
       for exactly that working set -- honour it).
-    * Recent history is an append-only ring of the last N visited ids,
-      skipping consecutive duplicates.
+    * Recent history is a most-recently-used ring of the last N *distinct*
+      visited ids: re-recording an id already present moves it to the front
+      rather than duplicating it (so a composite create that re-touches a
+      link target can't leave "A, B, A" in the trail).
 
 Persistence (mirroring to the ``SessionContext`` meta-node) is an
 infrastructure concern behind ``ports.SessionStore``; this module is pure.
@@ -21,8 +23,10 @@ infrastructure concern behind ``ports.SessionStore``; this module is pure.
 
 from __future__ import annotations
 
+import contextlib
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from graph_context.domain.models import NodeId
 
@@ -71,6 +75,15 @@ class FocusStack:
     def clear(self, *, keep_pinned: bool = True) -> None:
         self._entries = [e for e in self._entries if keep_pinned and e.pinned]
 
+    @classmethod
+    def restore(
+        cls, entries: list[FocusEntry], max_size: int = DEFAULT_FOCUS_SIZE
+    ) -> FocusStack:
+        """Rebuild a stack from a persisted snapshot (WP3), top-first."""
+        stack = cls(max_size)
+        stack._entries = list(entries)
+        return stack
+
     def __contains__(self, node_id: NodeId) -> bool:
         return any(e.node_id == node_id for e in self._entries)
 
@@ -111,13 +124,23 @@ class RecentHistory:
 
     def record(self, node_id: NodeId) -> None:
         if self._items and self._items[-1] == node_id:
-            return  # skip consecutive duplicates
-        self._items.append(node_id)
+            return  # already on top -- nothing to do
+        with contextlib.suppress(ValueError):
+            self._items.remove(node_id)  # de-dupe: drop the older occurrence (if any)
+        self._items.append(node_id)  # (re)insert at the most-recent end
 
     @property
     def items(self) -> tuple[NodeId, ...]:
         """Most recent first."""
         return tuple(reversed(self._items))
+
+    @classmethod
+    def restore(cls, items: list[NodeId], max_size: int = DEFAULT_RECENT_SIZE) -> RecentHistory:
+        """Rebuild from a snapshot's ``items`` list (which is most-recent-first)."""
+        history = cls(max_size)
+        for node_id in reversed(items):  # items arrive most-recent-first
+            history._items.append(node_id)
+        return history
 
 
 @dataclass(slots=True)
@@ -132,3 +155,29 @@ class SessionState:
         """Register that a read or write just involved ``node_id``."""
         self.focus.push(node_id)
         self.recent.record(node_id)
+
+    # -- persistence snapshot (WP3): plain-dict round-trip ----------------
+    # The SessionStore port deals in these dicts; keeping (de)serialization
+    # here means the JSON shape and the domain model can never drift apart.
+
+    def to_snapshot(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "project": self.project,
+            "focus": [
+                {"node_id": e.node_id, "pinned": e.pinned}
+                for e in self.focus.entries
+            ],
+            "recent": list(self.recent.items),
+        }
+
+    @classmethod
+    def from_snapshot(cls, data: dict[str, Any]) -> SessionState:
+        """Lenient restore: a corrupt snapshot degrades to a fresh session
+        field-by-field rather than crashing startup (WP3 contract)."""
+        focus = FocusStack.restore([
+            FocusEntry(node_id=str(e.get("node_id", "")), pinned=bool(e.get("pinned")))
+            for e in data.get("focus", []) if e.get("node_id")
+        ])
+        recent = RecentHistory.restore([str(i) for i in data.get("recent", [])])
+        return cls(project=data.get("project"), focus=focus, recent=recent)

@@ -42,3 +42,11 @@ class TestRecentHistory:
         for node_id in ("a", "a", "b", "c", "d"):
             recent.record(node_id)
         assert recent.items == ("d", "c", "b")
+
+    def test_re_recording_moves_to_front_without_duplicating(self) -> None:
+        # The composite-create wart: touching the new node, then a link
+        # target that was already recent, must not leave "siege, mira, siege".
+        recent = RecentHistory(max_size=6)
+        for node_id in ("mira", "siege", "mira"):
+            recent.record(node_id)
+        assert recent.items == ("mira", "siege")  # distinct, most-recent first

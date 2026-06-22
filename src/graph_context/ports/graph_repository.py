@@ -75,3 +75,12 @@ class GraphRepository(Protocol):
     async def hydrate(self) -> None: ...
 
     async def resync(self) -> frozenset[NodeId]: ...
+
+    async def fetch_body(self, node_id: NodeId) -> str:
+        """On-demand retrieval of a node's long-form body (Prose text).
+
+        Bodies are intentionally absent from the GraphIndex (see
+        ``NodeDraft.body``); this is the only read path for them.
+        Missing/empty body returns ``""``; unknown id raises NodeNotFound.
+        """
+        ...

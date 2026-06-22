@@ -80,6 +80,13 @@ class AnytypeGraphRepository:
             logger.info("resync applied %d out-of-band changes", len(changed_ids))
         return changed_ids
 
+    async def fetch_body(self, node_id: NodeId) -> str:
+        """On-demand body read (A5). The only code path that fetches a
+        single object -- never called during hydrate, by design."""
+        self._graph.node(node_id)  # NodeNotFound before spending an API call
+        obj = await self._client.get_object(node_id)
+        return str(obj.get("markdown", "") or "")
+
     # -- writes -----------------------------------------------------------
 
     async def create_node(

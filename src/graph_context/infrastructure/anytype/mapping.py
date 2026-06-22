@@ -30,6 +30,13 @@ SPIKE-CONFIRMED against a live server (API 2025-11-08, 2026-06-21):
   A4. PATCH with a property entry REPLACES that property's value wholesale
       (multi-value relations included) -- hence read-modify-write upstream.
       CONFIRMED (sent a one-element list, the prior targets were dropped).
+  A5. Object creation accepts a ``body`` field (Markdown); the object
+      returns it as ``markdown`` on read. Bodies may be large (spike S6:
+      1 MB round-tripped), so they are fetched on demand, never hydrated.
+  A6. PATCH cannot modify body -- write-once. Spike S6 CONFIRMED PATCH of
+      ``body`` is *silently ignored* (HTTP 200, content unchanged), so the
+      mock ignores body-in-PATCH rather than erroring; WP3 renders prose
+      once and never rewrites it.
 
   Timestamps (spike S3): ``created_date`` and ``last_modified_date`` are
   ``date``-format *properties*, not top-level fields, and
@@ -123,7 +130,14 @@ def to_create_payload(
         properties.append(
             property_entry(EDGE_PROPERTY_KEYS[edge_type], "objects", list(targets))
         )
-    return {"name": draft.name, "type_key": TYPE_KEYS[draft.type], "properties": properties}
+    payload: dict[str, Any] = {
+        "name": draft.name,
+        "type_key": TYPE_KEYS[draft.type],
+        "properties": properties,
+    }
+    if draft.body:
+        payload["body"] = draft.body  # A5: Markdown body, write-once (A6)
+    return payload
 
 
 def to_update_payload(

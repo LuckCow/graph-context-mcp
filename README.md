@@ -2,17 +2,45 @@
 
 An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth for characters, locations, events, and rendered prose; the LLM builds the world and renders scenes from it. See `docs/` (proposal) for the full design.
 
-This repository contains the vertical slice (WP0) **plus the Anytype adapter (WP1)**: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), and `MockAnytype` — an in-process simulator of the documented local API used in place of a live server. The MCP tool layer (WP2) is next; see `docs/WORK_PACKAGES.md`.
+This repository contains the vertical slice (WP0), the **Anytype adapter (WP1)**, the **MCP tool layer (WP2)**, and the **story layer (WP3)**: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the seven v1 tools, write-once Prose bodies, and debounced `SessionContext` persistence behind a `SessionStore` port.
 
-**Important:** no live Anytype server was available during WP1. Our representation assumptions are explicitly registered as A1–A4 in `infrastructure/anytype/mapping.py` and mirrored by `mock_server.py`; validating them against a live server (the spike in `docs/WORK_PACKAGES.md`) is the first task for whoever has one, and corrections must land in both files in the same PR.
+**Live-server status:** the WP1 spike was run against a real local Anytype (API `2025-11-08`, 2026-06-21) and the assumption-driven corrections are applied in `infrastructure/anytype/` (resync via `POST /search`, endpoint-split page caps, timestamps-from-properties, `plural_name` on type creation, write-once bodies confirmed by S6). The mapping assumptions A1–A6 in `mapping.py` are mirrored by `mock_server.py`; a live-gated E2E suite (`ANYTYPE_E2E=1`) runs the same contracts against a real server.
 
-Try it: `PYTHONPATH=src python scripts/demo_wp1.py` — bootstrap, composite writes, restart-and-hydrate equality, out-of-band human edits picked up by resync, all against the mock.
+Try it: `PYTHONPATH=src python scripts/demo_wp2_tools.py` — drives the full tool loop in-process (composite create → scene-assembly `explore` → `find_path` → `record_prose` → stale-summary sweep → resync reporting → actionable errors) against the mock-backed repository.
 
 ```
 pip install -e ".[dev]"
-pytest          # 79 tests; live server not required (MockAnytype)
+pytest          # 123 mock-backed tests + 11 live-gated (ANYTYPE_E2E=1); live server not required
 ruff check src tests
 ```
+
+## Running the MCP server
+
+```
+GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
+# or, against a live Anytype:
+ANYTYPE_API_KEY=… ANYTYPE_SPACE_ID=… PYTHONPATH=src python -m graph_context.interface.server
+```
+
+The server speaks stdio. A Claude Desktop / MCP-client entry (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "graph-context": {
+      "command": "python",
+      "args": ["-m", "graph_context.interface.server"],
+      "env": {
+        "PYTHONPATH": "src",
+        "ANYTYPE_API_KEY": "your-key",
+        "ANYTYPE_SPACE_ID": "your-space-id"
+      }
+    }
+  }
+}
+```
+
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `record_prose`. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`.
 
 ## Architecture in one paragraph
 
@@ -29,7 +57,7 @@ interface  ──▶  application  ──▶  domain
                                                      Anytype adapter next)
 ```
 
-**The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition root (the future `interface/server.py`) and tests.
+**The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition root (`interface/server.py`) and tests.
 
 ## Layout
 
@@ -41,17 +69,24 @@ interface  ──▶  application  ──▶  domain
 | `domain/traversal.py` | Bounded BFS (`explore`) | Pure function; filters prune subtrees; `as_of` hides future events |
 | `domain/pathfinding.py` | Bounded shortest path (`find_path`) | Undirected walk, direction-preserving result |
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
-| `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract** documented here |
+| `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand prose |
+| `ports/session_store.py` | Session-snapshot contract | Plain-dict snapshots; lenient load (corrupt → `None`) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
+| `application/node_reader.py` | `get_node` use-case | Grouped edges + WP3 `include_prose` reverse-reference excerpts |
 | `application/explorer.py` | `explore` / `find_path` use-case | Resolves focus-stack defaults |
-| `infrastructure/memory/` | `InMemoryGraphRepository` | Reference implementation; certified by `tests/contract` |
+| `application/prose_recorder.py` | `record_prose` use-case | Write-once body (text + delimited llm_input/output), explicit references |
+| `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh` |
+| `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` | Reference impls; certified by `tests/contract` |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
-| `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A4) live here |
-| `infrastructure/anytype/schema_bootstrap.py` | Idempotent space setup | gc_ types + edge relation properties |
-| `infrastructure/anytype/sync.py` | Hydrate / resync engine | Lenient reads, strict writes; last-modified watermark |
+| `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A6) live here |
+| `infrastructure/anytype/schema_bootstrap.py` | Idempotent space setup | gc_ types (incl. `plural_name`) + edge relation properties |
+| `infrastructure/anytype/sync.py` | Hydrate / resync engine | Lenient reads, strict writes; search-based modified-since |
 | `infrastructure/anytype/repository.py` | `AnytypeGraphRepository` | Persist-first write-through; composite rollback; self-write suppression |
-| `infrastructure/anytype/mock_server.py` | `MockAnytype` | Documented-behavior simulator; spike questions as knobs |
-| `interface/presenters.py` | Context header + detail levels | Response-budget shaping lives at the edge, not in tested logic |
+| `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
+| `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, write-once body, timestamps) |
+| `interface/presenters.py` | Context header + detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
+| `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
+| `interface/server.py` | Composition root | Only module importing infrastructure + the MCP SDK; lifespan wiring |
 
 ## Conventions to carry forward
 
@@ -63,12 +98,8 @@ interface  ──▶  application  ──▶  domain
 6. **Fakes are contracts.** A behavior added to the Anytype adapter must land in `InMemoryGraphRepository` too, with a test. If the fake can't express it, the port is wrong — fix the port.
 7. **Test names state behavior** (`test_failed_link_rolls_back_the_created_node`), grouped in classes per scenario; fixtures build worlds through public APIs, never by poking internals.
 
-## Next work packages
+## Status & what's next
 
-**WP1 — Anytype adapter** (`infrastructure/anytype/`): `client.py` (httpx against `http://localhost:31009/v1`, bearer key, `Anytype-Version: 2025-11-08` header, pagination, retry), `schema_bootstrap.py` (idempotently ensure Types + one relation Property per `EdgeType`), `mapping.py` (Node ⇄ Anytype object/properties), `repository.py` (implements the port; write-through to `GraphIndex`; full hydrate + incremental resync via `last_modified_date`). **Spike first:** verify relation ("object") properties round-trip through create/PATCH and appear in list/search responses — that single fact decides whether hydration is one pass or N+1.
+WP0–WP3 are complete and green against the mock (and the live-gated E2E suite): the Anytype adapter, the seven-tool MCP server, write-once Prose bodies, and debounced `SessionContext` persistence. The WP1 live-server spike has been run and its corrections applied (see "Live-server status" above and `docs/WORK_PACKAGES.md`). Definition of Done holds: `pytest` (124 mock-backed + 11 live-gated), `ruff`, and `mypy --strict` are all clean.
 
-**WP2 — MCP tool layer** (`interface/`): FastMCP server, the 7 tool definitions as thin wrappers (validate params → call service → presenter + context header), composition root wiring repository/session/services.
-
-**WP3 — Story layer**: `Prose` recording (`record_prose` service; text in the Anytype body, write-once), stale-summary listing/refresh, `SessionContext` persistence behind a `SessionStore` port.
-
-Parked decisions (revisit, don't relitigate): staleness propagation to neighbors; `refresh_summary` as tool vs. usage pattern; semantic search over summaries; type extensibility.
+WP4 (parked — entry criteria, not specs; see `docs/WORK_PACKAGES.md`): knowledge-query helper, staleness propagation to neighbors, type extensibility (`propose_type`), multi-user `SessionContext`, semantic search over summaries.
