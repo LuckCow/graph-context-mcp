@@ -70,6 +70,7 @@ class EmptyFocusStack(GraphContextError):
 
     def __init__(self) -> None:
         super().__init__(
-            "no start node given and the focus stack is empty; "
-            "pass an explicit start or focus a node first"
+            "no start node given and the focus stack is empty; pass an "
+            "explicit start, focus a node first, or call context "
+            "action='overview' to list entry-point node ids."
         )

@@ -132,6 +132,12 @@ async def context(
 
     Actions:
       get          -- graph statistics (node/edge counts, stale summaries).
+      overview     -- DERIVED entry-point map for a cold start: per-type
+                      counts plus the highest-degree "hub" nodes with name,
+                      type, id and summary. START HERE in a fresh session to
+                      obtain node ids for explore / get_node / focus. The map
+                      is rebuilt from the graph each call -- nothing to
+                      maintain. (alias: map)
       resync       -- pull in edits a human made directly in Anytype; reports
                       which nodes changed. Use before a long writing session.
       focus        -- push node_id onto the focus stack (queries default to
@@ -258,6 +264,9 @@ async def explore(
 ) -> str:
     """Walk the graph outward from a node. THE general retrieval primitive.
 
+    In a fresh session the focus stack is empty; call context
+    action="overview" first to get a starting node id.
+
     start: node id; empty = top of the focus stack. depth: 1-3 (default 1).
     detail: names | summaries (default) | full.
     as_of: story-time cutoff -- Events after it are hidden (a character's
@@ -295,7 +304,8 @@ async def find_path(
 ) -> str:
     """Find the shortest meaningful connection between two nodes -- "how is
     Mira related to the Fall of Brakk?" Surfaces non-obvious links for plot
-    work. start: empty = focus-stack top. Edge direction is ignored for
+    work. In a fresh session call context action="overview" first to get
+    node ids. start: empty = focus-stack top. Edge direction is ignored for
     reachability but shown in the result. Restrict edge_types to make the
     path more meaningful (e.g. only social edges: ["knows", "member_of"]).
     """

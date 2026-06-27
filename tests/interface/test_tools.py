@@ -178,10 +178,39 @@ async def test_record_prose_requires_references(services: tools.Services) -> Non
 async def test_context_get_reports_stats(services: tools.Services, world: World) -> None:
     out = await tools.context_tool(services, action="get")
     assert "nodes" in out and "edges" in out and "stale" in out
+    assert "overview" in out  # self-correcting pointer to entry-point discovery
 
 
 async def test_context_unknown_action_lists_actions(services: tools.Services) -> None:
     out = await tools.context_tool(services, action="teleport")
     assert "ERROR:" in out
-    for verb in ("get", "resync", "focus", "pin", "unpin", "remove", "clear"):
+    for verb in ("get", "overview", "resync", "focus", "pin", "unpin", "remove", "clear"):
         assert verb in out
+
+
+# -- cold-start discovery: context overview is the entry point --------------
+
+
+async def test_context_overview_lists_entry_points(
+    services: tools.Services, world: World
+) -> None:
+    body = _body(await tools.context_tool(services, action="overview"))
+    # Mira is the highest-degree node in the fixture (4 incident edges).
+    assert world.mira.id in body
+    assert "types:" in body and "Character" in body
+
+
+async def test_context_overview_map_alias(
+    services: tools.Services, world: World
+) -> None:
+    body = _body(await tools.context_tool(services, action="map"))
+    assert world.mira.id in body
+
+
+async def test_empty_focus_error_names_overview(services: tools.Services) -> None:
+    # An empty focus stack (as in a fresh session) has nothing for the start
+    # default to resolve to -- the error must point at the way out.
+    await tools.context_tool(services, action="clear")
+    out = await tools.explore_tool(services, start="")
+    assert "ERROR:" in out
+    assert "overview" in out

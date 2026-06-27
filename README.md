@@ -77,7 +77,7 @@ Because all three are container defaults inherited by `docker exec` — and `PYT
 
 To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.)
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `record_prose`. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`.
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `record_prose`. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
 
 ## Architecture in one paragraph
 

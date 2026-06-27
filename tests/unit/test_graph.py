@@ -57,6 +57,20 @@ class TestEdges:
         assert graph.edge_count() == 1
 
 
+class TestDegree:
+    def test_degree_counts_both_directions(self, graph: GraphIndex) -> None:
+        graph.add_edge(Edge("a", "knows", "b"))
+        graph.add_edge(Edge("a", "located_at", "home"))  # a: 2 out
+        graph.add_edge(Edge("b", "knows", "a"))          # a: 1 in
+        assert graph.degree("a") == 3
+
+    def test_isolated_node_has_degree_zero(self, graph: GraphIndex) -> None:
+        assert graph.degree("a") == 0
+
+    def test_unknown_id_has_degree_zero(self, graph: GraphIndex) -> None:
+        assert graph.degree("ghost") == 0
+
+
 class TestNodeRemoval:
     def test_removing_node_removes_incident_edges(self, graph: GraphIndex) -> None:
         graph.add_edge(Edge("a", "knows", "b"))

@@ -46,6 +46,7 @@ from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
 from graph_context.domain.models import Edge, LinkSpec, NodeDraft
+from graph_context.domain.overview import build_overview
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery
@@ -215,8 +216,14 @@ async def context_tool(
         stale = sum(1 for n in story if n.summary_stale)
         return (
             f"graph: {len(story)} nodes, {graph.edge_count()} edges, "
-            f"{stale} stale summaries"
+            f"{stale} stale summaries. "
+            "Call context action='overview' for entry-point node ids."
         )
+    if action in {"overview", "map"}:
+        # Derived cold-start map: per-type counts + highest-degree hub nodes,
+        # each with an id to start exploring from. Empty graph -> guidance,
+        # not an error (a fresh session should get something actionable).
+        return presenters.render_overview(build_overview(graph))
     if action == "resync":
         changed = await services.repository.resync()
         if not changed:
@@ -248,8 +255,8 @@ async def context_tool(
         getattr(services.session.focus, "push" if action == "focus" else action)(node_id)
         return f"focus {action}: {graph.node(node_id).name}"
     raise GraphContextError(
-        f"unknown action {action!r}; allowed: get, resync, set_project, "
-        "focus, pin, unpin, remove, clear"
+        f"unknown action {action!r}; allowed: get, overview, resync, "
+        "set_project, focus, pin, unpin, remove, clear"
     )
 
 

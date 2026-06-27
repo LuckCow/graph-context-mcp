@@ -131,6 +131,15 @@ class GraphIndex:
     def edge_count(self) -> int:
         return sum(len(edges) for edges in self._out.values())
 
+    def degree(self, node_id: NodeId) -> int:
+        """Incident-edge count (in + out). 0 for an isolated or unknown id.
+
+        Out- and in-edge sets are disjoint (self-loops are dropped at
+        ``add_edge``), so the sum is the true incident count. No existence
+        check, consistent with ``edges()`` -- cheap enough to rank every node.
+        """
+        return len(self._out[node_id]) + len(self._in[node_id])
+
     @staticmethod
     def _filtered(
         edges: set[Edge], allowed: frozenset[str] | None

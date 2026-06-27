@@ -22,6 +22,7 @@ from enum import StrEnum
 from graph_context.application.node_reader import NodeView
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Node
+from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreResult
@@ -49,6 +50,31 @@ def render_context_header(session: SessionState, graph: GraphIndex) -> str:
         if graph.has_node(node_id)
     )
     return f"[project: {project} | focus: {focus or '-'} | recent: {recent or '-'}]"
+
+
+def render_overview(overview: GraphOverview) -> str:
+    """Render the cold-start entry-point map (``context action='overview'``).
+
+    Ids are the last token before the colon on every hub line, so the LLM
+    can copy one straight into ``explore`` / ``get_node`` / ``focus``.
+    """
+    if overview.total_story_nodes == 0:
+        return "overview: no story nodes yet -- use create_node to begin a world."
+    types = ", ".join(f"{tc.type} {tc.count}" for tc in overview.type_counts)
+    lines = [
+        f"overview: {overview.total_story_nodes} story nodes across "
+        f"{len(overview.type_counts)} types (derived entry-point map).",
+        f"types: {types}",
+        "entry points (highest-degree nodes; pass an id to explore, "
+        "get_node, or context action='focus'):",
+    ]
+    for hub in overview.hubs:
+        node = hub.node
+        stale = " [summary stale]" if node.summary_stale else ""
+        lines.append(
+            f"- {node.name} ({node.type}, id={node.id}){stale}: {node.summary}"
+        )
+    return "\n".join(lines)
 
 
 def render_explore_result(result: ExploreResult, detail: Detail) -> str:
