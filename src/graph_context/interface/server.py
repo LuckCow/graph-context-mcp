@@ -5,8 +5,8 @@ import infrastructure. Wiring: config -> client -> bootstrap -> repository
 -> hydrate -> session (restored via SessionStore) -> services -> tools.
 
 Backends (env `GC_BACKEND`):
-* `anytype` (default) -- requires ANYTYPE_API_KEY + ANYTYPE_SPACE_ID and a
-  running local Anytype.
+* `anytype` (default) -- requires ANYTYPE_SPACE_ID, a key (ANYTYPE_API_KEY or
+  ANYTYPE_API_KEY_FILE), and a running local Anytype (ANYTYPE_API_BASE_URL).
 * `memory`  -- in-memory repository; for development and demos without
   Anytype. State evaporates on exit.
 

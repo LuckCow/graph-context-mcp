@@ -50,6 +50,9 @@ services:
       # Path to the mounted secret. App code reads the key from this file,
       # NOT from an env var (env vars leak via docker inspect / /proc / child procs).
       ANYTYPE_API_KEY_FILE: "/run/secrets/anytype_api_key"
+      # Default space for the live backend: the "TestWorld" space. Not a secret
+      # (just an identifier); override per-launch with -e ANYTYPE_SPACE_ID=… .
+      ANYTYPE_SPACE_ID: "bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"
 
     secrets:
       - anytype_api_key

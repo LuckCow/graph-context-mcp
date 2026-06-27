@@ -16,29 +16,67 @@ ruff check src tests
 
 ## Running the MCP server
 
+The server speaks **stdio** (one process per client; no network port). Run it directly only for a quick local check:
+
 ```
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
-# or, against a live Anytype:
-ANYTYPE_API_KEY=… ANYTYPE_SPACE_ID=… PYTHONPATH=src python -m graph_context.interface.server
 ```
 
-The server speaks stdio. A Claude Desktop / MCP-client entry (`claude_desktop_config.json`):
+## Connecting Claude Desktop (from the dev container)
+
+Claude Desktop runs on your **host**; the server runs **inside the dev container**. The host can't launch the container's Python directly, so Claude Desktop starts the server *inside the already-running container* over stdio with `docker exec -i`. (This is also how VS Code attaches — the container's compose `environment:` is inherited by every `docker exec` session, so the in-container env vars below are already set; the `-e` flags just pin the per-launch ones.)
+
+**1. Start the container** (it must be running before Claude Desktop launches the server):
+
+```
+docker compose -f .devcontainer/docker-compose.yml up -d --build
+```
+
+**2. Add the server to Claude Desktop's config.** Copy the `graph-context` entry from [`.devcontainer/claude_desktop_config.example.json`](.devcontainer/claude_desktop_config.example.json) into your host's `claude_desktop_config.json`:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "graph-context": {
-      "command": "python",
-      "args": ["-m", "graph_context.interface.server"],
-      "env": {
-        "PYTHONPATH": "src",
-        "ANYTYPE_API_KEY": "your-key",
-        "ANYTYPE_SPACE_ID": "your-space-id"
-      }
+      "command": "docker",
+      "args": [
+        "exec", "-i",
+        "-e", "GC_BACKEND=memory",
+        "-e", "PYTHONPATH=/workspaces/graph-context-mcp/src",
+        "graph-context-mcp-dev",
+        "python", "-m", "graph_context.interface.server"
+      ]
     }
   }
 }
 ```
+
+**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the seven tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
+
+### Graduating to the live Anytype backend
+
+`GC_BACKEND=anytype` (the default) talks to the Anytype desktop app on your host via `host.docker.internal:31009`. The container already wires everything it needs in `docker-compose.yml`: the base URL (`ANYTYPE_API_BASE_URL`), the file-mounted key (`ANYTYPE_API_KEY_FILE`), and the default space (`ANYTYPE_SPACE_ID`, pointing at the **TestWorld** space). The only thing you must create is the key file — `.devcontainer/secrets/anytype_api_key` (see [`.devcontainer/secrets/README.md`](.devcontainer/secrets/README.md)).
+
+Because all three are container defaults inherited by `docker exec`, the live backend needs **no `-e` flags at all** — `anytype` is the default backend. Drop the `memory`/`PYTHONPATH` overrides and the entry becomes:
+
+```json
+{
+  "mcpServers": {
+    "graph-context": {
+      "command": "docker",
+      "args": [
+        "exec", "-i", "graph-context-mcp-dev",
+        "python", "-m", "graph_context.interface.server"
+      ]
+    }
+  }
+}
+```
+
+To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.)
 
 Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `record_prose`. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`.
 

@@ -50,15 +50,45 @@ class AnytypeConfig:
 
     @classmethod
     def from_env(cls) -> AnytypeConfig:
+        api_key = _resolve_api_key()
         try:
-            api_key = os.environ["ANYTYPE_API_KEY"]
             space_id = os.environ["ANYTYPE_SPACE_ID"]
         except KeyError as missing:
             raise GraphContextError(
                 f"missing required environment variable: {missing.args[0]}"
             ) from None
-        return cls(
-            api_key=api_key,
-            space_id=space_id,
-            base_url=os.environ.get("ANYTYPE_BASE_URL", DEFAULT_BASE_URL),
+        # In the container the secret is file-mounted and the base URL points at
+        # the host's Anytype (host.docker.internal); both arrive under the
+        # ``*_API_*`` names. Accept the bare names too for a host-local run.
+        base_url = (
+            os.environ.get("ANYTYPE_BASE_URL")
+            or os.environ.get("ANYTYPE_API_BASE_URL")
+            or DEFAULT_BASE_URL
         )
+        return cls(api_key=api_key, space_id=space_id, base_url=base_url)
+
+
+def _resolve_api_key() -> str:
+    """The key, from ``ANYTYPE_API_KEY`` or a file at ``ANYTYPE_API_KEY_FILE``.
+
+    The container mounts the key as a read-only file (env vars leak via
+    ``docker inspect`` / ``/proc``), so the file path is the primary source;
+    the inline env var is the host-local fallback.
+    """
+    inline = os.environ.get("ANYTYPE_API_KEY")
+    if inline:
+        return inline
+    path = os.environ.get("ANYTYPE_API_KEY_FILE")
+    if path:
+        try:
+            with open(path) as handle:
+                key = handle.read().strip()
+        except OSError as err:
+            raise GraphContextError(
+                f"could not read ANYTYPE_API_KEY_FILE at {path}: {err}"
+            ) from None
+        if key:
+            return key
+    raise GraphContextError(
+        "missing Anytype credentials: set ANYTYPE_API_KEY or ANYTYPE_API_KEY_FILE"
+    )

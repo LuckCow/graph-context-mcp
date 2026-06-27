@@ -1,0 +1,18 @@
+{
+  "_comment": "Host-side Claude Desktop config for the in-container MCP server. Copy the 'graph-context' entry into your real claude_desktop_config.json (see README 'Connecting Claude Desktop'). The dev container (graph-context-mcp-dev) must be running first; Claude Desktop launches the server inside it over stdio via 'docker exec -i'. This sample uses GC_BACKEND=memory for the first smoke test (no Anytype, nothing persists).",
+  "mcpServers": {
+    "graph-context": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "-e", "GC_BACKEND=memory",
+        "-e", "PYTHONPATH=/workspaces/graph-context-mcp/src",
+        "graph-context-mcp-dev",
+        "python",
+        "-m",
+        "graph_context.interface.server"
+      ]
+    }
+  }
+}
