@@ -45,7 +45,6 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
       "args": [
         "exec", "-i",
         "-e", "GC_BACKEND=memory",
-        "-e", "PYTHONPATH=/workspaces/graph-context-mcp/src",
         "graph-context-mcp-dev",
         "python", "-m", "graph_context.interface.server"
       ]
@@ -60,7 +59,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 
 `GC_BACKEND=anytype` (the default) talks to the Anytype desktop app on your host via `host.docker.internal:31009`. The container already wires everything it needs in `docker-compose.yml`: the base URL (`ANYTYPE_API_BASE_URL`), the file-mounted key (`ANYTYPE_API_KEY_FILE`), and the default space (`ANYTYPE_SPACE_ID`, pointing at the **TestWorld** space). The only thing you must create is the key file — `.devcontainer/secrets/anytype_api_key` (see [`.devcontainer/secrets/README.md`](.devcontainer/secrets/README.md)).
 
-Because all three are container defaults inherited by `docker exec`, the live backend needs **no `-e` flags at all** — `anytype` is the default backend. Drop the `memory`/`PYTHONPATH` overrides and the entry becomes:
+Because all three are container defaults inherited by `docker exec` — and `PYTHONPATH` is baked into the image (`ENV` in the Dockerfile) so the package imports in every `docker exec` session — the live backend needs **no `-e` flags at all** — `anytype` is the default backend. Drop the `memory` override and the entry becomes:
 
 ```json
 {

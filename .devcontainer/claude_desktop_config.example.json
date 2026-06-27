@@ -7,7 +7,6 @@
         "exec",
         "-i",
         "-e", "GC_BACKEND=memory",
-        "-e", "PYTHONPATH=/workspaces/graph-context-mcp/src",
         "graph-context-mcp-dev",
         "python",
         "-m",

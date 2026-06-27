@@ -62,5 +62,11 @@ RUN mkdir -p /home/${USERNAME}/.claude \
     && chown -R ${USER_UID}:${USER_GID} /home/${USERNAME}/.claude \
     && chmod 700 /home/${USERNAME}/.claude
 
+# Make the src-layout package importable in EVERY shell and `docker exec` session
+# (including the one Claude Desktop spawns) without a per-launch `-e PYTHONPATH` flag.
+# The source lives in the runtime volume mount at this path, not in the build context,
+# so we set the path rather than `pip install -e .` (which would need the source at build time).
+ENV PYTHONPATH=/workspaces/graph-context-mcp/src
+
 USER ${USERNAME}
 WORKDIR /workspaces/graph-context-mcp
