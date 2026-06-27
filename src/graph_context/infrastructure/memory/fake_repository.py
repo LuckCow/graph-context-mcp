@@ -22,8 +22,10 @@ from dataclasses import replace
 from itertools import count
 from typing import Any
 
+from graph_context.domain import schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
+from graph_context.domain.schema import Role
 
 
 class InMemoryGraphRepository:
@@ -39,16 +41,25 @@ class InMemoryGraphRepository:
         return self._graph
 
     async def create_node(
-        self, draft: NodeDraft, links: Sequence[LinkSpec] = ()
+        self,
+        draft: NodeDraft,
+        links: Sequence[LinkSpec] = (),
+        *,
+        create_missing_relations: bool = False,
     ) -> Node:
+        role = schema.resolve_role(draft.type)
         node = Node(
             id=f"n{next(self._ids):04d}",
-            type=draft.type,
+            # Display name mirrors the Anytype backend: a mapped role renders
+            # as its role name (gc_prose -> "Prose"), else the raw identifier.
+            type=role.value if role is not None else draft.type,
             name=draft.name,
             summary=draft.summary,
             description=draft.description,
             story_time=draft.story_time,
             fields=dict(draft.fields),
+            type_key=draft.type,
+            role=role,
         )
         self._graph.upsert_node(node)
         if draft.body:
@@ -90,13 +101,27 @@ class InMemoryGraphRepository:
         self._graph.upsert_node(updated)
         return updated
 
-    async def add_link(self, anchor: NodeId, link: LinkSpec) -> Edge:
+    async def add_link(
+        self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
+    ) -> Edge:
         edge = link.to_edge(anchor=anchor)
         self._graph.add_edge(edge)
         return edge
 
     async def remove_link(self, edge: Edge) -> None:
         self._graph.remove_edge(edge)
+
+    def role_for(self, type_identifier: str) -> Role | None:
+        return schema.resolve_role(type_identifier)
+
+    def known_node_types(self) -> frozenset[str]:
+        # The in-memory backend has an open vocabulary; surface the mapped
+        # (non-infra) roles as helpful create_node suggestions.
+        return frozenset(r.value for r in Role if r not in schema.INFRA_ROLES)
+
+    def known_edge_labels(self) -> frozenset[str]:
+        # No predefined relation vocabulary off a live space.
+        return frozenset()
 
     async def hydrate(self) -> None:
         """No backing store: the index is already authoritative here."""

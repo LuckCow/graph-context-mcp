@@ -158,25 +158,31 @@ async def create_node(
     story_time: float | None = None,
     fields: dict[str, str] | None = None,
     links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool = False,
 ) -> str:
     """Create a story-world node and its initial links in ONE call.
 
-    type: Character | Location | Event | Technology | Faction | Item.
+    type: an existing type in your Anytype space (e.g. Character, Location,
+      Event, Organization, Technology, Theme -- whatever your space defines).
+      An unmatched type is reported back with the list of known types.
     summary: REQUIRED one-liner; keep it current -- exploration shows it.
-    story_time: REQUIRED for Event (number; position on the story timeline).
+    story_time: REQUIRED for an Event-role node (number; timeline position).
     links: list of {"edge_type", "other" (node id), "outgoing" (default true)}.
+      edge_type is a relation LABEL. Reuse an existing relation (e.g. knows,
+      located_at, participated_in, triggered_by, or any relation already in
+      your space). A label with no existing relation is surfaced for approval;
+      set create_missing_relations=true to create it on the fly.
       outgoing=false means the edge points FROM `other` TO the new node --
       e.g. creating an Event that an existing Character took part in:
         {"edge_type": "participated_in", "other": "<character id>",
          "outgoing": false}
-    Edge types: knows, located_at, member_of, participated_in, caused,
-    possesses, parent_of, child_of, precedes.
 
     Prefer linking at creation over separate update_node calls.
     """
     return await tools.create_node_tool(
         _services(ctx), type=type, name=name, summary=summary,
         description=description, story_time=story_time, fields=fields, links=links,
+        create_missing_relations=create_missing_relations,
     )
 
 
@@ -191,6 +197,7 @@ async def update_node(
     fields: dict[str, str] | None = None,
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool = False,
 ) -> str:
     """Modify a node's fields and/or links. Only provided arguments change.
 
@@ -199,7 +206,8 @@ async def update_node(
     `summary` whenever the change is meaningful; clear backlog stale flags
     later via explore(only_stale=true).
 
-    add_links: same shape as create_node's links.
+    add_links: same shape as create_node's links (set create_missing_relations
+    to create a brand-new relation label rather than reuse an existing one).
     remove_links: list of {"source", "edge_type", "target"} exactly as shown
     by get_node.
     """
@@ -207,6 +215,7 @@ async def update_node(
         _services(ctx), node_id=node_id, name=name, summary=summary,
         description=description, story_time=story_time, fields=fields,
         add_links=add_links, remove_links=remove_links,
+        create_missing_relations=create_missing_relations,
     )
 
 

@@ -24,6 +24,13 @@ async def main() -> None:
     config = AnytypeConfig(api_key="demo", space_id=mock.space_id)
     client = AnytypeClient(config, transport=mock.transport)
     await ensure_schema(client)
+    # Space-reflecting model: seed the user's native types (this demo space is
+    # empty). In a real space these already exist.
+    for key, name in {"character": "Character", "event": "Event",
+                      "location": "Location", "item": "Item"}.items():
+        await client.create_type(
+            {"key": key, "name": name, "plural_name": f"{name}s", "layout": "basic"}
+        )
     repo = AnytypeGraphRepository(client)
     await repo.hydrate()
     svc = tools.build_services(repo, SessionState(project="Ashfall"))

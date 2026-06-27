@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.interface import tools
 from graph_context.interface.presenters import PROSE_EXCERPT_CHARS
 from tests.conftest import World
@@ -44,26 +43,27 @@ async def test_header_present_on_error(services: tools.Services) -> None:
     assert "ERROR:" in out
 
 
-# -- invariant 2: errors are prompts -- they list the allowed values --------
+# -- invariant 2: errors are prompts -- parse-level validation --------------
+# (The type/relation vocabulary is OPEN; "does this type/relation exist in
+# the space?" is enforced by the Anytype repository and tested in
+# tests/anytype/test_repository.py. The tool layer validates shape only.)
 
 
-async def test_bad_node_type_lists_all_node_types(services: tools.Services) -> None:
-    out = await tools.create_node_tool(services, type="Charcter", name="x", summary="y")
+async def test_empty_node_type_errors(services: tools.Services) -> None:
+    out = await tools.create_node_tool(services, type="   ", name="x", summary="y")
     assert "ERROR:" in out
-    for node_type in NodeType:
-        assert node_type.value in out
+    assert "type" in out
 
 
-async def test_bad_edge_type_lists_all_edge_types(
+async def test_empty_edge_label_errors(
     services: tools.Services, world: World
 ) -> None:
     out = await tools.create_node_tool(
         services, type="Item", name="Relic", summary="s",
-        links=[{"edge_type": "knews", "other": world.mira.id}],
+        links=[{"edge_type": "", "other": world.mira.id}],
     )
     assert "ERROR:" in out
-    for edge_type in EdgeType:
-        assert edge_type.value in out
+    assert "edge_type" in out
 
 
 async def test_bad_detail_lists_allowed_levels(

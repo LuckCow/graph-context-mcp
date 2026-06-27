@@ -22,6 +22,7 @@ from typing import Protocol
 
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
+from graph_context.domain.schema import Role
 
 
 class GraphRepository(Protocol):
@@ -53,8 +54,22 @@ class GraphRepository(Protocol):
         ...
 
     async def create_node(
-        self, draft: NodeDraft, links: Sequence[LinkSpec] = ()
-    ) -> Node: ...
+        self,
+        draft: NodeDraft,
+        links: Sequence[LinkSpec] = (),
+        *,
+        create_missing_relations: bool = False,
+    ) -> Node:
+        """Create a node and its links.
+
+        Resolves ``draft.type`` to an existing space type (raising
+        :class:`graph_context.errors.UnknownNodeType` if none matches) and each
+        link's label to an existing relation. An unknown relation label raises
+        :class:`graph_context.errors.UnknownRelationLabel` unless
+        ``create_missing_relations`` is set, in which case the relation is
+        created. Either approval error is raised *before* any persistence.
+        """
+        ...
 
     async def update_node(
         self,
@@ -68,9 +83,23 @@ class GraphRepository(Protocol):
         fields: Mapping[str, str] | None = None,
     ) -> Node: ...
 
-    async def add_link(self, anchor: NodeId, link: LinkSpec) -> Edge: ...
+    async def add_link(
+        self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
+    ) -> Edge: ...
 
     async def remove_link(self, edge: Edge) -> None: ...
+
+    def role_for(self, type_identifier: str) -> Role | None:
+        """Resolve a requested type identifier to its semantic role (or None)."""
+        ...
+
+    def known_node_types(self) -> frozenset[str]:
+        """Type names available as create_node targets (for error suggestions)."""
+        ...
+
+    def known_edge_labels(self) -> frozenset[str]:
+        """Relation labels available to reuse (for error suggestions)."""
+        ...
 
     async def hydrate(self) -> None: ...
 

@@ -62,7 +62,7 @@ def render_explore_result(result: ExploreResult, detail: Detail) -> str:
 
 def _render_hit_line(node: Node, depth: int, detail: Detail) -> str:
     indent = "  " * depth
-    base = f"{indent}- {node.name} ({node.type.value}, id={node.id})"
+    base = f"{indent}- {node.name} ({node.type}, id={node.id})"
     if detail is Detail.NAMES:
         return base
     stale = " [summary stale]" if node.summary_stale else ""
@@ -75,7 +75,7 @@ def _render_hit_line(node: Node, depth: int, detail: Detail) -> str:
 def _name_with_type(graph: GraphIndex, node_id: str, *, pinned: bool) -> str:
     node = graph.node(node_id)
     pin_mark = "*" if pinned else ""
-    return f"{node.name}{pin_mark} ({node.type.value})"
+    return f"{node.name}{pin_mark} ({node.type})"
 
 
 def render_node_view(view: NodeView) -> str:
@@ -90,7 +90,7 @@ def render_node_view(view: NodeView) -> str:
     node = view.node
     stale = " [summary stale]" if node.summary_stale else ""
     lines = [
-        f"{node.name} ({node.type.value}, id={node.id}){stale}",
+        f"{node.name} ({node.type}, id={node.id}){stale}",
         f"summary: {node.summary}",
     ]
     if node.story_time is not None:
@@ -105,8 +105,8 @@ def render_node_view(view: NodeView) -> str:
             for edge, neighbor in pairs:
                 arrow = "->" if edge.source == node.id else "<-"
                 lines.append(
-                    f"  {edge_type.value} {arrow} {neighbor.name} "
-                    f"({neighbor.type.value}, id={neighbor.id})"
+                    f"  {edge_type} {arrow} {neighbor.name} "
+                    f"({neighbor.type}, id={neighbor.id})"
                 )
     else:
         lines.append("edges: none")
@@ -124,8 +124,8 @@ def render_path(path: Path | None) -> str:
                 "or widening edge_types.")
     if not path.edges:
         return f"{path.nodes[0].name} (start and target are the same node)"
-    parts = [f"{path.nodes[0].name} ({path.nodes[0].type.value})"]
+    parts = [f"{path.nodes[0].name} ({path.nodes[0].type})"]
     for edge, node in zip(path.edges, path.nodes[1:], strict=True):
         arrow = "->" if edge.target == node.id else "<-"
-        parts.append(f" —{edge.type.value}{arrow} {node.name} ({node.type.value})")
+        parts.append(f" —{edge.type}{arrow} {node.name} ({node.type})")
     return "".join(parts)

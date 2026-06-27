@@ -1,20 +1,19 @@
 """Hydrate & resync: out-of-band human edits, deletions, lenient reads."""
 
 from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 
-CHAR = NodeDraft(NodeType.CHARACTER, name="Mira", summary="Engineer.")
-PLACE = NodeDraft(NodeType.LOCATION, name="Undercroft", summary="Vaults.")
+CHAR = NodeDraft("Character", name="Mira", summary="Engineer.")
+PLACE = NodeDraft("Location", name="Undercroft", summary="Vaults.")
 
 
 def _snapshot(graph):
     nodes = tuple(sorted((n.id, n.name, n.summary) for n in graph.nodes()))
     edges = tuple(sorted(
-        (e.source, e.type.value, e.target)
+        (e.source, e.type, e.target)
         for n in graph.nodes() for e in graph.edges(n.id)
     ))
     return nodes, edges
@@ -24,7 +23,7 @@ class TestHydrate:
     async def test_restart_hydrate_reproduces_identical_graph(self, mock, client, repo):
         mira = await repo.create_node(CHAR)
         await repo.create_node(
-            PLACE, links=[LinkSpec(EdgeType.LOCATED_AT, other=mira.id, outgoing=False)]
+            PLACE, links=[LinkSpec("located_at", other=mira.id, outgoing=False)]
         )
         original = _snapshot(repo.graph)
 
@@ -36,25 +35,28 @@ class TestHydrate:
         assert _snapshot(fresh.graph) == original
         await fresh_client.aclose()
 
-    async def test_hydrate_call_budget_is_one_sweep(self, mock, client, repo):
+    async def test_hydrate_call_budget_has_no_per_object_gets(self, mock, client, repo):
         for i in range(30):  # 3 pages at page_limit=10
-            mock.seed_object("gc_character", f"c{i}",
+            mock.seed_object("character", f"c{i}",
                              properties=[mapping.property_entry("gc_summary", "text", "x")])
         mock.request_log.clear()
         await repo.hydrate()
         get_calls = [p for m, p in mock.request_log if m == "GET"]
-        assert len(get_calls) <= 5  # paged sweep only -- no N+1 per-object GETs
+        # paged sweeps only (objects + types + properties) -- no N+1 per-object GETs
+        assert len(get_calls) <= 8
 
-    async def test_hydrate_skips_dangling_and_illegal_edges(self, mock, client, repo):
+    async def test_hydrate_keeps_open_edges_but_skips_dangling(self, mock, client, repo):
         mira = await repo.create_node(CHAR)
         place = await repo.create_node(PLACE)
-        # Human drags an illegal edge (Location knows ...) and a dangling one in the UI
+        # Human drags a (now perfectly legal) edge and a dangling one in the UI.
         mock.edit_object_directly(place.id, set_property=mapping.property_entry(
             "gc_edge_knows", "objects", [mira.id]))
         mock.edit_object_directly(mira.id, set_property=mapping.property_entry(
             "gc_edge_knows", "objects", ["deleted-elsewhere"]))
         await repo.hydrate()  # must not raise
-        assert repo.graph.edge_count() == 0
+        # the open edge survives; only the dangling target is dropped
+        assert repo.graph.edge_count() == 1
+        assert {n.id for _, n in repo.graph.neighbors(place.id)} == {mira.id}
 
 
 class TestResync:
@@ -67,7 +69,7 @@ class TestResync:
 
     async def test_resync_picks_up_human_created_node_and_edge(self, mock, repo):
         mira = await repo.create_node(CHAR)
-        new_id = mock.seed_object("gc_character", "Orla", properties=[
+        new_id = mock.seed_object("character", "Orla", properties=[
             mapping.property_entry("gc_summary", "text", "A smuggler."),
             mapping.property_entry("gc_edge_knows", "objects", [mira.id]),
         ])
@@ -84,14 +86,14 @@ class TestResync:
         create issues against *other* objects (incoming links)."""
         mira = await repo.create_node(CHAR)
         await repo.create_node(
-            PLACE, links=[LinkSpec(EdgeType.LOCATED_AT, other=mira.id, outgoing=False)]
+            PLACE, links=[LinkSpec("located_at", other=mira.id, outgoing=False)]
         )
         assert await repo.resync() == frozenset()
 
     async def test_own_link_ops_are_not_reported_by_resync(self, mock, repo):
         mira = await repo.create_node(CHAR)
         place = await repo.create_node(PLACE)
-        edge = await repo.add_link(mira.id, LinkSpec(EdgeType.LOCATED_AT, other=place.id))
+        edge = await repo.add_link(mira.id, LinkSpec("located_at", other=place.id))
         await repo.remove_link(edge)
         assert await repo.resync() == frozenset()
 

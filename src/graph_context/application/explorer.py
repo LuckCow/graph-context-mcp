@@ -23,7 +23,6 @@ from dataclasses import replace
 from graph_context.domain import pathfinding, traversal
 from graph_context.domain.models import NodeId
 from graph_context.domain.pathfinding import Path
-from graph_context.domain.schema import EdgeType
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery, ExploreResult
 from graph_context.errors import EmptyFocusStack
@@ -49,7 +48,7 @@ class Explorer:
         source: NodeId | None,
         target: NodeId,
         *,
-        edge_types: Iterable[EdgeType] | None = None,
+        edge_types: Iterable[str] | None = None,
         max_length: int = pathfinding.DEFAULT_MAX_LENGTH,
     ) -> Path | None:
         """Shortest meaningful path; ``source=None`` uses the focus top."""

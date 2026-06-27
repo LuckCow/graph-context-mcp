@@ -26,13 +26,13 @@ import json
 import logging
 from typing import Any
 
-from graph_context.domain.schema import NodeType
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.schema_bootstrap import SESSION_TYPE_KEY
 
 logger = logging.getLogger(__name__)
 
-_SESSION_TYPE_KEY = mapping.TYPE_KEYS[NodeType.SESSION_CONTEXT]
+_SESSION_TYPE_KEY = SESSION_TYPE_KEY
 
 
 class AnytypeSessionStore:

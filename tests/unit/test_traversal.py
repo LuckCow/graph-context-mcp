@@ -1,6 +1,5 @@
 """Bounded BFS semantics: depth, filters, as_of, truncation."""
 
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.domain.traversal import ExploreQuery, explore
 from tests.conftest import World
 
@@ -41,7 +40,7 @@ class TestExplore:
             ExploreQuery(
                 start=world.siege.id,
                 depth=2,
-                exclude_node_types=frozenset({NodeType.CHARACTER}),
+                exclude_node_types=frozenset({"Character"}),
             ),
         )
         names = {hit.node.name for hit in result.hits}
@@ -54,7 +53,7 @@ class TestExplore:
             repository.graph,
             ExploreQuery(
                 start=world.mira.id,
-                edge_types=frozenset({EdgeType.POSSESSES}),
+                edge_types=frozenset({"possesses"}),
             ),
         )
         names = {hit.node.name for hit in result.hits}

@@ -35,13 +35,20 @@ class NodeWriter:
         self._session = session
 
     async def create_node(
-        self, draft: NodeDraft, links: Sequence[LinkSpec] = ()
+        self,
+        draft: NodeDraft,
+        links: Sequence[LinkSpec] = (),
+        *,
+        create_missing_relations: bool = False,
     ) -> Node:
         """Create a node and its initial links as one logical operation."""
+        role = self._repository.role_for(draft.type)
         schema.validate_new_node(
-            draft.type, draft.name, draft.summary, draft.story_time
+            role, draft.name, draft.summary, draft.story_time
         )
-        node = await self._repository.create_node(draft, links)
+        node = await self._repository.create_node(
+            draft, links, create_missing_relations=create_missing_relations
+        )
         self._session.touch(node.id)
         for link in links:
             if self._session.focus.top != link.other:  # keep new node on top
@@ -59,6 +66,7 @@ class NodeWriter:
         fields: Mapping[str, str] | None = None,
         add_links: Sequence[LinkSpec] = (),
         remove_links: Sequence[Edge] = (),
+        create_missing_relations: bool = False,
     ) -> Node:
         """Apply field and link changes; flag staleness unless summary is fresh."""
         self._repository.graph.node(node_id)  # fail fast on bad id
@@ -73,7 +81,9 @@ class NodeWriter:
             fields=fields,
         )
         for link in add_links:
-            await self._repository.add_link(node_id, link)
+            await self._repository.add_link(
+                node_id, link, create_missing_relations=create_missing_relations
+            )
         for edge in remove_links:
             await self._repository.remove_link(edge)
 

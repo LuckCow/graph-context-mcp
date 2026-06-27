@@ -10,7 +10,7 @@ up to that many Prose nodes that ``references`` this node, most-recent
 first (by Prose ``fields["generated_at"]``), each with a body excerpt
 fetched on demand via ``repository.fetch_body`` and capped at
 ``excerpt_chars``. The reverse-reference lookup is one index call:
-``graph.neighbors(node_id, Direction.IN, edge_types=[EdgeType.REFERENCES])``.
+``graph.neighbors(node_id, Direction.IN, edge_types=["references"])``.
 
 The excerpt budget (``excerpt_chars``) is a *presentation* concern and is
 injected by the tool layer (default keeps this use-case self-contained);
@@ -24,19 +24,20 @@ from dataclasses import dataclass, field
 
 from graph_context.domain.graph import Direction
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import EdgeType
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 
 DEFAULT_EXCERPT_CHARS = 300  # mirror of presenters.PROSE_EXCERPT_CHARS default
 
+REFERENCES_LABEL = "references"  # Prose -> source edge label (cleaned)
+
 
 @dataclass(frozen=True, slots=True)
 class NodeView:
     node: Node
-    # edge type -> ((edge, neighbor), ...); both directions, presenter
+    # edge label -> ((edge, neighbor), ...); both directions, presenter
     # renders the arrow by comparing edge.source with node.id.
-    edges: dict[EdgeType, tuple[tuple[Edge, Node], ...]]
+    edges: dict[str, tuple[tuple[Edge, Node], ...]]
     # WP3: (prose node, body excerpt) pairs, most-recent first; empty
     # unless include_prose was requested.
     prose: tuple[tuple[Node, str], ...] = field(default=())
@@ -53,13 +54,13 @@ class NodeReader:
         self,
         node_id: NodeId,
         *,
-        edge_type_filter: Iterable[EdgeType] | None = None,
+        edge_type_filter: Iterable[str] | None = None,
         include_prose: int = 0,
         excerpt_chars: int = DEFAULT_EXCERPT_CHARS,
     ) -> NodeView:
         graph = self._repository.graph
         node = graph.node(node_id)
-        grouped: dict[EdgeType, list[tuple[Edge, Node]]] = {}
+        grouped: dict[str, list[tuple[Edge, Node]]] = {}
         for edge, neighbor in graph.neighbors(
             node_id, Direction.BOTH, edge_types=edge_type_filter
         ):
@@ -70,7 +71,7 @@ class NodeReader:
         self._session.touch(node_id)
         return NodeView(
             node=node,
-            edges={k: tuple(v) for k, v in sorted(grouped.items(), key=lambda i: i[0].value)},
+            edges={k: tuple(v) for k, v in sorted(grouped.items(), key=lambda i: i[0])},
             prose=prose,
         )
 
@@ -82,7 +83,7 @@ class NodeReader:
         prose_nodes = [
             neighbor
             for _, neighbor in graph.neighbors(
-                node_id, Direction.IN, edge_types=[EdgeType.REFERENCES]
+                node_id, Direction.IN, edge_types=[REFERENCES_LABEL]
             )
         ]
         prose_nodes.sort(

@@ -10,9 +10,8 @@ from __future__ import annotations
 import asyncio
 
 from graph_context.domain.models import NodeDraft
-from graph_context.domain.schema import NodeType
 
-PROBE = NodeDraft(NodeType.CHARACTER, name="ResyncProbe", summary="A probe.")
+PROBE = NodeDraft("Character", name="ResyncProbe", summary="A probe.")
 
 
 async def test_resync_picks_up_out_of_band_edit(repo, raw_api):
@@ -30,7 +29,7 @@ async def test_resync_picks_up_out_of_band_edit(repo, raw_api):
 
 async def test_deletion_invisible_to_resync_but_hydrate_reconciles(repo, raw_api):
     node = await repo.create_node(
-        NodeDraft(NodeType.LOCATION, name="DoomedPlace", summary="To be archived.")
+        NodeDraft("Location", name="DoomedPlace", summary="To be archived.")
     )
     raw_api.archive(node.id)
     # Archived objects are invisible to list and search (spike S4), so the

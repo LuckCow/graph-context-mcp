@@ -33,6 +33,17 @@ from graph_context.infrastructure.anytype.config import API_VERSION, AnytypeConf
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
 
+# Native types a real story-world space would already define. The live E2E
+# space is a throwaway, so the fixture seeds them before the contract runs.
+_NATIVE_TYPES = {
+    "character": "Character",
+    "location": "Location",
+    "event": "Event",
+    "item": "Item",
+    "organization": "Organization",
+    "technology": "Technology",
+}
+
 
 def _key() -> str:
     if os.environ.get("ANYTYPE_API_KEY"):
@@ -72,6 +83,13 @@ def live_config() -> AnytypeConfig:
         client = AnytypeClient(config)
         try:
             await ensure_schema(client)
+            # The space-reflecting model writes the user's *native* types;
+            # a throwaway space has none, so seed a representative set.
+            for key, name in _NATIVE_TYPES.items():
+                await client.create_type(
+                    {"key": key, "name": name, "plural_name": f"{name}s",
+                     "layout": "basic"}
+                )
         finally:
             await client.aclose()
 

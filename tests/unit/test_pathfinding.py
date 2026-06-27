@@ -3,7 +3,6 @@
 import pytest
 
 from graph_context.domain.pathfinding import find_path
-from graph_context.domain.schema import EdgeType
 from graph_context.errors import NodeNotFound
 from tests.conftest import World
 
@@ -21,7 +20,7 @@ class TestFindPath:
             repository.graph,
             world.ashbrand.id,
             world.undercroft.id,
-            edge_types=[EdgeType.POSSESSES],  # cannot continue past Mira
+            edge_types=["possesses"],  # cannot continue past Mira
         )
         assert path is None
 

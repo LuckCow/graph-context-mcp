@@ -16,12 +16,14 @@ from typing import Any
 
 import pytest
 
-from graph_context.domain.schema import NodeType
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
-from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
+from graph_context.infrastructure.anytype.schema_bootstrap import (
+    SESSION_TYPE_KEY,
+    ensure_schema,
+)
 from graph_context.infrastructure.anytype.session_repository import AnytypeSessionStore
 from graph_context.infrastructure.memory.fake_session_store import InMemorySessionStore
 
@@ -76,8 +78,7 @@ async def test_anytype_store_overwrites_in_place(anytype_client: AnytypeClient) 
     await store.save(SNAPSHOT)
     await store.save({**SNAPSHOT, "project": "Second"})
     # still exactly one SessionContext object, holding the latest snapshot
-    type_key = mapping.TYPE_KEYS[NodeType.SESSION_CONTEXT]
-    objs = [o async for o in anytype_client.search(types=[type_key])]
+    objs = [o async for o in anytype_client.search(types=[SESSION_TYPE_KEY])]
     assert len(objs) == 1
     assert (await AnytypeSessionStore(anytype_client).load())["project"] == "Second"
 
@@ -87,7 +88,7 @@ async def test_anytype_store_corrupt_json_loads_none(
 ) -> None:
     mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     mock.seed_object(
-        mapping.TYPE_KEYS[NodeType.SESSION_CONTEXT],
+        SESSION_TYPE_KEY,
         "Session context (managed)",
         properties=[
             {"key": mapping.PROP_FIELDS, "format": "text", "text": "{not valid json"}

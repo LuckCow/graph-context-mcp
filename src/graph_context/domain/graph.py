@@ -17,8 +17,12 @@ is simpler and faster than any external graph engine at this scale.
 
 Invariants enforced here (the single choke point for edges):
     * Both endpoints of an edge must exist.
-    * Endpoint types must satisfy the schema's edge rules.
+    * Self-loops are dropped (an object relating to itself is not a graph edge).
     * Removing a node removes its incident edges.
+
+Edges are *open*: any relation label is admissible (the space-reflecting
+model reads whatever ``objects`` relations exist), so there is no longer a
+schema endpoint-rule check here.
 """
 
 from __future__ import annotations
@@ -27,9 +31,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from enum import StrEnum
 
-from graph_context.domain import schema
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import EdgeType
 from graph_context.errors import NodeNotFound
 
 
@@ -79,10 +81,17 @@ class GraphIndex:
     # -- edges ----------------------------------------------------------
 
     def add_edge(self, edge: Edge) -> None:
-        """Add a typed edge, enforcing existence and schema endpoint rules."""
-        source = self.node(edge.source)
-        target = self.node(edge.target)
-        schema.validate_edge(source.type, edge.type, target.type)
+        """Add a labelled edge, enforcing endpoint existence.
+
+        Both endpoints must exist (raises :class:`NodeNotFound` otherwise).
+        Self-loops (``source == target``) are silently skipped -- an untyped
+        self-reference (e.g. an object's generic ``links`` pointing at itself)
+        is not a meaningful graph edge.
+        """
+        self.node(edge.source)
+        self.node(edge.target)
+        if edge.source == edge.target:
+            return
         self._out[edge.source].add(edge)
         self._in[edge.target].add(edge)
 
@@ -94,9 +103,9 @@ class GraphIndex:
         self,
         node_id: NodeId,
         direction: Direction = Direction.BOTH,
-        edge_types: Iterable[EdgeType] | None = None,
+        edge_types: Iterable[str] | None = None,
     ) -> Iterator[Edge]:
-        """Yield edges incident to ``node_id``, optionally filtered by type."""
+        """Yield edges incident to ``node_id``, optionally filtered by label."""
         allowed = frozenset(edge_types) if edge_types is not None else None
         if direction in (Direction.OUT, Direction.BOTH):
             yield from self._filtered(self._out[node_id], allowed)
@@ -107,7 +116,7 @@ class GraphIndex:
         self,
         node_id: NodeId,
         direction: Direction = Direction.BOTH,
-        edge_types: Iterable[EdgeType] | None = None,
+        edge_types: Iterable[str] | None = None,
     ) -> Iterator[tuple[Edge, Node]]:
         """Yield ``(edge, neighbor)`` pairs around ``node_id``."""
         for edge in self.edges(node_id, direction, edge_types):
@@ -124,7 +133,7 @@ class GraphIndex:
 
     @staticmethod
     def _filtered(
-        edges: set[Edge], allowed: frozenset[EdgeType] | None
+        edges: set[Edge], allowed: frozenset[str] | None
     ) -> Iterator[Edge]:
         for edge in edges:
             if allowed is None or edge.type in allowed:

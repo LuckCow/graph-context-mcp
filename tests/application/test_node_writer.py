@@ -3,7 +3,6 @@
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.errors import NodeNotFound, SchemaViolation
 from tests.conftest import World
 
@@ -11,8 +10,8 @@ from tests.conftest import World
 class TestCreateNode:
     async def test_composite_create_writes_node_and_links(self, writer, repository, world: World):
         faction = await writer.create_node(
-            NodeDraft(NodeType.FACTION, name="Emberguard", summary="Brakk's last defenders."),
-            links=[LinkSpec(EdgeType.MEMBER_OF, other=world.mira.id, outgoing=False)],
+            NodeDraft("Organization", name="Emberguard", summary="Brakk's last defenders."),
+            links=[LinkSpec("member_of", other=world.mira.id, outgoing=False)],
         )
         neighbors = {n.name for _, n in repository.graph.neighbors(faction.id)}
         assert neighbors == {"Mira"}
@@ -20,21 +19,21 @@ class TestCreateNode:
     async def test_summaryless_create_is_rejected_before_any_write(self, writer, repository):
         before = repository.graph.node_count()
         with pytest.raises(SchemaViolation):
-            await writer.create_node(NodeDraft(NodeType.CHARACTER, name="Ghost", summary=""))
+            await writer.create_node(NodeDraft("Character", name="Ghost", summary=""))
         assert repository.graph.node_count() == before
 
     async def test_failed_link_rolls_back_the_created_node(self, writer, repository, world: World):
         before = repository.graph.node_count()
         with pytest.raises(NodeNotFound):
             await writer.create_node(
-                NodeDraft(NodeType.CHARACTER, name="Orla", summary="A smuggler."),
-                links=[LinkSpec(EdgeType.KNOWS, other="no-such-node")],
+                NodeDraft("Character", name="Orla", summary="A smuggler."),
+                links=[LinkSpec("knows", other="no-such-node")],
             )
         assert repository.graph.node_count() == before
 
     async def test_created_node_lands_on_focus_top(self, writer, session, world: World):
         node = await writer.create_node(
-            NodeDraft(NodeType.LOCATION, name="Brakk Gate", summary="The city gate.")
+            NodeDraft("Location", name="Brakk Gate", summary="The city gate.")
         )
         assert session.focus.top == node.id
 
@@ -53,11 +52,11 @@ class TestUpdateNode:
 
     async def test_update_can_add_and_remove_links(self, writer, repository, world: World):
         edge = await repository.add_link(
-            world.mira.id, LinkSpec(EdgeType.LOCATED_AT, other=world.undercroft.id)
+            world.mira.id, LinkSpec("located_at", other=world.undercroft.id)
         )
         await writer.update_node(world.mira.id, remove_links=[edge])
         located = list(
-            repository.graph.edges(world.mira.id, edge_types=[EdgeType.LOCATED_AT])
+            repository.graph.edges(world.mira.id, edge_types=["located_at"])
         )
         assert located == []
 

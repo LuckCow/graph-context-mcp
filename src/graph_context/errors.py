@@ -20,7 +20,41 @@ class GraphContextError(Exception):
 
 
 class SchemaViolation(GraphContextError):
-    """A write violated the fixed v1 type vocabulary or a structural rule."""
+    """A write violated a node-creation invariant or a structural rule."""
+
+
+class ApprovalRequired(GraphContextError):
+    """A write needs a new space-level type or relation the user must approve.
+
+    The space-reflecting model reuses existing types/relations; when a write
+    asks for one that does not exist yet, the writer raises this instead of
+    silently creating it, so new vocabulary is an explicit, user-approved act.
+    """
+
+
+class UnknownNodeType(ApprovalRequired):
+    """``create_node`` requested a type with no match in the space."""
+
+    def __init__(self, requested: str, known: tuple[str, ...] = ()) -> None:
+        self.requested = requested
+        self.known = tuple(known)
+        hint = f" Known types: {', '.join(sorted(self.known))}." if self.known else ""
+        super().__init__(f"no type in this space matches {requested!r}.{hint}")
+
+
+class UnknownRelationLabel(ApprovalRequired):
+    """A link used a relation label with no matching existing relation."""
+
+    def __init__(self, label: str, known: tuple[str, ...] = ()) -> None:
+        self.label = label
+        self.known = tuple(known)
+        hint = (
+            f" Existing relations: {', '.join(sorted(self.known))}." if self.known else ""
+        )
+        super().__init__(
+            f"no existing relation matches label {label!r}; pass "
+            f"create_missing_relations=true to create it.{hint}"
+        )
 
 
 class NodeNotFound(GraphContextError):

@@ -13,7 +13,6 @@ Run:  python scripts/demo_wp1.py
 import asyncio
 
 from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
@@ -25,7 +24,7 @@ from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
 def snapshot(graph):
     nodes = tuple(sorted((n.id, n.name) for n in graph.nodes()))
     edges = tuple(sorted(
-        (e.source, e.type.value, e.target)
+        (e.source, e.type, e.target)
         for n in graph.nodes() for e in graph.edges(n.id)
     ))
     return nodes, edges
@@ -38,23 +37,30 @@ async def main() -> None:
 
     print("== 1. bootstrap ==")
     await ensure_schema(client)
+    # The space-reflecting model uses the user's native types; this demo space
+    # is empty, so seed a representative set (as if the user made them in the UI).
+    for key, name in {"character": "Character", "location": "Location",
+                      "event": "Event"}.items():
+        await client.create_type(
+            {"key": key, "name": name, "plural_name": f"{name}s", "layout": "basic"}
+        )
     print(f"   schema ensured ({client.request_count} API calls)\n")
 
     print("== 2. build world through the repository ==")
     repo = AnytypeGraphRepository(client)
     await repo.hydrate()
     mira = await repo.create_node(
-        NodeDraft(NodeType.CHARACTER, "Mira", "Exiled siege engineer.")
+        NodeDraft("Character", "Mira", "Exiled siege engineer.")
     )
     undercroft = await repo.create_node(
-        NodeDraft(NodeType.LOCATION, "The Undercroft", "Vaults beneath Brakk."),
-        links=[LinkSpec(EdgeType.LOCATED_AT, other=mira.id, outgoing=False)],
+        NodeDraft("Location", "The Undercroft", "Vaults beneath Brakk."),
+        links=[LinkSpec("located_at", other=mira.id, outgoing=False)],
     )
     await repo.create_node(
-        NodeDraft(NodeType.EVENT, "Siege of Brakk", "The city falls.", story_time=10),
+        NodeDraft("Event", "Siege of Brakk", "The city falls.", story_time=10),
         links=[
-            LinkSpec(EdgeType.PARTICIPATED_IN, other=mira.id, outgoing=False),
-            LinkSpec(EdgeType.LOCATED_AT, other=undercroft.id),
+            LinkSpec("participated_in", other=mira.id, outgoing=False),
+            LinkSpec("located_at", other=undercroft.id),
         ],
     )
     print(f"   {repo.graph.node_count()} nodes / {repo.graph.edge_count()} edges\n")

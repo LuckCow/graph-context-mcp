@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from graph_context.domain.schema import EdgeType, NodeType
+from graph_context.domain.schema import Role
 
 NodeId = str
 """Opaque node identifier, owned by the storage layer."""
@@ -23,32 +23,49 @@ NodeId = str
 
 @dataclass(frozen=True, slots=True)
 class Edge:
-    """A directed, typed link between two nodes."""
+    """A directed, labelled link between two nodes.
+
+    ``type`` is the *cleaned display label* (e.g. ``"knows"``, ``"boss"``)
+    used for filtering and rendering. ``property_key`` is the raw Anytype
+    relation key the edge was read from / must be written back to (e.g.
+    ``"gc_edge_knows"``, ``"triggered_by"``); ``""`` for synthetic edges or
+    the in-memory backend. Both participate in identity so two genuinely
+    different relations that clean to the same label stay distinct.
+    """
 
     source: NodeId
-    type: EdgeType
+    type: str
     target: NodeId
+    property_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class LinkSpec:
     """One link requested as part of a composite write.
 
-    ``outgoing=True`` means the edge runs *from* the node being written
-    *to* ``other``; ``False`` reverses it (e.g. creating an Event and
-    linking an existing Character via ``participated_in`` requires an
-    incoming edge: Character -> Event).
+    ``edge_type`` is the requested relation *label*; the repository resolves
+    it to an existing relation's property key (or surfaces it for approval).
+    ``outgoing=True`` means the edge runs *from* the node being written *to*
+    ``other``; ``False`` reverses it (e.g. creating an Event and linking an
+    existing Character via ``participated_in`` requires an incoming edge:
+    Character -> Event).
     """
 
-    edge_type: EdgeType
+    edge_type: str
     other: NodeId
     outgoing: bool = True
 
-    def to_edge(self, anchor: NodeId) -> Edge:
+    def to_edge(self, anchor: NodeId, property_key: str = "") -> Edge:
         """Materialise this spec relative to the node being written."""
         if self.outgoing:
-            return Edge(source=anchor, type=self.edge_type, target=self.other)
-        return Edge(source=self.other, type=self.edge_type, target=anchor)
+            return Edge(
+                source=anchor, type=self.edge_type, target=self.other,
+                property_key=property_key,
+            )
+        return Edge(
+            source=self.other, type=self.edge_type, target=anchor,
+            property_key=property_key,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +82,7 @@ class NodeDraft:
     silently ignored).
     """
 
-    type: NodeType
+    type: str
     name: str
     summary: str
     description: str = ""
@@ -82,17 +99,23 @@ class Node:
     update that does not carry a fresh summary flips this to ``True``
     (rule lives in the ``NodeWriter`` use-case, not here).
 
-    ``story_time`` is only meaningful for ``NodeType.EVENT``; it is the
-    node's position on the story timeline and drives ``as_of`` filtering.
-    ``fields`` holds type-specific extras we have not promoted to first-class
-    attributes yet.
+    ``story_time`` is only meaningful for nodes whose ``role`` is
+    ``Role.EVENT``; it is the node's position on the story timeline and drives
+    ``as_of`` filtering. ``fields`` holds type-specific extras we have not
+    promoted to first-class attributes yet.
+
+    ``type`` is the Anytype type's *display name* (rendered to the user);
+    ``type_key`` is its raw key (used for writes); ``role`` is the resolved
+    semantic role (``None`` for types with no mapped role).
     """
 
     id: NodeId
-    type: NodeType
+    type: str
     name: str
     summary: str
     summary_stale: bool = False
     description: str = ""
     story_time: float | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
+    type_key: str = ""
+    role: Role | None = None

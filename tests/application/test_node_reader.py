@@ -6,7 +6,6 @@ from itertools import count
 
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.prose_recorder import ProseRecorder
-from graph_context.domain.schema import EdgeType
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from tests.conftest import World
@@ -17,18 +16,18 @@ async def test_get_node_groups_edges_both_directions(
 ) -> None:
     view = await NodeReader(repository, session).get_node(world.mira.id)
     types = set(view.edges)
-    assert EdgeType.PARTICIPATED_IN in types  # Mira -> Events
-    assert EdgeType.LOCATED_AT in types       # Mira -> Undercroft
-    assert EdgeType.POSSESSES in types        # Mira -> Ashbrand
+    assert "participated_in" in types  # Mira -> Events
+    assert "located_at" in types       # Mira -> Undercroft
+    assert "possesses" in types        # Mira -> Ashbrand
 
 
 async def test_get_node_edge_type_filter(
     repository: InMemoryGraphRepository, session: SessionState, world: World
 ) -> None:
     view = await NodeReader(repository, session).get_node(
-        world.mira.id, edge_type_filter=[EdgeType.POSSESSES]
+        world.mira.id, edge_type_filter=["possesses"]
     )
-    assert set(view.edges) == {EdgeType.POSSESSES}
+    assert set(view.edges) == {"possesses"}
 
 
 async def test_include_prose_orders_most_recent_first_and_bounds_excerpt(

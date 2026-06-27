@@ -44,8 +44,9 @@ from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
 from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.application.session_persister import SessionPersister
+from graph_context.domain import schema
 from graph_context.domain.models import Edge, LinkSpec, NodeDraft
-from graph_context.domain.schema import EdgeType, NodeType
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery
 from graph_context.errors import GraphContextError
@@ -55,9 +56,9 @@ from graph_context.ports.graph_repository import GraphRepository
 
 logger = logging.getLogger(__name__)
 
-# WP2 decision: derived/infrastructure node types never surface in
-# traversal unless explicitly asked for. Tool-layer policy, not domain.
-DEFAULT_EXPLORE_EXCLUDES = frozenset({NodeType.PROSE, NodeType.SESSION_CONTEXT})
+# WP2 decision: bookkeeping (Prose/SessionContext) node *roles* never surface
+# in traversal unless explicitly included. Tool-layer policy, not domain.
+DEFAULT_EXPLORE_EXCLUDE_ROLES = frozenset({Role.PROSE, Role.SESSION_CONTEXT})
 
 
 @dataclass(slots=True)
@@ -137,24 +138,23 @@ async def _note_mutation(services: Services) -> None:
 # -- parsing helpers: error messages are written FOR the LLM ---------------
 
 
-def _parse_node_type(value: str) -> NodeType:
-    try:
-        return NodeType(value)
-    except ValueError:
-        raise GraphContextError(
-            f"unknown node type {value!r}; allowed: "
-            f"{', '.join(t.value for t in NodeType)}"
-        ) from None
+def _parse_node_type(value: str) -> str:
+    """Normalize a requested node type. The vocabulary is OPEN: validation
+    (does this type exist in the space?) is the repository's job, which
+    raises an actionable ``UnknownNodeType`` listing the known types."""
+    normalized = value.strip()
+    if not normalized:
+        raise GraphContextError("node 'type' must be a non-empty string")
+    return normalized
 
 
-def _parse_edge_type(value: str) -> EdgeType:
-    try:
-        return EdgeType(value)
-    except ValueError:
-        raise GraphContextError(
-            f"unknown edge type {value!r}; allowed: "
-            f"{', '.join(e.value for e in EdgeType)}"
-        ) from None
+def _parse_edge_type(value: str) -> str:
+    """Normalize a relation label. OPEN vocabulary: an unknown label is
+    surfaced for approval by the repository, not rejected here."""
+    normalized = value.strip()
+    if not normalized:
+        raise GraphContextError("each link needs a non-empty 'edge_type' label")
+    return normalized
 
 
 def _parse_detail(value: str) -> Detail:
@@ -185,13 +185,13 @@ def _parse_links(raw: Sequence[dict[str, Any]] | None) -> list[LinkSpec]:
     return links
 
 
-def _node_type_set(values: Sequence[str] | None) -> frozenset[NodeType] | None:
+def _node_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
     if values is None:
         return None
     return frozenset(_parse_node_type(v) for v in values)
 
 
-def _edge_type_set(values: Sequence[str] | None) -> frozenset[EdgeType] | None:
+def _edge_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
     if values is None:
         return None
     return frozenset(_parse_edge_type(v) for v in values)
@@ -209,9 +209,12 @@ async def context_tool(
 ) -> str:
     graph = services.repository.graph
     if action == "get":
-        stale = sum(1 for n in graph.nodes() if n.summary_stale)
+        # Count only story nodes -- the managed SessionContext node and Prose
+        # passages are bookkeeping and would otherwise inflate an empty world.
+        story = [n for n in graph.nodes() if n.role not in schema.INFRA_ROLES]
+        stale = sum(1 for n in story if n.summary_stale)
         return (
-            f"graph: {graph.node_count()} nodes, {graph.edge_count()} edges, "
+            f"graph: {len(story)} nodes, {graph.edge_count()} edges, "
             f"{stale} stale summaries"
         )
     if action == "resync":
@@ -260,6 +263,7 @@ async def create_node_tool(
     story_time: float | None = None,
     fields: dict[str, str] | None = None,
     links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool = False,
 ) -> str:
     draft = NodeDraft(
         type=_parse_node_type(type),
@@ -269,7 +273,9 @@ async def create_node_tool(
         story_time=story_time,
         fields=fields or {},
     )
-    node = await services.writer.create_node(draft, _parse_links(links))
+    node = await services.writer.create_node(
+        draft, _parse_links(links), create_missing_relations=create_missing_relations
+    )
     await _note_mutation(services)
     view = await services.reader.get_node(node.id)
     return f"created:\n{presenters.render_node_view(view)}"
@@ -286,12 +292,14 @@ async def update_node_tool(
     fields: dict[str, str] | None = None,
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool = False,
 ) -> str:
     removals = [
         Edge(
             source=str(i["source"]),
             type=_parse_edge_type(str(i["edge_type"])),
             target=str(i["target"]),
+            property_key=str(i.get("property_key", "")),
         )
         for i in remove_links or []
     ]
@@ -304,6 +312,7 @@ async def update_node_tool(
         fields=fields,
         add_links=_parse_links(add_links),
         remove_links=removals,
+        create_missing_relations=create_missing_relations,
     )
     await _note_mutation(services)
     stale_note = (
@@ -348,9 +357,10 @@ async def explore_tool(
 ) -> str:
     excludes = _node_type_set(exclude_types) or frozenset()
     includes = _node_type_set(include_types)
+    exclude_roles: frozenset[Role] = frozenset()
     if includes is None:
-        # WP2 default: infrastructure types stay invisible unless included.
-        excludes = excludes | DEFAULT_EXPLORE_EXCLUDES
+        # WP2 default: bookkeeping roles stay invisible unless included.
+        exclude_roles = DEFAULT_EXPLORE_EXCLUDE_ROLES
     result = await services.explorer.explore(
         ExploreQuery(
             start=start,
@@ -361,6 +371,7 @@ async def explore_tool(
             as_of=as_of,
             include_future=include_future,
             limit=limit,
+            exclude_roles=exclude_roles,
         )
     )
     if only_stale:

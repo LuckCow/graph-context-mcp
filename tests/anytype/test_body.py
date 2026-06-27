@@ -11,28 +11,27 @@ from __future__ import annotations
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.errors import NodeNotFound
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 
 
 async def test_body_round_trips_via_fetch_body(repo: AnytypeGraphRepository) -> None:
     place = await repo.create_node(
-        NodeDraft(NodeType.LOCATION, name="The Undercroft", summary="Vaults.")
+        NodeDraft("Location", name="The Undercroft", summary="Vaults.")
     )
     prose = await repo.create_node(
         NodeDraft(
-            NodeType.PROSE, name="Scene", summary="Aftermath.",
+            "gc_prose", name="Scene", summary="Aftermath.",
             body="Ash drifted over the Undercroft.",
         ),
-        links=[LinkSpec(EdgeType.REFERENCES, other=place.id)],
+        links=[LinkSpec("references", other=place.id)],
     )
     assert await repo.fetch_body(prose.id) == "Ash drifted over the Undercroft."
 
 
 async def test_body_is_not_in_the_index(repo: AnytypeGraphRepository) -> None:
     prose = await repo.create_node(
-        NodeDraft(NodeType.PROSE, name="Scene", summary="s", body="secret text")
+        NodeDraft("gc_prose", name="Scene", summary="s", body="secret text")
     )
     # The indexed node carries no body attribute; bodies are fetch-only.
     assert not hasattr(repo.graph.node(prose.id), "body")
@@ -40,7 +39,7 @@ async def test_body_is_not_in_the_index(repo: AnytypeGraphRepository) -> None:
 
 async def test_body_survives_a_later_update(repo: AnytypeGraphRepository) -> None:
     prose = await repo.create_node(
-        NodeDraft(NodeType.PROSE, name="Scene", summary="s", body="original prose")
+        NodeDraft("gc_prose", name="Scene", summary="s", body="original prose")
     )
     await repo.update_node(prose.id, summary="revised summary")
     assert await repo.fetch_body(prose.id) == "original prose"  # write-once (A6/S6)
@@ -53,6 +52,6 @@ async def test_fetch_body_unknown_id_raises(repo: AnytypeGraphRepository) -> Non
 
 async def test_empty_body_is_empty_string(repo: AnytypeGraphRepository) -> None:
     node = await repo.create_node(
-        NodeDraft(NodeType.LOCATION, name="Plain", summary="no body here")
+        NodeDraft("Location", name="Plain", summary="no body here")
     )
     assert await repo.fetch_body(node.id) == ""

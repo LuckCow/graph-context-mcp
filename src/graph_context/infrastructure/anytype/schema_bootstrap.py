@@ -1,40 +1,66 @@
-"""Idempotent schema bootstrap: ensure our Types and Properties exist.
+"""Idempotent schema bootstrap: ensure our *infrastructure* exists.
 
-Run once at startup (composition root) before hydrate. Safe to re-run:
-existing keys are left untouched, missing ones are created. Cost: 2 list
-sweeps + one create per missing item -- only the very first run against a
-fresh space creates anything (8 types + 5 scalar + 10 edge properties =
-23 creates, which momentarily dips into the rate-limit burst budget; that
-is acceptable as a one-time setup cost, and why bootstrap runs *before*
-hydrate rather than interleaved).
+The space-reflecting model does NOT create a type per node kind anymore --
+story entities use the user's own native Anytype types. Bootstrap is now
+infra-only and create-if-missing:
+
+* the two ``gc_`` types we still own (Prose passages and the managed
+  SessionContext bookkeeping node);
+* the scalar ``gc_`` properties we write onto native objects (summary,
+  stale flag, description, story-time, fields JSON);
+* a small starter vocabulary of ``gc_edge_*`` relations so the model has
+  reusable relation labels for common links without an approval round-trip.
+  Human-created relations (``boss``, ``triggered_by``, ...) are first-class
+  too; these are merely convenient defaults.
+
+Safe to re-run: existing keys are left untouched. Only the first run against
+a space creates anything.
 """
 
 from __future__ import annotations
 
 import logging
 
-from graph_context.domain.schema import NodeType
+from graph_context.domain.schema import Role
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 
 logger = logging.getLogger(__name__)
 
+# gc_ infrastructure types: (key, display name) for the role.
+PROSE_TYPE_KEY = "gc_prose"
+SESSION_TYPE_KEY = "gc_session_context"
+INFRA_TYPES: dict[str, str] = {
+    PROSE_TYPE_KEY: Role.PROSE.value,
+    SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
+}
+
+# Starter relation vocabulary (key, display name). Reusable defaults; the
+# space-reflecting reader also picks up any human-created relation.
+DEFAULT_EDGE_RELATIONS: list[tuple[str, str]] = [
+    ("gc_edge_knows", "edge: knows"),
+    ("gc_edge_located_at", "edge: located_at"),
+    ("gc_edge_member_of", "edge: member_of"),
+    ("gc_edge_participated_in", "edge: participated_in"),
+    ("gc_edge_caused", "edge: caused"),
+    ("gc_edge_possesses", "edge: possesses"),
+    ("gc_edge_parent_of", "edge: parent_of"),
+    ("gc_edge_child_of", "edge: child_of"),
+    ("gc_edge_references", "edge: references"),
+    ("gc_edge_precedes", "edge: precedes"),
+]
+
 
 async def ensure_schema(client: AnytypeClient) -> None:
-    """Create any missing gc_ types and properties in the configured space."""
+    """Create any missing gc_ infrastructure types and properties."""
     existing_types = {t["key"] async for t in client.list_types()}
-    for node_type in NodeType:
-        key = mapping.TYPE_KEYS[node_type]
+    for key, name in INFRA_TYPES.items():
         if key not in existing_types:
-            logger.info("bootstrap: creating type %s", key)
-            # plural_name is required by the API (spike). It is cosmetic,
-            # human-editable display data, and bootstrap is create-if-missing,
-            # so a UI rename is never clobbered -- hence a naive plural rather
-            # than a maintained table (dynamic types are WP4 and carry their own).
+            logger.info("bootstrap: creating infra type %s", key)
             await client.create_type({
                 "key": key,
-                "name": node_type.value,
-                "plural_name": f"{node_type.value}s",
+                "name": name,
+                "plural_name": f"{name}s",
                 "layout": "basic",
             })
 
@@ -43,9 +69,7 @@ async def ensure_schema(client: AnytypeClient) -> None:
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
             await client.create_property({"key": key, "name": key, "format": fmt})
-    for edge_type, key in mapping.EDGE_PROPERTY_KEYS.items():
+    for key, name in DEFAULT_EDGE_RELATIONS:
         if key not in existing_properties:
             logger.info("bootstrap: creating relation property %s", key)
-            await client.create_property(
-                {"key": key, "name": f"edge: {edge_type.value}", "format": "objects"}
-            )
+            await client.create_property({"key": key, "name": name, "format": "objects"})

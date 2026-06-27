@@ -30,10 +30,11 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from graph_context.domain.models import LinkSpec, Node, NodeDraft, NodeId
-from graph_context.domain.schema import EdgeType, NodeType
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 
+PROSE_TYPE = "gc_prose"  # thin gc_ infra type for prose passages
+REFERENCES_LABEL = "references"  # Prose -> source relation label
 PROSE_BODY_CAP = 500_000  # chars; product bound, well inside S6's 1 MB ceiling
 SECTION_DELIM = "\n\n---\n"
 LLM_INPUT_HEADER = "### gc:llm_input"
@@ -71,14 +72,14 @@ class ProseRecorder:
         model: str = "",
     ) -> Node:
         draft = NodeDraft(
-            type=NodeType.PROSE,
+            type=PROSE_TYPE,
             name=title or _derive_title(text),
             summary=summary,
             fields={"model": model, "generated_at": self._now()},
             body=_assemble_body(text, llm_input, llm_output),
         )
         links = [
-            LinkSpec(EdgeType.REFERENCES, other=node_id) for node_id in references
+            LinkSpec(REFERENCES_LABEL, other=node_id) for node_id in references
         ]
         node = await self._repository.create_node(draft, links)
         self._session.touch(node.id)

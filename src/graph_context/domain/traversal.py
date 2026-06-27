@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import EdgeType, NodeType
+from graph_context.domain.schema import Role
 
 MAX_DEPTH = 3
 DEFAULT_DEPTH = 1
@@ -38,12 +38,13 @@ class ExploreQuery:
 
     start: NodeId
     depth: int = DEFAULT_DEPTH
-    include_node_types: frozenset[NodeType] | None = None
-    exclude_node_types: frozenset[NodeType] = frozenset()
-    edge_types: frozenset[EdgeType] | None = None
+    include_node_types: frozenset[str] | None = None
+    exclude_node_types: frozenset[str] = frozenset()
+    edge_types: frozenset[str] | None = None
     as_of: float | None = None
     include_future: bool = False
     limit: int = DEFAULT_LIMIT
+    exclude_roles: frozenset[Role] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,16 +93,31 @@ def explore(graph: GraphIndex, query: ExploreQuery) -> ExploreResult:
     return ExploreResult(hits=tuple(hits), truncated=truncated)
 
 
+def _node_identifiers(node: Node) -> set[str]:
+    """The strings a type filter may match a node by: display name, raw type
+    key, and role name. Lets ``include_types=["Prose"]`` work whether the
+    caller names the display type, the type key, or the role."""
+    identifiers = {node.type, node.type_key}
+    if node.role is not None:
+        identifiers.add(node.role.value)
+    return {i for i in identifiers if i}
+
+
 def _admits(node: Node, query: ExploreQuery) -> bool:
-    """Apply node-type and story-time filters to a candidate hit."""
-    if node.type in query.exclude_node_types:
+    """Apply role, node-type, and story-time filters to a candidate hit."""
+    identifiers = _node_identifiers(node)
+    if node.role in query.exclude_roles:
         return False
-    if query.include_node_types is not None and node.type not in query.include_node_types:
+    if identifiers & query.exclude_node_types:
+        return False
+    if query.include_node_types is not None and not (
+        identifiers & query.include_node_types
+    ):
         return False
     if (  # noqa: SIM103 -- early-return chain reads clearer than one boolean
         query.as_of is not None
         and not query.include_future
-        and node.type is NodeType.EVENT
+        and node.role is Role.EVENT
         and node.story_time is not None
         and node.story_time > query.as_of
     ):

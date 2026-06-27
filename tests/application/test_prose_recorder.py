@@ -5,7 +5,7 @@ from __future__ import annotations
 from graph_context.application import prose_recorder as pr
 from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.domain.graph import Direction
-from graph_context.domain.schema import EdgeType, NodeType
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from tests.conftest import World
@@ -19,12 +19,12 @@ async def test_record_creates_prose_node_with_references(
         text="Ash over the Undercroft.", summary="Aftermath.",
         references=[world.mira.id, world.undercroft.id], model="demo",
     )
-    assert node.type is NodeType.PROSE
+    assert node.role is Role.PROSE
     assert node.fields == {"model": "demo", "generated_at": "2026-01-01T00:00:00Z"}
     # references edges: Prose -> each source.
     targets = {
         e.target
-        for e in repository.graph.edges(node.id, Direction.OUT, [EdgeType.REFERENCES])
+        for e in repository.graph.edges(node.id, Direction.OUT, ["references"])
     }
     assert targets == {world.mira.id, world.undercroft.id}
 

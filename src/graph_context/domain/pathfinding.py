@@ -20,7 +20,6 @@ from dataclasses import dataclass
 
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import EdgeType
 
 DEFAULT_MAX_LENGTH = 4
 
@@ -41,7 +40,7 @@ def find_path(
     source: NodeId,
     target: NodeId,
     *,
-    edge_types: Iterable[EdgeType] | None = None,
+    edge_types: Iterable[str] | None = None,
     max_length: int = DEFAULT_MAX_LENGTH,
 ) -> Path | None:
     """Return a shortest path from ``source`` to ``target``, or ``None``.
