@@ -32,7 +32,8 @@ from collections.abc import Iterable, Iterator
 from enum import StrEnum
 
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.errors import NodeNotFound
+from graph_context.domain.schema import INFRA_ROLES
+from graph_context.errors import AmbiguousNodeName, NodeNotFound
 
 
 class Direction(StrEnum):
@@ -77,6 +78,73 @@ class GraphIndex:
 
     def nodes(self) -> Iterator[Node]:
         return iter(self._nodes.values())
+
+    # -- name resolution ------------------------------------------------
+    #
+    # Anytype's source-of-truth ids are opaque CIDs; an LLM holds *names*.
+    # Since the whole world is in memory here, name lookup is a cheap scan,
+    # so the tool layer can accept a name anywhere an id is expected and
+    # resolve it through here. ``node()`` above stays strictly id-only -- it
+    # backs edge-endpoint invariants that must never name-match.
+
+    def find_by_name(
+        self,
+        query: str,
+        node_type: str | None = None,
+        limit: int = 10,
+    ) -> list[Node]:
+        """Nodes whose name matches ``query`` (case-insensitive).
+
+        Exact-name matches win outright; only if there are none do
+        substring matches apply (capped at ``limit``). Bookkeeping roles
+        (Prose/SessionContext) are excluded so a bare name never resolves to
+        an infrastructure node. ``node_type`` optionally filters on the type
+        display label. Results are sorted by name then id (deterministic).
+        """
+        q = query.strip().casefold()
+        if not q:
+            return []
+        type_q = node_type.strip().casefold() if node_type else None
+
+        def candidate(node: Node) -> bool:
+            if node.role in INFRA_ROLES:
+                return False
+            return type_q is None or node.type.casefold() == type_q
+
+        def ordering(node: Node) -> tuple[str, str]:
+            return (node.name.casefold(), node.id)
+
+        pool = [n for n in self._nodes.values() if candidate(n)]
+        exact = sorted(
+            (n for n in pool if n.name.casefold() == q), key=ordering
+        )
+        if exact:
+            return exact
+        substring = sorted(
+            (n for n in pool if q in n.name.casefold()), key=ordering
+        )
+        return substring[:limit]
+
+    def resolve(self, identifier: str) -> Node:
+        """Resolve an id *or* a name to a single node.
+
+        A real id wins immediately (CIDs are unique and can't collide with a
+        name). Otherwise the identifier is treated as a name: a unique match
+        resolves, no match raises :class:`NodeNotFound`, and multiple matches
+        raise :class:`AmbiguousNodeName` listing the candidates.
+        """
+        node = self._nodes.get(identifier)
+        if node is not None:
+            return node
+        matches = self.find_by_name(identifier)
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise NodeNotFound(identifier)
+        raise AmbiguousNodeName(
+            identifier,
+            tuple((n.name, n.type, n.id) for n in matches),
+        )
 
     # -- edges ----------------------------------------------------------
 

@@ -4,11 +4,18 @@ import pytest
 
 from graph_context.domain.graph import Direction, GraphIndex
 from graph_context.domain.models import Edge, Node
-from graph_context.errors import NodeNotFound
+from graph_context.domain.schema import Role
+from graph_context.errors import AmbiguousNodeName, NodeNotFound
 
 
 def _node(node_id: str, node_type: str = "Character") -> Node:
     return Node(id=node_id, type=node_type, name=node_id, summary=f"{node_id} summary")
+
+
+def _named(
+    node_id: str, name: str, node_type: str = "Character", role: Role | None = None
+) -> Node:
+    return Node(id=node_id, type=node_type, name=name, summary="", role=role)
 
 
 @pytest.fixture
@@ -82,3 +89,59 @@ class TestNodeRemoval:
         graph.add_edge(Edge("a", "knows", "b"))
         graph.upsert_node(_node("a"))
         assert graph.edge_count() == 1
+
+
+class TestNameResolution:
+    """find_by_name / resolve: the LLM holds names, not Anytype CIDs."""
+
+    @pytest.fixture
+    def graph(self) -> GraphIndex:
+        g = GraphIndex()
+        g.upsert_node(_named("id-familinc", "FamiLinc", "Organization"))
+        g.upsert_node(_named("id-mark", "Mark Kota"))
+        g.upsert_node(_named("id-mara", "Mara Stone"))
+        g.upsert_node(_named("id-epstein", "The Epstein Class", "Organization"))
+        g.upsert_node(
+            _named("id-prose", "FamiLinc scene", "Prose", role=Role.PROSE)
+        )
+        return g
+
+    def test_resolve_passes_through_a_real_id(self, graph: GraphIndex) -> None:
+        assert graph.resolve("id-mark").id == "id-mark"
+
+    def test_resolve_exact_name_is_case_insensitive(self, graph: GraphIndex) -> None:
+        # The transcript's "Familinc" vs "FamiLinc" capitalization mismatch.
+        assert graph.resolve("familinc").id == "id-familinc"
+
+    def test_resolve_unique_substring(self, graph: GraphIndex) -> None:
+        assert graph.resolve("Kota").id == "id-mark"
+
+    def test_resolve_unknown_raises_node_not_found(self, graph: GraphIndex) -> None:
+        with pytest.raises(NodeNotFound):
+            graph.resolve("nobody here")
+
+    def test_resolve_ambiguous_substring_lists_candidates(
+        self, graph: GraphIndex
+    ) -> None:
+        # "Mar" matches both Mark Kota and Mara Stone.
+        with pytest.raises(AmbiguousNodeName) as excinfo:
+            graph.resolve("Mar")
+        ids = {c[2] for c in excinfo.value.candidates}
+        assert ids == {"id-mark", "id-mara"}
+
+    def test_exact_name_wins_over_substring(self, graph: GraphIndex) -> None:
+        # An exact "Mara Stone" resolves even though "Mar" is ambiguous.
+        assert graph.resolve("Mara Stone").id == "id-mara"
+
+    def test_find_by_name_excludes_infra_roles(self, graph: GraphIndex) -> None:
+        # The Prose node named "FamiLinc scene" must not surface on a bare name.
+        matches = graph.find_by_name("FamiLinc")
+        assert [n.id for n in matches] == ["id-familinc"]
+
+    def test_find_by_name_type_filter(self, graph: GraphIndex) -> None:
+        # "a" appears in both org names but the Character matches are filtered.
+        orgs = graph.find_by_name("a", node_type="Organization")
+        assert {n.id for n in orgs} == {"id-familinc", "id-epstein"}
+
+    def test_find_by_name_empty_query(self, graph: GraphIndex) -> None:
+        assert graph.find_by_name("   ") == []

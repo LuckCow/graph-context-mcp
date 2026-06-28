@@ -77,6 +77,28 @@ def render_overview(overview: GraphOverview) -> str:
     return "\n".join(lines)
 
 
+def render_node_matches(nodes: list[Node]) -> str:
+    """Render ``find_node`` results as copy-paste-able entry-point lines.
+
+    Same line shape as the overview's hub list -- id is the last token
+    before the colon -- so a match drops straight into any tool. Zero
+    matches is not an error: it returns guidance toward the overview.
+    """
+    if not nodes:
+        return (
+            "find_node: no match. Try a shorter or different name, drop the "
+            "type filter, or call context action='overview' for entry points."
+        )
+    header = f"find_node: {len(nodes)} match(es)."
+    lines = [header]
+    for node in nodes:
+        stale = " [summary stale]" if node.summary_stale else ""
+        lines.append(
+            f"- {node.name} ({node.type}, id={node.id}){stale}: {node.summary}"
+        )
+    return "\n".join(lines)
+
+
 def render_explore_result(result: ExploreResult, detail: Detail) -> str:
     lines = [_render_hit_line(hit.node, hit.depth, detail) for hit in result.hits]
     if result.truncated:

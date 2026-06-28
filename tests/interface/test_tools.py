@@ -214,3 +214,87 @@ async def test_empty_focus_error_names_overview(services: tools.Services) -> Non
     out = await tools.explore_tool(services, start="")
     assert "ERROR:" in out
     assert "overview" in out
+
+
+# -- name resolution: tools accept a name anywhere an id is expected --------
+
+
+async def test_get_node_accepts_a_name(
+    services: tools.Services, world: World
+) -> None:
+    # The transcript's failing call -- get_node by name -- now resolves.
+    out = await tools.get_node_tool(services, node_id="Mira")
+    assert _header_ok(out)
+    assert f"id={world.mira.id}" in out
+
+
+async def test_get_node_name_is_case_insensitive(services: tools.Services) -> None:
+    out = await tools.get_node_tool(services, node_id="the undercroft")
+    assert "The Undercroft" in _body(out)
+
+
+async def test_explore_start_accepts_a_name(
+    services: tools.Services, world: World
+) -> None:
+    out = await tools.explore_tool(services, start="Mira", depth=1)
+    assert world.mira.id in _body(out)
+
+
+async def test_find_path_endpoints_accept_names(
+    services: tools.Services, world: World
+) -> None:
+    out = await tools.find_path_tool(services, start="Mira", target="Ashbrand")
+    assert "Mira" in _body(out) and "Ashbrand" in _body(out)
+
+
+async def test_create_node_link_other_accepts_a_name(
+    services: tools.Services, world: World
+) -> None:
+    # Build the FamiLinc-style case: link a new node to an existing one by name.
+    out = await tools.create_node_tool(
+        services, type="Item", name="Relic", summary="A found thing.",
+        links=[{"edge_type": "possesses", "other": "Mira", "outgoing": False}],
+    )
+    assert "ERROR:" not in out
+    assert f"id={world.mira.id}" in out  # neighbour rendered with its real id
+
+
+async def test_ambiguous_name_reports_candidates(
+    services: tools.Services, world: World
+) -> None:
+    # "Brakk" matches both "Siege of Brakk" and "Fall of Brakk".
+    out = await tools.get_node_tool(services, node_id="Brakk")
+    assert "ERROR:" in out
+    assert world.siege.id in out and world.fall.id in out
+
+
+async def test_unknown_name_points_at_discovery(services: tools.Services) -> None:
+    out = await tools.get_node_tool(services, node_id="Nonexistent Person")
+    assert "ERROR:" in out
+    assert "find_node" in out or "overview" in out
+
+
+# -- find_node tool: explicit name search -----------------------------------
+
+
+async def test_find_node_lists_matches_with_ids(
+    services: tools.Services, world: World
+) -> None:
+    body = _body(await tools.find_node_tool(services, name="Brakk"))
+    assert world.siege.id in body and world.fall.id in body
+
+
+async def test_find_node_type_filter(
+    services: tools.Services, world: World
+) -> None:
+    body = _body(await tools.find_node_tool(services, name="Brakk", type="Event"))
+    assert world.siege.id in body and world.fall.id in body
+    body_loc = _body(await tools.find_node_tool(services, name="Brakk", type="Location"))
+    assert "no match" in body_loc
+
+
+async def test_find_node_no_match_points_at_overview(
+    services: tools.Services,
+) -> None:
+    body = _body(await tools.find_node_tool(services, name="zzz nobody"))
+    assert "overview" in body

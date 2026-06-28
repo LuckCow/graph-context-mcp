@@ -45,7 +45,8 @@ from graph_context.application.node_writer import NodeWriter
 from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
-from graph_context.domain.models import Edge, LinkSpec, NodeDraft
+from graph_context.domain.graph import GraphIndex
+from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
@@ -139,6 +140,17 @@ async def _note_mutation(services: Services) -> None:
 # -- parsing helpers: error messages are written FOR the LLM ---------------
 
 
+def _resolve(graph: GraphIndex, identifier: str) -> NodeId:
+    """Translate a user-supplied id-or-name into a real node id.
+
+    Resolution is a tool-layer concern (the same boundary that does all
+    ``_parse_*`` normalization), so the application and domain layers keep
+    receiving canonical ids. Raises NodeNotFound/AmbiguousNodeName, both
+    actionable, when the string does not resolve to exactly one node.
+    """
+    return graph.resolve(identifier).id
+
+
 def _parse_node_type(value: str) -> str:
     """Normalize a requested node type. The vocabulary is OPEN: validation
     (does this type exist in the space?) is the repository's job, which
@@ -167,19 +179,21 @@ def _parse_detail(value: str) -> Detail:
         ) from None
 
 
-def _parse_links(raw: Sequence[dict[str, Any]] | None) -> list[LinkSpec]:
+def _parse_links(
+    raw: Sequence[dict[str, Any]] | None, graph: GraphIndex
+) -> list[LinkSpec]:
     links: list[LinkSpec] = []
     for item in raw or []:
         if "edge_type" not in item or "other" not in item:
             raise GraphContextError(
-                "each link needs 'edge_type' and 'other' (target node id); "
-                "optional 'outgoing' (default true; false means the edge "
-                "points FROM 'other' TO this node)"
+                "each link needs 'edge_type' and 'other' (target node id or "
+                "name); optional 'outgoing' (default true; false means the "
+                "edge points FROM 'other' TO this node)"
             )
         links.append(
             LinkSpec(
                 edge_type=_parse_edge_type(str(item["edge_type"])),
-                other=str(item["other"]),
+                other=_resolve(graph, str(item["other"])),
                 outgoing=bool(item.get("outgoing", True)),
             )
         )
@@ -251,7 +265,7 @@ async def context_tool(
             return "focus cleared (pinned entries kept)."
         if not node_id:
             raise GraphContextError(f"action {action!r} requires node_id")
-        graph.node(node_id)  # validate before mutating focus
+        node_id = _resolve(graph, node_id)  # accept a name; validate before mutating
         getattr(services.session.focus, "push" if action == "focus" else action)(node_id)
         return f"focus {action}: {graph.node(node_id).name}"
     raise GraphContextError(
@@ -281,7 +295,9 @@ async def create_node_tool(
         fields=fields or {},
     )
     node = await services.writer.create_node(
-        draft, _parse_links(links), create_missing_relations=create_missing_relations
+        draft,
+        _parse_links(links, services.repository.graph),
+        create_missing_relations=create_missing_relations,
     )
     await _note_mutation(services)
     view = await services.reader.get_node(node.id)
@@ -301,11 +317,13 @@ async def update_node_tool(
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
 ) -> str:
+    graph = services.repository.graph
+    node_id = _resolve(graph, node_id)
     removals = [
         Edge(
-            source=str(i["source"]),
+            source=_resolve(graph, str(i["source"])),
             type=_parse_edge_type(str(i["edge_type"])),
-            target=str(i["target"]),
+            target=_resolve(graph, str(i["target"])),
             property_key=str(i.get("property_key", "")),
         )
         for i in remove_links or []
@@ -317,7 +335,7 @@ async def update_node_tool(
         description=description,
         story_time=story_time,
         fields=fields,
-        add_links=_parse_links(add_links),
+        add_links=_parse_links(add_links, graph),
         remove_links=removals,
         create_missing_relations=create_missing_relations,
     )
@@ -340,7 +358,7 @@ async def get_node_tool(
     include_prose: int = 0,
 ) -> str:
     view = await services.reader.get_node(
-        node_id,
+        _resolve(services.repository.graph, node_id),
         edge_type_filter=_edge_type_set(edge_types),
         include_prose=include_prose,
         excerpt_chars=presenters.PROSE_EXCERPT_CHARS,
@@ -368,6 +386,9 @@ async def explore_tool(
     if includes is None:
         # WP2 default: bookkeeping roles stay invisible unless included.
         exclude_roles = DEFAULT_EXPLORE_EXCLUDE_ROLES
+    # Empty start still defaults to the focus-stack top in the Explorer.
+    if start:
+        start = _resolve(services.repository.graph, start)
     result = await services.explorer.explore(
         ExploreQuery(
             start=start,
@@ -400,13 +421,27 @@ async def find_path_tool(
     edge_types: list[str] | None = None,
     max_length: int = 4,
 ) -> str:
+    graph = services.repository.graph
     path = await services.explorer.find_path(
-        start or None,
-        target,
+        _resolve(graph, start) if start else None,
+        _resolve(graph, target),
         edge_types=_edge_type_set(edge_types),
         max_length=max_length,
     )
     return presenters.render_path(path)
+
+
+@guarded
+async def find_node_tool(
+    services: Services,
+    name: str,
+    type: str = "",
+    limit: int = 10,
+) -> str:
+    matches = services.repository.graph.find_by_name(
+        name, node_type=type or None, limit=limit
+    )
+    return presenters.render_node_matches(matches)
 
 
 @guarded

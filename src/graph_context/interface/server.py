@@ -173,7 +173,9 @@ async def create_node(
       An unmatched type is reported back with the list of known types.
     summary: REQUIRED one-liner; keep it current -- exploration shows it.
     story_time: REQUIRED for an Event-role node (number; timeline position).
-    links: list of {"edge_type", "other" (node id), "outgoing" (default true)}.
+    links: list of {"edge_type", "other" (target node id OR name),
+      "outgoing" (default true)}. `other` accepts a node name -- it is
+      resolved for you (ambiguous names report the candidates).
       edge_type is a relation LABEL. Reuse an existing relation (e.g. knows,
       located_at, participated_in, triggered_by, or any relation already in
       your space). A label with no existing relation is surfaced for approval;
@@ -207,6 +209,8 @@ async def update_node(
 ) -> str:
     """Modify a node's fields and/or links. Only provided arguments change.
 
+    node_id accepts a node NAME as well as an id (resolved for you).
+
     IMPORTANT: any update WITHOUT a new `summary` flags the node's summary
     as stale (the one-liner may no longer reflect reality). Pass a fresh
     `summary` whenever the change is meaningful; clear backlog stale flags
@@ -236,6 +240,8 @@ async def get_node(
     with neighbor names and ids. Use when you need the full picture of a
     single entity; use `explore` to see a neighborhood instead.
 
+    node_id accepts a node NAME as well as an id (resolved for you; an
+    ambiguous name reports its candidates so you can pick one).
     edge_types: optional filter, e.g. ["participated_in", "knows"].
     include_prose: how many recently-recorded prose passages that reference
       this node to attach (default 0; most-recent first, with excerpts) --
@@ -265,9 +271,10 @@ async def explore(
     """Walk the graph outward from a node. THE general retrieval primitive.
 
     In a fresh session the focus stack is empty; call context
-    action="overview" first to get a starting node id.
+    action="overview" first to get a starting node id (or pass a node name
+    as `start` -- it is resolved for you).
 
-    start: node id; empty = top of the focus stack. depth: 1-3 (default 1).
+    start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
     detail: names | summaries (default) | full.
     as_of: story-time cutoff -- Events after it are hidden (a character's
     view of the world at that moment); include_future=true restores them
@@ -304,14 +311,42 @@ async def find_path(
 ) -> str:
     """Find the shortest meaningful connection between two nodes -- "how is
     Mira related to the Fall of Brakk?" Surfaces non-obvious links for plot
-    work. In a fresh session call context action="overview" first to get
-    node ids. start: empty = focus-stack top. Edge direction is ignored for
+    work. `target` and `start` each accept a node id OR name (resolved for
+    you). start: empty = focus-stack top. Edge direction is ignored for
     reachability but shown in the result. Restrict edge_types to make the
     path more meaningful (e.g. only social edges: ["knows", "member_of"]).
     """
     return await tools.find_path_tool(
         _services(ctx), target=target, start=start, edge_types=edge_types,
         max_length=max_length,
+    )
+
+
+@mcp.tool()
+async def find_node(
+    ctx: Context[Any, Any, Any],
+    name: str,
+    type: str = "",
+    limit: int = 10,
+) -> str:
+    """Find nodes by NAME when you know the name but not the id.
+
+    Matching is case-insensitive: exact-name matches are returned first, and
+    only if there are none does it fall back to substring matches. Each
+    result line carries the node id, ready to paste into any other tool.
+
+    name: the name (or fragment) to search for.
+    type: optional type filter (e.g. "Character") to disambiguate.
+    limit: max substring matches to return (default 10).
+
+    You usually don't need this first: get_node, explore, find_path,
+    update_node and link `other` targets all accept a name directly in place
+    of an id and resolve it for you. Reach for find_node to browse, to
+    disambiguate when a name is ambiguous, or to confirm a node exists.
+    For a cold start with no name in mind, use context action='overview'.
+    """
+    return await tools.find_node_tool(
+        _services(ctx), name=name, type=type, limit=limit,
     )
 
 
