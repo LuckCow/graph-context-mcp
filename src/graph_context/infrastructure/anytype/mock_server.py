@@ -173,6 +173,21 @@ class MockAnytype:
             body = json.loads(request.content)
             if body.get("type_key") not in self._types:
                 return self._error(400, "unknown_type")
+            # Spike/incident finding (2026-06): the live API rejects a relation
+            # (``objects``-format) property inlined in the create body with
+            # ``400 bad input: unknown property key`` -- a freshly-created
+            # relation is not yet attached to the object's type. Scalar gc_
+            # properties inline fine; relations must be written via a follow-up
+            # PATCH (which tolerates any space property). We model that here so
+            # the adapter's PATCH-after-create contract is enforced in CI.
+            for entry in body.get("properties", []):
+                if entry.get("format") == "objects":
+                    return httpx.Response(400, json={
+                        "code": "bad_request",
+                        "message": f'bad input: unknown property key: '
+                                   f'"{entry.get("key")}"',
+                        "object": "error", "status": 400,
+                    })
             object_id = self._new_id()
             self._objects[object_id] = {
                 "id": object_id,

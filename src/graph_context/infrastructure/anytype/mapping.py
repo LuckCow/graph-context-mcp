@@ -115,12 +115,14 @@ def to_create_payload(
     draft: NodeDraft,
     *,
     type_key: str,
-    outgoing: Mapping[str, Sequence[NodeId]] = {},
 ) -> dict[str, Any]:
-    """Build the POST body for a node plus its initial outgoing relations.
+    """Build the POST body for a node's system properties only.
 
-    ``type_key`` is the resolved native Anytype type; ``outgoing`` is keyed by
-    relation *property key* (already resolved from labels by the repository).
+    ``type_key`` is the resolved native Anytype type. Outgoing relations are
+    *not* inlined here: a freshly-created relation is not yet attached to the
+    object's type, so ``POST /objects`` would reject it with ``unknown property
+    key``. The repository writes outgoing relations via a follow-up PATCH (which
+    tolerates any space-level property), mirroring the update path.
     """
     properties = [
         property_entry(PROP_SUMMARY, "text", draft.summary),
@@ -130,8 +132,6 @@ def to_create_payload(
     ]
     if draft.story_time is not None:
         properties.append(property_entry(PROP_STORY_TIME, "number", draft.story_time))
-    for property_key, targets in outgoing.items():
-        properties.append(property_entry(property_key, "objects", list(targets)))
     payload: dict[str, Any] = {
         "name": draft.name,
         "type_key": type_key,
@@ -176,6 +176,22 @@ def relation_patch_payload(
 ) -> dict[str, Any]:
     """PATCH body that REPLACES one relation property's target list (A4)."""
     return {"properties": [property_entry(property_key, "objects", list(targets))]}
+
+
+def relations_patch_payload(
+    outgoing: Mapping[str, Sequence[NodeId]],
+) -> dict[str, Any]:
+    """PATCH body that sets several relation properties at once.
+
+    ``outgoing`` is keyed by relation *property key* (already resolved from
+    labels by the repository). Used to attach a new node's outgoing relations
+    after ``POST /objects`` creates the bare object."""
+    return {
+        "properties": [
+            property_entry(key, "objects", list(targets))
+            for key, targets in outgoing.items()
+        ]
+    }
 
 
 # -- inbound: API objects -> domain --------------------------------------

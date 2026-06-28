@@ -164,7 +164,7 @@ class AnytypeGraphRepository:
                 incoming.append((link, key))
 
         created = await self._client.create_object(
-            mapping.to_create_payload(draft, type_key=type_key, outgoing=outgoing)
+            mapping.to_create_payload(draft, type_key=type_key)
         )
         node = mapping.to_node(created, self._registry)
         if node is None:  # defensive: the store returned something unusable
@@ -174,6 +174,15 @@ class AnytypeGraphRepository:
 
         patched: list[tuple[NodeId, str, list[NodeId]]] = []
         try:
+            # Outgoing relations are PATCHed onto the new object rather than
+            # inlined in the POST: a freshly-created relation is not yet on the
+            # type, so an inline POST would 400. A failure here falls through to
+            # the rollback, which archives the node (and with it these edges).
+            if outgoing:
+                patched_self = await self._client.update_object(
+                    node.id, mapping.relations_patch_payload(outgoing)
+                )
+                self._track_watermark(patched_self)
             for link, key in incoming:
                 previous = self._outgoing_targets(link.other, key)
                 patched_source = await self._client.update_object(
