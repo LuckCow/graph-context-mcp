@@ -87,3 +87,22 @@ class TestCustomAndInlineReads:
         assert [(e.type, e.target) for e in out] == [("links", adnan.id)]
         # backlinks contributed no edges on either side
         assert repo.graph.edge_count() == 1
+
+    async def test_links_mirroring_a_semantic_relation_is_suppressed(self, repo, mock):
+        """Adapter-read behavior, not port-level: the in-memory fake has no
+        generic `links` concept, so this lives here rather than the contract
+        suite. Anytype mirrors semantic connections into `links`; the mirror
+        must not double the edge, while a `links`-only target (a bare body
+        mention) still reads as an edge."""
+        adnan = await repo.create_node(NodeDraft("Character", name="Adnan", summary="Boss."))
+        mira = await repo.create_node(CHAR)
+        greg_id = mock.seed_object("character", "Greg", properties=[
+            mapping.property_entry("gc_summary", "text", "Worker."),
+            mapping.property_entry("boss", "objects", [adnan.id]),
+            # `links` mirrors the semantic `boss` target AND carries a bare
+            # body mention of Mira.
+            mapping.property_entry("links", "objects", [adnan.id, mira.id]),
+        ])
+        await repo.hydrate()
+        out = {(e.type, e.target) for e in repo.graph.edges(greg_id)}
+        assert out == {("boss", adnan.id), ("links", mira.id)}

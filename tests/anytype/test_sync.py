@@ -97,6 +97,27 @@ class TestResync:
         await repo.remove_link(edge)
         assert await repo.resync() == frozenset()
 
+    async def test_removing_semantic_relation_resurrects_links_edge(self, mock, repo):
+        """The `links` mirror of a semantic relation is suppressed on read;
+        when the human deletes the semantic relation in the UI, the
+        `links`-only connection must reappear on the next resync (edges are
+        re-derived per object, no suppress/resurrect bookkeeping)."""
+        mira = await repo.create_node(CHAR)
+        orla_id = mock.seed_object("character", "Orla", properties=[
+            mapping.property_entry("gc_summary", "text", "A smuggler."),
+            mapping.property_entry("gc_edge_knows", "objects", [mira.id]),
+            mapping.property_entry("links", "objects", [mira.id]),  # the mirror
+        ])
+        await repo.resync()
+        assert {e.type for e in repo.graph.edges(orla_id)} == {"knows"}
+
+        # Human deletes the semantic relation in the UI; the mirror stays.
+        mock.edit_object_directly(orla_id, set_property=mapping.property_entry(
+            "gc_edge_knows", "objects", []))
+        changed = await repo.resync()
+        assert orla_id in changed
+        assert {e.type for e in repo.graph.edges(orla_id)} == {"links"}
+
     async def test_resync_misses_deletions_but_hydrate_reconciles(self, mock, repo):
         """The confirmed S4 behavior: archived objects are invisible to both
         list and search, so resync cannot see deletions; the next full

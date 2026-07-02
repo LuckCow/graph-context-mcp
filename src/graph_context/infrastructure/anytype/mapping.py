@@ -16,7 +16,10 @@ Representation (v2, space-reflecting):
   (:func:`clean_label`) -- key-derived so the label round-trips back to the
   exact property key on write and on filter. A small denylist drops
   account-pointing system relations; the generic ``links`` relation (which
-  also backs inline ``anytype://`` body links) is read as a generic edge.
+  also backs inline ``anytype://`` body links) is read as a generic edge,
+  but only for targets no named relation on the same object already points
+  at -- Anytype mirrors semantic connections into ``links``, and reading
+  the mirror verbatim would double every edge (see :func:`to_edges`).
 * Scalar fields we own are still ``gc_`` properties written onto the native
   object: ``gc_summary`` (text), ``gc_summary_stale`` (checkbox),
   ``gc_description`` (text), ``gc_story_time`` (number), and the ``gc_fields``
@@ -244,17 +247,35 @@ def to_edges(obj: Mapping[str, Any]) -> list[Edge]:
     An edge is any ``objects``-format relation not on the system denylist;
     the label is :func:`clean_label` of the property key. The label does not
     need the registry -- it is purely key-derived, which keeps it stable.
+
+    The generic ``links`` relation is subordinate to semantic relations:
+    Anytype mirrors inline body links there, so a target already reached by
+    a named relation on this object would surface as a duplicate edge. A
+    ``links`` edge is therefore emitted only for targets NO other relation
+    on this object points at. Per-object visibility is enough (the mirror is
+    same-source/same-direction), and sync re-derives an object's outgoing
+    edges through this function, so removing the semantic relation in the
+    Anytype UI resurrects the ``links``-only edge on the next resync.
     """
     source = obj["id"]
-    edges: list[Edge] = []
+    relation_entries: list[tuple[str, list[str]]] = []
+    semantic_targets: set[str] = set()
     for entry in obj.get("properties", []):
         if entry.get("format") != "objects":
             continue
         key = entry.get("key", "")
         if not key or key in SYSTEM_RELATION_DENYLIST:
             continue
+        targets = list(entry.get("objects") or [])
+        relation_entries.append((key, targets))
+        if key != GENERIC_LINK_KEY:
+            semantic_targets.update(targets)
+    edges: list[Edge] = []
+    for key, targets in relation_entries:
         label = clean_label(key)
-        for target in entry.get("objects") or []:
+        for target in targets:
+            if key == GENERIC_LINK_KEY and target in semantic_targets:
+                continue
             edges.append(Edge(source=source, type=label, target=target, property_key=key))
     return edges
 
