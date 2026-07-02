@@ -114,7 +114,7 @@ class TestCustomAndInlineReads:
         adnan = await repo.create_node(NodeDraft("Character", name="Adnan", summary="Boss."))
         # Human adds a bespoke `boss` relation on Greg only, in the UI.
         greg_id = mock.seed_object("character", "Greg", properties=[
-            mapping.property_entry("gc_summary", "text", "Worker."),
+            mapping.property_entry(mapping.PROP_SUMMARY, "text", "Worker."),
             mapping.property_entry("boss", "objects", [adnan.id]),
         ])
         await repo.hydrate()
@@ -128,7 +128,7 @@ class TestCustomAndInlineReads:
         # Inline link Famico -> Adnan, mirrored into `links`; reciprocal in
         # `backlinks` on both sides must NOT produce extra edges.
         famico_id = mock.seed_object("organization", "Famico", properties=[
-            mapping.property_entry("gc_summary", "text", "A company."),
+            mapping.property_entry(mapping.PROP_SUMMARY, "text", "A company."),
             mapping.property_entry("links", "objects", [adnan.id]),
             mapping.property_entry("backlinks", "objects", [adnan.id]),
         ])
@@ -149,7 +149,7 @@ class TestCustomAndInlineReads:
         adnan = await repo.create_node(NodeDraft("Character", name="Adnan", summary="Boss."))
         mira = await repo.create_node(CHAR)
         greg_id = mock.seed_object("character", "Greg", properties=[
-            mapping.property_entry("gc_summary", "text", "Worker."),
+            mapping.property_entry(mapping.PROP_SUMMARY, "text", "Worker."),
             mapping.property_entry("boss", "objects", [adnan.id]),
             # `links` mirrors the semantic `boss` target AND carries a bare
             # body mention of Mira.
@@ -193,3 +193,58 @@ class TestSingleWriterFreshReads:
         await repo.hydrate()  # store truth: both targets present
         assert {n.id for _, n in repo.graph.neighbors(mira.id)} == {orla.id, adnan.id}
         assert repo.pending_writes == 0  # depth surface idles at zero
+
+
+class TestSummaryChannel:
+    """ADR 011: the summary is stored in Anytype's BUILT-IN description
+    property (UI-featured, present in list/search -- so it hydrates), not
+    in a gc_ key. Pinned against the mock's store, not just round-tripped
+    through our own mapping."""
+
+    async def test_summary_lands_in_the_builtin_description_property(
+        self, repo, mock
+    ):
+        node = await repo.create_node(CHAR)
+        stored = {
+            p["key"]: p.get("text")
+            for p in mock.object(node.id)["properties"]
+            if p.get("format") == "text"
+        }
+        assert stored["description"] == "Engineer."
+        assert "gc_summary" not in stored
+
+    async def test_summary_update_patches_the_builtin_property(self, repo, mock):
+        node = await repo.create_node(CHAR)
+        await repo.update_node(node.id, summary="Leads the survivors.")
+        stored = {p["key"]: p.get("text") for p in mock.object(node.id)["properties"]}
+        assert stored["description"] == "Leads the survivors."
+
+    async def test_human_edit_to_builtin_description_reaches_summary_on_resync(
+        self, repo, mock
+    ):
+        """The point of ADR 011: humans now edit summaries in the UI; the
+        edit arrives like any out-of-band property change."""
+        node = await repo.create_node(CHAR)
+        mock.edit_object_directly(node.id, set_property=mapping.property_entry(
+            "description", "text", "Human-sharpened one-liner."
+        ))
+        changed = await repo.resync()
+        assert node.id in changed
+        assert repo.graph.node(node.id).summary == "Human-sharpened one-liner."
+
+    async def test_summary_falls_back_to_legacy_gc_summary(self, repo, mock):
+        """Unmigrated spaces read until scripts/migrate_summary_to_description
+        runs; delete this pin with the fallback."""
+        legacy_id = mock.seed_object("character", "Orla", properties=[
+            mapping.property_entry(mapping.PROP_LEGACY_SUMMARY, "text", "A smuggler."),
+        ])
+        await repo.hydrate()
+        assert repo.graph.node(legacy_id).summary == "A smuggler."
+
+    async def test_builtin_description_outranks_the_legacy_key(self, repo, mock):
+        legacy_id = mock.seed_object("character", "Orla", properties=[
+            mapping.property_entry("description", "text", "New channel."),
+            mapping.property_entry(mapping.PROP_LEGACY_SUMMARY, "text", "Old channel."),
+        ])
+        await repo.hydrate()
+        assert repo.graph.node(legacy_id).summary == "New channel."

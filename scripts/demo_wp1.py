@@ -77,7 +77,7 @@ async def main() -> None:
     print("== 4. human edits the space in the Anytype UI ==")
     mock.edit_object_directly(mira.id, name="Mira of Brakk")
     orla = mock.seed_object("gc_character", "Orla", properties=[
-        mapping.property_entry("gc_summary", "text", "A smuggler Mira trusts."),
+        mapping.property_entry(mapping.PROP_SUMMARY, "text", "A smuggler Mira trusts."),
         mapping.property_entry("gc_edge_knows", "objects", [mira.id]),
     ])
     changed = await fresh.resync()

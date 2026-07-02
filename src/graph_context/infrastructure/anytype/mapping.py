@@ -20,10 +20,12 @@ Representation (v2, space-reflecting):
   but only for targets no named relation on the same object already points
   at -- Anytype mirrors semantic connections into ``links``, and reading
   the mirror verbatim would double every edge (see :func:`to_edges`).
-* Scalar fields we own are still ``gc_`` properties written onto the native
-  object: ``gc_summary`` (text), ``gc_summary_stale`` (checkbox),
-  ``gc_story_time`` (number), and the ``gc_fields`` JSON blob. Object name
-  maps to Anytype's top-level ``name``.
+* Scalar fields we own: the **summary** lives in Anytype's built-in
+  ``description`` property (ADR 011 -- UI-featured, present in list/search
+  so it hydrates); ``gc_summary_stale`` (checkbox), ``gc_story_time``
+  (number), and the ``gc_fields`` JSON blob remain ``gc_`` properties
+  written onto the native object. Object name maps to Anytype's top-level
+  ``name``.
 * The node's long-form **description is the object body** (ADR 010).
   Created via the ``body`` key, read back as ``markdown``, updated via the
   ``markdown`` key in PATCH (**A7**: a wholesale replace, combinable with
@@ -63,22 +65,31 @@ logger = logging.getLogger(__name__)
 GC_PREFIX = "gc_"
 GC_EDGE_PREFIX = "gc_edge_"
 
-PROP_SUMMARY = "gc_summary"
+# The summary channel IS Anytype's built-in description property (ADR 011):
+# a one-liner slot the UI features under titles, in Set rows, and in
+# previews -- and, unlike the body (A7), present in list/search responses,
+# so summaries ride the hydrate sweep. Not to be confused with the tool
+# surface's "description", which is the long-form body (ADR 010).
+PROP_SUMMARY = "description"
 PROP_SUMMARY_STALE = "gc_summary_stale"
 PROP_STORY_TIME = "gc_story_time"
 PROP_FIELDS = "gc_fields"
 
-# Retired (ADR 010): descriptions live in the body now. The key survives
-# only for scripts/migrate_descriptions_to_body.py, which moves pre-ADR-010
-# spaces over; nothing in the server reads or writes it.
+# Retired keys. Each survives only for its migration script under
+# scripts/; nothing in the server writes them.
+# - gc_description (ADR 010): long-form text moved to the object body.
+# - gc_summary (ADR 011): the one-liner moved to the built-in description
+#   property; to_node keeps a read fallback until the space is migrated.
 PROP_LEGACY_DESCRIPTION = "gc_description"
+PROP_LEGACY_SUMMARY = "gc_summary"
 
 # Anytype built-in timestamp properties (date format), used by sync. Read-only.
 PROP_LAST_MODIFIED = "last_modified_date"
 PROP_CREATED = "created_date"
 
 SCALAR_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
-    PROP_SUMMARY: "text",
+    # PROP_SUMMARY is absent deliberately: the built-in description property
+    # exists in every space (ADR 011) -- nothing to mint.
     PROP_SUMMARY_STALE: "checkbox",
     PROP_STORY_TIME: "number",
     PROP_FIELDS: "text",
@@ -250,7 +261,10 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
         type_key=type_key,
         role=registry.role_for(type_key),
         name=obj.get("name", ""),
-        summary=props.get(PROP_SUMMARY) or "",
+        # Legacy fallback (ADR 011): a space that predates the summary
+        # migration still holds the one-liner in gc_summary; delete once
+        # scripts/migrate_summary_to_description.py has run.
+        summary=props.get(PROP_SUMMARY) or props.get(PROP_LEGACY_SUMMARY) or "",
         summary_stale=bool(props.get(PROP_SUMMARY_STALE)),
         story_time=props.get(PROP_STORY_TIME),
         fields=fields,

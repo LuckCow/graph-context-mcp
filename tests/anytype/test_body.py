@@ -58,7 +58,7 @@ async def test_fetch_body_ignores_the_retired_description_property(
     legacy_id = mock.seed_object(
         "location", "Old Keep",
         properties=[
-            {"key": "gc_summary", "format": "text", "text": "s"},
+            {"key": "description", "format": "text", "text": "s"},
             {"key": "gc_description", "format": "text",
              "text": "Pre-migration description."},
         ],
@@ -106,11 +106,11 @@ class TestA7BodyEditing:
         await client.update_object(node.id, {
             "name": "Keep II",
             "markdown": "v2",
-            "properties": [{"key": "gc_summary", "format": "text", "text": "s2"}],
+            "properties": [{"key": "description", "format": "text", "text": "s2"}],
         })
         obj = await client.get_object(node.id)
         props = {p["key"]: p.get("text") for p in obj["properties"]}
-        assert (obj["name"], obj["markdown"], props["gc_summary"]) == (
+        assert (obj["name"], obj["markdown"], props["description"]) == (
             "Keep II", "v2", "s2",
         )
 

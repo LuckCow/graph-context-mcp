@@ -38,7 +38,7 @@ class TestHydrate:
     async def test_hydrate_call_budget_has_no_per_object_gets(self, mock, client, repo):
         for i in range(30):  # 3 pages at page_limit=10
             mock.seed_object("character", f"c{i}",
-                             properties=[mapping.property_entry("gc_summary", "text", "x")])
+                             properties=[mapping.property_entry(mapping.PROP_SUMMARY, "text", "x")])
         mock.request_log.clear()
         await repo.hydrate()
         get_calls = [p for m, p in mock.request_log if m == "GET"]
@@ -70,7 +70,7 @@ class TestResync:
     async def test_resync_picks_up_human_created_node_and_edge(self, mock, repo):
         mira = await repo.create_node(CHAR)
         new_id = mock.seed_object("character", "Orla", properties=[
-            mapping.property_entry("gc_summary", "text", "A smuggler."),
+            mapping.property_entry(mapping.PROP_SUMMARY, "text", "A smuggler."),
             mapping.property_entry("gc_edge_knows", "objects", [mira.id]),
         ])
         changed = await repo.resync()
@@ -104,7 +104,7 @@ class TestResync:
         re-derived per object, no suppress/resurrect bookkeeping)."""
         mira = await repo.create_node(CHAR)
         orla_id = mock.seed_object("character", "Orla", properties=[
-            mapping.property_entry("gc_summary", "text", "A smuggler."),
+            mapping.property_entry(mapping.PROP_SUMMARY, "text", "A smuggler."),
             mapping.property_entry("gc_edge_knows", "objects", [mira.id]),
             mapping.property_entry("links", "objects", [mira.id]),  # the mirror
         ])
