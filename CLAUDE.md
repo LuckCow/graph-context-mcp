@@ -1,0 +1,75 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph (characters, locations, events, prose) is the source of truth; an LLM builds the world and renders scenes from it via eight stdio MCP tools. Design docs: `docs/adr/` (decisions), `docs/WORK_PACKAGES.md` (roadmap/status), README (setup + layout table).
+
+## Environment constraints
+
+The devcontainer applies an egress firewall (`.devcontainer/init-firewall.sh`): **most web connections are blocked**. Don't assume `curl`/`pip install <new-package>` will reach the internet. If a new package or dependency is needed, **ask the user first** — they will add it to the Docker container setup.
+
+The workspace is a 9p mount of a Windows drive, and Edit/Write may spuriously report `ENOENT: no such file or directory, statx` **even though the write succeeded** (stale 9p negative dentries; anthropics/claude-code#28015). Don't blindly ignore it and don't blindly retry: verify with `git diff` or `grep` whether the change actually landed, then proceed accordingly.
+
+## Commands
+
+```bash
+pip install -e ".[dev]"        # install (Python >=3.11)
+
+pytest                          # full mock-backed suite; live E2E self-skips
+pytest tests/unit/test_traversal.py -k explore   # single file / test (pythonpath is configured in pyproject)
+ruff check src tests            # lint
+mypy src                        # strict typing
+lint-imports                    # layer/dependency rule (import-linter contracts in pyproject.toml)
+```
+
+Definition of Done = all four green; CI (`.github/workflows/ci.yml`) runs exactly these on every push.
+
+```bash
+PYTHONPATH=src python scripts/demo_wp2_tools.py                              # drive the full tool loop in-process (mock-backed)
+GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server    # run the stdio server, nothing persists
+```
+
+### Live E2E (real Anytype server)
+
+```bash
+ANYTYPE_E2E=1 python -m pytest tests/e2e -q
+```
+
+Requires the Anytype desktop app on the host; from the devcontainer the API is `http://host.docker.internal:31009` (compose sets `ANYTYPE_API_BASE_URL` and `ANYTYPE_API_KEY_FILE=.devcontainer/secrets/anytype_api_key` already — `localhost` does *not* work from inside the container). The suite reuses one space named exactly `GC-E2E` and resets it before and after each run (the local API cannot delete spaces). It is intentionally slow: the live server throttles writes to ~1 req/s.
+
+## Architecture
+
+Ports-and-adapters with a strict, **machine-enforced** dependency rule (import-linter contracts in `pyproject.toml` — violations fail CI):
+
+```
+interface ──▶ application ──▶ domain
+(MCP tools,    (use-cases,     (pure logic: graph, traversal,
+ presenters)    one per tool)    schema, session — no I/O, no clocks)
+                    │
+                    ▼
+                  ports ◀── implemented by ── infrastructure
+             (GraphRepository,               (in-memory fake +
+              SessionStore)                   Anytype adapter)
+```
+
+Only the composition root (`interface/server.py`) and tests may import `infrastructure`; it is also the only module importing the MCP SDK.
+
+Key ideas that span multiple files:
+
+- **Anytype is storage + the human editing surface, never the traversal engine.** Its API only text-searches names/snippets, so all traversal runs on `domain/graph.py`'s `GraphIndex` — a derived, rebuildable projection. Repository adapters keep it coherent: write-through on our writes, hydrate/resync for edits humans make in the Anytype UI (with self-write suppression in `infrastructure/anytype/repository.py`).
+- **Space-reflecting open schema (ADR 006).** The server reflects the user's *existing* space: native types are node types, every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure (Prose, SessionContext, scalar properties). `infrastructure/anytype/registry.py` resolves requested types/relation labels against what the space actually has.
+- **Fakes are contracts.** `tests/contract/` runs the same suite against `InMemoryGraphRepository` and the (mock-backed) `AnytypeGraphRepository`. Any behavior added to the Anytype adapter must land in the fake too, with a test; if the fake can't express it, fix the port. The live-gated `tests/e2e/` suite runs the same contracts against a real server.
+- **Quirk quarantine.** All Anytype representation assumptions (A1–A6) live in `infrastructure/anytype/mapping.py`, mirrored by `mock_server.py` (`MockAnytype`), which pins live-server behavior confirmed by spikes (search caps, write-once bodies, timestamps-from-properties, fresh-relation settle window).
+- **The consumer of every tool response and error string is an LLM.** Tool docstrings are prompts (`interface/server.py`); errors derive from `GraphContextError` and echo allowed values so the model can self-correct; every response carries a `[project | focus | recent]` context header. Response-budget shaping lives in `interface/presenters.py`, not in tested logic.
+
+## Conventions
+
+Follow **CLEAN** principles in all code: **C**ohesive (one reason to change per module), **L**oosely coupled (depend on ports/abstractions, not concretions), **E**ncapsulated (no reaching into internals — tests included), **A**ssertive (objects act on their own state rather than interrogating others'), **N**on-redundant (a rule or fact lives in exactly one place). The repo-specific rules below are applications of these:
+
+1. **Business rules live in exactly one place** — edge legality in `GraphIndex.add_edge`, creation invariants in `schema.validate_new_node`, summary staleness in `NodeWriter`. Re-checking a rule in a second layer means it's in the wrong place.
+2. **Domain stays pure**: no I/O, no `httpx`, no MCP types, no clocks — this keeps `tests/unit` in milliseconds.
+3. Services take dependencies via constructor, typed against ports; a new tool ≈ a new application service shaped like `Explorer`.
+4. Parameter objects mirror the tool surface (`ExploreQuery` ↔ the `explore` tool schema); keep them in lockstep.
+5. Test names state behavior (`test_failed_link_rolls_back_the_created_node`), grouped in classes per scenario; fixtures build worlds through public APIs, never by poking internals.
