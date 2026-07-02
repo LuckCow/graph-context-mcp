@@ -7,7 +7,8 @@ infra-only and create-if-missing:
 * the two ``gc_`` types we still own (Prose passages and the managed
   SessionContext bookkeeping node);
 * the scalar ``gc_`` properties we write onto native objects (summary,
-  stale flag, description, story-time, fields JSON);
+  stale flag, story-time, fields JSON -- descriptions live in the object
+  body since ADR 010, so ``gc_description`` is no longer minted);
 * a small starter vocabulary of ``gc_edge_*`` relations so the model has
   reusable relation labels for common links without an approval round-trip.
   Human-created relations (``boss``, ``triggered_by``, ...) are first-class

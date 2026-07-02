@@ -76,7 +76,9 @@ class NodeWriter:
             name=name,
             summary=summary,
             summary_stale=self._staleness_after_update(summary),
-            description=description,
+            # The tool surface says "description"; storage says "body"
+            # (ADR 010) -- this is the one place the words meet.
+            body=description,
             story_time=story_time,
             fields=fields,
         )

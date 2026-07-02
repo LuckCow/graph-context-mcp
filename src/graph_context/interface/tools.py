@@ -292,7 +292,8 @@ async def create_node_tool(
         type=_parse_node_type(type),
         name=name,
         summary=summary,
-        description=description,
+        # Tool-surface "description" = the node's body (ADR 010).
+        body=description,
         story_time=story_time,
         fields=fields or {},
     )

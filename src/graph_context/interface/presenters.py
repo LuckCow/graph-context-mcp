@@ -122,10 +122,7 @@ def _render_hit_line(node: Node, depth: int, detail: Detail) -> str:
     if detail is Detail.NAMES:
         return base
     stale = " [summary stale]" if node.summary_stale else ""
-    if detail is Detail.SUMMARIES:
-        return f"{base}{stale}: {node.summary}"
-    description = f"\n{indent}    {node.description}" if node.description else ""
-    return f"{base}{stale}: {node.summary}{description}"
+    return f"{base}{stale}: {node.summary}"
 
 
 def _name_with_type(graph: GraphIndex, node_id: str, *, pinned: bool) -> str:
@@ -155,8 +152,9 @@ def render_node_view(view: NodeView) -> str:
     ]
     if node.story_time is not None:
         lines.append(f"story_time: {node.story_time}")
-    if node.description:
-        lines.append(f"description: {node.description}")
+    if view.body:
+        # The body IS the description (ADR 010); keep the LLM-facing label.
+        lines.append(f"description: {view.body}")
     for key, value in sorted(node.fields.items()):
         lines.append(f"{key}: {value}")
     if view.edges:

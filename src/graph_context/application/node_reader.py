@@ -39,6 +39,10 @@ class NodeView:
     # edge label -> ((edge, neighbor), ...); both directions, presenter
     # renders the arrow by comparing edge.source with node.id.
     edges: dict[str, tuple[tuple[Edge, Node], ...]]
+    # The node's long-form description, fetched on demand from the body
+    # (ADR 010) -- get_node is "working with the node directly", so the
+    # full text always rides along.
+    body: str = ""
     # WP3: (prose node, body excerpt) pairs, most-recent first; empty
     # unless include_prose was requested.
     prose: tuple[tuple[Node, str], ...] = field(default=())
@@ -70,6 +74,7 @@ class NodeReader:
             node_id, Direction.BOTH, edge_types=edge_type_filter
         ):
             grouped.setdefault(edge.type, []).append((edge, neighbor))
+        body = await self._repository.fetch_body(node_id)
         prose_nodes = self._referencing_prose(node_id)
         prose: tuple[tuple[Node, str], ...] = ()
         if include_prose > 0:
@@ -78,6 +83,7 @@ class NodeReader:
         return NodeView(
             node=node,
             edges={k: tuple(v) for k, v in sorted(grouped.items(), key=lambda i: i[0])},
+            body=body,
             prose=prose,
             prose_count=len(prose_nodes),
         )

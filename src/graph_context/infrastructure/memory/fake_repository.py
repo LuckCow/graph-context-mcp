@@ -58,7 +58,6 @@ class InMemoryGraphRepository:
             type=role.value if role is not None else draft.type,
             name=draft.name,
             summary=draft.summary,
-            description=draft.description,
             story_time=draft.story_time,
             fields=dict(draft.fields),
             type_key=draft.type,
@@ -84,7 +83,7 @@ class InMemoryGraphRepository:
         name: str | None = None,
         summary: str | None = None,
         summary_stale: bool | None = None,
-        description: str | None = None,
+        body: str | None = None,
         story_time: float | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node:
@@ -94,7 +93,6 @@ class InMemoryGraphRepository:
                 "name": name,
                 "summary": summary,
                 "summary_stale": summary_stale,
-                "description": description,
                 "story_time": story_time,
                 "fields": dict(fields) if fields is not None else None,
             }.items()
@@ -102,6 +100,9 @@ class InMemoryGraphRepository:
         }
         updated = replace(self._graph.node(node_id), **changes)
         self._graph.upsert_node(updated)
+        if body is not None:
+            # A7 semantics: wholesale replace; empty string clears.
+            self._bodies[node_id] = body
         return updated
 
     async def add_link(

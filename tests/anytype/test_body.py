@@ -1,9 +1,9 @@
-"""Body (Prose text) round-trip through the Anytype adapter (WP3 / spike S6).
+"""Body round-trips through the Anytype adapter (WP3 spike S6; A7 / ADR 010).
 
 Body is supplied at creation as Markdown (A5), fetched on demand via
-``fetch_body`` (never hydrated), and is write-once: a later update must NOT
-disturb it (A6 / S6 -- the live server silently ignores a body in PATCH,
-mirrored by the mock).
+``fetch_body`` (never hydrated), and updated via the ``markdown`` PATCH key
+(A7 -- wholesale replace; the ``body`` key is only valid on create). An
+update that does not name the body must leave it untouched.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import pytest
 from graph_context.domain.models import LinkSpec, NodeDraft
 from graph_context.errors import NodeNotFound
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 
 
@@ -38,12 +39,34 @@ async def test_body_is_not_in_the_index(repo: AnytypeGraphRepository) -> None:
     assert not hasattr(repo.graph.node(prose.id), "body")
 
 
-async def test_body_survives_a_later_update(repo: AnytypeGraphRepository) -> None:
+async def test_body_survives_an_update_that_does_not_name_it(
+    repo: AnytypeGraphRepository,
+) -> None:
     prose = await repo.create_node(
         NodeDraft("gc_prose", name="Scene", summary="s", body="original prose")
     )
     await repo.update_node(prose.id, summary="revised summary")
-    assert await repo.fetch_body(prose.id) == "original prose"  # write-once (A6/S6)
+    assert await repo.fetch_body(prose.id) == "original prose"
+
+
+async def test_fetch_body_falls_back_to_legacy_description_property(
+    repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+) -> None:
+    """A space that predates the ADR 010 migration still reads its
+    descriptions: markdown wins when present, gc_description otherwise."""
+    legacy_id = mock.seed_object(
+        "location", "Old Keep",
+        properties=[
+            {"key": "gc_summary", "format": "text", "text": "s"},
+            {"key": "gc_description", "format": "text",
+             "text": "Pre-migration description."},
+        ],
+    )
+    await repo.hydrate()
+    assert await repo.fetch_body(legacy_id) == "Pre-migration description."
+    # The body, once written, outranks the retired property.
+    await client.update_object(legacy_id, {"markdown": "Migrated text."})
+    assert await repo.fetch_body(legacy_id) == "Migrated text."
 
 
 async def test_fetch_body_unknown_id_raises(repo: AnytypeGraphRepository) -> None:

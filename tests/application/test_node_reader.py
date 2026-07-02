@@ -98,7 +98,7 @@ async def test_prose_count_populated_without_include_prose(
     view = await NodeReader(repository, session).get_node(world.undercroft.id)
     assert view.prose_count == 2
     assert view.prose == ()  # count is index-only ...
-    assert fetches == 0  # ... and costs zero body fetches
+    assert fetches == 1  # ... costing only the node's own body fetch (ADR 010)
 
 
 async def test_prose_count_excludes_story_node_references(

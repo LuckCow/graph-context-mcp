@@ -167,10 +167,10 @@ class AnytypeGraphRepository:
         return changed_ids
 
     async def fetch_body(self, node_id: NodeId) -> str:
-        """On-demand body read (A5). The only path that fetches one object."""
+        """On-demand body read (A5/A7), with the legacy-description fallback."""
         self._graph.node(node_id)  # NodeNotFound before spending an API call
         obj = await self._client.get_object(node_id)
-        return str(obj.get("markdown", "") or "")
+        return mapping.body_of(obj)
 
     # -- writes -----------------------------------------------------------
 
@@ -254,7 +254,7 @@ class AnytypeGraphRepository:
         name: str | None = None,
         summary: str | None = None,
         summary_stale: bool | None = None,
-        description: str | None = None,
+        body: str | None = None,
         story_time: float | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node:
@@ -263,7 +263,7 @@ class AnytypeGraphRepository:
             name=name,
             summary=summary,
             summary_stale=summary_stale,
-            description=description,
+            body=body,
             story_time=story_time,
             fields=fields,
         )

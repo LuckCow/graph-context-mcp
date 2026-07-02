@@ -4,7 +4,7 @@ Prose lives in the graph (proposal, "Story layer") so consistency checks
 ("how was this place described last time?") are queryable. A Prose node:
 
 * ``body``     -- the rendered text, then delimited llm_input/llm_output
-                  sections (write-once; see NodeDraft.body / A5+A6).
+                  sections (write-once *by policy*; see NodeDraft.body).
 * ``summary``  -- one-liner, required like every node.
 * ``fields``   -- generation metadata (model, generated_at).
 * ``references`` edges to every source node used to generate it. These
@@ -12,9 +12,10 @@ Prose lives in the graph (proposal, "Story layer") so consistency checks
   of the focus stack -- provenance must be honest.
 
 Spike S6 (resolved): bodies of 50 KB / 250 KB / 1 MB all created and
-round-tripped against the live server with no practical size ceiling, and
-PATCH of a body is silently ignored -- which is exactly why prose is
-write-once. PROSE_BODY_CAP is therefore a *product* bound (keep stored
+round-tripped against the live server with no practical size ceiling.
+Bodies are API-editable after all (A7, ADR 010), so prose being write-once
+is a *policy* choice -- provenance must not be editable -- no longer an
+API limitation. PROSE_BODY_CAP is likewise a *product* bound (keep stored
 prompts from bloating the space without limit), not a technical one; it is
 set well inside the confirmed-good range and keeps the truncation marker
 because silent truncation is worse than none.

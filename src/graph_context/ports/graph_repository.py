@@ -84,7 +84,7 @@ class GraphRepository(Protocol):
         name: str | None = None,
         summary: str | None = None,
         summary_stale: bool | None = None,
-        description: str | None = None,
+        body: str | None = None,
         story_time: float | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node: ...
@@ -112,10 +112,13 @@ class GraphRepository(Protocol):
     async def resync(self) -> frozenset[NodeId]: ...
 
     async def fetch_body(self, node_id: NodeId) -> str:
-        """On-demand retrieval of a node's long-form body (Prose text).
+        """On-demand retrieval of a node's long-form body.
 
-        Bodies are intentionally absent from the GraphIndex (see
-        ``NodeDraft.body``); this is the only read path for them.
-        Missing/empty body returns ``""``; unknown id raises NodeNotFound.
+        The body is the node's description (Prose text on Prose nodes;
+        ADR 010). Bodies are intentionally absent from the GraphIndex (see
+        ``NodeDraft.body``); this is the only read path for them, which
+        also means a human's body edit in the Anytype UI is visible on the
+        very next fetch, no resync needed. Missing/empty body returns
+        ``""``; unknown id raises NodeNotFound.
         """
         ...

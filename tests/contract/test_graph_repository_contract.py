@@ -62,11 +62,36 @@ class GraphRepositoryContract:
     async def test_update_applies_only_provided_fields(self, repo):
         node = await repo.create_node(CHAR)
         updated = await repo.update_node(
-            node.id, description="Leads the survivors.", summary_stale=True
+            node.id, body="Leads the survivors.", summary_stale=True
         )
-        assert updated.description == "Leads the survivors."
         assert updated.summary == "Exiled siege engineer."  # untouched
         assert updated.summary_stale is True
+
+    async def test_body_round_trips_and_updates(self, repo):
+        """ADR 010: the body is the node's description -- mutable, on-demand."""
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="Engineer.",
+                      body="Born in the Undercroft."),
+        )
+        assert await repo.fetch_body(node.id) == "Born in the Undercroft."
+        await repo.update_node(node.id, body="Leads the survivors now.")
+        assert await repo.fetch_body(node.id) == "Leads the survivors now."
+
+    async def test_update_without_body_leaves_body_alone(self, repo):
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="Engineer.",
+                      body="Original description."),
+        )
+        await repo.update_node(node.id, summary="Fresh summary.")
+        assert await repo.fetch_body(node.id) == "Original description."
+
+    async def test_empty_body_update_clears_it(self, repo):
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="Engineer.",
+                      body="Disposable."),
+        )
+        await repo.update_node(node.id, body="")
+        assert await repo.fetch_body(node.id) == ""
 
     async def test_update_unknown_node_raises(self, repo):
         with pytest.raises(NodeNotFound):

@@ -22,13 +22,23 @@ Representation (v2, space-reflecting):
   the mirror verbatim would double every edge (see :func:`to_edges`).
 * Scalar fields we own are still ``gc_`` properties written onto the native
   object: ``gc_summary`` (text), ``gc_summary_stale`` (checkbox),
-  ``gc_description`` (text), ``gc_story_time`` (number), and the ``gc_fields``
-  JSON blob. Object name maps to Anytype's top-level ``name``; body is
-  reserved for Prose text (write-once; A5/A6).
+  ``gc_story_time`` (number), and the ``gc_fields`` JSON blob. Object name
+  maps to Anytype's top-level ``name``.
+* The node's long-form **description is the object body** (ADR 010).
+  Created via the ``body`` key, read back as ``markdown``, updated via the
+  ``markdown`` key in PATCH (**A7**: a wholesale replace, combinable with
+  name/properties in one PATCH; a ``body`` key in PATCH is silently
+  ignored -- the documented create/update field-name mismatch). Bodies are
+  absent from list/search responses, so they never enter the index;
+  :func:`body_of` is the single read, with a fallback to the retired
+  ``gc_description`` property until a space is migrated.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
-A1-A6 relation/PATCH/body assumptions are unchanged; only the *which keys*
-question moved from a closed ``gc_`` set to "whatever the space has".
+A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
+was corrected to A7 on 2026-07-02 (body patching is a documented feature of
+this API version; the original spike used the wrong field name). Only the
+*which keys* question moved from a closed ``gc_`` set to "whatever the space
+has".
 
   Timestamps (spike S3): ``created_date`` and ``last_modified_date`` are
   ``date``-format *properties*, not top-level fields, and
@@ -55,18 +65,21 @@ GC_EDGE_PREFIX = "gc_edge_"
 
 PROP_SUMMARY = "gc_summary"
 PROP_SUMMARY_STALE = "gc_summary_stale"
-PROP_DESCRIPTION = "gc_description"
 PROP_STORY_TIME = "gc_story_time"
 PROP_FIELDS = "gc_fields"
+
+# Retired write path (ADR 010): descriptions live in the body now. The key
+# survives only as the read fallback in :func:`body_of` for spaces that
+# predate the migration script; delete once migrated.
+PROP_LEGACY_DESCRIPTION = "gc_description"
 
 # Anytype built-in timestamp properties (date format), used by sync. Read-only.
 PROP_LAST_MODIFIED = "last_modified_date"
 PROP_CREATED = "created_date"
 
-SCALAR_PROPERTIES: dict[str, str] = {  # key -> format
+SCALAR_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_SUMMARY: "text",
     PROP_SUMMARY_STALE: "checkbox",
-    PROP_DESCRIPTION: "text",
     PROP_STORY_TIME: "number",
     PROP_FIELDS: "text",
 }
@@ -130,7 +143,6 @@ def to_create_payload(
     properties = [
         property_entry(PROP_SUMMARY, "text", draft.summary),
         property_entry(PROP_SUMMARY_STALE, "checkbox", False),
-        property_entry(PROP_DESCRIPTION, "text", draft.description),
         property_entry(PROP_FIELDS, "text", json.dumps(dict(draft.fields))),
     ]
     if draft.story_time is not None:
@@ -141,7 +153,7 @@ def to_create_payload(
         "properties": properties,
     }
     if draft.body:
-        payload["body"] = draft.body  # A5: Markdown body, write-once (A6)
+        payload["body"] = draft.body  # A5/A7: `body` on create, `markdown` on update
     return payload
 
 
@@ -150,28 +162,33 @@ def to_update_payload(
     name: str | None = None,
     summary: str | None = None,
     summary_stale: bool | None = None,
-    description: str | None = None,
+    body: str | None = None,
     story_time: float | None = None,
     fields: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build a PATCH body containing only the provided changes."""
+    """Build a PATCH body containing only the provided changes.
+
+    A body change rides the same PATCH as name/properties under the
+    ``markdown`` key (A7) -- one throttled write, wholesale replace, and an
+    empty string clears the body.
+    """
     properties: list[dict[str, Any]] = []
     if summary is not None:
         properties.append(property_entry(PROP_SUMMARY, "text", summary))
     if summary_stale is not None:
         properties.append(property_entry(PROP_SUMMARY_STALE, "checkbox", summary_stale))
-    if description is not None:
-        properties.append(property_entry(PROP_DESCRIPTION, "text", description))
     if story_time is not None:
         properties.append(property_entry(PROP_STORY_TIME, "number", story_time))
     if fields is not None:
         properties.append(property_entry(PROP_FIELDS, "text", json.dumps(dict(fields))))
-    body: dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     if name is not None:
-        body["name"] = name
+        payload["name"] = name
+    if body is not None:
+        payload["markdown"] = body
     if properties:
-        body["properties"] = properties
-    return body
+        payload["properties"] = properties
+    return payload
 
 
 def relation_patch_payload(
@@ -235,10 +252,23 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
         name=obj.get("name", ""),
         summary=props.get(PROP_SUMMARY) or "",
         summary_stale=bool(props.get(PROP_SUMMARY_STALE)),
-        description=props.get(PROP_DESCRIPTION) or "",
         story_time=props.get(PROP_STORY_TIME),
         fields=fields,
     )
+
+
+def body_of(obj: Mapping[str, Any]) -> str:
+    """A fetched object's long-form body (its description; ADR 010).
+
+    ``markdown`` is present only on single-object GET responses (A7).
+    Spaces that predate the migration script may still hold the text in
+    the retired ``gc_description`` property; fall back to it while the
+    body is empty so nothing goes dark mid-transition.
+    """
+    markdown = str(obj.get("markdown", "") or "")
+    if markdown:
+        return markdown
+    return str(_property_map(obj).get(PROP_LEGACY_DESCRIPTION) or "")
 
 
 def to_edges(obj: Mapping[str, Any]) -> list[Edge]:

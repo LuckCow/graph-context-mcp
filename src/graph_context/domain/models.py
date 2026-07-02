@@ -72,20 +72,21 @@ class LinkSpec:
 class NodeDraft:
     """Everything needed to create a node, minus the storage-assigned id.
 
-    ``body`` is long-form, write-once content (Markdown). It is persisted
-    to the store at creation but is deliberately **not** part of
-    :class:`Node` and never enters the GraphIndex: bodies (Prose text can
-    be thousands of words) would bloat hydration and the context window.
-    Retrieval is on-demand via ``GraphRepository.fetch_body``. Write-once
-    is also the safe posture given Anytype's documented PATCH-body
-    limitation (mapping assumption A6; spike S6 confirmed PATCH of body is
-    silently ignored).
+    ``body`` is the node's long-form content (Markdown): its description
+    on ordinary nodes, the rendered text on Prose nodes (ADR 010 unified
+    the two). It is persisted to the store at creation but is deliberately
+    **not** part of :class:`Node` and never enters the GraphIndex: bodies
+    can be thousands of words and the store never returns them on
+    list/search anyway (A7). Retrieval is on-demand via
+    ``GraphRepository.fetch_body``; updates go through
+    ``GraphRepository.update_node(body=...)``. Prose and intent bodies
+    stay immutable *by policy* (provenance must not be editable), not by
+    API limitation.
     """
 
     type: str
     name: str
     summary: str
-    description: str = ""
     story_time: float | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     body: str = ""
@@ -114,7 +115,6 @@ class Node:
     name: str
     summary: str
     summary_stale: bool = False
-    description: str = ""
     story_time: float | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     type_key: str = ""
