@@ -76,3 +76,41 @@ async def test_include_prose_zero_fetches_nothing(
 ) -> None:
     view = await NodeReader(repository, session).get_node(world.undercroft.id)
     assert view.prose == ()
+
+
+async def test_prose_count_populated_without_include_prose(
+    repository: InMemoryGraphRepository, session: SessionState, world: World
+) -> None:
+    recorder = ProseRecorder(repository, now=lambda: "t")
+    for i in range(2):
+        await recorder.record(
+            text=f"scene {i}", summary="s", references=[world.undercroft.id]
+        )
+    fetches = 0
+    original_fetch_body = repository.fetch_body
+
+    async def counting_fetch_body(node_id: str) -> str:
+        nonlocal fetches
+        fetches += 1
+        return await original_fetch_body(node_id)
+
+    repository.fetch_body = counting_fetch_body  # type: ignore[method-assign]
+    view = await NodeReader(repository, session).get_node(world.undercroft.id)
+    assert view.prose_count == 2
+    assert view.prose == ()  # count is index-only ...
+    assert fetches == 0  # ... and costs zero body fetches
+
+
+async def test_prose_count_excludes_story_node_references(
+    repository: InMemoryGraphRepository, session: SessionState, world: World
+) -> None:
+    # A human-created `references` relation between story nodes is not prose.
+    from graph_context.domain.models import LinkSpec
+
+    await repository.add_link(
+        world.siege.id,
+        LinkSpec("references", other=world.undercroft.id),
+        create_missing_relations=True,
+    )
+    view = await NodeReader(repository, session).get_node(world.undercroft.id)
+    assert view.prose_count == 0

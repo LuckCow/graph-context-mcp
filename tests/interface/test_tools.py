@@ -146,19 +146,24 @@ async def test_include_prose_excerpt_is_capped(
     body = _body(await tools.get_node_tool(
         services, node_id=world.undercroft.id, include_prose=1
     ))
-    assert "prose:" in body
+    assert "prose (1 of 1):" in body
     # the rendered excerpt is truncated with an ellipsis marker
     assert "…" in body
     # no full body leaks: the run of x's never reaches the untruncated length
     assert "x" * (PROSE_EXCERPT_CHARS + 1) not in body
 
 
-async def test_include_prose_default_zero_shows_no_prose_section(
+async def test_include_prose_default_zero_shows_count_but_no_excerpts(
     services: tools.Services, world: World
 ) -> None:
-    await _record_prose_about(services, world.undercroft.id)
-    out = await tools.get_node_tool(services, node_id=world.undercroft.id)
-    assert "prose:" not in _body(out)
+    await tools.record_prose_tool(
+        services, text="Vault scene.\nThe hidden second line.", summary="Scene.",
+        references=[world.undercroft.id],
+    )
+    body = _body(await tools.get_node_tool(services, node_id=world.undercroft.id))
+    assert "prose: 1 passage(s) reference this node" in body
+    assert "include_prose" in body  # the hint tells the LLM how to fetch them
+    assert "The hidden second line." not in body  # no excerpt/body leaked
 
 
 # -- record_prose requires explicit provenance ------------------------------

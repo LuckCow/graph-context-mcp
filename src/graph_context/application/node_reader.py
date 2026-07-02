@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 from graph_context.domain.graph import Direction
 from graph_context.domain.models import Edge, Node, NodeId
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 
@@ -41,6 +42,10 @@ class NodeView:
     # WP3: (prose node, body excerpt) pairs, most-recent first; empty
     # unless include_prose was requested.
     prose: tuple[tuple[Node, str], ...] = field(default=())
+    # Total Prose passages referencing this node -- always populated
+    # (index-only, no body fetches) so "does prose exist?" is a signal the
+    # presenter can surface, never an inference.
+    prose_count: int = 0
 
 
 class NodeReader:
@@ -65,32 +70,42 @@ class NodeReader:
             node_id, Direction.BOTH, edge_types=edge_type_filter
         ):
             grouped.setdefault(edge.type, []).append((edge, neighbor))
+        prose_nodes = self._referencing_prose(node_id)
         prose: tuple[tuple[Node, str], ...] = ()
         if include_prose > 0:
-            prose = await self._recent_prose(node_id, include_prose, excerpt_chars)
+            prose = await self._excerpts(prose_nodes[:include_prose], excerpt_chars)
         self._session.touch(node_id)
         return NodeView(
             node=node,
             edges={k: tuple(v) for k, v in sorted(grouped.items(), key=lambda i: i[0])},
             prose=prose,
+            prose_count=len(prose_nodes),
         )
 
-    async def _recent_prose(
-        self, node_id: NodeId, limit: int, excerpt_chars: int
-    ) -> tuple[tuple[Node, str], ...]:
-        graph = self._repository.graph
-        # Incoming `references` edges originate on Prose nodes (Prose -> here).
+    def _referencing_prose(self, node_id: NodeId) -> list[Node]:
+        """Prose nodes referencing this node, most-recent first. Index-only.
+
+        Incoming `references` edges originate on Prose nodes (Prose -> here);
+        the role filter keeps a human-created `references` relation between
+        story nodes from posing as prose.
+        """
         prose_nodes = [
             neighbor
-            for _, neighbor in graph.neighbors(
+            for _, neighbor in self._repository.graph.neighbors(
                 node_id, Direction.IN, edge_types=[REFERENCES_LABEL]
             )
+            if neighbor.role is Role.PROSE
         ]
         prose_nodes.sort(
             key=lambda n: n.fields.get("generated_at", ""), reverse=True
         )
+        return prose_nodes
+
+    async def _excerpts(
+        self, prose_nodes: list[Node], excerpt_chars: int
+    ) -> tuple[tuple[Node, str], ...]:
         out: list[tuple[Node, str]] = []
-        for prose_node in prose_nodes[:limit]:
+        for prose_node in prose_nodes:
             body = await self._repository.fetch_body(prose_node.id)
             excerpt = body[:excerpt_chars]
             if len(body) > excerpt_chars:

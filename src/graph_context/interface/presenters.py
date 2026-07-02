@@ -24,6 +24,7 @@ from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
+from graph_context.domain.schema import INFRA_ROLES
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreResult
 
@@ -170,9 +171,17 @@ def render_node_view(view: NodeView) -> str:
     else:
         lines.append("edges: none")
     if view.prose:
-        lines.append("prose:")
+        lines.append(f"prose ({len(view.prose)} of {view.prose_count}):")
         for prose_node, excerpt in view.prose:
             lines.append(f"  {prose_node.name} (id={prose_node.id}): {excerpt}")
+    elif view.prose_count > 0:
+        lines.append(
+            f"prose: {view.prose_count} passage(s) reference this node "
+            "(pass include_prose=1-3 to view)"
+        )
+    elif node.role not in INFRA_ROLES:
+        # An explicit signal so "no prior prose" is never an inference.
+        lines.append("prose: none recorded")
     return "\n".join(lines)
 
 
