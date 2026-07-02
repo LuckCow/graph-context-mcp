@@ -618,9 +618,14 @@ surfaces.
   delimiter must be a visible markdown construct (`---` + a distinctive
   heading); detection must be whitespace-tolerant (normalization rewrote
   `---` as ` --- `).
-- **Not yet verified (needs one look in the desktop app):** whether an
-  `anytype://` markdown link renders as a *clickable* object link in the
-  editor. 10c is gated on this eyeball check.
+- **Deep links confirmed (user-verified in the app, 2026-07-02):** an
+  `anytype://` markdown link is an ordinary text block with a link mark —
+  clickable, and stable across GET → PATCH cycles. It is NOT a *pill*
+  (mention mark): the link text is static (does not follow a rename), no
+  icon, and no `links`/`backlinks`/graph registration — which confirms
+  the empty-mirror spike result as by-design, permanent behavior (the
+  footer can never create spurious edges). **Pills, by contrast, degrade
+  on markdown write-back** — see the body-rewrite caveat in 10c.
 
 ### WP10a — Native scalar property reflection
 
@@ -679,9 +684,22 @@ surfaces.
   confirmed). `update_node(description=…)` re-renders the footer around
   the new text.
 - **Known staleness:** a human editing links in the UI stales the footer
-  until the server's next write to that node. Accepted for v1 (the
-  relations panel is always truth); a resync-driven refresh would write
-  on every out-of-band change and is deliberately NOT v1.
+  until the server's next write to that node; a renamed *target* likewise
+  leaves stale footer link text (deep links are static — no live pill
+  behavior). Both share the same window and the same fix: any server
+  write to the node re-renders the footer from the index. Accepted for
+  v1 (the relations panel is always truth); a resync-driven refresh
+  would write on every out-of-band change and is deliberately NOT v1.
+- **Body-rewrite caveat (pills degrade):** a human *mention pill* placed
+  in the description degrades to a static link whenever the body is
+  written back through the API — and any footer regeneration writes the
+  whole body (markdown PATCH is full replacement). This surface is not
+  new: `update_node(description=…)` has done full-body replacement since
+  WP9. 10c widens it from "when the LLM rewrites the description" to
+  "when links change". Stance: document it (profile docstrings + README
+  space guide: use plain links inside descriptions the bot maintains),
+  and minimize rewrites — regenerate the footer only when its rendered
+  content would actually change, never on a no-op.
 - Prose/intent nodes keep footer-free bodies (write-once by policy).
 
 ### Decisions (settled)
@@ -703,8 +721,6 @@ surfaces.
 - Footer heading wording + whether `explore`/`get_node` should note "N
   connections rendered on the page" (probably not — the graph already
   says it).
-- Does the desktop app render `anytype://` markdown links as clickable
-  object links (the 10c gate)?
 - Should 10b also write the summary into `snippet`? (Probably a no-op —
   snippet appears derived from the body.)
 
@@ -761,7 +777,8 @@ starts life on the body-based description model instead of migrating later.
 WP10 (attribute reflection, summary → built-in description, connections
 footer) is likewise storage-track and independent of WP5–WP8. Internal
 order: 10b before (or with) 10a; 10c after WP9 (it builds on the body
-machinery) and behind its UI-rendering gate check.
+machinery; its UI-rendering gate is resolved — deep links confirmed
+clickable and PATCH-stable).
 
 ## Risk register (top items)
 
@@ -780,3 +797,4 @@ machinery) and behind its UI-rendering gate check.
 | One user's prompts exposed to all space members via intent nodes | privacy review at WP8 | Per-user consent knob; `[prompt withheld]` marker keeps the trace usable |
 | `explore full` body fan-out bloats latency/context (WP9) | dogfooding transcripts | Fetches are unthrottled reads; add caps/excerpts/`include_bodies` knobs — tune options, not the architecture |
 | Connections footer clobbers human body text (WP10c) | footer/description diff in dogfooding | Server owns ONLY below the delimiter; append when unmatched, never merge; strip is whitespace-tolerant (normalization) |
+| Body write-back degrades human mention pills (WP9 update path; widened by WP10c) | humans report pills turning into plain links | Document (plain links in bot-maintained descriptions); regenerate footer only when its content changes |
