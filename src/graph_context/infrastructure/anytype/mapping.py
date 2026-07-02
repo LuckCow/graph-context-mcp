@@ -203,6 +203,10 @@ def to_create_payload(
     }
     if draft.body:
         payload["body"] = draft.body  # A5/A7: `body` on create, `markdown` on update
+    if draft.icon:
+        # Emoji icon envelope (live-confirmed). Create-only by design:
+        # icons are human-owned cosmetics after birth.
+        payload["icon"] = {"format": "emoji", "emoji": draft.icon}
     return payload
 
 

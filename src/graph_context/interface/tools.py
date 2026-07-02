@@ -286,6 +286,7 @@ async def create_node_tool(
     story_time: float | None = None,
     fields: dict[str, str] | None = None,
     links: list[dict[str, Any]] | None = None,
+    icon: str = "",
     create_missing_relations: bool = False,
 ) -> str:
     draft = NodeDraft(
@@ -296,6 +297,7 @@ async def create_node_tool(
         body=description,
         story_time=story_time,
         fields=fields or {},
+        icon=icon.strip(),
     )
     node = await services.writer.create_node(
         draft,

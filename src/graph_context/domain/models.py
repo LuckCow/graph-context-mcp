@@ -90,6 +90,10 @@ class NodeDraft:
     story_time: float | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     body: str = ""
+    # A single emoji shown on the page, in lists, and in the graph view.
+    # Cosmetic and human-owned after creation: set once here, never
+    # updated by the server (a human's recolor/re-pick always survives).
+    icon: str = ""
 
 
 @dataclass(frozen=True, slots=True)

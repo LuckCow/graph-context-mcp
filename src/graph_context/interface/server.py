@@ -178,12 +178,14 @@ async def create_node(
     story_time: float | None = None,
     fields: dict[str, str] | None = None,
     links: list[dict[str, Any]] | None = None,
+    icon: str = "",
     create_missing_relations: bool = False,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.create_node_tool(
         _services(ctx), type=type, name=name, summary=summary,
         description=description, story_time=story_time, fields=fields, links=links,
+        icon=icon,
         create_missing_relations=create_missing_relations,
     )
 

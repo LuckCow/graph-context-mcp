@@ -256,6 +256,7 @@ class MockAnytype:
                 "name": body.get("name", ""),
                 "type": {"key": body["type_key"]},
                 "archived": False,
+                "icon": body.get("icon"),
                 "properties": list(body.get("properties", [])),
                 "snippet": "",
                 "markdown": body.get("body", ""),  # A5: body in, markdown out

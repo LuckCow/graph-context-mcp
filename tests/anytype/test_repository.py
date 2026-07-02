@@ -242,3 +242,15 @@ class TestSummaryChannel:
         ])
         await repo.hydrate()
         assert repo.graph.node(legacy_id).summary == ""
+
+
+class TestIcon:
+    async def test_create_carries_an_emoji_icon(self, repo, mock):
+        node = await repo.create_node(NodeDraft(
+            "Character", name="Mira", summary="Engineer.", icon="⚙️",
+        ))
+        assert mock.object(node.id)["icon"] == {"format": "emoji", "emoji": "⚙️"}
+
+    async def test_no_icon_means_no_icon_key_write(self, repo, mock):
+        node = await repo.create_node(CHAR)
+        assert mock.object(node.id)["icon"] is None  # human's pick survives
