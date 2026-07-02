@@ -586,6 +586,145 @@ Suggested sizing: **M**.
 
 ---
 
+## WP10 — Reflect the attribute layer; summaries and connections visible in the UI
+
+**Goal:** close the remaining gaps between what the human builds in the
+Anytype UI and what each side of the system can see. The space-reflecting
+pivot (ADR 006) reflected *types* and *object relations* but not scalar
+*attributes* — the real story space has 10+ human-created `select`
+properties (`role`, `narrative_status`, `event_type`, …) the LLM cannot
+read. Symmetrically, the summary (the node's most important one-liner)
+hides in a custom `gc_summary` property the UI never features, and a
+node's connections are visible only in the relations panel, not on the
+page. Three items, one theme: the same knowledge, first-class on both
+surfaces.
+
+### Feasibility spikes (run 2026-07-02, live server, GC-E2E space)
+
+- **Built-in `description` property: writable and hydratable.** Settable
+  at create and via PATCH (`{"key": "description", "format": "text", ...}`),
+  read back on GET, **and present in search/list responses** — so unlike
+  the body (A7), text stored there still rides the hydrate sweep. This is
+  what makes 10b safe: summaries must live in the index.
+- **`anytype://object?objectId=…&spaceId=…` markdown links round-trip**
+  through the body. Writing them via the API does **not** populate the
+  `links` mirror relation (`objects: null` after create) — so a rendered
+  connections footer creates zero spurious edges; the real relations
+  already carry the graph. (Bonus: `to_edges` would dedup them even if the
+  mirror appeared later, since footer targets are exactly the semantic
+  relation targets.)
+- **HTML comments are stripped by markdown normalization** (S6): a
+  `<!-- gc:connections -->` delimiter does not survive. The footer
+  delimiter must be a visible markdown construct (`---` + a distinctive
+  heading); detection must be whitespace-tolerant (normalization rewrote
+  `---` as ` --- `).
+- **Not yet verified (needs one look in the desktop app):** whether an
+  `anytype://` markdown link renders as a *clickable* object link in the
+  editor. 10c is gated on this eyeball check.
+
+### WP10a — Native scalar property reflection
+
+- **Read side (the core):** `to_node` ingests native scalar properties —
+  `select` / `multi_select` / `text` / `number` / `date` / `url` — into
+  `Node.fields`, values normalized to strings (select → the option's
+  display name). Excluded: our `gc_` keys (already first-class), the
+  built-in `description` (that is the summary channel after 10b),
+  timestamps (sync-owned), and `objects`-format relations (edges). The
+  LLM finally sees `role: Everyperson`.
+- **Write side (spike-gated):** how to *set* a select value via PATCH is
+  unknown — the `/properties/{id}/options` endpoint 404s on `2025-11-08`,
+  so option ids may not be enumerable. Spike first; if writable, `fields`
+  writes route to a native property when the key matches one, else to the
+  `gc_fields` blob as today. If not writable, native attributes are
+  read-only from the tool surface (documented) and the blob stays the
+  write path.
+- Charts the retirement path for `gc_fields` (the last human-invisible
+  blob), but does NOT retire it in this WP — existing worlds use it.
+
+### WP10b — Summary moves to the built-in `description` property
+
+- `gc_summary` text moves to Anytype's built-in `description`, which the
+  UI features under the title, in Set rows, and in object previews — the
+  summary becomes visible everywhere a human looks, and stays hydratable
+  (spike above). `gc_summary_stale` (checkbox) is unchanged; the
+  staleness lifecycle and NodeWriter rule move over untouched.
+- Mirrors WP9 exactly: mapping swap, contract tests, one-shot migration
+  script (`gc_summary` → `description`, clear the old property), then
+  retire the `gc_summary` key. WP9's migration taught us the
+  containment-check pattern; reuse it.
+- Interaction with 10a pinned by test: the built-in `description` must
+  NOT be reflected into `fields` (it is the summary channel).
+
+### WP10c — Rendered connections footer in the body (spike-gated)
+
+- The server maintains a **generated footer section** at the bottom of
+  each story node's body: `---` + a distinctive heading (exact wording
+  decided at implementation; must not collide with plausible human
+  headings) + one line per **outgoing** relation, each target rendered as
+  an `anytype://` object link — a human reads a page and can click
+  through its connections without opening the relations panel.
+- **Outgoing only.** Rendering incoming edges would place links on the
+  target object's body; if Anytype ever mirrors body links into `links`,
+  those would surface as wrong-direction edges. Outgoing footer targets
+  are exactly the object's own semantic relation targets — safe under
+  `to_edges` dedup by construction.
+- **The LLM never sees it:** `fetch_body` strips everything from the
+  footer delimiter down (whitespace-tolerant match). The footer is pure
+  human interface; the LLM reads clean description text and gets edges
+  from the graph as always.
+- **Write cost ~zero on our paths:** `add_link`/`remove_link` already GET
+  the source object inside the critical section (ADR 009) — the same GET
+  carries the current markdown, and the same PATCH can carry the
+  regenerated footer alongside the relation change (combined-PATCH,
+  confirmed). `update_node(description=…)` re-renders the footer around
+  the new text.
+- **Known staleness:** a human editing links in the UI stales the footer
+  until the server's next write to that node. Accepted for v1 (the
+  relations panel is always truth); a resync-driven refresh would write
+  on every out-of-band change and is deliberately NOT v1.
+- Prose/intent nodes keep footer-free bodies (write-once by policy).
+
+### Decisions (settled)
+
+- **Templates: skipped deliberately.** Reading type templates as
+  description scaffolds was considered and cut — templates are
+  human-owned structure, the auto-population interaction with our
+  create-with-body path is an unspiked collision risk, and profile
+  docstrings already carry the "write it for the page" guidance.
+- Footer is server-owned below the delimiter and never touches text above
+  it; if no delimiter is found the footer is appended, never merged.
+- 10b lands before or with 10a (the `description`-exclusion rule in 10a
+  presumes the summary lives there).
+
+### Open questions
+
+- Select-value write shape (the 10a spike); whether option *creation* is
+  possible or only reuse of existing options.
+- Footer heading wording + whether `explore`/`get_node` should note "N
+  connections rendered on the page" (probably not — the graph already
+  says it).
+- Does the desktop app render `anytype://` markdown links as clickable
+  object links (the 10c gate)?
+- Should 10b also write the summary into `snippet`? (Probably a no-op —
+  snippet appears derived from the body.)
+
+### Tests
+
+Contract: native properties round-trip into `fields` on both
+implementations (mock grows select/multi_select fidelity, including the
+inline option envelope); built-in description as summary channel
+(round-trip, staleness, exclusion from `fields`); footer render/strip
+round-trip incl. normalization-tolerant delimiter matching (`fetch_body`
+never returns footer text; body writes never duplicate the footer).
+Migration tests mirror WP9's. Live E2E pins the built-in-description
+write and the footer round-trip against the real server.
+
+Suggested sizing: 10a = M (read side S, write side depends on spike),
+10b = M, 10c = M. Independent of WP5–WP8; 10b before 10a; 10c any time
+after WP9.
+
+---
+
 ## Sequencing
 
 ```
@@ -617,6 +756,12 @@ WP9 (descriptions → body, ADR 010) is independent of the WP5–WP8 chain and
 touches all four layers but no orchestrator code; it may land any time.
 Landing it before WP7 is mildly preferable — intent-node capture then
 starts life on the body-based description model instead of migrating later.
+**[Shipped 2026-07-02.]**
+
+WP10 (attribute reflection, summary → built-in description, connections
+footer) is likewise storage-track and independent of WP5–WP8. Internal
+order: 10b before (or with) 10a; 10c after WP9 (it builds on the body
+machinery) and behind its UI-rendering gate check.
 
 ## Risk register (top items)
 
@@ -634,3 +779,4 @@ starts life on the body-based description model instead of migrating later.
 | Concurrent turns silently lose link writes (in-process RMW race) | WP8 contract test | Single-writer delta queue (WP8); until it lands, the orchestrator runs single-user |
 | One user's prompts exposed to all space members via intent nodes | privacy review at WP8 | Per-user consent knob; `[prompt withheld]` marker keeps the trace usable |
 | `explore full` body fan-out bloats latency/context (WP9) | dogfooding transcripts | Fetches are unthrottled reads; add caps/excerpts/`include_bodies` knobs — tune options, not the architecture |
+| Connections footer clobbers human body text (WP10c) | footer/description diff in dogfooding | Server owns ONLY below the delimiter; append when unmatched, never merge; strip is whitespace-tolerant (normalization) |
