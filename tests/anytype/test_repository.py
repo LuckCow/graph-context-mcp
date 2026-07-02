@@ -6,6 +6,8 @@ import pytest
 from graph_context.domain.models import LinkSpec, NodeDraft
 from graph_context.errors import UnknownNodeType, UnknownRelationLabel
 from graph_context.infrastructure.anytype import mapping
+from graph_context.infrastructure.anytype.config import AnytypeApiError
+from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 
 CHAR = NodeDraft("Character", name="Mira", summary="Engineer.")
 
@@ -53,6 +55,56 @@ class TestRelationReuseAndApproval:
         assert [(e.type, e.target) for e in edges] == [("boss", boss.id)]
         # the relation now exists and is reused without approval next time
         assert repo.registry.key_for_label("boss") is not None
+
+
+class TestFreshRelationSettleWindow:
+    """Live finding (2026-07): a just-created relation 400s ("unknown
+    property key") in PATCHes for a short settle window. The repository
+    must retry those PATCHes -- but only for keys it created itself."""
+
+    async def _settling_repo(self, mock, client):
+        mock.property_settle_patches = 2
+        sleeps: list[float] = []
+
+        async def instant(delay: float) -> None:
+            sleeps.append(delay)
+
+        repository = AnytypeGraphRepository(client, sleep=instant)
+        await repository.hydrate()
+        return repository, sleeps
+
+    async def test_create_with_fresh_relation_survives_settle_window(
+        self, mock, client, repo
+    ) -> None:
+        repository, sleeps = await self._settling_repo(mock, client)
+        target = await repository.create_node(
+            NodeDraft("Character", name="Adnan", summary="Boss.")
+        )
+        node = await repository.create_node(
+            NodeDraft("Character", name="Mary", summary="Marketer."),
+            links=[LinkSpec("inspired_by", other=target.id)],
+            create_missing_relations=True,
+        )
+        edges = [(e.type, e.target) for e in repository.graph.edges(node.id)]
+        assert ("inspired_by", target.id) in edges
+        assert len(sleeps) == 2  # two rejected PATCHes, two backoffs
+
+    async def test_settle_window_longer_than_budget_still_rolls_back(
+        self, mock, client, repo
+    ) -> None:
+        repository, _ = await self._settling_repo(mock, client)
+        mock.property_settle_patches = 10  # never settles within the budget
+        target = await repository.create_node(
+            NodeDraft("Character", name="Adnan", summary="Boss.")
+        )
+        before = repository.graph.node_count()
+        with pytest.raises(AnytypeApiError):
+            await repository.create_node(
+                NodeDraft("Character", name="Mary", summary="Marketer."),
+                links=[LinkSpec("inspired_by", other=target.id)],
+                create_missing_relations=True,
+            )
+        assert repository.graph.node_count() == before  # rolled back
 
 
 class TestCustomAndInlineReads:

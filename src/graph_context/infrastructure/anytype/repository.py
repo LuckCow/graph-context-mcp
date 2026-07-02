@@ -28,9 +28,10 @@ read-modify-write in step 3 reads from the *index*.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from graph_context.domain import schema
@@ -44,6 +45,7 @@ from graph_context.errors import (
 )
 from graph_context.infrastructure.anytype import mapping, sync
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.config import AnytypeApiError
 from graph_context.infrastructure.anytype.registry import (
     PropertyInfo,
     SpaceRegistry,
@@ -51,6 +53,14 @@ from graph_context.infrastructure.anytype.registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Live finding (2026-07): a relation created via POST /properties is not
+# immediately usable -- PATCHing it onto an object 400s with "unknown
+# property key" for a short settle window (~0.5 s observed). Retried with
+# backoff; total budget ~4.5 s, well past anything seen live.
+_FRESH_KEY_ATTEMPTS = 5
+_FRESH_KEY_BACKOFF_SECONDS = 0.3
+_UNKNOWN_KEY_MARKER = "unknown property key"
 
 
 def _slugify(label: str) -> str:
@@ -61,10 +71,19 @@ def _slugify(label: str) -> str:
 class AnytypeGraphRepository:
     """Write-through repository over the Anytype local API."""
 
-    def __init__(self, client: AnytypeClient) -> None:
+    def __init__(
+        self,
+        client: AnytypeClient,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self._client = client
+        self._sleep = sleep
         self._graph = GraphIndex()
         self._registry = SpaceRegistry()
+        # Relation keys created by this repository that have not yet been
+        # proven usable in a PATCH (the live settle window; see module note).
+        self._unsettled_keys: set[str] = set()
         self._watermark: str | None = None  # None until first hydrate
         # Self-write suppression: stamps already accounted for (our own writes
         # + hydrate), so resync's watermark query never reports our own
@@ -179,15 +198,16 @@ class AnytypeGraphRepository:
             # type, so an inline POST would 400. A failure here falls through to
             # the rollback, which archives the node (and with it these edges).
             if outgoing:
-                patched_self = await self._client.update_object(
-                    node.id, mapping.relations_patch_payload(outgoing)
+                patched_self = await self._patch_relations(
+                    node.id, mapping.relations_patch_payload(outgoing), outgoing
                 )
                 self._track_watermark(patched_self)
             for link, key in incoming:
                 previous = self._outgoing_targets(link.other, key)
-                patched_source = await self._client.update_object(
+                patched_source = await self._patch_relations(
                     link.other,
                     mapping.relation_patch_payload(key, [*previous, node.id]),
+                    [key],
                 )
                 patched.append((link.other, key, previous))
                 self._track_watermark(patched_source)
@@ -239,9 +259,10 @@ class AnytypeGraphRepository:
         self._graph.node(edge.target)
         targets = self._outgoing_targets(edge.source, key)
         if edge.target not in targets:
-            updated = await self._client.update_object(
+            updated = await self._patch_relations(
                 edge.source,
                 mapping.relation_patch_payload(key, [*targets, edge.target]),
+                [key],
             )
             self._track_watermark(updated)
         self._graph.add_edge(edge)
@@ -263,6 +284,33 @@ class AnytypeGraphRepository:
 
     # -- internals ----------------------------------------------------------
 
+    async def _patch_relations(
+        self, object_id: NodeId, payload: dict[str, Any], keys: Iterable[str]
+    ) -> dict[str, Any]:
+        """``update_object`` tolerant of the fresh-relation settle window.
+
+        A key created by :meth:`_resolve_relation` may 400 ("unknown property
+        key") for a short while after creation; only then is the PATCH
+        retried with backoff. Established keys fail fast as before.
+        """
+        fresh = self._unsettled_keys.intersection(keys)
+        for attempt in range(_FRESH_KEY_ATTEMPTS):
+            try:
+                result = await self._client.update_object(object_id, payload)
+            except AnytypeApiError as err:
+                unsettled = (
+                    fresh
+                    and err.status == 400
+                    and _UNKNOWN_KEY_MARKER in err.detail
+                )
+                if unsettled and attempt < _FRESH_KEY_ATTEMPTS - 1:
+                    await self._sleep(_FRESH_KEY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                raise
+            self._unsettled_keys -= fresh  # proven usable
+            return result
+        raise AssertionError("unreachable")  # loop always returns or raises
+
     async def _resolve_relation(self, label: str, create_missing: bool) -> str:
         """Resolve a relation label to an existing property key, reusing when
         possible. Surfaces unknown labels for approval unless ``create_missing``."""
@@ -282,6 +330,7 @@ class AnytypeGraphRepository:
             format="objects",
         )
         self._registry.register_property(info)
+        self._unsettled_keys.add(info.key)  # not yet PATCH-usable; see module note
         return info.key
 
     def _outgoing_targets(self, source: NodeId, property_key: str) -> list[NodeId]:

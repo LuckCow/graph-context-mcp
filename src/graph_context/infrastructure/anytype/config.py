@@ -23,6 +23,7 @@ class AnytypeApiError(GraphContextError):
         super().__init__(f"Anytype API error {status} ({code}) at {endpoint}: {message}")
         self.status = status
         self.code = code
+        self.detail = message  # raw server message, for targeted handling
         self.endpoint = endpoint
 
 

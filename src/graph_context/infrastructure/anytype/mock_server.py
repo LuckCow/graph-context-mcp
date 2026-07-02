@@ -75,10 +75,17 @@ class MockAnytype:
         *,
         space_name: str = "TestWorld",
         max_page_limit: int = 100,
+        property_settle_patches: int = 0,
     ) -> None:
         self.space_id = space_id
         self.space_name = space_name
         self.max_page_limit = max_page_limit  # the POST /search per-page cap
+        # Live finding (2026-07): a relation created via POST /properties is
+        # not immediately usable -- a PATCH naming it 400s ("unknown property
+        # key") for a short settle window. The knob makes the next N PATCHes
+        # per fresh key reject the same way (0 = settled instantly).
+        self.property_settle_patches = property_settle_patches
+        self._settling: dict[str, int] = {}
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
         self._properties: dict[str, dict[str, Any]] = {}
@@ -230,6 +237,15 @@ class MockAnytype:
             return httpx.Response(200, json={"object": obj})
         if request.method == "PATCH":
             body = json.loads(request.content)
+            for entry in body.get("properties", []):
+                key = entry.get("key", "")
+                if self._settling.get(key, 0) > 0:  # settle window still open
+                    self._settling[key] -= 1
+                    return httpx.Response(400, json={
+                        "code": "bad_request",
+                        "message": f'bad input: unknown property key: "{key}"',
+                        "object": "error", "status": 400,
+                    })
             if "name" in body:
                 obj["name"] = body["name"]
             for entry in body.get("properties", []):
@@ -268,6 +284,8 @@ class MockAnytype:
             return self._paginated(list(self._properties.values()), request.url.params)
         body = json.loads(request.content)
         self._properties[body["key"]] = {"id": self._new_id(), **body}
+        if self.property_settle_patches > 0 and body.get("format") == "objects":
+            self._settling[body["key"]] = self.property_settle_patches
         return httpx.Response(201, json={"property": self._properties[body["key"]]})
 
     # -- helpers ---------------------------------------------------------------
