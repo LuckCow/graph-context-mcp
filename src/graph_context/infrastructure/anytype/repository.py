@@ -214,8 +214,15 @@ class AnytypeGraphRepository:
                 else:
                     incoming.append((link, key))
 
+            # Field routing (ADR 012): native-matching keys become property
+            # entries (select tags resolved-or-created first -- POST
+            # validates them inline); the residual goes to the blob.
+            native_fields, blob = await self._resolve_field_entries(draft.fields)
             created = await self._client.create_object(
-                mapping.to_create_payload(draft, type_key=type_key)
+                mapping.to_create_payload(
+                    draft, type_key=type_key,
+                    native_properties=native_fields, fields_blob=blob,
+                )
             )
             node = mapping.to_node(created, self._registry)
             if node is None:  # defensive: the store returned something unusable
@@ -268,13 +275,18 @@ class AnytypeGraphRepository:
         fields: Mapping[str, str] | None = None,
     ) -> Node:
         self._graph.node(node_id)  # NodeNotFound before any API call
+        native_fields: list[dict[str, Any]] = []
+        blob: Mapping[str, str] | None = None
+        if fields is not None:
+            native_fields, blob = await self._resolve_field_entries(fields)
         payload = mapping.to_update_payload(
             name=name,
             summary=summary,
             summary_stale=summary_stale,
             body=body,
             story_time=story_time,
-            fields=fields,
+            fields=blob,
+            native_properties=native_fields,
         )
         async with self._writer():
             updated = await self._client.update_object(node_id, payload)
@@ -413,6 +425,80 @@ class AnytypeGraphRepository:
             for e in self._graph.edges(source, Direction.OUT)
             if e.property_key == property_key
         ]
+
+    # -- field routing (ADR 012) -------------------------------------------
+
+    async def _resolve_field_entries(
+        self, fields: Mapping[str, str]
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Split ``fields`` into native property entries + the residual blob.
+
+        A key matching a reflectable native property (by key or display
+        name) writes that property -- where humans filter and sort; select
+        values are resolved against the property's tags *before* the object
+        write (POST validates inline select entries, so resolution cannot
+        wait). Unmatched keys fall through to the ``gc_fields`` blob.
+        """
+        native: list[dict[str, Any]] = []
+        residual: dict[str, str] = {}
+        for key, value in fields.items():
+            info = self._registry.field_property(key)
+            if info is None:
+                residual[key] = value
+                continue
+            native.append(await self._native_entry(info, value))
+        return native, residual
+
+    async def _native_entry(self, info: PropertyInfo, value: str) -> dict[str, Any]:
+        fmt = info.format
+        if fmt == "select":
+            return mapping.property_entry(
+                info.key, fmt, await self._resolve_tag(info, value)
+            )
+        if fmt == "multi_select":
+            keys = [
+                await self._resolve_tag(info, part.strip())
+                for part in value.split(",") if part.strip()
+            ]
+            return mapping.property_entry(info.key, fmt, keys)
+        if fmt == "number":
+            try:
+                return mapping.property_entry(info.key, fmt, float(value))
+            except ValueError:
+                raise GraphContextError(
+                    f"field {info.key!r} is a number property; got {value!r} "
+                    "(pass a plain number, e.g. \"42\")"
+                ) from None
+        if fmt == "checkbox":
+            lowered = value.strip().lower()
+            if lowered not in {"true", "false", "yes", "no", "1", "0"}:
+                raise GraphContextError(
+                    f"field {info.key!r} is a checkbox property; got {value!r} "
+                    "(pass \"true\" or \"false\")"
+                )
+            return mapping.property_entry(
+                info.key, fmt, lowered in {"true", "yes", "1"}
+            )
+        # text / date / url / email / phone: pass the string through.
+        return mapping.property_entry(info.key, fmt, value)
+
+    async def _resolve_tag(self, info: PropertyInfo, value: str) -> str:
+        """Resolve a select/multi_select value to an existing tag key,
+        creating the option when missing (options are cheap; ceremony is
+        not). Matches case-insensitively on tag name or key."""
+        if not value:
+            raise GraphContextError(
+                f"field {info.key!r} is a {info.format} property and needs a "
+                "non-empty option name; clearing an option is not supported "
+                "yet -- set a different one or edit it in Anytype"
+            )
+        target = value.strip().lower()
+        async for tag in self._client.list_tags(info.id):
+            if target in (str(tag.get("name", "")).lower(), str(tag.get("key", "")).lower()):
+                return str(tag["key"])
+        created = await self._client.create_tag(info.id, {"name": value.strip()})
+        logger.info("created tag %r on property %s", value.strip(), info.key)
+        return str(created["key"])
 
     async def _rollback_create(
         self,

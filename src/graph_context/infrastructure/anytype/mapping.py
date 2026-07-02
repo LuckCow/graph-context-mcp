@@ -170,6 +170,8 @@ def to_create_payload(
     draft: NodeDraft,
     *,
     type_key: str,
+    native_properties: Sequence[dict[str, Any]] = (),
+    fields_blob: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the POST body for a node's system properties only.
 
@@ -178,11 +180,19 @@ def to_create_payload(
     object's type, so ``POST /objects`` would reject it with ``unknown property
     key``. The repository writes outgoing relations via a follow-up PATCH (which
     tolerates any space-level property), mirroring the update path.
+
+    ADR 012 field routing: ``native_properties`` carries the already-resolved
+    entries for ``fields`` keys that matched native scalar properties (select
+    values resolved to existing tags -- inline select entries are validated
+    by POST, so resolution must precede it); ``fields_blob`` is the residual
+    written to ``gc_fields`` (defaults to all of ``draft.fields``).
     """
+    blob = dict(draft.fields) if fields_blob is None else dict(fields_blob)
     properties = [
         property_entry(PROP_SUMMARY, "text", draft.summary),
         property_entry(PROP_SUMMARY_STALE, "checkbox", False),
-        property_entry(PROP_FIELDS, "text", json.dumps(dict(draft.fields))),
+        property_entry(PROP_FIELDS, "text", json.dumps(blob)),
+        *native_properties,
     ]
     if draft.story_time is not None:
         properties.append(property_entry(PROP_STORY_TIME, "number", draft.story_time))
@@ -204,14 +214,17 @@ def to_update_payload(
     body: str | None = None,
     story_time: float | None = None,
     fields: Mapping[str, str] | None = None,
+    native_properties: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build a PATCH body containing only the provided changes.
 
     A body change rides the same PATCH as name/properties under the
     ``markdown`` key (A7) -- one throttled write, wholesale replace, and an
-    empty string clears the body.
+    empty string clears the body. ``fields`` here is the residual blob after
+    the repository routed native-matching keys into ``native_properties``
+    (ADR 012).
     """
-    properties: list[dict[str, Any]] = []
+    properties: list[dict[str, Any]] = [*native_properties]
     if summary is not None:
         properties.append(property_entry(PROP_SUMMARY, "text", summary))
     if summary_stale is not None:

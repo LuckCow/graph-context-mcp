@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from graph_context.domain.models import NodeDraft
+from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
@@ -132,3 +135,109 @@ async def test_human_select_edit_reaches_fields_on_resync(
     changed = await repo.resync()
     assert node.id in changed
     assert repo.graph.node(node.id).fields["role"] == "Hero"
+
+
+class TestFieldWriteRouting:
+    """ADR 012 write side: `fields` keys matching native properties write
+    those properties (select values resolved-or-created as tags BEFORE the
+    object write); unmatched keys fall through to the gc_fields blob."""
+
+    async def _seed_role_property(self, client: AnytypeClient) -> str:
+        prop = await client.create_property(
+            {"key": "role", "name": "Role", "format": "select"}
+        )
+        await client.create_tag(prop["id"], {"name": "Everyperson", "color": "blue"})
+        return str(prop["id"])
+
+    async def test_create_routes_native_keys_and_blob_residual(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await self._seed_role_property(client)
+        await client.create_property({"key": "notes", "name": "Notes", "format": "text"})
+        await repo.hydrate()  # registry must know the new properties
+        node = await repo.create_node(NodeDraft(
+            "Character", name="Autumn", summary="Worker.",
+            fields={"role": "everyperson", "notes": "arc 1", "quirk": "hums"},
+        ))
+        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
+        assert stored["role"]["select"]["name"] == "Everyperson"  # matched by name
+        assert stored["notes"]["text"] == "arc 1"
+        assert '"quirk": "hums"' in stored["gc_fields"]["text"]
+        assert "role" not in stored["gc_fields"]["text"]
+        # And the read-back view merges the channels seamlessly.
+        assert node.fields == {"role": "Everyperson", "notes": "arc 1", "quirk": "hums"}
+
+    async def test_unknown_select_value_creates_the_tag(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        prop_id = await self._seed_role_property(client)
+        await repo.hydrate()
+        node = await repo.create_node(NodeDraft(
+            "Character", name="Renata", summary="Exec.", fields={"role": "Antagonist"},
+        ))
+        assert node.fields["role"] == "Antagonist"
+        tags = [t async for t in client.list_tags(prop_id)]
+        assert "Antagonist" in {t["name"] for t in tags}
+
+    async def test_update_routes_native_and_replaces_blob(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await self._seed_role_property(client)
+        await repo.hydrate()
+        node = await repo.create_node(NodeDraft(
+            "Character", name="Autumn", summary="Worker.", fields={"quirk": "hums"},
+        ))
+        updated = await repo.update_node(
+            node.id, fields={"role": "Everyperson", "tic": "taps twice"}
+        )
+        assert updated.fields == {"role": "Everyperson", "tic": "taps twice"}
+        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
+        assert '"tic"' in stored["gc_fields"]["text"]
+        assert '"quirk"' not in stored["gc_fields"]["text"]  # blob replaced
+
+    async def test_multi_select_splits_on_commas(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await client.create_property(
+            {"key": "themes", "name": "Themes", "format": "multi_select"}
+        )
+        await repo.hydrate()
+        node = await repo.create_node(NodeDraft(
+            "Character", name="Autumn", summary="Worker.",
+            fields={"themes": "Dark, Hopeful"},
+        ))
+        assert node.fields["themes"] == "Dark, Hopeful"
+
+    async def test_bad_number_and_checkbox_values_error_actionably(
+        self, repo: AnytypeGraphRepository, client: AnytypeClient
+    ) -> None:
+        await client.create_property(
+            {"key": "wordcount", "name": "Word count", "format": "number"}
+        )
+        await client.create_property(
+            {"key": "verified", "name": "Verified", "format": "checkbox"}
+        )
+        await repo.hydrate()
+        with pytest.raises(GraphContextError, match="number"):
+            await repo.create_node(NodeDraft(
+                "Character", name="A", summary="s", fields={"wordcount": "lots"},
+            ))
+        with pytest.raises(GraphContextError, match="true"):
+            await repo.create_node(NodeDraft(
+                "Character", name="B", summary="s", fields={"verified": "maybe"},
+            ))
+
+    async def test_field_matches_by_display_name_too(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await client.create_property(
+            {"key": "real_life_inspiration", "name": "Real life inspiration",
+             "format": "text"}
+        )
+        await repo.hydrate()
+        node = await repo.create_node(NodeDraft(
+            "Character", name="Mary", summary="Marketer.",
+            fields={"Real life inspiration": "rental family services"},
+        ))
+        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
+        assert stored["real_life_inspiration"]["text"] == "rental family services"
