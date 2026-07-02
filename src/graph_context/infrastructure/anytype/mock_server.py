@@ -21,6 +21,12 @@ something:
   list and search and cannot be enumerated (spike S4), so human deletions
   are only reconciled by a full hydrate -- there is deliberately no knob to
   make them visible.
+* Bodies (A5/A7, ADR 010): created via the ``body`` key, echoed back as
+  ``markdown``, updated via the ``markdown`` key in PATCH (wholesale
+  replace; a ``body`` key in PATCH is silently ignored -- the documented
+  create/update field-name mismatch). ``markdown`` appears **only** on the
+  single-object ``GET``; list and search responses never carry it, so
+  hydration code can never accidentally depend on it.
 * 429 ``rate_limit_exceeded`` payloads via ``fail_next`` for retry tests.
 
 This module and ``mapping.py`` are the two places our representation
@@ -65,6 +71,15 @@ _CONDITIONS: dict[str, Callable[[str, str], bool]] = {
     "less": lambda a, b: a < b,
     "equal": lambda a, b: a == b,
 }
+
+
+def _without_markdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """List/search views of objects: everything but the body (A7).
+
+    The live server returns ``markdown`` only on the single-object GET;
+    bodies never ride the hydrate sweep or resync queries.
+    """
+    return [{k: v for k, v in o.items() if k != "markdown"} for o in items]
 
 
 class MockAnytype:
@@ -163,8 +178,9 @@ class MockAnytype:
     def edit_object_directly(self, object_id: str, **changes: Any) -> None:
         """Mutate an object as a human edit; stamps last_modified_date.
 
-        ``changes`` may set ``name`` or ``properties`` (full entries list)
-        or ``set_property`` = a single entry dict to upsert by key.
+        ``changes`` may set ``name`` or ``properties`` (full entries list),
+        ``set_property`` = a single entry dict to upsert by key, or
+        ``markdown`` = the body as rewritten in the Anytype editor.
         """
         obj = self._objects[object_id]
         if "name" in changes:
@@ -173,6 +189,8 @@ class MockAnytype:
             obj["properties"] = changes["properties"]
         if "set_property" in changes:
             self._upsert_property_entry(obj, changes["set_property"])
+        if "markdown" in changes:
+            obj["markdown"] = changes["markdown"]
         self._stamp(obj, PROP_LAST_MODIFIED)
 
     def archive_directly(self, object_id: str) -> None:
@@ -188,7 +206,7 @@ class MockAnytype:
         if request.method == "GET":
             # Hydrate sweep: unfiltered, archived hidden, large pages honored.
             items = [o for o in self._objects.values() if not o["archived"]]
-            return self._paginated(items, request.url.params)
+            return self._paginated(_without_markdown(items), request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
             if body.get("type_key") not in self._types:
@@ -236,7 +254,9 @@ class MockAnytype:
         sort = body.get("sort")
         if sort and sort.get("property_key") in (PROP_LAST_MODIFIED, PROP_CREATED):
             items.sort(key=self._effective, reverse=sort.get("direction") == "desc")
-        return self._paginated(items, request.url.params, cap=self.max_page_limit)
+        return self._paginated(
+            _without_markdown(items), request.url.params, cap=self.max_page_limit
+        )
 
     def _handle_object(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         obj = self._objects.get(match.group("obj"))
@@ -259,10 +279,14 @@ class MockAnytype:
                 obj["name"] = body["name"]
             for entry in body.get("properties", []):
                 self._upsert_property_entry(obj, entry)  # REPLACE semantics (A4)
-            # A6 / spike S6: a body in PATCH is silently ignored (the live
-            # server returns 200 but leaves the content unchanged) -- so we
-            # deliberately do NOT touch obj["markdown"] here. Bodies are
-            # write-once.
+            # A7 (ADR 010, live-confirmed 2026-07-02): the update field for
+            # body content is ``markdown`` -- a wholesale replace, combinable
+            # with name/properties in one PATCH; empty string clears the body.
+            # A ``body`` key in PATCH is silently ignored (200, content
+            # unchanged) -- the create/update field-name mismatch is the
+            # documented gotcha the original S6 spike tripped on.
+            if "markdown" in body:
+                obj["markdown"] = body["markdown"]
             self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":
