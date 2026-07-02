@@ -28,6 +28,8 @@ from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreResult
 
 _RECENT_SHOWN = 3
+_FOCUS_SHOWN = 3  # header shows the top of the stack, not the whole working set
+_HEADER_NAME_CHARS = 32  # ellipsize pathological titles; the header is an echo
 PROSE_EXCERPT_CHARS = 300  # WP3 starting point; tune by dogfooding
 
 
@@ -39,13 +41,18 @@ class Detail(StrEnum):
 
 def render_context_header(session: SessionState, graph: GraphIndex) -> str:
     project = session.project or "-"
-    focus = ", ".join(
+    focus_entries = [
+        entry for entry in session.focus.entries if graph.has_node(entry.node_id)
+    ]
+    focus_parts = [
         _name_with_type(graph, entry.node_id, pinned=entry.pinned)
-        for entry in session.focus.entries
-        if graph.has_node(entry.node_id)
-    )
+        for entry in focus_entries[:_FOCUS_SHOWN]
+    ]
+    if len(focus_entries) > _FOCUS_SHOWN:
+        focus_parts.append(f"(+{len(focus_entries) - _FOCUS_SHOWN} more)")
+    focus = ", ".join(focus_parts)
     recent = ", ".join(
-        graph.node(node_id).name
+        _truncate(graph.node(node_id).name)
         for node_id in session.recent.items[:_RECENT_SHOWN]
         if graph.has_node(node_id)
     )
@@ -123,7 +130,11 @@ def _render_hit_line(node: Node, depth: int, detail: Detail) -> str:
 def _name_with_type(graph: GraphIndex, node_id: str, *, pinned: bool) -> str:
     node = graph.node(node_id)
     pin_mark = "*" if pinned else ""
-    return f"{node.name}{pin_mark} ({node.type})"
+    return f"{_truncate(node.name)}{pin_mark} ({node.type})"
+
+
+def _truncate(name: str, limit: int = _HEADER_NAME_CHARS) -> str:
+    return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
 def render_node_view(view: NodeView) -> str:
