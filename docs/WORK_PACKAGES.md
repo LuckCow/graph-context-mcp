@@ -14,7 +14,42 @@
 
 Also beyond the original spec: a `find_node` tool (eighth tool), a derived `context action="overview"` cold-start map, and name-or-id resolution on every node parameter.
 
-**WP4 remains the open frontier** — parked, entry criteria unchanged.
+**WP4 remains parked** (entry criteria unchanged). The open frontier is now
+WP5–WP7 — see the direction addendum below and ADRs 007/008.
+
+---
+
+## Direction addendum (2026-07-02) — beyond fiction, beyond MCP
+
+The project's scope now extends past a fiction-only MCP server, in two
+decisions made after dogfooding (full rationale in the ADRs; the summaries
+here are pointers, not spec):
+
+**ADR 007 — orchestrator as a second in-process interface adapter.** The
+behaviors wanted next (automatic capture, provenance, mode-gated tool
+availability) require seeing the conversation, which an MCP server never
+does — it receives tool calls only. A new `orchestrator/` package (same
+repo, LangGraph initially, quarantined like the Anytype quirks) imports the
+application layer directly and reuses `interface/tools.py`; the MCP server
+remains a supported standalone product. Modes: world-modeling (full
+surface) vs authoring (read-only + focus; mutation tools not bound at all).
+
+**ADR 008 — provenance is a harness responsibility.** The harness records
+automatically what `record_prose` asked the model to volunteer: one
+`gc_intent` node per mutating turn (verbatim prompt + condensed tool-call
+trace in the write-once body; `intent` edges to every node touched,
+populated at creation — one write per turn), chained to any captured
+artifact. Hidden behind the infra-role mechanism; surfaced via
+`get_node(include_provenance=N)`. **Supersedes WP3's
+`llm_input`/`llm_output` parameters on `record_prose`** (kept below as
+history); the tool itself survives as the voluntary path for harness-less
+MCP clients.
+
+WP5 (domain profiles — **shipped 2026-07-02**: `interface/profiles.py`,
+`GC_PROFILE`, golden snapshot tests, workspace demo), WP6 (orchestrator
+skeleton), WP7 (provenance & capture pipeline), and WP8 (multi-user: chat
+transports, single-writer write scheduling, per-session state) below
+specify the work.
 
 ---
 
@@ -183,8 +218,266 @@ Take these up only after WP1–3 are dogfooded on a real story world. Each needs
 - **Knowledge query helper** (`knowledge_of(character, as_of)`): assemble participation-derived + background-implied + explicit `knows` layers. Entry criterion: the documented `explore` recipe demonstrably produces continuity errors in practice.
 - **Staleness propagation** (one hop along selected edge types): entry criterion: stale-summary counts in dogfooding show self-only flagging misses real drift.
 - **Type extensibility** (`propose_type`): entry criterion: the fixed vocabulary blocks a real story world; requires a human-approval flow design.
-- **Multi-user**: per-user `SessionContext`, conflict policy beyond LWW. Entry criterion: a second user exists.
+- **Multi-user**: per-user `SessionContext`, conflict policy beyond LWW. Entry criterion: a second user exists. **[Superseded by WP8 (2026-07-02)** — the chat-transport direction turned the second user from hypothesis into plan; WP8 is the mini-spec this line asked for.**]**
 - **Semantic search over summaries**: complement to structural queries; entry criterion: users ask "find the node about X" questions that name-search can't answer.
+
+---
+
+## WP5 — Domain profiles (generalize beyond fiction)
+
+**Goal:** the same server serves a story world or a work knowledge base;
+fiction becomes one *profile*, not the baked-in framing. ADR 006 already
+made the schema open — what remains fiction-specific is prompt framing (the
+tool docstrings), the `story_time` naming, and the Prose concept.
+
+### Deliverables
+
+- A `DomainProfile`: docstring framing fragments and worked examples, role-map
+  overrides, capture-artifact framing (scene vs meeting note vs decision
+  record), and time-axis framing ("story time" vs real timestamps — the
+  mechanism and `gc_story_time` key are unchanged; only the words differ).
+  Two shipped profiles: **`fiction`** (default; current docstrings verbatim)
+  and **`workspace`**.
+- Tool registration assembles docstrings from the active profile at startup.
+  Docstrings are prompts — profile fragments are prompt engineering and get
+  the same review bar; snapshot tests make each profile's assembled output a
+  reviewable artifact.
+- Prose generalizes to **capture** in concept and docs; the `gc_prose` type
+  key stays for compatibility with existing spaces.
+- README split: fiction quickstart vs workspace quickstart; a workspace demo
+  script in `scripts/`.
+
+### Decisions (settled)
+
+- Fiction remains the default profile — existing setups see zero change.
+- `gc_` keys (`gc_story_time`, `gc_prose`, …) are frozen for compat; profiles
+  change framing, never storage keys.
+- Profile selection via env (`GC_PROFILE`), consistent with `GC_BACKEND`.
+
+### Open questions
+
+- Should the profile eventually live per-space (persisted alongside
+  SessionContext) rather than per-process env?
+- How far docstring templating can go before two hand-written variants read
+  better than one templated one — let the snapshot diffs decide.
+
+### Tests
+
+Golden/snapshot docstrings per profile; role-override behavior through the
+registry; the workspace demo end-to-end against the fake.
+
+---
+
+## WP6 — Orchestrator skeleton (ADR 007)
+
+**Goal:** a runnable agentic pipeline in this repo with two modes and
+harness-owned tool binding, reusing the existing tool layer. No provenance
+yet — that is WP7. Independent of WP5 (the skeleton can run fiction-framed).
+
+### Deliverables
+
+- `orchestrator/` package: LangGraph state machine with `world_modeling` and
+  `authoring` mode nodes; per-mode tool binding over the `interface/tools.py`
+  wrappers. In authoring mode the mutation tools are **not bound** —
+  unavailable, not refused.
+- Shared service builder: factor `_build_services` out of
+  `interface/server.py` so both composition roots wire identically
+  (config → client → bootstrap → repository → hydrate → session → services).
+- Packaging: `[orchestrator]` optional extra in pyproject; langgraph added to
+  the devcontainer image (egress firewall — container build, not ad-hoc pip).
+- Import-linter contracts extended per ADR 007: orchestrator → interface
+  (tools/presenters only, never `server.py`) → application → domain;
+  orchestrator's composition root joins the infrastructure allowlist; no
+  langgraph import outside `orchestrator/`.
+- Transport-agnostic entry seam: `handle_message(session_id, user_id, text)
+  → reply events`. The CLI chat loop is the first thin adapter over it
+  (chat-bot transports arrive in WP8); presenter output stays
+  transport-neutral.
+- Demo script proving the acceptance scenario (switch modes; authoring mode
+  cannot mutate).
+
+### Decisions (settled)
+
+- Same repo; in-process coupling; LangGraph quarantined so a framework swap
+  is orchestrator-internal (all ADR 007).
+- Mode switching is explicit (user command) for v1.
+- **No MCP-wrapped pipeline** (settled 2026-07-02): the orchestrator is not
+  re-exposed as an MCP server for Claude Desktop — two LLMs in the loop,
+  and the outer model (not the harness) would still decide whether the
+  pipeline runs. Claude Desktop keeps the plain tool server; the
+  orchestrator's surface is its own (CLI first).
+
+### Open questions
+
+- Should `tools.py`/`presenters.py` move from `interface/` to a neutral
+  shared package now that two adapters import them? (Defer until the second
+  import actually lands; a rename-only PR is cheap.)
+- Model-*suggested* mode switches with harness confirmation, once explicit
+  switching has been dogfooded.
+
+### Tests
+
+Authoring-mode binding literally lacks mutation tools (asserted on the graph
+definition, not on refusal behavior); the pipeline drives a scripted fake
+LLM through both modes against the in-memory backend; import-linter enforces
+the quarantine.
+
+---
+
+## WP7 — Provenance & capture pipeline (ADR 008)
+
+**Goal:** provenance becomes automatic — intent nodes journaled per mutating
+turn, authoring output captured with references, `record_prose`'s `llm_*`
+parameters retired. Depends on WP6 (the harness must exist); pairs naturally
+with WP5's capture generalization.
+
+### Deliverables
+
+- `MutationJournal` observer in the application layer: writers report
+  created/modified node ids at the source (the writers already know — no
+  parsing of presenter output). No-op journal in the MCP server; per-turn
+  collector in the orchestrator.
+- `IntentRecorder` application service: at end of a mutating turn, ONE
+  `gc_intent` node — naming convention `Intent: <first ~60 chars> —
+  <timestamp>`; write-once body = verbatim prompt + condensed tool-call
+  trace, capped with `[truncated]`; `intent` edges to every touched node,
+  populated at creation. Scalar properties `gc_user_id` (transport-scoped)
+  and `gc_model` for attribution — in a shared space Anytype's own
+  `creator`/`last_modified_by` show only the bot identity, so intent nodes
+  are the real attribution record. Read-only turns write nothing.
+- Authoring auto-capture: entity-link produced text against `GraphIndex`
+  names (exact/alias matching for v1) → capture node with `references`
+  edges; the intent node links to the artifact (prompt → intent → artifact
+  + touched nodes).
+- `get_node(include_provenance=N)` mirroring `include_prose`; edges to
+  infra-role nodes suppressed in `get_node`/`explore` edge grouping by
+  default (tool-layer policy — domain stays policy-free).
+- Retire `llm_input`/`llm_output`/`model` from `record_prose` (public-surface
+  change: run it through the WP2 param-naming review discipline).
+- Config: subsystem on/off toggle; prompt-storage knob extending
+  `GC_STORE_LLM_INPUT`.
+
+### Decisions (settled)
+
+- One intent node per user turn, not per mutation (write cost and coherence).
+- Single `intent` edge label; created-vs-modified detail in the body.
+- Fields-touched only in v1 — no before/after diffs.
+
+### Open questions
+
+- Multi-turn intent chains (`follows` edges) for "now continue"-style turns
+  whose real intent lives earlier in the conversation.
+- Whether captured text should *propose* graph updates (assertions absent
+  from the graph → staleness flow) or merely flag referenced nodes.
+- Retention of intent nodes: leave pruning to the human until dogfooding
+  proves otherwise.
+- Semantic entity-linking, tied to WP4's parked semantic-search item — whose
+  entry criterion workspace usage makes far likelier to trigger.
+
+### Tests
+
+A mutating turn yields exactly one intent node with edges to every touched
+node; a read-only turn yields none; body cap and truncation marker; hidden
+from `explore` and edge groups by default; `include_provenance` ordering and
+excerpts; the privacy knob suppresses prompt text. All through the contract
+suite — intent nodes are ordinary nodes, so the fake needs no new
+capability.
+
+---
+
+## WP8 — Multi-user (supersedes WP4's parked multi-user item)
+
+**Goal:** several humans drive one orchestrator against one shared space —
+chat transports as the surface, concurrent writes that never silently lose
+a user's command, per-session state, attribution and privacy handled.
+Depends on WP6 (harness + transport seam) and WP7 (intent nodes already
+carry `gc_user_id`/`gc_model`).
+
+### Deliverables
+
+- **Chat-bot transports** behind WP6's `handle_message` seam: Telegram
+  (long polling — outbound HTTPS only, least ops friction) and/or Slack
+  (Socket Mode — outbound websocket; the natural surface for the workspace
+  profile), Discord equivalent-shaped. Chosen per deployment. Message
+  chunking and dialect shims (Slack mrkdwn, Discord 2k-char limit) live in
+  the transport adapter; presenters stay transport-neutral. One message =
+  one turn = at most one intent node. Transport egress joins the
+  devcontainer firewall allowlist (or the bot runs outside the container).
+- **Single-writer delta queue** (settled — see decisions). All Anytype
+  writes flow through one scheduler task inside the Anytype adapter, which
+  also owns the ~1 write/s pacing. Queue entries are **deltas** ("add
+  target T to relation R on node N", "set field F=V", "create node with
+  links") — never precomputed relation lists. The current-targets read
+  happens **at dequeue time, as a fresh GET** of the object (reads are
+  unthrottled per S7), so every PATCH payload is materialized from the
+  freshest state an instant before send. This closes the in-process
+  read-modify-write race by construction (exactly one writer), narrows the
+  human-vs-bot race (Q2) to the GET→PATCH gap and detects it precisely
+  (the loud-log hardening Q2 deferred), and is the single place for
+  queue-depth feedback ("queued behind N writes"). The **port contract**
+  gains the guarantee: concurrent link mutations on one node all take
+  effect. The fake meets it via synchronous atomic ops; the Anytype
+  adapter via the queue. ADR 009 lands with the implementation PR.
+- **Per-session state.** `SessionState` keyed by session id (transport
+  thread/channel ↔ LangGraph `thread_id`): focus stack, recent list,
+  project label per session. The `SessionStore` port extends to keyed
+  load/flush (one `gc_session_context` node per session; debounce
+  discipline unchanged); fake + contract tests move with it. The MCP
+  server keeps its single implicit session — behavior unchanged.
+- **Authorization at the bot layer.** Channel and user allowlists;
+  per-user *mode* availability (WP6's mode binding extends per-user — e.g.
+  authoring for everyone, world-modeling for editors). Config-driven for
+  v1; unauthorized users' tools are unbound, not refused.
+- **Privacy.** `GC_STORE_LLM_INPUT` evolves into per-user consent for
+  prompt storage: intent nodes are visible to every space member, so an
+  opted-out user's intent node keeps the tool-call trace but replaces the
+  prompt text with `[prompt withheld by user preference]`. Default: store.
+- **Shared-space operation documented** (README + docstrings): the bot
+  identity owns the shared space; humans join via Anytype's space sharing
+  (Editor/Viewer) and their devices sync continuously — there is no sync
+  trigger to build. Auto-resync flips on (Q1 revisited): timer plus resync
+  at turn start. The S4 deletion staleness window restated in multi-user
+  terms. Chat-only users need no Anytype at all.
+
+### Decisions (settled)
+
+- **Single-writer delta queue over per-node locks.** A lock table solves
+  only the race; the queue solves the race, the write pacing, and user
+  feedback with one mechanism, and deltas-not-payloads makes stale-list
+  clobbering unrepresentable rather than merely guarded.
+- **Dequeue-time reads are fresh GETs, not index reads** — cheap
+  (unthrottled) and it buys Q2's precise race detection for free.
+- **Conflict policy stays LWW with loud logging for human-vs-bot**;
+  bot-vs-bot lost writes are eliminated, not logged.
+- Transport-scoped user ids (`discord:…`, `slack:U…`) are the identity for
+  v1; no cross-transport identity mapping yet.
+
+### Open questions
+
+- Queue fairness: FIFO for v1; per-user round-robin if one user's bulk
+  work starves others.
+- Composite create-with-links rollback (archive on failed link write)
+  interacting with queued deltas — compensating delta or inline rollback?
+  Design at implementation.
+- Should Viewer-role space members be allowed to mutate *through the bot*
+  (which holds Editor rights)? Bot-layer authz must not silently outrank
+  Anytype's own roles.
+- Self-hosted `any-sync` network for privacy-sensitive workspace
+  deployments.
+- Cross-transport identity mapping, only if the same human on two
+  transports becomes real.
+
+### Tests
+
+Contract: `asyncio.gather` of two `add_links` on one node → both edges
+present (fake passes trivially; mock-backed adapter fails before the queue,
+passes after). Scheduler: a delta enqueued against a node whose relation
+list changed after enqueue still produces the correct final list; pacing
+respects ~1 write/s with burst; queue depth is surfaced. Sessions: two
+sessions mutate focus independently; restart restores both. AuthZ: an
+unallowed user/channel reaches no tools (asserted on the binding, not on
+refusal). Privacy: an opted-out user's intent node carries the trace but
+not the prompt.
 
 ---
 
@@ -200,6 +493,21 @@ WP2 tool layer (vs fake) ──────┘
 
 WP1 and WP2 parallelize across two devs after the async-conversion PR merges; their integration point is one line in the composition root. WP3 is strictly after both. Suggested sizing: WP1.0 = S, WP1 = L, WP2 = M, WP3 = M.
 
+The direction-addendum work (ADRs 007/008):
+
+```
+WP5 domain profiles ─────────────┐
+                                 ├──▶ WP7 provenance & capture ──▶ WP8 multi-user
+WP6 orchestrator skeleton ───────┘
+```
+
+WP5 and WP6 are independent and parallelize; WP7 is strictly after WP6 (the
+harness must exist) and lands best after WP5 (capture framing); WP8 follows
+WP7 (it builds on intent attribution and the transport seam). Suggested
+sizing: WP5 = M, WP6 = M, WP7 = L, WP8 = L. One severable piece: WP8's
+single-writer delta queue is adapter-internal and useful before multi-user
+(it also fixes pacing for bulk writes) — it may land any time after WP1.
+
 ## Risk register (top items)
 
 | Risk | Signal | Mitigation |
@@ -210,3 +518,8 @@ WP1 and WP2 parallelize across two devs after the async-conversion PR merges; th
 | Tool surface churn after release | Param-naming review skipped | WP2's scheduled naming review before first external use |
 | LLM misuses tools | Dogfooding transcripts | Docstrings-as-prompts discipline; iterate on descriptions, not new tools |
 | Anytype API version drift | Changelog page | Pin `Anytype-Version`; subscribe to the changelog; bump deliberately |
+| LangGraph abstractions leak into core layers | import-linter CI failure | ADR 007 quarantine; a framework swap must stay orchestrator-internal |
+| Intent nodes clutter the human editing surface | dogfooding in the Anytype UI | Naming convention + infra-role hiding + subsystem toggle (ADR 008) |
+| Bulk ingestion (workspace profile) hits the ~1 write/s throttle | import/seeding timing | Pace batch creates; design an explicit import path before promising one |
+| Concurrent turns silently lose link writes (in-process RMW race) | WP8 contract test | Single-writer delta queue (WP8); until it lands, the orchestrator runs single-user |
+| One user's prompts exposed to all space members via intent nodes | privacy review at WP8 | Per-user consent knob; `[prompt withheld]` marker keeps the trace usable |
