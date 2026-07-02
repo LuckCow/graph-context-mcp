@@ -493,10 +493,13 @@ not the prompt.
 server). Everything below landed as specified; the live run surfaced one
 contract nuance — body round-trips are asserted **stripped**, because the
 server normalizes markdown on store (the S6 caveat, reconfirmed). The
-migration script exists with mock-backed tests (`--dry-run` supported) but
-has **not yet been run against the real story space** — do that at a quiet
-moment, then delete `fetch_body`'s legacy `gc_description` fallback. The
-`explore full` fan-out tuning question stays open by design.
+migration **ran against the real story space on 2026-07-02**: 64 objects
+carried a `gc_description` — 8 migrated into empty bodies, 56 were stale
+copies of bodies a human had already written (cleared, bodies untouched),
+0 conflicts; a re-run finds nothing. `fetch_body`'s legacy fallback is
+deleted — the server reads only the body; the migration script remains the
+one converter for any other pre-ADR-010 space. The `explore full` fan-out
+tuning question stays open by design.
 
 **Goal:** a node's long-form description is its Anytype **body** — the
 UI's primary editing surface — instead of the cramped `gc_description`

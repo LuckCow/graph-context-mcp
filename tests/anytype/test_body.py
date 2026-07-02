@@ -49,11 +49,12 @@ async def test_body_survives_an_update_that_does_not_name_it(
     assert await repo.fetch_body(prose.id) == "original prose"
 
 
-async def test_fetch_body_falls_back_to_legacy_description_property(
-    repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+async def test_fetch_body_ignores_the_retired_description_property(
+    repo: AnytypeGraphRepository, mock: MockAnytype
 ) -> None:
-    """A space that predates the ADR 010 migration still reads its
-    descriptions: markdown wins when present, gc_description otherwise."""
+    """Only the body is the description (ADR 010). An unmigrated object's
+    gc_description is invisible to the server -- the migration script
+    (scripts/migrate_descriptions_to_body.py) is the one converter."""
     legacy_id = mock.seed_object(
         "location", "Old Keep",
         properties=[
@@ -63,10 +64,7 @@ async def test_fetch_body_falls_back_to_legacy_description_property(
         ],
     )
     await repo.hydrate()
-    assert await repo.fetch_body(legacy_id) == "Pre-migration description."
-    # The body, once written, outranks the retired property.
-    await client.update_object(legacy_id, {"markdown": "Migrated text."})
-    assert await repo.fetch_body(legacy_id) == "Migrated text."
+    assert await repo.fetch_body(legacy_id) == ""
 
 
 async def test_fetch_body_unknown_id_raises(repo: AnytypeGraphRepository) -> None:

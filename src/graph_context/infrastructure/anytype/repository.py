@@ -167,7 +167,7 @@ class AnytypeGraphRepository:
         return changed_ids
 
     async def fetch_body(self, node_id: NodeId) -> str:
-        """On-demand body read (A5/A7), with the legacy-description fallback."""
+        """On-demand body read (A5/A7). The only path that fetches one object."""
         self._graph.node(node_id)  # NodeNotFound before spending an API call
         obj = await self._client.get_object(node_id)
         return mapping.body_of(obj)

@@ -30,8 +30,8 @@ Representation (v2, space-reflecting):
   name/properties in one PATCH; a ``body`` key in PATCH is silently
   ignored -- the documented create/update field-name mismatch). Bodies are
   absent from list/search responses, so they never enter the index;
-  :func:`body_of` is the single read, with a fallback to the retired
-  ``gc_description`` property until a space is migrated.
+  :func:`body_of` is the single read. Pre-ADR-010 spaces are converted by
+  ``scripts/migrate_descriptions_to_body.py``.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -68,9 +68,9 @@ PROP_SUMMARY_STALE = "gc_summary_stale"
 PROP_STORY_TIME = "gc_story_time"
 PROP_FIELDS = "gc_fields"
 
-# Retired write path (ADR 010): descriptions live in the body now. The key
-# survives only as the read fallback in :func:`body_of` for spaces that
-# predate the migration script; delete once migrated.
+# Retired (ADR 010): descriptions live in the body now. The key survives
+# only for scripts/migrate_descriptions_to_body.py, which moves pre-ADR-010
+# spaces over; nothing in the server reads or writes it.
 PROP_LEGACY_DESCRIPTION = "gc_description"
 
 # Anytype built-in timestamp properties (date format), used by sync. Read-only.
@@ -260,15 +260,12 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
 def body_of(obj: Mapping[str, Any]) -> str:
     """A fetched object's long-form body (its description; ADR 010).
 
-    ``markdown`` is present only on single-object GET responses (A7).
-    Spaces that predate the migration script may still hold the text in
-    the retired ``gc_description`` property; fall back to it while the
-    body is empty so nothing goes dark mid-transition.
+    ``markdown`` is present only on single-object GET responses (A7). A
+    space written before ADR 010 must run the migration script
+    (``scripts/migrate_descriptions_to_body.py``) -- the retired
+    ``gc_description`` property is not read here.
     """
-    markdown = str(obj.get("markdown", "") or "")
-    if markdown:
-        return markdown
-    return str(_property_map(obj).get(PROP_LEGACY_DESCRIPTION) or "")
+    return str(obj.get("markdown", "") or "")
 
 
 def to_edges(obj: Mapping[str, Any]) -> list[Edge]:

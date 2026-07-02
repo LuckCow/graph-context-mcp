@@ -117,8 +117,9 @@ async def main() -> None:
     )
     if conflicts:
         print(
-            "conflicted objects keep their gc_description; fetch_body serves "
-            "the body (which outranks it) until a human merges the texts."
+            "conflicted objects keep their gc_description for a human to "
+            "merge into the body; the server reads only the body, so that "
+            "text stays invisible until merged (re-run afterwards)."
         )
 
 
