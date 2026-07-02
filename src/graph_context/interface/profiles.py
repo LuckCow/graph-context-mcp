@@ -89,7 +89,9 @@ later via explore(only_stale=true).
 description: REPLACES the node's entire long-form text (its Anytype page
 body). To make a targeted edit, get_node first and send back the full
 revised text -- a human may have rewritten it in Anytype since you last
-saw it. An empty string clears it.
+saw it. An empty string clears it. Never list the node's links in the
+description: a Connections section is maintained automatically at the
+bottom of the page (you never see or write it).
 
 fields: {"key": "value"} attributes. A key matching one of the space's
 own properties (by key or display name -- get_node shows what a node
@@ -182,8 +184,13 @@ links: list of {"edge_type", "other" (target node id OR name),
   e.g. creating an Event that an existing Character took part in:
     {"edge_type": "participated_in", "other": "<character id>",
      "outgoing": false}
+icon: a single emoji for the page, shown in lists and the graph view --
+  pick one that fits the node (a face for a person, a place mark for a
+  location, an object for an item). Optional; humans may change it later.
 
-Prefer linking at creation over separate update_node calls.
+Prefer linking at creation over separate update_node calls. Do not list
+the node's links in the description -- a Connections section is
+maintained automatically at the bottom of the page.
 """,
     "update_node": _UPDATE_NODE_DOC,
     "get_node": """\
@@ -328,8 +335,13 @@ links: list of {"edge_type", "other" (target node id OR name),
   outgoing=false means the edge points FROM `other` TO the new node --
   e.g. creating a Meeting that an existing Person attended:
     {"edge_type": "attended", "other": "<person id>", "outgoing": false}
+icon: a single emoji for the page, shown in lists and the graph view --
+  pick one that fits the node (a face for a person, a calendar for a
+  meeting, a target for a milestone). Optional; humans may change it later.
 
-Prefer linking at creation over separate update_node calls.
+Prefer linking at creation over separate update_node calls. Do not list
+the node's links in the description -- a Connections section is
+maintained automatically at the bottom of the page.
 """,
     "update_node": _UPDATE_NODE_DOC,
     "get_node": """\

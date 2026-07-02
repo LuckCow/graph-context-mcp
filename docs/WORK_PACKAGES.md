@@ -684,7 +684,20 @@ write `body_of` output, never raw markdown.** Original spec follows.
 - Interaction with 10a pinned by test: the built-in `description` must
   NOT be reflected into `fields` (it is the summary channel).
 
-### WP10c — Rendered connections footer in the body (spike-gated)
+### WP10c — Rendered connections footer in the body — **shipped 2026-07-02**
+
+**Status:** complete (ADR 013); mock suite + live E2E green, including a
+live round-trip (footer rendered on link writes, deep links + heading
+survive store normalization, `fetch_body` strips it, removing the last
+outgoing edge removes it). Implemented exactly as specified below —
+`_current_state` (the ADR 009 store-truth GET) hands the whole object to
+the footer renderer, so maintenance costs zero extra API calls; rollback
+restores the source's A8-clean markdown; unchanged footers are never
+rewritten. Rider shipped with it: **`create_node` takes an emoji `icon`**
+(create-only envelope `{"format":"emoji","emoji":…}`; the server never
+PATCHes icons, so a human's re-pick always survives), and the profile
+docstrings teach both the icon and "never list links in the description".
+Original spec follows.
 
 - The server maintains a **generated footer section** at the bottom of
   each story node's body: `---` + a distinctive heading (exact wording

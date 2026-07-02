@@ -54,6 +54,30 @@ async def test_a7_body_editing_field_name_mismatch(live_config) -> None:
 class TestAnytypeLiveRepository(GraphRepositoryContract):
     """Certifies the live adapter against the same contract as the fakes."""
 
+    async def test_connections_footer_round_trips_live(self, repo):
+        """ADR 013 against the real server: link writes render the footer
+        (deep links + heading survive store normalization), fetch_body
+        strips it, and removing the last outgoing edge removes it."""
+        from graph_context.infrastructure.anytype.mapping import CONNECTIONS_HEADING
+
+        place = await repo.create_node(
+            NodeDraft("Location", name="Footer Keep", summary="s")
+        )
+        mira = await repo.create_node(
+            NodeDraft("Character", name="Footer Pin", summary="s",
+                      body="Body text stays intact."),
+            links=[LinkSpec("located_at", other=place.id)],
+        )
+        raw = (await repo._client.get_object(mira.id)).get("markdown", "")
+        assert CONNECTIONS_HEADING in raw
+        assert f"anytype://object?objectId={place.id}" in raw
+        assert (await repo.fetch_body(mira.id)).strip() == "Body text stays intact."
+        edge = next(iter(repo.graph.edges(mira.id)))
+        await repo.remove_link(edge)
+        raw = (await repo._client.get_object(mira.id)).get("markdown", "")
+        assert CONNECTIONS_HEADING not in raw
+        assert (await repo.fetch_body(mira.id)).strip() == "Body text stays intact."
+
     async def test_native_select_field_round_trips_live(self, repo):
         """ADR 012 against the real server: a `fields` key matching a select
         property resolves-or-creates the tag, writes the property, and
