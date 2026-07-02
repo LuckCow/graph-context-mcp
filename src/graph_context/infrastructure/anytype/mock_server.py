@@ -27,6 +27,10 @@ something:
   create/update field-name mismatch). ``markdown`` appears **only** on the
   single-object ``GET``; list and search responses never carry it, so
   hydration code can never accidentally depend on it.
+* The single-object GET's ``markdown`` is an **export** (A8): the built-in
+  ``description`` property is prepended as the first line, while PATCH
+  writes body blocks only -- so a raw GET -> PATCH round-trip duplicates
+  the summary line. Reads must go through ``mapping.body_of``.
 * 429 ``rate_limit_exceeded`` payloads via ``fail_next`` for retry tests.
 
 This module and ``mapping.py`` are the two places our representation
@@ -263,7 +267,7 @@ class MockAnytype:
         if obj is None:
             return self._error(404, "object_not_found")
         if request.method == "GET":
-            return httpx.Response(200, json={"object": obj})
+            return httpx.Response(200, json={"object": self._exported(obj)})
         if request.method == "PATCH":
             body = json.loads(request.content)
             for entry in body.get("properties", []):
@@ -341,6 +345,21 @@ class MockAnytype:
             if p.get("format") == "date"
         }
         return str(dates.get(PROP_LAST_MODIFIED) or dates.get(PROP_CREATED) or "")
+
+    @staticmethod
+    def _exported(obj: dict[str, Any]) -> dict[str, Any]:
+        """The single-object GET view: markdown is an EXPORT, not the raw
+        body (A8) -- the built-in ``description`` property is prepended as
+        the first line. PATCH, by contrast, writes body blocks only; the
+        asymmetry is the round-trip trap ``mapping.body_of`` defuses."""
+        description = next(
+            (str(p.get("text") or "") for p in obj["properties"]
+             if p.get("key") == "description" and p.get("format") == "text"),
+            "",
+        )
+        if not description:
+            return obj
+        return {**obj, "markdown": f"{description}\n{obj.get('markdown', '')}"}
 
     def _paginated(
         self, items: list[dict[str, Any]], params: httpx.QueryParams, *, cap: int | None = None

@@ -34,6 +34,11 @@ Representation (v2, space-reflecting):
   absent from list/search responses, so they never enter the index;
   :func:`body_of` is the single read. Pre-ADR-010 spaces are converted by
   ``scripts/migrate_descriptions_to_body.py``.
+* **A8:** the markdown export *prepends* the built-in ``description``
+  property (the summary, ADR 011) as its first line, but PATCH writes
+  body blocks only -- GET -> PATCH round-trips would duplicate the
+  summary line. :func:`body_of` strips the prefix; write-backs must
+  write its output, never the raw ``markdown`` field.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -76,10 +81,9 @@ PROP_STORY_TIME = "gc_story_time"
 PROP_FIELDS = "gc_fields"
 
 # Retired keys. Each survives only for its migration script under
-# scripts/; nothing in the server writes them.
+# scripts/; nothing in the server reads or writes them.
 # - gc_description (ADR 010): long-form text moved to the object body.
-# - gc_summary (ADR 011): the one-liner moved to the built-in description
-#   property; to_node keeps a read fallback until the space is migrated.
+# - gc_summary (ADR 011): the one-liner moved to the built-in description.
 PROP_LEGACY_DESCRIPTION = "gc_description"
 PROP_LEGACY_SUMMARY = "gc_summary"
 
@@ -261,10 +265,7 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
         type_key=type_key,
         role=registry.role_for(type_key),
         name=obj.get("name", ""),
-        # Legacy fallback (ADR 011): a space that predates the summary
-        # migration still holds the one-liner in gc_summary; delete once
-        # scripts/migrate_summary_to_description.py has run.
-        summary=props.get(PROP_SUMMARY) or props.get(PROP_LEGACY_SUMMARY) or "",
+        summary=props.get(PROP_SUMMARY) or "",
         summary_stale=bool(props.get(PROP_SUMMARY_STALE)),
         story_time=props.get(PROP_STORY_TIME),
         fields=fields,
@@ -278,8 +279,25 @@ def body_of(obj: Mapping[str, Any]) -> str:
     space written before ADR 010 must run the migration script
     (``scripts/migrate_descriptions_to_body.py``) -- the retired
     ``gc_description`` property is not read here.
+
+    **A8 (live-confirmed 2026-07-02):** the markdown *export* prepends the
+    built-in ``description`` property (the summary channel, ADR 011) as
+    the first line, while PATCH writes body blocks only -- so a naive
+    GET -> PATCH round-trip duplicates the summary into the body. This
+    function strips that prefix; every read goes through here, and any
+    write-back path must therefore write ``body_of`` output, never the
+    raw ``markdown`` field.
     """
-    return str(obj.get("markdown", "") or "")
+    markdown = str(obj.get("markdown", "") or "")
+    summary = str(_property_map(obj).get(PROP_SUMMARY) or "")
+    if summary and markdown.startswith(summary):
+        remainder = markdown[len(summary):]
+        stripped = remainder.lstrip(" \t")
+        # Only a whole leading LINE is the export artifact; same text merely
+        # prefixing the body's first paragraph is genuine content.
+        if stripped == "" or stripped.startswith("\n"):
+            return stripped.removeprefix("\n")
+    return markdown
 
 
 def to_edges(obj: Mapping[str, Any]) -> list[Edge]:

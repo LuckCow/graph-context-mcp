@@ -63,3 +63,11 @@ as the **summary channel**. The tool surface keeps the words `summary`
   human-visible where it was invisible before.
 - One fewer `gc_` key; the thin infra layer shrinks to `gc_summary_stale`,
   `gc_story_time`, `gc_fields`, and the two infra types.
+- **New quirk A8, found by the live E2E the day this shipped:** the
+  markdown *export* on single-object GET prepends the built-in
+  description as its first line, while PATCH writes body blocks only — a
+  raw GET → PATCH round-trip would duplicate the summary into the body.
+  `mapping.body_of` strips the prefix (every server read goes through
+  it), the mock composes the same export, and any future write-back path
+  (e.g. WP10c's connections footer) must write `body_of` output, never
+  the raw `markdown` field.

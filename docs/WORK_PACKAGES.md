@@ -646,7 +646,18 @@ surfaces.
 - Charts the retirement path for `gc_fields` (the last human-invisible
   blob), but does NOT retire it in this WP — existing worlds use it.
 
-### WP10b — Summary moves to the built-in `description` property
+### WP10b — Summary moves to the built-in `description` property — **shipped 2026-07-02**
+
+**Status:** complete (ADR 011); mock suite + live E2E green. The real
+space scan found zero competition for the slot (no object used the
+built-in description; nine carried a `gc_summary`) and the migration ran
+the same day: 9 moved, 0 conflicts, idempotent re-run clean. The read
+fallback is deleted; `gc_summary` survives only in the migration script.
+The live E2E caught a new quirk in the act — **A8: the markdown export
+prepends the built-in description**, while PATCH writes body blocks only,
+so raw GET → PATCH round-trips duplicate the summary line. `body_of`
+strips it, the mock composes it, and **WP10c's footer write-back must
+write `body_of` output, never raw markdown.** Original spec follows.
 
 - `gc_summary` text moves to Anytype's built-in `description`, which the
   UI features under the title, in Set rows, and in object previews — the

@@ -37,6 +37,7 @@ from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mapping import (
     PROP_LEGACY_DESCRIPTION,
+    body_of,
     property_entry,
 )
 
@@ -76,7 +77,7 @@ async def migrate(client: AnytypeClient, *, dry_run: bool) -> tuple[int, int, in
         # (list responses never include the body, A7).
         obj = await client.get_object(object_id)
         description = _legacy_description(obj)
-        body = str(obj.get("markdown", "") or "")
+        body = body_of(obj)  # A8: never read raw markdown (summary prefix)
         name = obj.get("name", object_id)
         if not body.strip():
             if dry_run:

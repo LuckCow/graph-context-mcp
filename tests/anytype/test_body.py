@@ -80,12 +80,18 @@ async def test_empty_body_is_empty_string(repo: AnytypeGraphRepository) -> None:
 
 
 class TestA7BodyEditing:
-    """Pin the A7 quirk (ADR 010) at the API level, mirroring the live server.
+    """Pin the A7/A8 quirks (ADRs 010/011) at the API level, as live behaves.
 
-    Create writes the ``body`` key; update goes through the ``markdown`` key
-    (wholesale replace, combinable with name/properties in one PATCH); a
+    A7: create writes the ``body`` key; update goes through the ``markdown``
+    key (wholesale replace, combinable with name/properties in one PATCH); a
     ``body`` key in PATCH is silently ignored -- the documented create/update
     field-name mismatch. ``markdown`` appears only on single-object GET.
+
+    A8: that GET ``markdown`` is an EXPORT -- the built-in ``description``
+    property (the summary, here ``"s"``) is prepended as the first line,
+    while PATCH writes body blocks only. The raw-markdown assertions below
+    deliberately show the prefix; ``mapping.body_of`` strips it for every
+    server read.
     """
 
     async def test_markdown_patch_replaces_the_body(
@@ -95,7 +101,8 @@ class TestA7BodyEditing:
             NodeDraft("Location", name="Keep", summary="s", body="v1")
         )
         await client.update_object(node.id, {"markdown": "v2"})
-        assert (await client.get_object(node.id))["markdown"] == "v2"
+        assert (await client.get_object(node.id))["markdown"] == "s\nv2"  # A8 prefix
+        assert await repo.fetch_body(node.id) == "v2"
 
     async def test_markdown_combines_with_name_and_properties_in_one_patch(
         self, repo: AnytypeGraphRepository, client: AnytypeClient
@@ -111,7 +118,7 @@ class TestA7BodyEditing:
         obj = await client.get_object(node.id)
         props = {p["key"]: p.get("text") for p in obj["properties"]}
         assert (obj["name"], obj["markdown"], props["description"]) == (
-            "Keep II", "v2", "s2",
+            "Keep II", "s2\nv2", "s2",
         )
 
     async def test_empty_markdown_clears_the_body(
@@ -121,7 +128,8 @@ class TestA7BodyEditing:
             NodeDraft("Location", name="Keep", summary="s", body="v1")
         )
         await client.update_object(node.id, {"markdown": ""})
-        assert (await client.get_object(node.id))["markdown"] == ""
+        assert (await client.get_object(node.id))["markdown"] == "s\n"  # A8 prefix
+        assert await repo.fetch_body(node.id) == ""
 
     async def test_body_key_in_patch_is_silently_ignored(
         self, repo: AnytypeGraphRepository, client: AnytypeClient
@@ -130,7 +138,7 @@ class TestA7BodyEditing:
             NodeDraft("Location", name="Keep", summary="s", body="v1")
         )
         await client.update_object(node.id, {"body": "clobber attempt"})
-        assert (await client.get_object(node.id))["markdown"] == "v1"
+        assert await repo.fetch_body(node.id) == "v1"
 
     async def test_list_and_search_never_carry_markdown(
         self, repo: AnytypeGraphRepository, client: AnytypeClient

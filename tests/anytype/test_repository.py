@@ -232,19 +232,13 @@ class TestSummaryChannel:
         assert node.id in changed
         assert repo.graph.node(node.id).summary == "Human-sharpened one-liner."
 
-    async def test_summary_falls_back_to_legacy_gc_summary(self, repo, mock):
-        """Unmigrated spaces read until scripts/migrate_summary_to_description
-        runs; delete this pin with the fallback."""
+    async def test_retired_gc_summary_is_invisible(self, repo, mock):
+        """Only the built-in description is the summary channel (ADR 011).
+        An unmigrated object's gc_summary is not read -- the migration
+        script (scripts/migrate_summary_to_description.py) is the one
+        converter."""
         legacy_id = mock.seed_object("character", "Orla", properties=[
             mapping.property_entry(mapping.PROP_LEGACY_SUMMARY, "text", "A smuggler."),
         ])
         await repo.hydrate()
-        assert repo.graph.node(legacy_id).summary == "A smuggler."
-
-    async def test_builtin_description_outranks_the_legacy_key(self, repo, mock):
-        legacy_id = mock.seed_object("character", "Orla", properties=[
-            mapping.property_entry("description", "text", "New channel."),
-            mapping.property_entry(mapping.PROP_LEGACY_SUMMARY, "text", "Old channel."),
-        ])
-        await repo.hydrate()
-        assert repo.graph.node(legacy_id).summary == "New channel."
+        assert repo.graph.node(legacy_id).summary == ""
