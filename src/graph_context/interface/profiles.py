@@ -86,6 +86,11 @@ as stale (the one-liner may no longer reflect reality). Pass a fresh
 `summary` whenever the change is meaningful; clear backlog stale flags
 later via explore(only_stale=true).
 
+description: REPLACES the node's entire long-form text (its Anytype page
+body). To make a targeted edit, get_node first and send back the full
+revised text -- a human may have rewritten it in Anytype since you last
+saw it. An empty string clears it.
+
 add_links: same shape as create_node's links (set create_missing_relations
 to create a brand-new relation label rather than reuse an existing one).
 remove_links: list of {"source", "edge_type", "target"} exactly as shown
@@ -147,6 +152,10 @@ type: an existing type in your Anytype space (e.g. Character, Location,
   Event, Organization, Technology, Theme -- whatever your space defines).
   An unmatched type is reported back with the list of known types.
 summary: REQUIRED one-liner; keep it current -- exploration shows it.
+description: long-form text (a portrait, a place's atmosphere, an
+  event's account). Stored as the node's Anytype page BODY, where the
+  user reads and edits it directly; returned by get_node and
+  explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
@@ -166,9 +175,11 @@ Prefer linking at creation over separate update_node calls.
     "get_node": """\
 Read ONE node in depth: all fields plus every edge grouped by type,
 with neighbor names and ids. Use when you need the full picture of a
-single entity; use `explore` to see a neighborhood instead. To read
-several related nodes at once (e.g. all participants of a scene),
-prefer explore(depth=1, detail="full") over repeated get_node calls.
+single entity; use `explore` to see a neighborhood instead. The full
+description (the node's Anytype page body) is fetched fresh on every
+call, so a human's latest edits are always included. To read several
+related nodes at once (e.g. all participants of a scene), prefer
+explore(depth=1, detail="full") over repeated get_node calls.
 
 node_id accepts a node NAME as well as an id (resolved for you; an
 ambiguous name reports its candidates so you can pick one).
@@ -279,6 +290,10 @@ type: an existing type in your Anytype space (e.g. Person, Team, Project,
   Meeting, Decision, Document -- whatever your space defines). An
   unmatched type is reported back with the list of known types.
 summary: REQUIRED one-liner; keep it current -- exploration shows it.
+description: long-form text (a person's role and history, a project's
+  charter, a decision's rationale). Stored as the node's Anytype page
+  BODY, where the user reads and edits it directly; returned by get_node
+  and explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (meetings, decisions,
   milestones): its position on the timeline as a sortable number -- use
   epoch seconds or YYYYMMDD (e.g. 20260702). The parameter name is
@@ -300,8 +315,10 @@ Prefer linking at creation over separate update_node calls.
     "get_node": """\
 Read ONE node in depth: all fields plus every edge grouped by type,
 with neighbor names and ids. Use when you need the full picture of a
-single entity; use `explore` to see a neighborhood instead. To read
-several related nodes at once (e.g. everyone in a meeting), prefer
+single entity; use `explore` to see a neighborhood instead. The full
+description (the node's Anytype page body) is fetched fresh on every
+call, so a human's latest edits are always included. To read several
+related nodes at once (e.g. everyone in a meeting), prefer
 explore(depth=1, detail="full") over repeated get_node calls.
 
 node_id accepts a node NAME as well as an id (resolved for you; an
