@@ -44,10 +44,11 @@ class Role(StrEnum):
 INFRA_ROLES: frozenset[Role] = frozenset({Role.PROSE, Role.SESSION_CONTEXT})
 
 
-# Editable seed mapping of Anytype type *key* -> Role. Native space keys plus
-# the legacy ``gc_`` duplicate keys (so objects created under the old closed
-# schema still resolve to a role after the pivot). A space may extend/override
-# this via the repository's registry role-overrides.
+# Editable seed mapping of Anytype type *key* -> Role: common native space
+# keys plus the two gc_ infrastructure types we own. A space may extend or
+# override this via the repository's registry role-overrides (which is also
+# where the Anytype adapter's legacy pre-pivot ``gc_`` read-compat entries
+# live -- adapter knowledge, not domain).
 DEFAULT_TYPE_ROLES: dict[str, Role] = {
     # native space types
     "event": Role.EVENT,
@@ -60,13 +61,6 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     # thin gc_ infrastructure we still own
     "gc_prose": Role.PROSE,
     "gc_session_context": Role.SESSION_CONTEXT,
-    # legacy gc_ entity duplicates -- read-compat with pre-pivot data
-    "gc_character": Role.CHARACTER,
-    "gc_event": Role.EVENT,
-    "gc_location": Role.LOCATION,
-    "gc_technology": Role.TECHNOLOGY,
-    "gc_faction": Role.ORGANIZATION,
-    "gc_item": Role.ITEM,
 }
 
 

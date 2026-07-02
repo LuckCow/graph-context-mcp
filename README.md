@@ -2,7 +2,9 @@
 
 An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth for characters, locations, events, and rendered prose; the LLM builds the world and renders scenes from it. See `docs/` (proposal) for the full design.
 
-This repository contains the vertical slice (WP0), the **Anytype adapter (WP1)**, the **MCP tool layer (WP2)**, and the **story layer (WP3)**: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the seven v1 tools, write-once Prose bodies, and debounced `SessionContext` persistence behind a `SessionStore` port.
+This repository contains the vertical slice (WP0), the **Anytype adapter (WP1)**, the **MCP tool layer (WP2)**, and the **story layer (WP3)**: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the eight v1 tools, write-once Prose bodies, and debounced `SessionContext` persistence behind a `SessionStore` port.
+
+**Space-reflecting (v2, [ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation (yours or bootstrapped) is a labelled edge. There is no closed `gc_` vocabulary anymore; `gc_` keys survive only for infrastructure (Prose, SessionContext, scalar properties). Architecture decisions live in [`docs/adr/`](docs/adr/).
 
 **Live-server status:** the WP1 spike was run against a real local Anytype (API `2025-11-08`, 2026-06-21) and the assumption-driven corrections are applied in `infrastructure/anytype/` (resync via `POST /search`, endpoint-split page caps, timestamps-from-properties, `plural_name` on type creation, write-once bodies confirmed by S6). The mapping assumptions A1–A6 in `mapping.py` are mirrored by `mock_server.py`; a live-gated E2E suite (`ANYTYPE_E2E=1`) runs the same contracts against a real server.
 
@@ -10,7 +12,7 @@ Try it: `PYTHONPATH=src python scripts/demo_wp2_tools.py` — drives the full to
 
 ```
 pip install -e ".[dev]"
-pytest          # 123 mock-backed tests + 11 live-gated (ANYTYPE_E2E=1); live server not required
+pytest          # 177 mock-backed tests + 10 live-gated (ANYTYPE_E2E=1); live server not required
 ruff check src tests
 ```
 
@@ -53,7 +55,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the seven tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
+**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the eight tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
 
 ### Graduating to the live Anytype backend
 
@@ -75,9 +77,9 @@ Because all three are container defaults inherited by `docker exec` — and `PYT
 }
 ```
 
-To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.)
+To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.) Set `GC_STORE_LLM_INPUT=0` to stop `record_prose` from persisting assembled prompts (`llm_input`) into the space — a privacy/size knob; the prose text and `llm_output` are stored either way.
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `record_prose`. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `record_prose`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
 
 ## Architecture in one paragraph
 
@@ -90,8 +92,8 @@ interface  ──▶  application  ──▶  domain
                           │            schema, session)
                           ▼
                        ports  ◀──implemented by──  infrastructure
-                  (GraphRepository)                 (memory fake today,
-                                                     Anytype adapter next)
+                  (GraphRepository)                 (in-memory fake +
+                                                     Anytype adapter)
 ```
 
 **The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition root (`interface/server.py`) and tests.
@@ -100,7 +102,8 @@ interface  ──▶  application  ──▶  domain
 
 | Path | Role | Key idea |
 |---|---|---|
-| `domain/schema.py` | Fixed v1 vocabulary + structural rules | Closed set; edge endpoint rules enforced once, at `GraphIndex.add_edge` |
+| `domain/schema.py` | Open type vocabulary + semantic `Role` layer | Types/edges are whatever the space has ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)); an editable type-key→Role map drives timeline/`as_of` and infra-hiding |
+| `domain/overview.py` | Derived cold-start map | Per-type counts + highest-degree hubs; rebuilt per call, nothing maintained |
 | `domain/models.py` | `Node`, `Edge`, `NodeDraft`, `LinkSpec` | Immutable; ids minted by storage, hence draft vs node |
 | `domain/graph.py` | `GraphIndex` adjacency projection | The traversal engine's substrate; rebuildable, never authoritative |
 | `domain/traversal.py` | Bounded BFS (`explore`) | Pure function; filters prune subtrees; `as_of` hides future events |
@@ -116,13 +119,14 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` | Reference impls; certified by `tests/contract` |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
 | `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A6) live here |
-| `infrastructure/anytype/schema_bootstrap.py` | Idempotent space setup | gc_ types (incl. `plural_name`) + edge relation properties |
+| `infrastructure/anytype/registry.py` | `SpaceRegistry`: the space's live types/relations | Resolves requested types & relation labels to existing keys; unknown labels surface for approval |
+| `infrastructure/anytype/schema_bootstrap.py` | Idempotent **infra-only** bootstrap | gc_ infra types (Prose, SessionContext), scalar gc_ properties, starter `gc_edge_*` relations — story entities use the space's native types |
 | `infrastructure/anytype/sync.py` | Hydrate / resync engine | Lenient reads, strict writes; search-based modified-since |
 | `infrastructure/anytype/repository.py` | `AnytypeGraphRepository` | Persist-first write-through; composite rollback; self-write suppression |
 | `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, write-once body, timestamps) |
 | `interface/presenters.py` | Context header + detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
+| `interface/tools.py` | The eight tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
 | `interface/server.py` | Composition root | Only module importing infrastructure + the MCP SDK; lifespan wiring |
 
 ## Conventions to carry forward
@@ -137,6 +141,6 @@ interface  ──▶  application  ──▶  domain
 
 ## Status & what's next
 
-WP0–WP3 are complete and green against the mock (and the live-gated E2E suite): the Anytype adapter, the seven-tool MCP server, write-once Prose bodies, and debounced `SessionContext` persistence. The WP1 live-server spike has been run and its corrections applied (see "Live-server status" above and `docs/WORK_PACKAGES.md`). Definition of Done holds: `pytest` (124 mock-backed + 11 live-gated), `ruff`, and `mypy --strict` are all clean.
+WP0–WP3 are complete and green against the mock (and the live-gated E2E suite): the Anytype adapter, the eight-tool MCP server, write-once Prose bodies, and debounced `SessionContext` persistence. The WP1 live-server spike has been run and its corrections applied (see "Live-server status" above and `docs/WORK_PACKAGES.md`), and the space-reflecting pivot ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)) landed after WP3 — see the status addendum in `docs/WORK_PACKAGES.md`. Definition of Done holds: `pytest`, `ruff`, and `mypy --strict` are all clean; CI runs them plus `lint-imports` on every push.
 
 WP4 (parked — entry criteria, not specs; see `docs/WORK_PACKAGES.md`): knowledge-query helper, staleness propagation to neighbors, type extensibility (`propose_type`), multi-user `SessionContext`, semantic search over summaries.

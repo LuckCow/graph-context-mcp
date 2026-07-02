@@ -6,6 +6,18 @@
 
 ---
 
+## Status addendum (2026-07-02)
+
+**WP0–WP3 are complete** and green against both the mock suite and the live-gated E2E suite; the Definition of Done (tests, `ruff`, `mypy --strict`, demo scripts) holds. ADRs now exist in `docs/adr/` (001–005 backfill the decisions this document names; 006 is new — read it before this document's WP1/WP2 sections).
+
+**The space-reflecting pivot (2026-06-27) supersedes this document's closed-vocabulary design.** WP1's "one Type per `NodeType`, one relation per `EdgeType`" bootstrap and the fixed `NodeType`/`EdgeType` vocabulary described below were implemented, dogfooded, and then replaced: the system now reflects the user's **native** Anytype types and relations (open vocabulary, live `SpaceRegistry`, key-derived edge labels, semantic `Role` layer; `gc_` keys survive only for infra — Prose, SessionContext, scalar properties, starter `gc_edge_*` relations). See **ADR 006** for the full decision. Sections below describing the closed schema are kept as history, not as spec.
+
+Also beyond the original spec: a `find_node` tool (eighth tool), a derived `context action="overview"` cold-start map, and name-or-id resolution on every node parameter.
+
+**WP4 remains the open frontier** — parked, entry criteria unchanged.
+
+---
+
 ## Cross-cutting: rules of the road
 
 **Dependency rule.** `interface → application → domain`; infrastructure implements `ports`; only the composition root and tests import infrastructure. CI should eventually enforce this (import-linter), but code review enforces it now.

@@ -57,6 +57,11 @@ class AppContext:
 async def _build_services() -> tuple[Services, list[Any]]:
     backend = os.environ.get("GC_BACKEND", "anytype")
     session = SessionState(project=os.environ.get("GC_PROJECT_NAME"))
+    # WP3 privacy/size knob: GC_STORE_LLM_INPUT=0 stops record_prose from
+    # persisting assembled prompts (llm_input) into the space.
+    store_llm_input = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
+        "0", "false", "no",
+    }
     teardown: list[Any] = []
 
     if backend == "memory":
@@ -65,7 +70,9 @@ async def _build_services() -> tuple[Services, list[Any]]:
         )
 
         logger.info("backend=memory (development mode; nothing persists)")
-        return build_services(InMemoryGraphRepository(), session), teardown
+        return build_services(
+            InMemoryGraphRepository(), session, store_llm_input=store_llm_input
+        ), teardown
 
     from graph_context.application.session_persister import SessionPersister
     from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -95,7 +102,9 @@ async def _build_services() -> tuple[Services, list[Any]]:
     session = await SessionPersister.load_or_fresh(store, session)
     persister = SessionPersister(store, session)
     teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
-    return build_services(repository, session, persister), teardown
+    return build_services(
+        repository, session, persister, store_llm_input=store_llm_input
+    ), teardown
 
 
 @asynccontextmanager

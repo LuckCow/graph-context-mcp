@@ -30,6 +30,21 @@ class PropertyInfo:
     format: str
 
 
+# Read-compat with pre-pivot data (ADR 006): the old bootstrap minted a
+# closed gc_ type per node kind; spaces it touched still contain objects of
+# these types. Seeded into every registry's role_overrides so those objects
+# keep their semantic role. Adapter knowledge -- deliberately NOT in
+# ``schema.DEFAULT_TYPE_ROLES``.
+LEGACY_TYPE_ROLES: dict[str, Role] = {
+    "gc_character": Role.CHARACTER,
+    "gc_event": Role.EVENT,
+    "gc_location": Role.LOCATION,
+    "gc_technology": Role.TECHNOLOGY,
+    "gc_faction": Role.ORGANIZATION,
+    "gc_item": Role.ITEM,
+}
+
+
 @dataclass
 class SpaceRegistry:
     """A snapshot of the space's types and relation properties."""
@@ -124,5 +139,7 @@ async def load_registry(client: AnytypeClient) -> SpaceRegistry:
                 key=key, name=prop.get("name", key), format=prop.get("format", "")
             )
     return SpaceRegistry(
-        properties_by_key=properties_by_key, types_by_key=types_by_key
+        properties_by_key=properties_by_key,
+        types_by_key=types_by_key,
+        role_overrides=dict(LEGACY_TYPE_ROLES),
     )

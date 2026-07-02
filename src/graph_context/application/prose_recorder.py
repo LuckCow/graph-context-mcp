@@ -19,9 +19,11 @@ prompts from bloating the space without limit), not a technical one; it is
 set well inside the confirmed-good range and keeps the truncation marker
 because silent truncation is worse than none.
 
-TODO(junior):
-* A config flag to skip storing llm_input entirely (privacy/size; see
-  WP3 open questions).
+``store_llm_input=False`` (env ``GC_STORE_LLM_INPUT=0`` at the composition
+root) drops the llm_input section entirely -- the WP3 privacy/size knob:
+stored prompts aid debugging but bloat the space and may repeat the user's
+own notes verbatim. llm_output is kept either way (it is the model's text,
+usually near-identical to the prose itself).
 """
 
 from __future__ import annotations
@@ -55,10 +57,12 @@ class ProseRecorder:
         session: SessionState,
         *,
         now: Callable[[], str] = _utc_now_iso,  # injectable for tests
+        store_llm_input: bool = True,
     ) -> None:
         self._repository = repository
         self._session = session
         self._now = now
+        self._store_llm_input = store_llm_input
 
     async def record(
         self,
@@ -76,7 +80,9 @@ class ProseRecorder:
             name=title or _derive_title(text),
             summary=summary,
             fields={"model": model, "generated_at": self._now()},
-            body=_assemble_body(text, llm_input, llm_output),
+            body=_assemble_body(
+                text, llm_input if self._store_llm_input else "", llm_output
+            ),
         )
         links = [
             LinkSpec(REFERENCES_LABEL, other=node_id) for node_id in references

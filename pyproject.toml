@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = ["httpx>=0.27", "mcp>=1.2"]          # domain stays dependency-free; these are infrastructure/interface-only
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10", "import-linter>=2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -31,3 +31,37 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 mypy_path = "src"
+
+# The dependency rule (README "Architecture in one paragraph"), enforced.
+[tool.importlinter]
+root_package = "graph_context"
+
+[[tool.importlinter.contracts]]
+name = "Layers: interface -> application -> domain"
+type = "layers"
+layers = [
+    "graph_context.interface",
+    "graph_context.application",
+    "graph_context.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain, ports and application never import infrastructure"
+type = "forbidden"
+source_modules = [
+    "graph_context.domain",
+    "graph_context.ports",
+    "graph_context.application",
+]
+forbidden_modules = ["graph_context.infrastructure"]
+
+# Within interface, only the composition root (server.py) may import
+# infrastructure; list the other modules explicitly.
+[[tool.importlinter.contracts]]
+name = "Only the composition root imports infrastructure"
+type = "forbidden"
+source_modules = [
+    "graph_context.interface.tools",
+    "graph_context.interface.presenters",
+]
+forbidden_modules = ["graph_context.infrastructure"]

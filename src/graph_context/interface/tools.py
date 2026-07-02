@@ -80,6 +80,8 @@ def build_services(
     repository: GraphRepository,
     session: SessionState,
     persister: SessionPersister | None = None,
+    *,
+    store_llm_input: bool = True,
 ) -> Services:
     return Services(
         repository=repository,
@@ -87,7 +89,7 @@ def build_services(
         writer=NodeWriter(repository, session),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        prose=ProseRecorder(repository, session),
+        prose=ProseRecorder(repository, session, store_llm_input=store_llm_input),
         persister=persister,
     )
 

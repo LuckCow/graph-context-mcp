@@ -13,11 +13,10 @@ through search (``types=[...]`` in the body); the find here uses the same
 logged -- v1 is single-user, so this is a curiosity, not a conflict to
 resolve (multi-user = per-user nodes, WP4).
 
-TODO(junior):
-* The SessionContext object is intentionally excluded from the graph
-  workflows; hydrate WILL index it as a node (it is a gc_ type). That is
-  harmless -- explore excludes the type by default (WP2 decision) -- but
-  the tool layer never surfaces it accidentally.
+Note: hydrate indexes the SessionContext object as a node (it is a real
+object in the space). That is by design and harmless -- its role is in
+``schema.INFRA_ROLES``, so explore hides it by default (WP2 decision) and
+the story-node stats skip it; only an explicit ``include_types`` surfaces it.
 """
 
 from __future__ import annotations

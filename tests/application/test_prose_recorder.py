@@ -43,6 +43,21 @@ async def test_body_assembles_delimited_llm_sections(
     assert pr.LLM_OUTPUT_HEADER in body and "the completion" in body
 
 
+async def test_store_llm_input_false_drops_the_input_section(
+    repository: InMemoryGraphRepository, session: SessionState, world: World
+) -> None:
+    recorder = ProseRecorder(
+        repository, session, now=lambda: "t", store_llm_input=False
+    )
+    node = await recorder.record(
+        text="rendered", summary="s", references=[world.mira.id],
+        llm_input="the prompt", llm_output="the completion",
+    )
+    body = await repository.fetch_body(node.id)
+    assert pr.LLM_INPUT_HEADER not in body and "the prompt" not in body
+    assert pr.LLM_OUTPUT_HEADER in body and "the completion" in body  # kept
+
+
 async def test_oversized_body_is_truncated_with_marker(
     repository: InMemoryGraphRepository, session: SessionState, world: World
 ) -> None:

@@ -12,9 +12,14 @@ class TestResolveRole:
         assert schema.resolve_role("character") is Role.CHARACTER
         assert schema.resolve_role("event") is Role.EVENT
 
-    def test_legacy_gc_key_resolves_for_read_compat(self) -> None:
-        assert schema.resolve_role("gc_character") is Role.CHARACTER
-        assert schema.resolve_role("gc_faction") is Role.ORGANIZATION
+    def test_gc_infra_keys_resolve(self) -> None:
+        assert schema.resolve_role("gc_prose") is Role.PROSE
+        assert schema.resolve_role("gc_session_context") is Role.SESSION_CONTEXT
+
+    def test_legacy_gc_entity_keys_are_not_domain_knowledge(self) -> None:
+        # Pre-pivot read-compat lives in the Anytype adapter's registry
+        # overrides (registry.LEGACY_TYPE_ROLES), not the domain map.
+        assert schema.resolve_role("gc_character") is None
 
     def test_matching_is_case_insensitive_and_accepts_role_name(self) -> None:
         assert schema.resolve_role("Character") is Role.CHARACTER
