@@ -104,7 +104,7 @@ Run against a live local Anytype reached at `http://host.docker.internal:31009` 
 - **S3 — `last_modified_date` usable, with a wrinkle.** Granularity is **seconds** (`2026-06-21T22:27:55Z`). A **relation-only PATCH bumps `last_modified_date`** (verified) — so out-of-band relation edits are visible to resync. Sorting/filtering live **only on `POST /search`**, not on `GET /objects` (GET rejects filter params with HTTP 400). Filter shape: `"filters": {"property_key","condition","value"}` or `{"and":[…]}/{"or":[…]}`; `"sort": {"property_key","direction"}`; condition `greater_or_equal` works. **Wrinkle:** the `last_modified_date` *value* is **omitted from the property list for objects never modified since creation** (only `created_date` appears), yet the server still tracks, sorts, and filters by it internally (a `>= T` filter returned 308 objects; sort placed the genuinely-edited object first). **Implication:** don't derive the resync high-water-mark from returned object timestamps (they may be absent); track sync time client-side and query `last_modified_date >= T`, deduping the boundary second (use `>=`, it's idempotent).
 - **S4 — deletions are INVISIBLE to incremental resync (confirmed risk).** `DELETE` = archive (soft delete; the DELETE response body's `archived` flag is stale/`false`, but a follow-up `GET` shows `archived: true`). Archived objects **disappear from both `GET /objects` and `POST /search`**, are **not** surfaced by a modified-since query, and **cannot be enumerated** (an `archived == true` filter is silently ignored — returns the full live set). They remain fetchable by id via `GET /objects/{id}`. **Consequence:** human deletions are undetectable incrementally; detecting them requires **full-set reconciliation** (hydrate all live ids, diff against the index). This drives **Q3** below.
 - **S5 — custom types work.** `POST /types` with an explicit `key` (`gc_character`, `gc_location`) succeeds; the key is **honored, stable, and queryable**. Type-scoping is done via the top-level **`"types": [...]` array on `POST /search`**, not via `GET /objects` query params (GET rejects a `type=` param with 400). New types arrive with Anytype's default properties (`backlinks`, `tag`, `created_date`, `creator`, `links`) auto-attached, alongside our `gc_*` ones — harmless, the mapping ignores non-`gc_` keys.
-- **S6 — body is write-once; generous size.** Body is supplied at creation as markdown and returned in the `markdown` field. **PATCH of `body` is silently ignored** (HTTP 200, but content unchanged) — confirms the historical limitation and **validates WP3's "render once, write-once body" design.** Bodies of **50 KB, 250 KB, and 1 MB all created and round-tripped** fully (1 MB in 480 ms); no practical size ceiling for Prose nodes. Minor caveat: markdown is normalized on store (trailing-whitespace/formatting), so byte-exact round-trip isn't guaranteed — store the rendered text, not a checksum-sensitive blob.
+- **S6 — body is write-once; generous size.** Body is supplied at creation as markdown and returned in the `markdown` field. **PATCH of `body` is silently ignored** (HTTP 200, but content unchanged) — confirms the historical limitation and **validates WP3's "render once, write-once body" design.** Bodies of **50 KB, 250 KB, and 1 MB all created and round-tripped** fully (1 MB in 480 ms); no practical size ceiling for Prose nodes. Minor caveat: markdown is normalized on store (trailing-whitespace/formatting), so byte-exact round-trip isn't guaranteed — store the rendered text, not a checksum-sensitive blob. **[Corrected 2026-07-02 (re-spike + docs check): bodies are NOT write-once — body patching is a documented feature of `2025-11-08` itself** ("update an object's markdown body via `UpdateObjectRequest`"; earlier versions couldn't touch the body at all). The documented gotcha is a create/update **field-name mismatch**: create takes `body`, update takes `markdown` — `PATCH {"body": …}` is silently ignored (re-confirmed live) while **`PATCH {"markdown": …}` replaces the content** (full replacement: GET the object — the response includes `markdown` — modify, PATCH the whole text back). The original spike exercised only the `body` key. `2025-11-08` remains the current API version; later additions (chat, file endpoints) were non-breaking rollups into it. Also confirmed: `markdown` is **absent from list/search results** (single-object `GET` only), so bodies can never ride the hydrate sweep. See **ADR 010** and **WP9**; write-once for Prose/intent bodies is now a policy choice, not a limitation.**]**
 - **S7 — writes are the binding constraint, not reads.** **Reads are effectively unthrottled** (80 rapid `GET`s, 0×429). **Writes are throttled to ~1 req/s sustained** after a small burst (~30–60 before first 429 in this session). 429 body: `{"object":"error","status":429,"code":"rate_limit_exceeded","message":"You have reached maximum request limit."}` plus headers `ratelimit-limit/-remaining/-reset` and `x-rate-limit-*` (reset hint = 1 s). `ANYTYPE_API_DISABLE_RATE_LIMIT` is **not** set on this server. **Consequence:** bulk *creation* (seeding/import), not hydration, is the slow path — the client's exponential backoff on 429 is correct; per-tool single writes are fine, but any batch-create path must pace at ~1/s. (Seeding 2,000 objects for this very spike was the bottleneck — done partially, ~750, which was ample for the read measurements.)
 - **S8 — auth is a two-step pairing; version header not enforced.** Error envelope is uniform: invalid key → `401 {"code":"unauthorized","message":"invalid api key"}`; missing header → `401 …"missing authorization header"`. Key lifecycle: `POST /v1/auth/challenges {app_name}` → `challenge_id`; user approves in the desktop app and reads a code; `POST /v1/auth/api_keys {challenge_id, code}` → bearer api_key. Keys are **per-app (named)** and **long-lived** (no expiry observed). **Surprise:** the `Anytype-Version` header is **not strictly enforced** — a bogus `1999-01-01` still returned 200. Version drift therefore won't surface as an error; keep pinning it but rely on the changelog, not runtime rejection, to catch breaking changes.
 
@@ -132,7 +132,7 @@ Contract suite against fake + live (gated). Adapter-only unit tests with `httpx.
 ### Decisions (settled)
 
 - Edges = relation properties on the **source** node, one property per `EdgeType`; reverse adjacency exists only in the index.
-- Scalar fields (`summary`, `story_time`, …) are properties, never body. Body is reserved for Prose text (WP3).
+- Scalar fields (`summary`, `story_time`, …) are properties, never body. Body is reserved for Prose text (WP3). **[Superseded by ADR 010 / WP9 (2026-07-02):** descriptions move from the `gc_description` property to the body; body updates work via the `markdown` PATCH key (S6 correction). Scalars stay properties.**]**
 - Anytype object ids are used verbatim as `NodeId`. Delete = archive.
 - Concurrency with human edits is **last-write-wins** for v1; a mid-session human edit overwritten by the server is acceptable and documented. Locking/merge is Phase 4.
 - Resync triggers: project open (full hydrate), explicit `context` resync action, and before `explore`/`find_path` if the last sync is older than a configurable threshold (default: off; see open question Q1).
@@ -193,7 +193,7 @@ In-process tool invocation against the fake (FastMCP supports direct call/test c
 
 ### Deliverables
 
-- `application/prose_recorder.py` + `record_prose` tool: creates a `Prose` node with `references` edges to every source node id supplied. Rendered text goes in the Anytype **body** (write-once — avoids the PATCH-body limitation). `llm_input`/`llm_output` stored as delimited sections in the same body, after the rendered text, capped at the size limit established in spike S6 with an explicit `[truncated]` marker. Generation metadata (model, timestamp) as properties.
+- `application/prose_recorder.py` + `record_prose` tool: creates a `Prose` node with `references` edges to every source node id supplied. Rendered text goes in the Anytype **body** (write-once — avoids the PATCH-body limitation; **since ADR 010 this is policy, not a limitation** — provenance stays immutable by choice). `llm_input`/`llm_output` stored as delimited sections in the same body, after the rendered text, capped at the size limit established in spike S6 with an explicit `[truncated]` marker. Generation metadata (model, timestamp) as properties.
 - `get_node` gains `include_prose: int` (default 0): returns up to N most recent Prose nodes referencing this node, name + first ~M chars — the "how was this place described last time?" consistency lookup.
 - Stale-summary workflow: `explore` gains `only_stale: bool` filter (tool layer narrows results to `summary_stale=True` nodes); `context` stats already count them (WP2). **Settled per the proposal's open question: no `refresh_summary` tool.** Rationale: it would be a composite of existing primitives (`explore only_stale` → LLM regenerates → `update_node` with fresh summaries); tool-surface minimalism wins, and the workflow is documented in the `explore`/`update_node` docstrings instead. Revisit only if dogfooding shows the LLM fails to execute the pattern reliably.
 - `ports/session_store.py` + `infrastructure/anytype/session_repository.py`: `SessionState` serialized as JSON into a text property of a `SessionContext` meta-node. **Debounced** persistence: flush on project switch, server shutdown, and at most every N mutations (default 10) — never per-touch. Load on startup; corrupt/missing state degrades to a fresh session with a logged warning, never a crash.
@@ -487,6 +487,93 @@ not the prompt.
 
 ---
 
+## WP9 — Descriptions move to the body (ADR 010)
+
+**Goal:** a node's long-form description is its Anytype **body** — the
+UI's primary editing surface — instead of the cramped `gc_description`
+side-panel property. The index carries names/summaries only; full text is
+fetched on demand. Unblocked by the 2026-07-02 correction of S6: body
+patching is a documented feature of the current `2025-11-08` API version
+(`UpdateObjectRequest`'s `markdown` field — a documented create-`body` /
+update-`markdown` field-name mismatch the original spike tripped on; no
+newer API version exists). Independent of WP5–WP8; can land any time.
+
+### Deliverables
+
+- **Domain** (`domain/models.py`): `Node` loses `description` (the index
+  gets lighter); `NodeDraft`'s `description` and `body` merge into one
+  long-form field. Docstrings updated — body is no longer "Prose only"
+  and no longer described as write-once-by-constraint.
+- **Port** (`ports/graph_repository.py`): `update_node` swaps its
+  `description` parameter for a body write; `fetch_body` (already on the
+  port) becomes the description read path.
+- **Application:** `NodeWriter` routes description → body on create and
+  update (the summary-staleness rule fires exactly as today — a body
+  edit without a fresh summary flips `summary_stale`). `NodeReader`
+  fetches the body and adds it to `NodeView`, same pattern as the
+  existing prose excerpts.
+- **Interface:** the tool surface keeps the `description` parameter name
+  (docstrings are prompts; "description" reads better to the model).
+  `get_node` renders the body. `explore detail=full` **fans out
+  `fetch_body` over its hits** (reads are unthrottled, S7) so one call
+  still assembles a scene with full text — options and budgets
+  provisional, tuned after dogfooding with the agent LLM. Profile
+  docstrings (`interface/profiles.py`) reworded; golden snapshots
+  regenerate.
+- **Infrastructure** (`infrastructure/anytype/`): `mapping.py` drops
+  `gc_description` from payloads and `to_node`, adds the **A7 quirk**:
+  create = `body` key, update = `markdown` key (wholesale replace),
+  `body` in PATCH silently ignored. `fetch_body` gains the transition
+  fallback (markdown if non-empty, else the object's `gc_description`
+  property — free, the single-object GET carries properties).
+  `mock_server.py` pins A7 **and stops returning `markdown` from
+  list/search** (live never includes it; the mock currently does, which
+  would mask hydration code depending on it). The in-memory fake grows
+  the same body semantics. `schema_bootstrap` stops minting
+  `gc_description`.
+- **Migration:** one-shot script — walk nodes with non-empty
+  `gc_description`, PATCH the value into `markdown`, clear the property.
+  Paced at ~1 write/s (S7); a large space takes minutes. After running
+  it on the real spaces, delete the `fetch_body` fallback.
+- Demo script: create a node with a description, edit its body by hand
+  in the Anytype UI, `get_node` shows the edit immediately (no resync).
+
+### Tests
+
+Contract suite: description round-trips through the body on both
+implementations; update replaces it; `fetch_body` fallback reads legacy
+`gc_description`; `explore full` returns bodies for hits. Adapter tests
+against the mock: `markdown`-PATCH applied, `body`-PATCH ignored, search
+results carry no markdown. One live-gated E2E pinning the A7 behavior
+against the real server. Presenter goldens for the new `get_node` /
+`explore full` output.
+
+### Decisions (settled)
+
+- Body PATCH is wholesale replace → description conflicts are
+  last-write-wins vs humans (WP1 stance); bot-vs-bot is serialized by
+  the ADR 009 seam. No merge machinery.
+- Prose and intent bodies stay write-once **as policy** (provenance
+  should not be editable).
+- `explore full` fetches bodies rather than being demoted to
+  summaries-only — chosen deliberately; revisit with tuning knobs, not
+  by relitigating the default, unless dogfooding shows it's unusable.
+
+### Open questions
+
+- `explore full` fan-out tuning: cap the number of body fetches? A
+  per-call `include_bodies` budget? Truncate long bodies to an excerpt
+  with a marker? Decide from agent-LLM dogfooding transcripts.
+- Should resync flip `summary_stale` when it detects an out-of-band
+  body edit (human rewrote the description; the one-liner may no longer
+  match)? Cheap to add once bodies are the description.
+- When to run the migration on the real story space (it's quick, but
+  pick a moment nothing else is writing).
+
+Suggested sizing: **M**.
+
+---
+
 ## Sequencing
 
 ```
@@ -514,6 +601,11 @@ sizing: WP5 = M, WP6 = M, WP7 = L, WP8 = L. One severable piece: WP8's
 single-writer delta queue is adapter-internal and useful before multi-user
 (it also fixes pacing for bulk writes) — it may land any time after WP1.
 
+WP9 (descriptions → body, ADR 010) is independent of the WP5–WP8 chain and
+touches all four layers but no orchestrator code; it may land any time.
+Landing it before WP7 is mildly preferable — intent-node capture then
+starts life on the body-based description model instead of migrating later.
+
 ## Risk register (top items)
 
 | Risk | Signal | Mitigation |
@@ -529,3 +621,4 @@ single-writer delta queue is adapter-internal and useful before multi-user
 | Bulk ingestion (workspace profile) hits the ~1 write/s throttle | import/seeding timing | Pace batch creates; design an explicit import path before promising one |
 | Concurrent turns silently lose link writes (in-process RMW race) | WP8 contract test | Single-writer delta queue (WP8); until it lands, the orchestrator runs single-user |
 | One user's prompts exposed to all space members via intent nodes | privacy review at WP8 | Per-user consent knob; `[prompt withheld]` marker keeps the trace usable |
+| `explore full` body fan-out bloats latency/context (WP9) | dogfooding transcripts | Fetches are unthrottled reads; add caps/excerpts/`include_bodies` knobs — tune options, not the architecture |
