@@ -254,7 +254,9 @@ async def get_node(
 ) -> str:
     """Read ONE node in depth: all fields plus every edge grouped by type,
     with neighbor names and ids. Use when you need the full picture of a
-    single entity; use `explore` to see a neighborhood instead.
+    single entity; use `explore` to see a neighborhood instead. To read
+    several related nodes at once (e.g. all participants of a scene),
+    prefer explore(depth=1, detail="full") over repeated get_node calls.
 
     node_id accepts a node NAME as well as an id (resolved for you; an
     ambiguous name reports its candidates so you can pick one).
@@ -301,6 +303,13 @@ async def explore(
       explore(start="<event id>", depth=2,
               include_types=["Character", "Location", "Item"],
               detail="summaries", as_of=<event time>)
+
+    RENDERING PREP (about to write prose about a scene):
+      explore(start="<event id>", depth=1, detail="full")
+    returns the FULL descriptions of the event and every participant in
+    ONE call -- do not fetch participants one-by-one with get_node.
+    Caution: "full" emits complete, untruncated descriptions; keep
+    depth=1 and use `limit`.
 
     STALE-SUMMARY SWEEP (before a big writing session):
       explore(depth=3, limit=50, only_stale=true, detail="names")
