@@ -135,6 +135,11 @@ class AnytypeClient:
     def _space(self) -> str:
         return f"/v1/spaces/{self._config.space_id}"
 
+    async def get_space(self) -> dict[str, Any]:
+        """The configured space's own record (name etc.)."""
+        payload = await self.request("GET", self._space)
+        return _unwrap(payload, "space")
+
     def list_objects(self) -> AsyncIterator[dict[str, Any]]:
         """Full unfiltered object sweep -- the hydrate path (spike S2: GET
         ``/objects`` takes no filters and honors a large page size)."""

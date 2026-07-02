@@ -46,6 +46,7 @@ from typing import Any
 
 import httpx
 
+_SPACE = re.compile(r"^/v1/spaces/(?P<space>[^/]+)$")
 _OBJECTS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects$")
 _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
 _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
@@ -72,9 +73,11 @@ class MockAnytype:
         self,
         space_id: str = "space-1",
         *,
+        space_name: str = "TestWorld",
         max_page_limit: int = 100,
     ) -> None:
         self.space_id = space_id
+        self.space_name = space_name
         self.max_page_limit = max_page_limit  # the POST /search per-page cap
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
@@ -102,6 +105,7 @@ class MockAnytype:
             (_SEARCH, self._handle_search),
             (_TYPES, self._handle_types),
             (_PROPERTIES, self._handle_properties),
+            (_SPACE, self._handle_space),
         ):
             match = pattern.match(path)
             if match:
@@ -241,6 +245,13 @@ class MockAnytype:
             self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         return self._error(405, "method_not_allowed")
+
+    def _handle_space(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        return httpx.Response(
+            200, json={"space": {"id": self.space_id, "name": self.space_name}}
+        )
 
     def _handle_types(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":

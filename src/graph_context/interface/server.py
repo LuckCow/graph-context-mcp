@@ -100,6 +100,13 @@ async def _build_services() -> tuple[Services, list[Any]]:
     # shutdown. A corrupt/missing snapshot degrades to the fresh session.
     store = AnytypeSessionStore(client)
     session = await SessionPersister.load_or_fresh(store, session)
+    if not session.project:
+        # Derived cosmetic default: the space's own name. Never blocks startup;
+        # GC_PROJECT_NAME and a persisted set_project both take precedence.
+        try:
+            session.project = (await client.get_space()).get("name") or None
+        except Exception:  # noqa: BLE001
+            logger.warning("could not read space name for the project label")
     persister = SessionPersister(store, session)
     teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
     return build_services(

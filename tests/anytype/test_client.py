@@ -17,6 +17,12 @@ class TestPagination:
         assert len(list_calls) >= 3
 
 
+class TestSpace:
+    async def test_get_space_returns_name(self, mock, client):
+        space = await client.get_space()
+        assert space == {"id": mock.space_id, "name": "TestWorld"}
+
+
 class TestRetry:
     async def test_retries_on_429_then_succeeds(self, mock, client):
         mock.fail_next(2, status=429)

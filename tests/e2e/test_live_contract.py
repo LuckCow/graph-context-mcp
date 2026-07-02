@@ -9,7 +9,18 @@ space) is provided by ``tests/e2e/conftest.py``.
 from __future__ import annotations
 
 from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.infrastructure.anytype.client import AnytypeClient
 from tests.contract.test_graph_repository_contract import GraphRepositoryContract
+
+
+async def test_get_space_returns_a_name(live_config) -> None:
+    """Pins the /v1/spaces/{id} envelope the project-label default reads."""
+    client = AnytypeClient(live_config)
+    try:
+        space = await client.get_space()
+    finally:
+        await client.aclose()
+    assert space.get("name")
 
 
 class TestAnytypeLiveRepository(GraphRepositoryContract):
