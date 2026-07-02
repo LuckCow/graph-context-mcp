@@ -11,6 +11,7 @@ When live-server access exists, add a third subclass gated behind
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.domain.schema import Role
 from graph_context.errors import NodeNotFound
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
@@ -85,6 +86,23 @@ class GraphRepositoryContract:
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
 
 
+class RoleOverrideContract:
+    """Constructor ``role_overrides`` (WP5 domain profiles) shape role
+    resolution identically in every implementation: the mapped type gains
+    the role both on lookup and on the created node."""
+
+    async def test_overridden_type_resolves_and_stamps_the_role(self, meeting_repo):
+        assert meeting_repo.role_for("Meeting") is Role.EVENT
+        node = await meeting_repo.create_node(
+            NodeDraft(
+                "Meeting", name="Standup", summary="Daily sync.",
+                story_time=20260702,
+            )
+        )
+        assert node.role is Role.EVENT
+        assert meeting_repo.graph.node(node.id).role is Role.EVENT
+
+
 class TestInMemoryRepository(GraphRepositoryContract):
     @pytest.fixture
     def repo(self):
@@ -100,6 +118,33 @@ class TestAnytypeRepository(GraphRepositoryContract):
         await ensure_schema(client)
         await seed_native_types(client)
         repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class TestInMemoryRoleOverrides(RoleOverrideContract):
+    @pytest.fixture
+    def meeting_repo(self):
+        return InMemoryGraphRepository(role_overrides={"meeting": Role.EVENT})
+
+
+class TestAnytypeRoleOverrides(RoleOverrideContract):
+    @pytest.fixture
+    async def meeting_repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        # The space-reflecting model resolves types against the live space:
+        # the type must exist for the override to have anything to bite on.
+        await client.create_type(
+            {"key": "meeting", "name": "Meeting",
+             "plural_name": "Meetings", "layout": "basic"}
+        )
+        repository = AnytypeGraphRepository(
+            client, role_overrides={"meeting": Role.EVENT}
+        )
         await repository.hydrate()
         yield repository
         await client.aclose()

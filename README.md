@@ -1,6 +1,6 @@
 # graph-context-mcp
 
-An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth for characters, locations, events, and rendered prose; the LLM builds the world and renders scenes from it. See `docs/` (proposal) for the full design.
+An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the original and default surface) or a **work knowledge base** (people, teams, projects, meetings, decisions). See `docs/` (proposal) for the full design.
 
 This repository contains the vertical slice (WP0), the **Anytype adapter (WP1)**, the **MCP tool layer (WP2)**, and the **story layer (WP3)**: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the eight v1 tools, write-once Prose bodies, and debounced `SessionContext` persistence behind a `SessionStore` port.
 
@@ -12,9 +12,27 @@ Try it: `PYTHONPATH=src python scripts/demo_wp2_tools.py` — drives the full to
 
 ```
 pip install -e ".[dev]"
-pytest          # 177 mock-backed tests + 10 live-gated (ANYTYPE_E2E=1); live server not required
+pytest          # mock-backed suite + live-gated E2E (ANYTYPE_E2E=1); live server not required
 ruff check src tests
 ```
+
+## Domain profiles (GC_PROFILE)
+
+The schema is space-reflecting and domain-neutral (ADR 006); what a profile changes is **framing**: the tool docstrings the LLM reads (they are prompts) and a few native type-key → role mappings. Wire format never changes — storage keys (`gc_story_time`, `gc_prose`, …), tool names, and parameters are identical across profiles, so switching profiles never migrates data.
+
+| | `fiction` (default) | `workspace` |
+|---|---|---|
+| Framing | characters, scenes, foreshadowing | people, projects, meetings, decisions |
+| Worked examples | scene assembly, rendering prep | meeting/decision briefs, deep context |
+| Extra Event-role types | — (`event` is already mapped) | `meeting`, `decision`, `milestone` (timeline over real time: epoch seconds or YYYYMMDD in `story_time`) |
+
+Select with `GC_PROFILE=workspace` (unset = `fiction`; existing setups see zero change). Try the work-KB surface in-process:
+
+```
+PYTHONPATH=src python scripts/demo_workspace_profile.py
+```
+
+Profile docstrings are pinned by golden snapshot tests (`tests/interface/golden/`) — editing them is prompt engineering, and the golden diff is the review artifact (`GC_REGEN_GOLDENS=1 pytest tests/interface/test_profiles.py` to regenerate deliberately).
 
 ## Running the MCP server
 

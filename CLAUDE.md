@@ -26,6 +26,8 @@ lint-imports                    # layer/dependency rule (import-linter contracts
 
 Definition of Done = all four green; CI (`.github/workflows/ci.yml`) runs exactly these on every push.
 
+> **Known gap (2026-07-02):** `lint-imports` is not installed in the container (pip is egress-blocked; add `import-linter` — and `langgraph` for WP6 — at the next container rebuild). Skip it locally until then; CI still enforces the contracts on push.
+
 ```bash
 PYTHONPATH=src python scripts/demo_wp2_tools.py                              # drive the full tool loop in-process (mock-backed)
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server    # run the stdio server, nothing persists

@@ -31,10 +31,13 @@ from graph_context.domain.schema import Role
 class InMemoryGraphRepository:
     """``GraphRepository`` whose only store is its own :class:`GraphIndex`."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, role_overrides: Mapping[str, Role] | None = None) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
         self._bodies: dict[NodeId, str] = {}
+        # Profile-supplied type-key -> Role additions (WP5); same contract
+        # as the Anytype adapter's registry overrides.
+        self._role_overrides: dict[str, Role] = dict(role_overrides or {})
 
     @property
     def graph(self) -> GraphIndex:
@@ -47,7 +50,7 @@ class InMemoryGraphRepository:
         *,
         create_missing_relations: bool = False,
     ) -> Node:
-        role = schema.resolve_role(draft.type)
+        role = schema.resolve_role(draft.type, self._role_overrides)
         node = Node(
             id=f"n{next(self._ids):04d}",
             # Display name mirrors the Anytype backend: a mapped role renders
@@ -112,7 +115,7 @@ class InMemoryGraphRepository:
         self._graph.remove_edge(edge)
 
     def role_for(self, type_identifier: str) -> Role | None:
-        return schema.resolve_role(type_identifier)
+        return schema.resolve_role(type_identifier, self._role_overrides)
 
     def known_node_types(self) -> frozenset[str]:
         # The in-memory backend has an open vocabulary; surface the mapped

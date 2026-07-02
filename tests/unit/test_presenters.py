@@ -76,4 +76,4 @@ class TestOverview:
 
     def test_empty_overview_guides_to_create_node(self) -> None:
         overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
-        assert "no story nodes yet" in render_overview(overview)
+        assert "no nodes yet" in render_overview(overview)

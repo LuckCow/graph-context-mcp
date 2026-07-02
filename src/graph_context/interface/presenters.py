@@ -67,10 +67,10 @@ def render_overview(overview: GraphOverview) -> str:
     can copy one straight into ``explore`` / ``get_node`` / ``focus``.
     """
     if overview.total_story_nodes == 0:
-        return "overview: no story nodes yet -- use create_node to begin a world."
+        return "overview: no nodes yet -- use create_node to add the first one."
     types = ", ".join(f"{tc.type} {tc.count}" for tc in overview.type_counts)
     lines = [
-        f"overview: {overview.total_story_nodes} story nodes across "
+        f"overview: {overview.total_story_nodes} nodes across "
         f"{len(overview.type_counts)} types (derived entry-point map).",
         f"types: {types}",
         "entry points (highest-degree nodes; pass an id to explore, "

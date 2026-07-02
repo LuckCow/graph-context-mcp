@@ -75,12 +75,16 @@ class AnytypeGraphRepository:
         self,
         client: AnytypeClient,
         *,
+        role_overrides: Mapping[str, Role] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._client = client
         self._sleep = sleep
         self._graph = GraphIndex()
-        self._registry = SpaceRegistry()
+        # Profile-supplied type-key -> Role additions (WP5); merged into the
+        # registry on every (re)load so resync keeps them.
+        self._role_overrides: dict[str, Role] = dict(role_overrides or {})
+        self._registry = SpaceRegistry(role_overrides=dict(self._role_overrides))
         # Relation keys created by this repository that have not yet been
         # proven usable in a PATCH (the live settle window; see module note).
         self._unsettled_keys: set[str] = set()
@@ -104,7 +108,7 @@ class AnytypeGraphRepository:
         key = self._registry.type_key_for(type_identifier)
         if key is not None:
             return self._registry.role_for(key)
-        return schema.resolve_role(type_identifier)
+        return schema.resolve_role(type_identifier, self._role_overrides)
 
     def known_node_types(self) -> frozenset[str]:
         return self._registry.known_node_types()
@@ -115,7 +119,9 @@ class AnytypeGraphRepository:
     # -- sync -------------------------------------------------------------
 
     async def hydrate(self) -> None:
-        self._registry = await load_registry(self._client)
+        self._registry = await load_registry(
+            self._client, extra_role_overrides=self._role_overrides
+        )
         self._graph, watermark, stamps = await sync.load_index(
             self._client, self._registry
         )
@@ -128,7 +134,9 @@ class AnytypeGraphRepository:
             await self.hydrate()
             return frozenset(node.id for node in self._graph.nodes())
         # Refresh the registry so human-created types/relations get labelled.
-        self._registry = await load_registry(self._client)
+        self._registry = await load_registry(
+            self._client, extra_role_overrides=self._role_overrides
+        )
         fetched = await sync.fetch_changes(self._client, self._watermark)
         unseen = [
             obj for obj in fetched

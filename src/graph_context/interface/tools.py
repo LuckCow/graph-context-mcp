@@ -257,9 +257,9 @@ async def context_tool(
         # v1: one server process = one space; the label is cosmetic.
         services.session.project = project or services.session.project
         return (
-            "project label updated. Note: this server is bound to one story "
-            "world (Anytype space); switching worlds means restarting the "
-            "server with a different ANYTYPE_SPACE_ID."
+            "project label updated. Note: this server is bound to one "
+            "Anytype space; switching spaces means restarting the server "
+            "with a different ANYTYPE_SPACE_ID."
         )
     if action in {"focus", "pin", "unpin", "remove", "clear"}:
         if action == "clear":

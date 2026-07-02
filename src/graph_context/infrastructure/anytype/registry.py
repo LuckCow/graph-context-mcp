@@ -15,6 +15,7 @@ Built once per hydrate from two cheap paged sweeps (``GET /types`` and
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from graph_context.domain import schema
@@ -124,8 +125,15 @@ class SpaceRegistry:
         self.properties_by_key[info.key] = info
 
 
-async def load_registry(client: AnytypeClient) -> SpaceRegistry:
-    """Build a registry from the space's live types and properties."""
+async def load_registry(
+    client: AnytypeClient,
+    extra_role_overrides: Mapping[str, Role] | None = None,
+) -> SpaceRegistry:
+    """Build a registry from the space's live types and properties.
+
+    ``extra_role_overrides`` carries the active DomainProfile's type-key ->
+    Role additions (WP5); they win over the legacy read-compat seeds.
+    """
     types_by_key: dict[str, str] = {}
     async for type_obj in client.list_types():
         key = type_obj.get("key")
@@ -141,5 +149,5 @@ async def load_registry(client: AnytypeClient) -> SpaceRegistry:
     return SpaceRegistry(
         properties_by_key=properties_by_key,
         types_by_key=types_by_key,
-        role_overrides=dict(LEGACY_TYPE_ROLES),
+        role_overrides={**LEGACY_TYPE_ROLES, **(extra_role_overrides or {})},
     )

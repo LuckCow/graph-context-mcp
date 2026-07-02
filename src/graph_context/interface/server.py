@@ -42,10 +42,16 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from graph_context.domain.session import SessionState
-from graph_context.interface import tools
+from graph_context.interface import profiles, tools
 from graph_context.interface.tools import Services, build_services
 
 logger = logging.getLogger(__name__)
+
+# The active domain profile (WP5): GC_PROFILE picks the docstring set (the
+# tool descriptions registered below ARE the profile's prompts) and the
+# type-key -> Role additions passed to the repository in _build_services.
+# Read at import time because @mcp.tool registration happens at import time.
+_PROFILE = profiles.get_profile(os.environ.get("GC_PROFILE"))
 
 
 @dataclass(slots=True)
@@ -64,6 +70,7 @@ async def _build_services() -> tuple[Services, list[Any]]:
     }
     teardown: list[Any] = []
 
+    logger.info("profile=%s (%s)", _PROFILE.name, _PROFILE.description)
     if backend == "memory":
         from graph_context.infrastructure.memory.fake_repository import (
             InMemoryGraphRepository,
@@ -71,7 +78,9 @@ async def _build_services() -> tuple[Services, list[Any]]:
 
         logger.info("backend=memory (development mode; nothing persists)")
         return build_services(
-            InMemoryGraphRepository(), session, store_llm_input=store_llm_input
+            InMemoryGraphRepository(role_overrides=_PROFILE.role_overrides),
+            session,
+            store_llm_input=store_llm_input,
         ), teardown
 
     from graph_context.application.session_persister import SessionPersister
@@ -87,7 +96,9 @@ async def _build_services() -> tuple[Services, list[Any]]:
     client = AnytypeClient(config)
     teardown.append(client.aclose)
     await ensure_schema(client)
-    repository = AnytypeGraphRepository(client)
+    repository = AnytypeGraphRepository(
+        client, role_overrides=_PROFILE.role_overrides
+    )
     await repository.hydrate()
     logger.info(
         "hydrated space %s: %d nodes / %d edges",
@@ -140,37 +151,15 @@ def _services(ctx: Context[Any, Any, Any]) -> Services:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["context"])
 async def context(
     ctx: Context[Any, Any, Any], action: str = "get", node_id: str = "", project: str = ""
 ) -> str:
-    """Inspect or adjust the working session: graph stats, focus stack, resync.
-
-    Actions:
-      get          -- graph statistics (node/edge counts, stale summaries).
-      overview     -- DERIVED entry-point map for a cold start: per-type
-                      counts plus the highest-degree "hub" nodes with name,
-                      type, id and summary. START HERE in a fresh session to
-                      obtain node ids for explore / get_node / focus. The map
-                      is rebuilt from the graph each call -- nothing to
-                      maintain. (alias: map)
-      resync       -- pull in edits a human made directly in Anytype; reports
-                      which nodes changed. Use before a long writing session.
-      focus        -- push node_id onto the focus stack (queries default to
-                      the top of this stack when no start is given).
-      pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
-      remove       -- drop node_id from the focus stack.
-      clear        -- empty the focus stack (pinned entries survive).
-      set_project  -- relabel the project shown in the header (cosmetic; one
-                      server is bound to one story world).
-
-    Every tool response begins with `[project | focus | recent]` -- this tool
-    is how you manage what appears there.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.context_tool(_services(ctx), action=action, node_id=node_id, project=project)
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["create_node"])
 async def create_node(
     ctx: Context[Any, Any, Any],
     type: str,
@@ -182,27 +171,7 @@ async def create_node(
     links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
 ) -> str:
-    """Create a story-world node and its initial links in ONE call.
-
-    type: an existing type in your Anytype space (e.g. Character, Location,
-      Event, Organization, Technology, Theme -- whatever your space defines).
-      An unmatched type is reported back with the list of known types.
-    summary: REQUIRED one-liner; keep it current -- exploration shows it.
-    story_time: REQUIRED for an Event-role node (number; timeline position).
-    links: list of {"edge_type", "other" (target node id OR name),
-      "outgoing" (default true)}. `other` accepts a node name -- it is
-      resolved for you (ambiguous names report the candidates).
-      edge_type is a relation LABEL. Reuse an existing relation (e.g. knows,
-      located_at, participated_in, triggered_by, or any relation already in
-      your space). A label with no existing relation is surfaced for approval;
-      set create_missing_relations=true to create it on the fly.
-      outgoing=false means the edge points FROM `other` TO the new node --
-      e.g. creating an Event that an existing Character took part in:
-        {"edge_type": "participated_in", "other": "<character id>",
-         "outgoing": false}
-
-    Prefer linking at creation over separate update_node calls.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.create_node_tool(
         _services(ctx), type=type, name=name, summary=summary,
         description=description, story_time=story_time, fields=fields, links=links,
@@ -210,7 +179,7 @@ async def create_node(
     )
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["update_node"])
 async def update_node(
     ctx: Context[Any, Any, Any],
     node_id: str,
@@ -223,20 +192,7 @@ async def update_node(
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
 ) -> str:
-    """Modify a node's fields and/or links. Only provided arguments change.
-
-    node_id accepts a node NAME as well as an id (resolved for you).
-
-    IMPORTANT: any update WITHOUT a new `summary` flags the node's summary
-    as stale (the one-liner may no longer reflect reality). Pass a fresh
-    `summary` whenever the change is meaningful; clear backlog stale flags
-    later via explore(only_stale=true).
-
-    add_links: same shape as create_node's links (set create_missing_relations
-    to create a brand-new relation label rather than reuse an existing one).
-    remove_links: list of {"source", "edge_type", "target"} exactly as shown
-    by get_node.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.update_node_tool(
         _services(ctx), node_id=node_id, name=name, summary=summary,
         description=description, story_time=story_time, fields=fields,
@@ -245,34 +201,21 @@ async def update_node(
     )
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["get_node"])
 async def get_node(
     ctx: Context[Any, Any, Any],
     node_id: str,
     edge_types: list[str] | None = None,
     include_prose: int = 0,
 ) -> str:
-    """Read ONE node in depth: all fields plus every edge grouped by type,
-    with neighbor names and ids. Use when you need the full picture of a
-    single entity; use `explore` to see a neighborhood instead. To read
-    several related nodes at once (e.g. all participants of a scene),
-    prefer explore(depth=1, detail="full") over repeated get_node calls.
-
-    node_id accepts a node NAME as well as an id (resolved for you; an
-    ambiguous name reports its candidates so you can pick one).
-    edge_types: optional filter, e.g. ["participated_in", "knows"].
-    include_prose: how many recently-recorded prose passages that reference
-      this node to attach (default 0; most-recent first, with excerpts) --
-      the "how was this described last time?" consistency lookup. Try 1-3
-      before re-describing a returning location or character.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.get_node_tool(
         _services(ctx), node_id=node_id, edge_types=edge_types,
         include_prose=include_prose,
     )
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["explore"])
 async def explore(
     ctx: Context[Any, Any, Any],
     start: str = "",
@@ -286,38 +229,7 @@ async def explore(
     detail: str = "summaries",
     only_stale: bool = False,
 ) -> str:
-    """Walk the graph outward from a node. THE general retrieval primitive.
-
-    In a fresh session the focus stack is empty; call context
-    action="overview" first to get a starting node id (or pass a node name
-    as `start` -- it is resolved for you).
-
-    start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
-    detail: names | summaries (default) | full.
-    as_of: story-time cutoff -- Events after it are hidden (a character's
-    view of the world at that moment); include_future=true restores them
-    (foreshadowing/direction). limit caps results (default 25; the response
-    says when it truncated).
-
-    SCENE ASSEMBLY is an explore configuration, not a separate tool:
-      explore(start="<event id>", depth=2,
-              include_types=["Character", "Location", "Item"],
-              detail="summaries", as_of=<event time>)
-
-    RENDERING PREP (about to write prose about a scene):
-      explore(start="<event id>", depth=1, detail="full")
-    returns the FULL descriptions of the event and every participant in
-    ONE call -- do not fetch participants one-by-one with get_node.
-    Caution: "full" emits complete, untruncated descriptions; keep
-    depth=1 and use `limit`.
-
-    STALE-SUMMARY SWEEP (before a big writing session):
-      explore(depth=3, limit=50, only_stale=true, detail="names")
-      ...then update_node each with a fresh summary.
-
-    Prose and SessionContext nodes are hidden unless explicitly named in
-    include_types.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.explore_tool(
         _services(ctx), start=start, depth=depth, include_types=include_types,
         exclude_types=exclude_types, edge_types=edge_types, as_of=as_of,
@@ -326,7 +238,7 @@ async def explore(
     )
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["find_path"])
 async def find_path(
     ctx: Context[Any, Any, Any],
     target: str,
@@ -334,48 +246,27 @@ async def find_path(
     edge_types: list[str] | None = None,
     max_length: int = 4,
 ) -> str:
-    """Find the shortest meaningful connection between two nodes -- "how is
-    Mira related to the Fall of Brakk?" Surfaces non-obvious links for plot
-    work. `target` and `start` each accept a node id OR name (resolved for
-    you). start: empty = focus-stack top. Edge direction is ignored for
-    reachability but shown in the result. Restrict edge_types to make the
-    path more meaningful (e.g. only social edges: ["knows", "member_of"]).
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.find_path_tool(
         _services(ctx), target=target, start=start, edge_types=edge_types,
         max_length=max_length,
     )
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
     ctx: Context[Any, Any, Any],
     name: str,
     type: str = "",
     limit: int = 10,
 ) -> str:
-    """Find nodes by NAME when you know the name but not the id.
-
-    Matching is case-insensitive: exact-name matches are returned first, and
-    only if there are none does it fall back to substring matches. Each
-    result line carries the node id, ready to paste into any other tool.
-
-    name: the name (or fragment) to search for.
-    type: optional type filter (e.g. "Character") to disambiguate.
-    limit: max substring matches to return (default 10).
-
-    You usually don't need this first: get_node, explore, find_path,
-    update_node and link `other` targets all accept a name directly in place
-    of an id and resolve it for you. Reach for find_node to browse, to
-    disambiguate when a name is ambiguous, or to confirm a node exists.
-    For a cold start with no name in mind, use context action='overview'.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.find_node_tool(
         _services(ctx), name=name, type=type, limit=limit,
     )
 
 
-@mcp.tool()
+@mcp.tool(description=_PROFILE.tool_docs["record_prose"])
 async def record_prose(
     ctx: Context[Any, Any, Any],
     text: str,
@@ -386,15 +277,7 @@ async def record_prose(
     llm_output: str = "",
     model: str = "",
 ) -> str:
-    """Save rendered prose INTO the graph so future scenes stay consistent.
-
-    Call after writing any scene/passage the user keeps. references is
-    REQUIRED and must list every node id whose content shaped the prose
-    (the characters present, the location, the events depicted) -- this
-    powers later consistency checks. summary: one-liner of what the passage
-    covers. Optionally store the generation inputs (llm_input/llm_output/
-    model) for provenance.
-    """
+    """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.record_prose_tool(
         _services(ctx), text=text, summary=summary, references=references,
         title=title, llm_input=llm_input, llm_output=llm_output, model=model,
