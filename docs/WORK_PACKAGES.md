@@ -403,7 +403,13 @@ carry `gc_user_id`/`gc_model`).
   the transport adapter; presenters stay transport-neutral. One message =
   one turn = at most one intent node. Transport egress joins the
   devcontainer firewall allowlist (or the bot runs outside the container).
-- **Single-writer delta queue** (settled — see decisions). All Anytype
+- **Single-writer delta queue** (settled — see decisions). **Core shipped
+  2026-07-02 (ADR 009):** FIFO single-writer seam in the adapter,
+  store-truth PATCH materialization via fresh GET in the critical section,
+  precise Q2 race detection, `pending_writes` depth surface, mock-transport
+  yield fidelity, and the port-level concurrency contract test. Deferred to
+  this WP: explicit pacing interval, fairness, and user-facing depth
+  feedback. Original spec follows. All Anytype
   writes flow through one scheduler task inside the Anytype adapter, which
   also owns the ~1 write/s pacing. Queue entries are **deltas** ("add
   target T to relation R on node N", "set field F=V", "create node with

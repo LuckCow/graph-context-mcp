@@ -46,6 +46,12 @@ class GraphRepository(Protocol):
       resync). ``resync`` applies incremental out-of-band changes and
       returns the ids of nodes that changed; callers surface these to the
       user ("N nodes changed outside this session").
+    * **Concurrent link mutations on one node all take effect** (ADR 009).
+      However the event loop interleaves overlapping write calls, no write
+      may be lost to a stale read-modify-write of a relation list. The fake
+      satisfies this by being synchronously atomic; the Anytype adapter by
+      serializing writes and materializing PATCH payloads from a fresh read
+      inside the critical section.
     """
 
     @property

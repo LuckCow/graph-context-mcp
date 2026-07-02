@@ -38,6 +38,7 @@ as strings.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Callable
@@ -98,7 +99,15 @@ class MockAnytype:
 
     @property
     def transport(self) -> httpx.MockTransport:
-        return httpx.MockTransport(self.handle)
+        return httpx.MockTransport(self._handle_async)
+
+    async def _handle_async(self, request: httpx.Request) -> httpx.Response:
+        # Fidelity: real I/O always suspends the calling task. Without this
+        # yield every mock request completes atomically and in-process
+        # concurrency bugs (lost read-modify-write updates, ADR 009) are
+        # invisible to the whole suite.
+        await asyncio.sleep(0)
+        return self.handle(request)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.request_log.append((request.method, request.url.path))

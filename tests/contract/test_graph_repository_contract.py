@@ -8,6 +8,8 @@ When live-server access exists, add a third subclass gated behind
 ``ANYTYPE_E2E=1`` pointing the same tests at a real space.
 """
 
+import asyncio
+
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft
@@ -84,6 +86,31 @@ class GraphRepositoryContract:
                       fields={"fuel": "bonemeal"})
         )
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
+
+    async def test_concurrent_link_mutations_on_one_node_all_take_effect(self, repo):
+        """Port guarantee (ADR 009): overlapping link writes against one
+        source node must ALL land in the store -- a stale read-modify-write
+        of the relation list may not silently drop a sibling's update,
+        however the event loop interleaves the calls. Asserted against the
+        STORE (post-hydrate), not the index: the lost update only shows
+        there."""
+        mira = await repo.create_node(CHAR)
+        sites = [
+            await repo.create_node(
+                NodeDraft("Location", name=f"Site {i}", summary="A place.")
+            )
+            for i in range(3)
+        ]
+        await asyncio.gather(
+            *[
+                repo.add_link(mira.id, LinkSpec("located_at", other=site.id))
+                for site in sites
+            ]
+        )
+        await repo.hydrate()  # rebuild the index from store truth
+        assert {n.id for _, n in repo.graph.neighbors(mira.id)} == {
+            site.id for site in sites
+        }
 
 
 class RoleOverrideContract:

@@ -158,3 +158,38 @@ class TestCustomAndInlineReads:
         await repo.hydrate()
         out = {(e.type, e.target) for e in repo.graph.edges(greg_id)}
         assert out == {("boss", adnan.id), ("links", mira.id)}
+
+
+class TestSingleWriterFreshReads:
+    """ADR 009: relation writes build on store truth read inside the
+    critical section, so both bot-vs-bot and human-vs-bot overwrites of
+    relation lists are prevented / detected. The bot-vs-bot guarantee is
+    port-level (contract suite); the human-edit behavior is adapter-only
+    (the fake has no out-of-band editors), so it lives here."""
+
+    async def test_out_of_band_relation_edit_survives_a_link_write(
+        self, repo, client, caplog
+    ):
+        import logging
+
+        mira = await repo.create_node(CHAR)
+        orla = await repo.create_node(
+            NodeDraft("Character", name="Orla", summary="Ally.")
+        )
+        adnan = await repo.create_node(
+            NodeDraft("Character", name="Adnan", summary="Boss.")
+        )
+        # A human adds mira -knows-> adnan in the Anytype UI: store changes,
+        # the repository's index does not.
+        await client.update_object(
+            mira.id, mapping.relation_patch_payload("gc_edge_knows", [adnan.id])
+        )
+        # The bot links mira -knows-> orla. Before ADR 009 the PATCH payload
+        # came from the index view ([]) and clobbered the human's edit.
+        with caplog.at_level(logging.WARNING):
+            edge = await repo.add_link(mira.id, LinkSpec("knows", other=orla.id))
+        assert edge.target == orla.id
+        assert any("out-of-band edit" in r.getMessage() for r in caplog.records)
+        await repo.hydrate()  # store truth: both targets present
+        assert {n.id for _, n in repo.graph.neighbors(mira.id)} == {orla.id, adnan.id}
+        assert repo.pending_writes == 0  # depth surface idles at zero

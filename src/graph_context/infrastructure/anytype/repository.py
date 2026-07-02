@@ -31,7 +31,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 from graph_context.domain import schema
@@ -85,6 +86,13 @@ class AnytypeGraphRepository:
         # registry on every (re)load so resync keeps them.
         self._role_overrides: dict[str, Role] = dict(role_overrides or {})
         self._registry = SpaceRegistry(role_overrides=dict(self._role_overrides))
+        # ADR 009: the single-writer seam. Every store mutation runs inside
+        # this FIFO lock, and relation-list PATCH payloads are materialized
+        # from a fresh GET *inside* the critical section -- so a wholesale-
+        # replace PATCH (A4) is never built on state another writer already
+        # changed. `pending_writes` is the queue-depth surface (WP8).
+        self._write_lock = asyncio.Lock()
+        self._pending_writes = 0
         # Relation keys created by this repository that have not yet been
         # proven usable in a PATCH (the live settle window; see module note).
         self._unsettled_keys: set[str] = set()
@@ -101,6 +109,11 @@ class AnytypeGraphRepository:
     @property
     def registry(self) -> SpaceRegistry:
         return self._registry
+
+    @property
+    def pending_writes(self) -> int:
+        """Write operations queued or in flight (ADR 009 depth surface)."""
+        return self._pending_writes
 
     # -- registry lookups (port surface) ----------------------------------
 
@@ -175,60 +188,64 @@ class AnytypeGraphRepository:
         # Pre-validate endpoints (index-only) before any API call.
         for link in links:
             self._graph.node(link.other)  # raises NodeNotFound
-        # Resolve every link label -> relation property key (may create
-        # relations); raises UnknownRelationLabel before any persistence.
-        resolved = [
-            (link, await self._resolve_relation(link.edge_type, create_missing_relations))
-            for link in links
-        ]
 
-        outgoing: dict[str, list[NodeId]] = {}
-        incoming: list[tuple[LinkSpec, str]] = []
-        for link, key in resolved:
-            if link.outgoing:
-                outgoing.setdefault(key, []).append(link.other)
-            else:
-                incoming.append((link, key))
+        async with self._writer():
+            # Resolve every link label -> relation property key (may create
+            # relations); raises UnknownRelationLabel before any persistence.
+            resolved = [
+                (link, await self._resolve_relation(link.edge_type, create_missing_relations))
+                for link in links
+            ]
 
-        created = await self._client.create_object(
-            mapping.to_create_payload(draft, type_key=type_key)
-        )
-        node = mapping.to_node(created, self._registry)
-        if node is None:  # defensive: the store returned something unusable
-            raise GraphContextError(
-                f"created object {created.get('id')} did not map back to a node"
+            outgoing: dict[str, list[NodeId]] = {}
+            incoming: list[tuple[LinkSpec, str]] = []
+            for link, key in resolved:
+                if link.outgoing:
+                    outgoing.setdefault(key, []).append(link.other)
+                else:
+                    incoming.append((link, key))
+
+            created = await self._client.create_object(
+                mapping.to_create_payload(draft, type_key=type_key)
             )
-
-        patched: list[tuple[NodeId, str, list[NodeId]]] = []
-        try:
-            # Outgoing relations are PATCHed onto the new object rather than
-            # inlined in the POST: a freshly-created relation is not yet on the
-            # type, so an inline POST would 400. A failure here falls through to
-            # the rollback, which archives the node (and with it these edges).
-            if outgoing:
-                patched_self = await self._patch_relations(
-                    node.id, mapping.relations_patch_payload(outgoing), outgoing
+            node = mapping.to_node(created, self._registry)
+            if node is None:  # defensive: the store returned something unusable
+                raise GraphContextError(
+                    f"created object {created.get('id')} did not map back to a node"
                 )
-                self._track_watermark(patched_self)
-            for link, key in incoming:
-                previous = self._outgoing_targets(link.other, key)
-                patched_source = await self._patch_relations(
-                    link.other,
-                    mapping.relation_patch_payload(key, [*previous, node.id]),
-                    [key],
-                )
-                patched.append((link.other, key, previous))
-                self._track_watermark(patched_source)
-        except Exception:
-            await self._rollback_create(node.id, patched)
-            raise
 
-        # Persisted everywhere -- now (and only now) mutate the index.
-        self._graph.upsert_node(node)
-        for link, key in resolved:
-            self._graph.add_edge(link.to_edge(anchor=node.id, property_key=key))
-        self._track_watermark(created)
-        return node
+            patched: list[tuple[NodeId, str, list[NodeId]]] = []
+            try:
+                # Outgoing relations are PATCHed onto the new object rather than
+                # inlined in the POST: a freshly-created relation is not yet on the
+                # type, so an inline POST would 400. A failure here falls through to
+                # the rollback, which archives the node (and with it these edges).
+                if outgoing:
+                    patched_self = await self._patch_relations(
+                        node.id, mapping.relations_patch_payload(outgoing), outgoing
+                    )
+                    self._track_watermark(patched_self)
+                for link, key in incoming:
+                    # Store-truth read (ADR 009): also makes the rollback
+                    # restore what the store really held, not an index view.
+                    previous = await self._current_targets(link.other, key)
+                    patched_source = await self._patch_relations(
+                        link.other,
+                        mapping.relation_patch_payload(key, [*previous, node.id]),
+                        [key],
+                    )
+                    patched.append((link.other, key, previous))
+                    self._track_watermark(patched_source)
+            except Exception:
+                await self._rollback_create(node.id, patched)
+                raise
+
+            # Persisted everywhere -- now (and only now) mutate the index.
+            self._graph.upsert_node(node)
+            for link, key in resolved:
+                self._graph.add_edge(link.to_edge(anchor=node.id, property_key=key))
+            self._track_watermark(created)
+            return node
 
     async def update_node(
         self,
@@ -250,47 +267,87 @@ class AnytypeGraphRepository:
             story_time=story_time,
             fields=fields,
         )
-        updated = await self._client.update_object(node_id, payload)
-        node = mapping.to_node(updated, self._registry)
-        if node is None:
-            raise GraphContextError(f"updated object {node_id} did not map back")
-        self._graph.upsert_node(node)
-        self._track_watermark(updated)
-        return node
+        async with self._writer():
+            updated = await self._client.update_object(node_id, payload)
+            node = mapping.to_node(updated, self._registry)
+            if node is None:
+                raise GraphContextError(f"updated object {node_id} did not map back")
+            self._graph.upsert_node(node)
+            self._track_watermark(updated)
+            return node
 
     async def add_link(
         self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
     ) -> Edge:
-        key = await self._resolve_relation(link.edge_type, create_missing_relations)
-        edge = link.to_edge(anchor=anchor, property_key=key)
-        self._graph.node(edge.source)  # endpoints must exist
-        self._graph.node(edge.target)
-        targets = self._outgoing_targets(edge.source, key)
-        if edge.target not in targets:
-            updated = await self._patch_relations(
-                edge.source,
-                mapping.relation_patch_payload(key, [*targets, edge.target]),
-                [key],
-            )
-            self._track_watermark(updated)
-        self._graph.add_edge(edge)
-        return edge
+        async with self._writer():
+            key = await self._resolve_relation(link.edge_type, create_missing_relations)
+            edge = link.to_edge(anchor=anchor, property_key=key)
+            self._graph.node(edge.source)  # endpoints must exist
+            self._graph.node(edge.target)
+            targets = await self._current_targets(edge.source, key)
+            if edge.target not in targets:
+                updated = await self._patch_relations(
+                    edge.source,
+                    mapping.relation_patch_payload(key, [*targets, edge.target]),
+                    [key],
+                )
+                self._track_watermark(updated)
+            self._graph.add_edge(edge)
+            return edge
 
     async def remove_link(self, edge: Edge) -> None:
         key = edge.property_key or self._registry.key_for_label(edge.type)
         if key is None:  # nothing on the store to patch; drop from the index
             self._graph.remove_edge(edge)
             return
-        targets = [
-            t for t in self._outgoing_targets(edge.source, key) if t != edge.target
-        ]
-        updated = await self._client.update_object(
-            edge.source, mapping.relation_patch_payload(key, targets)
-        )
-        self._graph.remove_edge(edge)
-        self._track_watermark(updated)
+        async with self._writer():
+            targets = [
+                t for t in await self._current_targets(edge.source, key)
+                if t != edge.target
+            ]
+            updated = await self._client.update_object(
+                edge.source, mapping.relation_patch_payload(key, targets)
+            )
+            self._graph.remove_edge(edge)
+            self._track_watermark(updated)
 
     # -- internals ----------------------------------------------------------
+
+    @asynccontextmanager
+    async def _writer(self) -> AsyncIterator[None]:
+        """The single-writer critical section (ADR 009).
+
+        FIFO over the lock's waiter queue: writes execute in arrival order,
+        exactly one at a time. The settle-window retries in
+        :meth:`_patch_relations` sleep while holding the lock -- deliberate,
+        a later write must not overtake an earlier one mid-retry.
+        """
+        self._pending_writes += 1
+        try:
+            async with self._write_lock:
+                yield
+        finally:
+            self._pending_writes -= 1
+
+    async def _current_targets(self, source: NodeId, property_key: str) -> list[NodeId]:
+        """Store-truth targets of one relation, read at write time.
+
+        Reads are unthrottled (S7), so the extra GET is cheap. This is also
+        the precise Q2 race detector: divergence from the index view means a
+        human edited this relation since the last (re)sync. The write then
+        builds on store truth, so the human's edit SURVIVES instead of being
+        clobbered by an index-derived wholesale-replace PATCH.
+        """
+        obj = await self._client.get_object(source)
+        current = mapping.relation_targets(obj, property_key)
+        index_view = self._outgoing_targets(source, property_key)
+        if set(current) != set(index_view):
+            logger.warning(
+                "out-of-band edit on %s.%s (index %s != store %s); "
+                "building the write on store state so the edit survives",
+                source, property_key, sorted(index_view), sorted(current),
+            )
+        return current
 
     async def _patch_relations(
         self, object_id: NodeId, payload: dict[str, Any], keys: Iterable[str]

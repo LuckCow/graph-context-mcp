@@ -280,6 +280,19 @@ def to_edges(obj: Mapping[str, Any]) -> list[Edge]:
     return edges
 
 
+def relation_targets(obj: Mapping[str, Any], property_key: str) -> list[str]:
+    """Current targets of ONE ``objects``-format relation on a fetched object.
+
+    The write-time read of ADR 009: PATCH payloads for relation lists are
+    materialized from this (store truth) rather than from the index, so a
+    wholesale-replace PATCH (A4) can never be built on stale state.
+    """
+    for entry in obj.get("properties", []):
+        if entry.get("key") == property_key and entry.get("format") == "objects":
+            return list(entry.get("objects") or [])
+    return []
+
+
 # -- sync helpers: timestamps & the modified-since query -----------------
 
 
