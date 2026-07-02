@@ -89,7 +89,7 @@ def build_services(
         writer=NodeWriter(repository, session),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        prose=ProseRecorder(repository, session, store_llm_input=store_llm_input),
+        prose=ProseRecorder(repository, store_llm_input=store_llm_input),
         persister=persister,
     )
 

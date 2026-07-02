@@ -36,7 +36,7 @@ async def test_include_prose_orders_most_recent_first_and_bounds_excerpt(
     # Deterministic generated_at stamps so ordering is testable.
     clock = count()
     recorder = ProseRecorder(
-        repository, session, now=lambda: f"2026-01-01T00:00:{next(clock):02d}Z"
+        repository, now=lambda: f"2026-01-01T00:00:{next(clock):02d}Z"
     )
     older = await recorder.record(
         text="O" * 50, summary="older", references=[world.undercroft.id], title="older"
@@ -59,7 +59,7 @@ async def test_include_prose_respects_limit(
 ) -> None:
     clock = count()
     recorder = ProseRecorder(
-        repository, session, now=lambda: f"2026-01-01T00:00:{next(clock):02d}Z"
+        repository, now=lambda: f"2026-01-01T00:00:{next(clock):02d}Z"
     )
     for i in range(3):
         await recorder.record(

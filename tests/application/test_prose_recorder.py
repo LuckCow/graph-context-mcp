@@ -12,9 +12,9 @@ from tests.conftest import World
 
 
 async def test_record_creates_prose_node_with_references(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
+    repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, session, now=lambda: "2026-01-01T00:00:00Z")
+    recorder = ProseRecorder(repository, now=lambda: "2026-01-01T00:00:00Z")
     node = await recorder.record(
         text="Ash over the Undercroft.", summary="Aftermath.",
         references=[world.mira.id, world.undercroft.id], model="demo",
@@ -29,10 +29,24 @@ async def test_record_creates_prose_node_with_references(
     assert targets == {world.mira.id, world.undercroft.id}
 
 
-async def test_body_assembles_delimited_llm_sections(
+async def test_record_does_not_touch_the_focus_stack(
     repository: InMemoryGraphRepository, session: SessionState, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, session, now=lambda: "t")
+    # Prose is an infra role hidden from traversal; recording it must not
+    # push it onto the focus stack or into recent history.
+    session.touch(world.mira.id)
+    focus_before = list(session.focus.entries)
+    recent_before = list(session.recent.items)
+    recorder = ProseRecorder(repository, now=lambda: "t")
+    await recorder.record(text="rendered", summary="s", references=[world.mira.id])
+    assert list(session.focus.entries) == focus_before
+    assert list(session.recent.items) == recent_before
+
+
+async def test_body_assembles_delimited_llm_sections(
+    repository: InMemoryGraphRepository, world: World
+) -> None:
+    recorder = ProseRecorder(repository, now=lambda: "t")
     node = await recorder.record(
         text="rendered", summary="s", references=[world.mira.id],
         llm_input="the prompt", llm_output="the completion",
@@ -44,11 +58,9 @@ async def test_body_assembles_delimited_llm_sections(
 
 
 async def test_store_llm_input_false_drops_the_input_section(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
+    repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(
-        repository, session, now=lambda: "t", store_llm_input=False
-    )
+    recorder = ProseRecorder(repository, now=lambda: "t", store_llm_input=False)
     node = await recorder.record(
         text="rendered", summary="s", references=[world.mira.id],
         llm_input="the prompt", llm_output="the completion",
@@ -59,9 +71,9 @@ async def test_store_llm_input_false_drops_the_input_section(
 
 
 async def test_oversized_body_is_truncated_with_marker(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
+    repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, session, now=lambda: "t")
+    recorder = ProseRecorder(repository, now=lambda: "t")
     huge = "z" * (pr.PROSE_BODY_CAP + 1000)
     node = await recorder.record(text=huge, summary="s", references=[world.mira.id])
     body = await repository.fetch_body(node.id)
@@ -70,9 +82,9 @@ async def test_oversized_body_is_truncated_with_marker(
 
 
 async def test_title_defaults_to_first_line(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
+    repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, session, now=lambda: "t")
+    recorder = ProseRecorder(repository, now=lambda: "t")
     node = await recorder.record(
         text="The vaults were silent.\nThen the bells.", summary="s",
         references=[world.mira.id],
