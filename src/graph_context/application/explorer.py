@@ -17,7 +17,8 @@ is deliberate -- see the proposal's "small, parameterized tool surface".
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import asyncio
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 
 from graph_context.domain import pathfinding, traversal
@@ -42,6 +43,20 @@ class Explorer:
         result = traversal.explore(self._repository.graph, query)
         self._session.touch(query.start)
         return result
+
+    async def bodies_for(self, node_ids: Sequence[NodeId]) -> dict[NodeId, str]:
+        """Fan out on-demand body fetches -- ``explore detail='full'`` (ADR 010).
+
+        Bodies never enter the index (A7: list/search responses omit them),
+        so full-text scene assembly is one concurrent GET per hit. Reads are
+        unthrottled (S7) and the query's own ``limit`` bounds the fan-out;
+        further shaping (caps, excerpts) is deliberately unbuilt until
+        dogfooding with the agent LLM shows what it needs.
+        """
+        bodies = await asyncio.gather(
+            *(self._repository.fetch_body(node_id) for node_id in node_ids)
+        )
+        return dict(zip(node_ids, bodies, strict=True))
 
     async def find_path(
         self,

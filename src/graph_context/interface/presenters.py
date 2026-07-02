@@ -17,6 +17,7 @@ silently: the header must never crash a tool response.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 
 from graph_context.application.node_reader import NodeView
@@ -107,8 +108,18 @@ def render_node_matches(nodes: list[Node]) -> str:
     return "\n".join(lines)
 
 
-def render_explore_result(result: ExploreResult, detail: Detail) -> str:
-    lines = [_render_hit_line(hit.node, hit.depth, detail) for hit in result.hits]
+def render_explore_result(
+    result: ExploreResult,
+    detail: Detail,
+    bodies: Mapping[str, str] | None = None,
+) -> str:
+    """``bodies`` (node id -> full text) accompanies ``detail='full'``: the
+    tool layer fans out on-demand fetches (ADR 010) and passes them in, so
+    the presenter stays I/O-free."""
+    lines = [
+        _render_hit_line(hit.node, hit.depth, detail, (bodies or {}).get(hit.node.id, ""))
+        for hit in result.hits
+    ]
     if result.truncated:
         lines.append(
             "... result limit reached; narrow filters or raise `limit` to see more."
@@ -116,13 +127,15 @@ def render_explore_result(result: ExploreResult, detail: Detail) -> str:
     return "\n".join(lines)
 
 
-def _render_hit_line(node: Node, depth: int, detail: Detail) -> str:
+def _render_hit_line(node: Node, depth: int, detail: Detail, body: str = "") -> str:
     indent = "  " * depth
     base = f"{indent}- {node.name} ({node.type}, id={node.id})"
     if detail is Detail.NAMES:
         return base
     stale = " [summary stale]" if node.summary_stale else ""
-    return f"{base}{stale}: {node.summary}"
+    if detail is Detail.SUMMARIES or not body:
+        return f"{base}{stale}: {node.summary}"
+    return f"{base}{stale}: {node.summary}\n{indent}    {body}"
 
 
 def _name_with_type(graph: GraphIndex, node_id: str, *, pinned: bool) -> str:

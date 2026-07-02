@@ -383,6 +383,7 @@ async def explore_tool(
     detail: str = "summaries",
     only_stale: bool = False,
 ) -> str:
+    detail_level = _parse_detail(detail)  # fail fast, before any traversal
     excludes = _node_type_set(exclude_types) or frozenset()
     includes = _node_type_set(include_types)
     exclude_roles: frozenset[Role] = frozenset()
@@ -413,7 +414,14 @@ async def explore_tool(
             result,
             hits=tuple(h for h in result.hits if h.node.summary_stale or h.depth == 0),
         )
-    return presenters.render_explore_result(result, _parse_detail(detail))
+    bodies = None
+    if detail_level is Detail.FULL:
+        # detail='full' = summaries + full bodies, fetched on demand
+        # (ADR 010) -- after narrowing, so only rendered hits cost a GET.
+        bodies = await services.explorer.bodies_for(
+            [hit.node.id for hit in result.hits]
+        )
+    return presenters.render_explore_result(result, detail_level, bodies)
 
 
 @guarded

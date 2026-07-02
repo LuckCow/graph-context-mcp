@@ -303,3 +303,35 @@ async def test_find_node_no_match_points_at_overview(
 ) -> None:
     body = _body(await tools.find_node_tool(services, name="zzz nobody"))
     assert "overview" in body
+
+
+# -- ADR 010: detail='full' fans out on-demand body fetches ------------------
+
+
+async def test_full_detail_renders_hit_bodies(
+    services: tools.Services, world: World
+) -> None:
+    await tools.update_node_tool(
+        services, node_id=world.mira.id,
+        description="Born beneath the vaults; leads the survivors now.",
+    )
+    out = _body(await tools.explore_tool(
+        services, start=world.undercroft.id, depth=1, detail="full"
+    ))
+    assert "Born beneath the vaults" in out
+
+
+async def test_summaries_detail_costs_no_body_fetches(
+    services: tools.Services, world: World
+) -> None:
+    fetches = 0
+    original = services.repository.fetch_body
+
+    async def counting(node_id: str) -> str:
+        nonlocal fetches
+        fetches += 1
+        return await original(node_id)
+
+    services.repository.fetch_body = counting  # type: ignore[method-assign]
+    await tools.explore_tool(services, start=world.mira.id, depth=2, detail="summaries")
+    assert fetches == 0
