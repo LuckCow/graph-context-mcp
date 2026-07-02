@@ -68,14 +68,19 @@ class GraphRepositoryContract:
         assert updated.summary_stale is True
 
     async def test_body_round_trips_and_updates(self, repo):
-        """ADR 010: the body is the node's description -- mutable, on-demand."""
+        """ADR 010: the body is the node's description -- mutable, on-demand.
+
+        Compared stripped: the live server normalizes markdown on store
+        (S6 -- trailing whitespace changes), so byte equality is not part
+        of the contract.
+        """
         node = await repo.create_node(
             NodeDraft("Character", name="Mira", summary="Engineer.",
                       body="Born in the Undercroft."),
         )
-        assert await repo.fetch_body(node.id) == "Born in the Undercroft."
+        assert (await repo.fetch_body(node.id)).strip() == "Born in the Undercroft."
         await repo.update_node(node.id, body="Leads the survivors now.")
-        assert await repo.fetch_body(node.id) == "Leads the survivors now."
+        assert (await repo.fetch_body(node.id)).strip() == "Leads the survivors now."
 
     async def test_update_without_body_leaves_body_alone(self, repo):
         node = await repo.create_node(
@@ -83,7 +88,7 @@ class GraphRepositoryContract:
                       body="Original description."),
         )
         await repo.update_node(node.id, summary="Fresh summary.")
-        assert await repo.fetch_body(node.id) == "Original description."
+        assert (await repo.fetch_body(node.id)).strip() == "Original description."
 
     async def test_empty_body_update_clears_it(self, repo):
         node = await repo.create_node(

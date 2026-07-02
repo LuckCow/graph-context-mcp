@@ -487,7 +487,16 @@ not the prompt.
 
 ---
 
-## WP9 — Descriptions move to the body (ADR 010)
+## WP9 — Descriptions move to the body (ADR 010) — **shipped 2026-07-02**
+
+**Status:** complete and green (mock suite + live E2E, 16/16 against a real
+server). Everything below landed as specified; the live run surfaced one
+contract nuance — body round-trips are asserted **stripped**, because the
+server normalizes markdown on store (the S6 caveat, reconfirmed). The
+migration script exists with mock-backed tests (`--dry-run` supported) but
+has **not yet been run against the real story space** — do that at a quiet
+moment, then delete `fetch_body`'s legacy `gc_description` fallback. The
+`explore full` fan-out tuning question stays open by design.
 
 **Goal:** a node's long-form description is its Anytype **body** — the
 UI's primary editing surface — instead of the cramped `gc_description`

@@ -23,6 +23,34 @@ async def test_get_space_returns_a_name(live_config) -> None:
     assert space.get("name")
 
 
+async def test_a7_body_editing_field_name_mismatch(live_config) -> None:
+    """Pins A7 (ADR 010) against the real server, raw client level.
+
+    Create takes ``body``; update takes ``markdown`` (wholesale replace)
+    while a ``body`` key in PATCH is silently ignored; neither the hydrate
+    sweep nor search ever returns ``markdown``. The contract subclass below
+    certifies the same semantics through the repository -- this test exists
+    so a server-side change to the raw quirk is caught by name.
+
+    Note the live server normalizes markdown on store (S6), so assertions
+    use ``strip()``, never byte equality.
+    """
+    client = AnytypeClient(live_config)
+    try:
+        created = await client.create_object(
+            {"name": "A7 pin", "type_key": "page", "body": "v1 original"}
+        )
+        object_id = created["id"]
+        await client.update_object(object_id, {"body": "clobber attempt"})
+        assert (await client.get_object(object_id))["markdown"].strip() == "v1 original"
+        await client.update_object(object_id, {"markdown": "v2 via markdown"})
+        assert (await client.get_object(object_id))["markdown"].strip() == "v2 via markdown"
+        async for obj in client.list_objects():
+            assert not obj.get("markdown")
+    finally:
+        await client.aclose()
+
+
 class TestAnytypeLiveRepository(GraphRepositoryContract):
     """Certifies the live adapter against the same contract as the fakes."""
 
