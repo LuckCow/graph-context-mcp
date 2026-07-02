@@ -203,6 +203,16 @@ class AnytypeClient:
         payload = await self.request("POST", f"{self._space}/properties", json=body)
         return _unwrap(payload, "property")
 
+    def list_tags(self, property_id: str) -> AsyncIterator[dict[str, Any]]:
+        """Select/multi_select options ("tags", ADR 012). Property ID, not key."""
+        return self.paginate(f"{self._space}/properties/{property_id}/tags")
+
+    async def create_tag(self, property_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        payload = await self.request(
+            "POST", f"{self._space}/properties/{property_id}/tags", json=body
+        )
+        return _unwrap(payload, "tag")
+
     @staticmethod
     def _to_error(response: httpx.Response, endpoint: str) -> AnytypeApiError:
         code, message = "unknown", response.text[:200]

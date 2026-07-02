@@ -96,8 +96,17 @@ async def _build_services() -> tuple[Services, list[Any]]:
     client = AnytypeClient(config)
     teardown.append(client.aclose)
     await ensure_schema(client)
+    # GC_FIELD_DENYLIST (ADR 012): comma-separated property keys to hide
+    # from field reflection, on top of the built-in system-noise denylist.
+    field_denylist = frozenset(
+        key.strip()
+        for key in os.environ.get("GC_FIELD_DENYLIST", "").split(",")
+        if key.strip()
+    )
     repository = AnytypeGraphRepository(
-        client, role_overrides=_PROFILE.role_overrides
+        client,
+        role_overrides=_PROFILE.role_overrides,
+        field_denylist=field_denylist,
     )
     await repository.hydrate()
     logger.info(

@@ -77,6 +77,7 @@ class AnytypeGraphRepository:
         client: AnytypeClient,
         *,
         role_overrides: Mapping[str, Role] | None = None,
+        field_denylist: Iterable[str] = (),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._client = client
@@ -85,7 +86,13 @@ class AnytypeGraphRepository:
         # Profile-supplied type-key -> Role additions (WP5); merged into the
         # registry on every (re)load so resync keeps them.
         self._role_overrides: dict[str, Role] = dict(role_overrides or {})
-        self._registry = SpaceRegistry(role_overrides=dict(self._role_overrides))
+        # Space-specific field-reflection silences (GC_FIELD_DENYLIST,
+        # ADR 012); merged with the system denylist inside the registry.
+        self._field_denylist: frozenset[str] = frozenset(field_denylist)
+        self._registry = SpaceRegistry(
+            role_overrides=dict(self._role_overrides),
+            hidden_field_keys=self._field_denylist,
+        )
         # ADR 009: the single-writer seam. Every store mutation runs inside
         # this FIFO lock, and relation-list PATCH payloads are materialized
         # from a fresh GET *inside* the critical section -- so a wholesale-
@@ -133,7 +140,8 @@ class AnytypeGraphRepository:
 
     async def hydrate(self) -> None:
         self._registry = await load_registry(
-            self._client, extra_role_overrides=self._role_overrides
+            self._client, extra_role_overrides=self._role_overrides,
+            hidden_field_keys=self._field_denylist,
         )
         self._graph, watermark, stamps = await sync.load_index(
             self._client, self._registry
@@ -148,7 +156,8 @@ class AnytypeGraphRepository:
             return frozenset(node.id for node in self._graph.nodes())
         # Refresh the registry so human-created types/relations get labelled.
         self._registry = await load_registry(
-            self._client, extra_role_overrides=self._role_overrides
+            self._client, extra_role_overrides=self._role_overrides,
+            hidden_field_keys=self._field_denylist,
         )
         fetched = await sync.fetch_changes(self._client, self._watermark)
         unseen = [

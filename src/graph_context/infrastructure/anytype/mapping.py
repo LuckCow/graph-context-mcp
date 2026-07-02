@@ -103,6 +103,25 @@ SCALAR_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # body links are mirrored here, so reading it surfaces inline links as edges.
 GENERIC_LINK_KEY = "links"
 
+# -- native scalar reflection (ADR 012) -----------------------------------
+
+# Property formats that surface in Node.fields (and are writable through
+# the ``fields`` parameter). ``objects`` is edges; everything else scalar.
+REFLECTED_FIELD_FORMATS: frozenset[str] = frozenset(
+    {"text", "number", "select", "multi_select", "date", "checkbox",
+     "url", "email", "phone"}
+)
+
+# System properties that would be pure context-window noise if reflected.
+# Census-based (real space, 2026-07-02): every object carries these. A
+# curated list, deliberately NOT a name heuristic -- `creator_origin`
+# looked system-flavored and turned out to be a user's story relation.
+# Space-specific additions come from GC_FIELD_DENYLIST via the registry.
+SYSTEM_PROPERTY_DENYLIST: frozenset[str] = frozenset(
+    {"created_date", "last_modified_date", "added_date",
+     "last_opened_date", "last_used_date"}
+)
+
 # Account-pointing / reverse-adjacency system relations that are NOT story
 # edges. ``backlinks`` is the reverse of ``links``/named relations and is
 # already covered by the in-memory reverse index, so reading it would
@@ -116,7 +135,12 @@ _VALUE_FIELD = {
     "number": "number",
     "checkbox": "checkbox",
     "objects": "objects",
-    "date": "date",  # read-only here; lets _property_map surface timestamps
+    "date": "date",
+    "select": "select",            # value: inline tag envelope (ADR 012)
+    "multi_select": "multi_select",  # value: list of tag envelopes
+    "url": "url",
+    "email": "email",
+    "phone": "phone",
 }
 
 
@@ -242,12 +266,39 @@ def _property_map(obj: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def field_value(fmt: str, raw: Any) -> str:
+    """Normalize a native scalar property value to the string ``fields``
+    carry (ADR 012): select -> the option's display name, multi_select ->
+    comma-joined names, checkbox -> "true"/"false", numbers untrailed."""
+    if raw is None:
+        return ""
+    if fmt == "select":
+        return str(raw.get("name", "")) if isinstance(raw, Mapping) else str(raw)
+    if fmt == "multi_select":
+        return ", ".join(
+            str(t.get("name", "")) if isinstance(t, Mapping) else str(t)
+            for t in raw
+        )
+    if fmt == "checkbox":
+        return "true" if raw else "false"
+    if fmt == "number" and isinstance(raw, float) and raw.is_integer():
+        return str(int(raw))
+    return str(raw)
+
+
 def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
     """Translate an API object to a :class:`Node`.
 
     Returns ``None`` only for archived objects or objects with no type key.
     Every other object is a first-class node -- the space-reflecting model
     sees the user's native objects, not just a ``gc_`` subset.
+
+    ``fields`` merges two channels (ADR 012): the ``gc_fields`` blob (the
+    bot's channel for keys with no native property) and every reflectable
+    native scalar property, normalized to strings. Native wins on a key
+    collision -- the human-visible surface is authoritative. Empty values
+    and false checkboxes are skipped; noise is filtered by
+    ``registry.reflects_field`` (system denylist + GC_FIELD_DENYLIST).
     """
     type_key = (obj.get("type") or {}).get("key", "")
     if obj.get("archived") or not type_key:
@@ -259,6 +310,16 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
     except (ValueError, AttributeError):
         logger.warning("unparseable gc_fields on %s; ignoring", obj.get("id"))
         fields = {}
+    for entry in obj.get("properties", []):
+        key, fmt = entry.get("key", ""), entry.get("format", "")
+        if not key or not registry.reflects_field(key, fmt):
+            continue
+        raw = entry.get(_VALUE_FIELD.get(fmt, ""))
+        if fmt == "checkbox" and not raw:
+            continue  # an unticked checkbox is absence, not a fact
+        value = field_value(fmt, raw)
+        if value:
+            fields[key] = value
     return Node(
         id=obj["id"],
         type=registry.type_name(type_key),

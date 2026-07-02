@@ -31,6 +31,12 @@ something:
   ``description`` property is prepended as the first line, while PATCH
   writes body blocks only -- so a raw GET -> PATCH round-trip duplicates
   the summary line. Reads must go through ``mapping.body_of``.
+* Select/multi_select options are **tags** (ADR 012): ``GET/POST
+  /properties/{propertyId}/tags`` (property ID, not key -- a key 404s
+  "invalid property id"). A write referencing a tag that does not exist
+  400s the whole request ("invalid select option"), on POST /objects and
+  PATCH alike; values are accepted by tag id or key and stored/read as
+  the inline tag envelope.
 * 429 ``rate_limit_exceeded`` payloads via ``fail_next`` for retry tests.
 
 This module and ``mapping.py`` are the two places our representation
@@ -63,6 +69,7 @@ _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
 _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
 _TYPES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types$")
 _PROPERTIES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties$")
+_TAGS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties/(?P<prop>[^/]+)/tags$")
 
 PROP_LAST_MODIFIED = "last_modified_date"
 PROP_CREATED = "created_date"
@@ -109,6 +116,9 @@ class MockAnytype:
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
         self._properties: dict[str, dict[str, Any]] = {}
+        # Select/multi_select options ("tags", ADR 012), keyed by property ID
+        # -- the live route rejects property keys ("invalid property id").
+        self._tags: dict[str, list[dict[str, Any]]] = {}
         self._ids = count(1)
         self._clock = count(1)
         self._fail_queue: list[tuple[int, dict[str, Any]]] = []
@@ -139,6 +149,7 @@ class MockAnytype:
             (_OBJECTS, self._handle_objects),
             (_SEARCH, self._handle_search),
             (_TYPES, self._handle_types),
+            (_TAGS, self._handle_tags),
             (_PROPERTIES, self._handle_properties),
             (_SPACE, self._handle_space),
         ):
@@ -230,6 +241,9 @@ class MockAnytype:
                                    f'"{entry.get("key")}"',
                         "object": "error", "status": 400,
                     })
+            error = self._resolve_select_values(body.get("properties", []))
+            if error is not None:
+                return error
             object_id = self._new_id()
             self._objects[object_id] = {
                 "id": object_id,
@@ -279,6 +293,9 @@ class MockAnytype:
                         "message": f'bad input: unknown property key: "{key}"',
                         "object": "error", "status": 400,
                     })
+            error = self._resolve_select_values(body.get("properties", []))
+            if error is not None:
+                return error
             if "name" in body:
                 obj["name"] = body["name"]
             for entry in body.get("properties", []):
@@ -324,6 +341,82 @@ class MockAnytype:
         if self.property_settle_patches > 0 and body.get("format") == "objects":
             self._settling[body["key"]] = self.property_settle_patches
         return httpx.Response(201, json={"property": self._properties[body["key"]]})
+
+    def _handle_tags(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        """Select/multi_select options (ADR 012). Addressed by property ID --
+        the live route 404s on a property KEY ("invalid property id")."""
+        prop = next(
+            (p for p in self._properties.values() if p["id"] == match.group("prop")),
+            None,
+        )
+        if prop is None:
+            return httpx.Response(404, json={
+                "code": "object_not_found", "message": "invalid property id",
+                "object": "error", "status": 404,
+            })
+        tags = self._tags.setdefault(prop["id"], [])
+        if request.method == "GET":
+            return self._paginated(tags, request.url.params)
+        if request.method == "POST":
+            body = json.loads(request.content)
+            name = body.get("name", "")
+            tag = {
+                "object": "tag", "id": self._new_id(),
+                "key": re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_"),
+                "name": name, "color": body.get("color", "grey"),
+            }
+            tags.append(tag)
+            return httpx.Response(201, json={"tag": tag})
+        return self._error(405, "method_not_allowed")
+
+    def _resolve_select_values(
+        self, entries: list[dict[str, Any]]
+    ) -> httpx.Response | None:
+        """Validate + normalize select/multi_select entries in a write.
+
+        Live behavior (ADR 012 spikes): the value must reference an EXISTING
+        tag by id or key -- a bare unknown string 400s the whole request, on
+        POST /objects and PATCH alike. Stored values become the inline tag
+        envelope that reads return."""
+        def find(
+            value: Any, tags: list[dict[str, Any]]
+        ) -> dict[str, Any] | None:
+            if isinstance(value, dict):  # already an envelope (seeded)
+                return value
+            return next((t for t in tags if value in (t["id"], t["key"])), None)
+
+        for entry in entries:
+            fmt = entry.get("format")
+            if fmt not in ("select", "multi_select"):
+                continue
+            prop = self._properties.get(entry.get("key", ""))
+            tags = self._tags.get(prop["id"], []) if prop else []
+
+            if fmt == "select":
+                raw = entry.get("select")
+                if raw is None:
+                    continue
+                tag = find(raw, tags)
+                if tag is None:
+                    return httpx.Response(400, json={
+                        "code": "bad_request", "object": "error", "status": 400,
+                        "message": f'bad input: invalid select option for '
+                                   f'"{entry.get("key")}": {raw}',
+                    })
+                entry["select"] = tag
+            else:
+                resolved = []
+                for raw in entry.get("multi_select") or []:
+                    tag = find(raw, tags)
+                    if tag is None:
+                        return httpx.Response(400, json={
+                            "code": "bad_request", "object": "error", "status": 400,
+                            "message": f'bad input: invalid multi_select option '
+                                       f'for "{entry.get("key")}": {raw}',
+                        })
+                    resolved.append(tag)
+                entry["multi_select"] = resolved
+        return None
 
     # -- helpers ---------------------------------------------------------------
 

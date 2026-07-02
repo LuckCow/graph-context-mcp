@@ -29,6 +29,9 @@ class PropertyInfo:
     key: str
     name: str
     format: str
+    # Property object id -- required by the tags routes (ADR 012), which
+    # reject property keys. "" for entries built before ids mattered.
+    id: str = ""
 
 
 # Read-compat with pre-pivot data (ADR 006): the old bootstrap minted a
@@ -53,6 +56,9 @@ class SpaceRegistry:
     properties_by_key: dict[str, PropertyInfo] = field(default_factory=dict)
     types_by_key: dict[str, str] = field(default_factory=dict)  # key -> display name
     role_overrides: dict[str, Role] = field(default_factory=dict)
+    # Extra property keys hidden from field reflection (GC_FIELD_DENYLIST);
+    # merged with mapping.SYSTEM_PROPERTY_DENYLIST in reflects_field().
+    hidden_field_keys: frozenset[str] = frozenset()
 
     # -- types ----------------------------------------------------------
 
@@ -124,15 +130,50 @@ class SpaceRegistry:
         """Record a newly created relation so later writes can reuse it."""
         self.properties_by_key[info.key] = info
 
+    # -- scalar fields (ADR 012) -----------------------------------------
+
+    def reflects_field(self, key: str, fmt: str) -> bool:
+        """Should this property surface in ``Node.fields``?
+
+        Scalar formats only; excludes ``gc_`` keys (first-class or retired),
+        the built-in ``description`` (the summary channel, ADR 011), the
+        census-based system-noise denylist, and any space-specific keys the
+        user silenced via ``GC_FIELD_DENYLIST``.
+        """
+        return (
+            fmt in mapping.REFLECTED_FIELD_FORMATS
+            and not key.startswith(mapping.GC_PREFIX)
+            and key != mapping.PROP_SUMMARY
+            and key not in mapping.SYSTEM_PROPERTY_DENYLIST
+            and key not in self.hidden_field_keys
+        )
+
+    def field_property(self, identifier: str) -> PropertyInfo | None:
+        """Resolve a ``fields`` key to a reflectable scalar property.
+
+        Case-insensitive match on key or display name -- the write-side
+        mirror of :meth:`reflects_field` (an unmatched key falls through to
+        the ``gc_fields`` blob).
+        """
+        target = identifier.strip().lower()
+        for key, info in self.properties_by_key.items():
+            if not self.reflects_field(key, info.format):
+                continue
+            if key.lower() == target or info.name.strip().lower() == target:
+                return info
+        return None
+
 
 async def load_registry(
     client: AnytypeClient,
     extra_role_overrides: Mapping[str, Role] | None = None,
+    hidden_field_keys: frozenset[str] = frozenset(),
 ) -> SpaceRegistry:
     """Build a registry from the space's live types and properties.
 
     ``extra_role_overrides`` carries the active DomainProfile's type-key ->
     Role additions (WP5); they win over the legacy read-compat seeds.
+    ``hidden_field_keys`` carries GC_FIELD_DENYLIST (ADR 012).
     """
     types_by_key: dict[str, str] = {}
     async for type_obj in client.list_types():
@@ -144,10 +185,12 @@ async def load_registry(
         key = prop.get("key")
         if key:
             properties_by_key[key] = PropertyInfo(
-                key=key, name=prop.get("name", key), format=prop.get("format", "")
+                key=key, name=prop.get("name", key),
+                format=prop.get("format", ""), id=prop.get("id", ""),
             )
     return SpaceRegistry(
         properties_by_key=properties_by_key,
         types_by_key=types_by_key,
         role_overrides={**LEGACY_TYPE_ROLES, **(extra_role_overrides or {})},
+        hidden_field_keys=hidden_field_keys,
     )
