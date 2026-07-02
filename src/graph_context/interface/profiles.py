@@ -91,6 +91,14 @@ body). To make a targeted edit, get_node first and send back the full
 revised text -- a human may have rewritten it in Anytype since you last
 saw it. An empty string clears it.
 
+fields: {"key": "value"} attributes. A key matching one of the space's
+own properties (by key or display name -- get_node shows what a node
+already carries) updates THAT property, visible and filterable in
+Anytype; select options match by name and are created when new;
+multi-select values are comma-separated names ("Dark, Hopeful").
+Unmatched keys land in a bot-only extras store, which this parameter
+replaces wholesale -- resend extras you want kept.
+
 add_links: same shape as create_node's links (set create_missing_relations
 to create a brand-new relation label rather than reuse an existing one).
 remove_links: list of {"source", "edge_type", "target"} exactly as shown
@@ -157,6 +165,12 @@ description: long-form text (a portrait, a place's atmosphere, an
   user reads and edits it directly; returned by get_node and
   explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
+fields: {"key": "value"} attributes. A key matching one of the space's
+  own properties (e.g. role, tech_type -- by key or display name) writes
+  THAT property, visible and filterable in Anytype; select options match
+  by name and are created when new; multi-select values are
+  comma-separated names. Unmatched keys are kept in a bot-only extras
+  store.
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you (ambiguous names report the candidates).
@@ -298,6 +312,12 @@ story_time: REQUIRED for an Event-role node (meetings, decisions,
   milestones): its position on the timeline as a sortable number -- use
   epoch seconds or YYYYMMDD (e.g. 20260702). The parameter name is
   historical; read it as "time".
+fields: {"key": "value"} attributes. A key matching one of the space's
+  own properties (e.g. status, priority -- by key or display name)
+  writes THAT property, visible and filterable in Anytype; select
+  options match by name and are created when new; multi-select values
+  are comma-separated names. Unmatched keys are kept in a bot-only
+  extras store.
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you (ambiguous names report the candidates).

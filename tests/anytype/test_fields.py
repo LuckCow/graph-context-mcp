@@ -241,3 +241,26 @@ class TestFieldWriteRouting:
         ))
         stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
         assert stored["real_life_inspiration"]["text"] == "rental family services"
+
+
+async def test_fresh_tag_settle_window_is_retried() -> None:
+    """A write immediately after create_tag may 400 "invalid select option"
+    (live flake; same shape as the fresh-relation window). The repository
+    retries with backoff instead of failing the create."""
+    mock = MockAnytype(tag_settle_writes=2)
+    config = AnytypeConfig(api_key="test", space_id=mock.space_id, page_limit=10)
+    client = AnytypeClient(config, transport=mock.transport)
+    await ensure_schema(client)
+    await seed_native_types(client)
+    await client.create_property({"key": "role", "name": "Role", "format": "select"})
+
+    async def instant(_: float) -> None:
+        pass
+
+    repo = AnytypeGraphRepository(client, sleep=instant)
+    await repo.hydrate()
+    node = await repo.create_node(NodeDraft(
+        "Character", name="Autumn", summary="Worker.", fields={"role": "Antagonist"},
+    ))
+    assert node.fields["role"] == "Antagonist"
+    await client.aclose()

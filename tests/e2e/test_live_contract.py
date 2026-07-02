@@ -54,6 +54,32 @@ async def test_a7_body_editing_field_name_mismatch(live_config) -> None:
 class TestAnytypeLiveRepository(GraphRepositoryContract):
     """Certifies the live adapter against the same contract as the fakes."""
 
+    async def test_native_select_field_round_trips_live(self, repo):
+        """ADR 012 against the real server: a `fields` key matching a select
+        property resolves-or-creates the tag, writes the property, and
+        reflects back as the option's display name -- while system
+        timestamps stay filtered out of fields."""
+        client = repo._client  # E2E-only reach-in; the port has no property API
+        if repo.registry.field_property("E2E Mood") is None:
+            # NOTE: the live server slugifies the requested key its own way
+            # (e2e_mood came back as e_2_e_mood), so the test addresses the
+            # property by DISPLAY NAME throughout -- which is also the
+            # friendlier path to exercise live.
+            await client.create_property(
+                {"key": "e2e_mood", "name": "E2E Mood", "format": "select"}
+            )
+            await repo.resync()  # refresh the registry snapshot
+        key = repo.registry.field_property("E2E Mood").key
+        node = await repo.create_node(
+            NodeDraft("Character", name="Field Pin", summary="s",
+                      fields={"E2E Mood": "Wistful", "extra": "blob-bound"}),
+        )
+        assert node.fields[key] == "Wistful"          # tag auto-created
+        assert node.fields["extra"] == "blob-bound"   # residual -> blob
+        assert "created_date" not in node.fields      # noise filter, live
+        updated = await repo.update_node(node.id, fields={"E2E Mood": "wistful"})
+        assert updated.fields[key] == "Wistful"       # option REUSED by name
+
     async def test_create_with_brand_new_outgoing_relation_links_in_one_call(self, repo):
         """Regression (Mary Abbott incident): creating a node with an outgoing
         link whose relation does not exist yet must succeed atomically.

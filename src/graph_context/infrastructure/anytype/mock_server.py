@@ -103,6 +103,7 @@ class MockAnytype:
         space_name: str = "TestWorld",
         max_page_limit: int = 100,
         property_settle_patches: int = 0,
+        tag_settle_writes: int = 0,
     ) -> None:
         self.space_id = space_id
         self.space_name = space_name
@@ -112,7 +113,12 @@ class MockAnytype:
         # key") for a short settle window. The knob makes the next N PATCHes
         # per fresh key reject the same way (0 = settled instantly).
         self.property_settle_patches = property_settle_patches
+        # Same knob for freshly created TAGS (select options): the next N
+        # object writes referencing a fresh tag 400 "invalid select option"
+        # (inferred from a live flake; same shape as the relation window).
+        self.tag_settle_writes = tag_settle_writes
         self._settling: dict[str, int] = {}
+        self._tag_settling: dict[str, int] = {}
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
         self._properties: dict[str, dict[str, Any]] = {}
@@ -359,13 +365,23 @@ class MockAnytype:
             return self._paginated(tags, request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
+            if not body.get("color"):
+                # CreateTagRequest.Color is REQUIRED (live-confirmed).
+                return httpx.Response(400, json={
+                    "code": "bad_request", "object": "error", "status": 400,
+                    "message": "Key: 'CreateTagRequest.Color' Error:Field "
+                               "validation for 'Color' failed on the "
+                               "'required' tag",
+                })
             name = body.get("name", "")
             tag = {
                 "object": "tag", "id": self._new_id(),
                 "key": re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_"),
-                "name": name, "color": body.get("color", "grey"),
+                "name": name, "color": body["color"],
             }
             tags.append(tag)
+            if self.tag_settle_writes > 0:
+                self._tag_settling[tag["key"]] = self.tag_settle_writes
             return httpx.Response(201, json={"tag": tag})
         return self._error(405, "method_not_allowed")
 
@@ -397,6 +413,9 @@ class MockAnytype:
                 if raw is None:
                     continue
                 tag = find(raw, tags)
+                if tag is not None and self._tag_settling.get(tag["key"], 0) > 0:
+                    self._tag_settling[tag["key"]] -= 1
+                    tag = None  # settle window still open: reject as invalid
                 if tag is None:
                     return httpx.Response(400, json={
                         "code": "bad_request", "object": "error", "status": 400,

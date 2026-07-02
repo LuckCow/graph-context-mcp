@@ -627,7 +627,20 @@ surfaces.
   footer can never create spurious edges). **Pills, by contrast, degrade
   on markdown write-back** — see the body-rewrite caveat in 10c.
 
-### WP10a — Native scalar property reflection
+### WP10a — Native scalar property reflection — **shipped 2026-07-02**
+
+**Status:** complete (ADR 012), read AND write side; mock suite + live
+E2E green. The write-shape spike answered everything: options are
+**tags** (`GET/POST /properties/{propertyId}/tags` — property *id*, not
+key), PATCH/POST accept a tag id or key and 400 on anything else, so
+`fields` writes resolve-or-create tags by name (color is REQUIRED on
+create — derived from the name hash; live also slugifies requested
+property keys its own way, e.g. `e2e_mood` → `e_2_e_mood`). A live
+flake right after a tag creation looked exactly like the fresh-relation
+settle window, so object writes carrying fresh tags get the same
+retry-with-backoff discipline (mock knob `tag_settle_writes` pins it).
+The spurious-property filter shipped as specified:
+`SYSTEM_PROPERTY_DENYLIST` + `GC_FIELD_DENYLIST`. Original spec follows.
 
 - **Read side (the core):** `to_node` ingests native scalar properties —
   `select` / `multi_select` / `text` / `number` / `date` / `url` — into
@@ -727,8 +740,8 @@ write `body_of` output, never raw markdown.** Original spec follows.
 
 ### Open questions
 
-- Select-value write shape (the 10a spike); whether option *creation* is
-  possible or only reuse of existing options.
+- ~~Select-value write shape (the 10a spike)~~ — **answered, see 10a
+  status**: tags endpoints; creation works; color required.
 - Footer heading wording + whether `explore`/`get_node` should note "N
   connections rendered on the page" (probably not — the graph already
   says it).

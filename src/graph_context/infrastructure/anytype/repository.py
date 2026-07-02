@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -62,11 +63,27 @@ logger = logging.getLogger(__name__)
 _FRESH_KEY_ATTEMPTS = 5
 _FRESH_KEY_BACKOFF_SECONDS = 0.3
 _UNKNOWN_KEY_MARKER = "unknown property key"
+# Freshly created select options appear to have the same settle window
+# (inferred from a live flake -- an object write immediately after
+# create_tag 400'd "invalid select option", then succeeded; not
+# spike-reproducible once the tag exists). Same retry discipline.
+_INVALID_OPTION_MARKERS = ("invalid select option", "invalid multi_select option")
 
 
 def _slugify(label: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
     return slug or "relation"
+
+
+# Anytype's tag palette. CreateTagRequest requires a color (live-confirmed);
+# picking by name hash is deterministic without maintaining a mapping, and a
+# human can recolor in the UI without us ever clobbering it (create-only).
+_TAG_COLORS = ("grey", "yellow", "orange", "red", "pink",
+               "purple", "blue", "ice", "teal", "lime")
+
+
+def _tag_color(name: str) -> str:
+    return _TAG_COLORS[zlib.crc32(name.strip().lower().encode()) % len(_TAG_COLORS)]
 
 
 class AnytypeGraphRepository:
@@ -103,6 +120,8 @@ class AnytypeGraphRepository:
         # Relation keys created by this repository that have not yet been
         # proven usable in a PATCH (the live settle window; see module note).
         self._unsettled_keys: set[str] = set()
+        # Tag keys created by this repository, same settle discipline.
+        self._unsettled_tags: set[str] = set()
         self._watermark: str | None = None  # None until first hydrate
         # Self-write suppression: stamps already accounted for (our own writes
         # + hydrate), so resync's watermark query never reports our own
@@ -218,10 +237,12 @@ class AnytypeGraphRepository:
             # entries (select tags resolved-or-created first -- POST
             # validates them inline); the residual goes to the blob.
             native_fields, blob = await self._resolve_field_entries(draft.fields)
-            created = await self._client.create_object(
-                mapping.to_create_payload(
-                    draft, type_key=type_key,
-                    native_properties=native_fields, fields_blob=blob,
+            created = await self._send_tolerating_fresh_tags(
+                lambda: self._client.create_object(
+                    mapping.to_create_payload(
+                        draft, type_key=type_key,
+                        native_properties=native_fields, fields_blob=blob,
+                    )
                 )
             )
             node = mapping.to_node(created, self._registry)
@@ -289,7 +310,9 @@ class AnytypeGraphRepository:
             native_properties=native_fields,
         )
         async with self._writer():
-            updated = await self._client.update_object(node_id, payload)
+            updated = await self._send_tolerating_fresh_tags(
+                lambda: self._client.update_object(node_id, payload)
+            )
             node = mapping.to_node(updated, self._registry)
             if node is None:
                 raise GraphContextError(f"updated object {node_id} did not map back")
@@ -482,6 +505,31 @@ class AnytypeGraphRepository:
         # text / date / url / email / phone: pass the string through.
         return mapping.property_entry(info.key, fmt, value)
 
+    async def _send_tolerating_fresh_tags(
+        self, send: Callable[[], Awaitable[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        """An object write tolerant of the fresh-tag settle window.
+
+        Mirrors :meth:`_patch_relations`: only a 400 naming an invalid
+        select option while we hold unproven fresh tags is retried.
+        """
+        for attempt in range(_FRESH_KEY_ATTEMPTS):
+            try:
+                result = await send()
+            except AnytypeApiError as err:
+                unsettled = (
+                    bool(self._unsettled_tags)
+                    and err.status == 400
+                    and any(m in err.detail for m in _INVALID_OPTION_MARKERS)
+                )
+                if unsettled and attempt < _FRESH_KEY_ATTEMPTS - 1:
+                    await self._sleep(_FRESH_KEY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                raise
+            self._unsettled_tags.clear()  # proven usable
+            return result
+        raise AssertionError("unreachable")  # loop always returns or raises
+
     async def _resolve_tag(self, info: PropertyInfo, value: str) -> str:
         """Resolve a select/multi_select value to an existing tag key,
         creating the option when missing (options are cheap; ceremony is
@@ -496,8 +544,14 @@ class AnytypeGraphRepository:
         async for tag in self._client.list_tags(info.id):
             if target in (str(tag.get("name", "")).lower(), str(tag.get("key", "")).lower()):
                 return str(tag["key"])
-        created = await self._client.create_tag(info.id, {"name": value.strip()})
+        created = await self._client.create_tag(
+            info.id,
+            # `color` is REQUIRED by CreateTagRequest (live-confirmed);
+            # derived from the name so it is stable and human-recolorable.
+            {"name": value.strip(), "color": _tag_color(value)},
+        )
         logger.info("created tag %r on property %s", value.strip(), info.key)
+        self._unsettled_tags.add(str(created["key"]))
         return str(created["key"])
 
     async def _rollback_create(
