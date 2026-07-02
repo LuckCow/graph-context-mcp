@@ -56,18 +56,38 @@ async def test_moves_description_into_body_and_clears_property(
     assert await migrate_script.migrate(client, dry_run=False) == (0, 0, 0)
 
 
-async def test_existing_body_is_a_conflict_left_untouched(
+async def test_distinct_body_is_a_conflict_left_untouched(
     mock: MockAnytype, client: AnytypeClient
 ) -> None:
     object_id = _seed_legacy(
         mock, "Keep", "Old property text.", body="A human already wrote this."
     )
-    migrated, _, conflicts = await migrate_script.migrate(client, dry_run=False)
-    assert (migrated, conflicts) == (0, 1)
+    migrated, cleared, conflicts = await migrate_script.migrate(client, dry_run=False)
+    assert (migrated, cleared, conflicts) == (0, 0, 1)
     obj = await client.get_object(object_id)
     props = {p["key"]: p.get("text") for p in obj["properties"]}
     assert obj["markdown"] == "A human already wrote this."
     assert props["gc_description"] == "Old property text."  # kept for the human
+
+
+async def test_body_containing_the_description_clears_the_stale_copy(
+    mock: MockAnytype, client: AnytypeClient
+) -> None:
+    """The dominant real-space case: a human already copied the description
+    into the page body (modulo markdown normalization). The property is a
+    stale duplicate -- cleared; the body stays byte-untouched."""
+    object_id = _seed_legacy(
+        mock, "Keep", "The old keep\nstands alone.",
+        body="# The old keep stands alone.   \n",
+    )
+    migrated, cleared, conflicts = await migrate_script.migrate(client, dry_run=False)
+    assert (migrated, cleared, conflicts) == (0, 1, 0)
+    obj = await client.get_object(object_id)
+    props = {p["key"]: p.get("text") for p in obj["properties"]}
+    assert obj["markdown"] == "# The old keep stands alone.   \n"  # untouched
+    assert props["gc_description"] == ""
+    # Idempotent: nothing left on a second pass.
+    assert await migrate_script.migrate(client, dry_run=False) == (0, 0, 0)
 
 
 async def test_dry_run_writes_nothing(

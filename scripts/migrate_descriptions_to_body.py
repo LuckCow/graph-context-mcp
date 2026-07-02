@@ -3,13 +3,21 @@
 ADR 010 made the Anytype page body the node's description. Spaces written
 before it hold the text in the retired ``gc_description`` property; until
 migrated they are served by ``fetch_body``'s read fallback. This script
-finishes the job for one space:
+finishes the job for one space. For every live object with a non-empty
+gc_description:
 
-    for every live object with a non-empty gc_description:
-        - body empty      -> PATCH the text in as `markdown`, then clear
-                             the property (one combined write; A7)
-        - body non-empty  -> SKIP and report (a human already wrote a body;
-                             merging prose is a human call, not a script's)
+    - body empty                    -> PATCH the text in as `markdown`,
+                                       clearing the property in the same
+                                       combined write (A7)
+    - body already CONTAINS the     -> clear the property only; the body
+      description (a human copied     is already the truth and stays
+      it into the page)               byte-untouched
+    - body holds DISTINCT text      -> SKIP and report (merging prose is
+                                       a human call, not a script's)
+
+Containment is judged on a whitespace/markdown-insensitive form: the
+store normalizes markdown (S6), so byte comparison would misread every
+copied body as distinct.
 
 Idempotent: a second run finds nothing to do. Writes pace at ~1/s (S7
 throttle) via the client's 429 backoff plus an explicit sleep, so a large
@@ -22,6 +30,7 @@ ANYTYPE_API_BASE_URL if not localhost):
 """
 
 import asyncio
+import re
 import sys
 
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -41,12 +50,27 @@ def _legacy_description(obj: dict) -> str:
     return ""
 
 
+def _comparable(text: str) -> str:
+    """Whitespace/markdown-insensitive form for containment checks (S6:
+    the store normalizes markdown, so byte equality never holds)."""
+    text = re.sub(r"[#*_>`\-\[\]()]", "", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _body_contains(body: str, description: str) -> bool:
+    needle = _comparable(description)
+    return bool(needle) and needle in _comparable(body)
+
+
 async def migrate(client: AnytypeClient, *, dry_run: bool) -> tuple[int, int, int]:
-    migrated = skipped = conflicts = 0
+    migrated = cleared = conflicts = 0
     candidates = [
         obj["id"] async for obj in client.list_objects() if _legacy_description(obj)
     ]
     print(f"{len(candidates)} object(s) carry a gc_description")
+    clear_property = {
+        "properties": [property_entry(PROP_LEGACY_DESCRIPTION, "text", "")]
+    }
     for object_id in candidates:
         # Reads are unthrottled; fetch the authoritative single-object view
         # (list responses never include the body, A7).
@@ -54,22 +78,28 @@ async def migrate(client: AnytypeClient, *, dry_run: bool) -> tuple[int, int, in
         description = _legacy_description(obj)
         body = str(obj.get("markdown", "") or "")
         name = obj.get("name", object_id)
-        if body.strip():
-            conflicts += 1
-            print(f"  CONFLICT {name!r}: body already written; left for a human")
-            continue
-        if dry_run:
+        if not body.strip():
+            if dry_run:
+                print(f"  would migrate {name!r} ({len(description)} chars)")
+            else:
+                await client.update_object(
+                    object_id, {"markdown": description, **clear_property}
+                )
+                print(f"  migrated {name!r} ({len(description)} chars)")
+                await asyncio.sleep(WRITE_PACING_SECONDS)
             migrated += 1
-            print(f"  would migrate {name!r} ({len(description)} chars)")
-            continue
-        await client.update_object(object_id, {
-            "markdown": description,
-            "properties": [property_entry(PROP_LEGACY_DESCRIPTION, "text", "")],
-        })
-        migrated += 1
-        print(f"  migrated {name!r} ({len(description)} chars)")
-        await asyncio.sleep(WRITE_PACING_SECONDS)
-    return migrated, skipped, conflicts
+        elif _body_contains(body, description):
+            if dry_run:
+                print(f"  would clear stale copy on {name!r} (body already holds it)")
+            else:
+                await client.update_object(object_id, clear_property)
+                print(f"  cleared stale copy on {name!r} (body already holds it)")
+                await asyncio.sleep(WRITE_PACING_SECONDS)
+            cleared += 1
+        else:
+            conflicts += 1
+            print(f"  CONFLICT {name!r}: body holds distinct text; left for a human")
+    return migrated, cleared, conflicts
 
 
 async def main() -> None:
@@ -77,11 +107,14 @@ async def main() -> None:
     config = AnytypeConfig.from_env()
     client = AnytypeClient(config)
     try:
-        migrated, _, conflicts = await migrate(client, dry_run=dry_run)
+        migrated, cleared, conflicts = await migrate(client, dry_run=dry_run)
     finally:
         await client.aclose()
-    verb = "would migrate" if dry_run else "migrated"
-    print(f"done: {verb} {migrated}, conflicts {conflicts}")
+    prefix = "would " if dry_run else ""
+    print(
+        f"done: {prefix}migrate {migrated}, {prefix}clear {cleared} stale "
+        f"copies, conflicts {conflicts}"
+    )
     if conflicts:
         print(
             "conflicted objects keep their gc_description; fetch_body serves "
