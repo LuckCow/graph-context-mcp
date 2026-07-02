@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -365,6 +366,19 @@ def body_of(obj: Mapping[str, Any]) -> str:
     function strips that prefix; every read goes through here, and any
     write-back path must therefore write ``body_of`` output, never the
     raw ``markdown`` field.
+
+    The server-rendered connections footer (ADR 013) is likewise stripped:
+    the LLM reads clean description text and gets edges from the graph.
+    """
+    return body_and_footer_of(obj)[0]
+
+
+def body_and_footer_of(obj: Mapping[str, Any]) -> tuple[str, str]:
+    """``(clean body, current footer)`` of a fetched object.
+
+    The write-back seam: A8 prefix stripped, footer split off -- so a
+    caller can compare/replace the footer and PATCH ``compose_body`` output
+    without ever round-tripping export artifacts into the store.
     """
     markdown = str(obj.get("markdown", "") or "")
     summary = str(_property_map(obj).get(PROP_SUMMARY) or "")
@@ -374,8 +388,79 @@ def body_of(obj: Mapping[str, Any]) -> str:
         # Only a whole leading LINE is the export artifact; same text merely
         # prefixing the body's first paragraph is genuine content.
         if stripped == "" or stripped.startswith("\n"):
-            return stripped.removeprefix("\n")
-    return markdown
+            markdown = stripped.removeprefix("\n")
+    return split_connections_footer(markdown)
+
+
+# -- the connections footer (ADR 013) -------------------------------------
+
+CONNECTIONS_HEADING = "## Connections (auto)"
+
+_HEADING_LINE = re.compile(r"^#{1,6}\s*Connections \(auto\)\s*$")
+_RULE_LINE = re.compile(r"^\s*-{3,}\s*$")
+
+
+def render_connections_footer(
+    connections: Sequence[tuple[str, str, str]], space_id: str
+) -> str:
+    """The generated footer: one deep-linked line per OUTGOING relation.
+
+    ``connections`` is ``(label, target name, target id)`` tuples, already
+    ordered by the caller. Deep links are plain link marks -- clickable and
+    PATCH-stable, never registered in links/backlinks (user-verified), so
+    the footer can't mint edges. Empty input renders no footer at all.
+    """
+    if not connections:
+        return ""
+    lines = ["---", CONNECTIONS_HEADING]
+    for label, name, target_id in connections:
+        lines.append(
+            f"- {label} → [{name}]"
+            f"(anytype://object?objectId={target_id}&spaceId={space_id})"
+        )
+    return "\n".join(lines)
+
+
+def split_connections_footer(markdown: str) -> tuple[str, str]:
+    """``(body text, footer text)`` -- whitespace-tolerant (the store
+    normalizes markdown, e.g. rewriting ``---`` with padding). Footer is
+    ``""`` when none is present."""
+    lines = markdown.split("\n")
+    for i, line in enumerate(lines):
+        if _HEADING_LINE.match(line.strip()):
+            start = i
+            if i > 0 and _RULE_LINE.match(lines[i - 1]):
+                start = i - 1
+            return "\n".join(lines[:start]).rstrip(), "\n".join(lines[start:]).strip()
+    return markdown, ""
+
+
+def strip_connections_footer(markdown: str) -> str:
+    """Body text without the generated footer."""
+    return split_connections_footer(markdown)[0]
+
+
+def footers_equal(a: str, b: str) -> bool:
+    """Content comparison across store normalization (per-line strip)."""
+
+    def normalize(text: str) -> list[str]:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    return normalize(a) == normalize(b)
+
+
+def compose_body(clean_body: str, footer: str) -> str:
+    """Body text + footer, ready for a ``markdown`` write (A7).
+
+    Callers must pass ``body_of`` output as ``clean_body`` (A8: never the
+    raw export) -- the server owns only the footer; text above it is
+    written back verbatim.
+    """
+    if not footer:
+        return clean_body
+    if not clean_body.strip():
+        return footer
+    return f"{clean_body.rstrip()}\n\n{footer}"
 
 
 def to_edges(obj: Mapping[str, Any]) -> list[Edge]:

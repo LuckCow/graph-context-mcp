@@ -132,6 +132,11 @@ class AnytypeClient:
     # -- space-scoped convenience wrappers --------------------------------
 
     @property
+    def space_id(self) -> str:
+        """The bound space id (deep links in the connections footer need it)."""
+        return self._config.space_id
+
+    @property
     def _space(self) -> str:
         return f"/v1/spaces/{self._config.space_id}"
 

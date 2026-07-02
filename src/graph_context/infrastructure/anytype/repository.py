@@ -251,27 +251,47 @@ class AnytypeGraphRepository:
                     f"created object {created.get('id')} did not map back to a node"
                 )
 
-            patched: list[tuple[NodeId, str, list[NodeId]]] = []
+            patched: list[tuple[NodeId, str, list[NodeId], str | None]] = []
             try:
                 # Outgoing relations are PATCHed onto the new object rather than
                 # inlined in the POST: a freshly-created relation is not yet on the
                 # type, so an inline POST would 400. A failure here falls through to
                 # the rollback, which archives the node (and with it these edges).
                 if outgoing:
+                    payload = mapping.relations_patch_payload(outgoing)
+                    markdown = self._footer_markdown(
+                        created, node,
+                        [link.to_edge(anchor=node.id, property_key=key)
+                         for link, key in resolved if link.outgoing],
+                    )
+                    if markdown is not None:
+                        payload["markdown"] = markdown  # ADR 013, same PATCH
                     patched_self = await self._patch_relations(
-                        node.id, mapping.relations_patch_payload(outgoing), outgoing
+                        node.id, payload, outgoing
                     )
                     self._track_watermark(patched_self)
                 for link, key in incoming:
                     # Store-truth read (ADR 009): also makes the rollback
                     # restore what the store really held, not an index view.
-                    previous = await self._current_targets(link.other, key)
-                    patched_source = await self._patch_relations(
-                        link.other,
-                        mapping.relation_patch_payload(key, [*previous, node.id]),
-                        [key],
+                    obj, previous = await self._current_state(link.other, key)
+                    payload = mapping.relation_patch_payload(key, [*previous, node.id])
+                    markdown = self._footer_markdown(
+                        obj, self._graph.node(link.other),
+                        [*self._graph.edges(link.other, Direction.OUT),
+                         link.to_edge(anchor=node.id, property_key=key)],
+                        extra_names={node.id: node.name},
                     )
-                    patched.append((link.other, key, previous))
+                    restore_markdown: str | None = None
+                    if markdown is not None:
+                        payload["markdown"] = markdown  # ADR 013, same PATCH
+                        # What the rollback should write back (A8-clean).
+                        restore_markdown = mapping.compose_body(
+                            *mapping.body_and_footer_of(obj)
+                        )
+                    patched_source = await self._patch_relations(
+                        link.other, payload, [key]
+                    )
+                    patched.append((link.other, key, previous, restore_markdown))
                     self._track_watermark(patched_source)
             except Exception:
                 await self._rollback_create(node.id, patched)
@@ -295,11 +315,19 @@ class AnytypeGraphRepository:
         story_time: float | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node:
-        self._graph.node(node_id)  # NodeNotFound before any API call
+        existing = self._graph.node(node_id)  # NodeNotFound before any API call
         native_fields: list[dict[str, Any]] = []
         blob: Mapping[str, str] | None = None
         if fields is not None:
             native_fields, blob = await self._resolve_field_entries(fields)
+        if body is not None and existing.role not in schema.INFRA_ROLES:
+            # ADR 013: re-render the footer around the new text (index edges;
+            # link changes maintain it on their own writes).
+            footer = mapping.render_connections_footer(
+                self._connections(self._graph.edges(node_id, Direction.OUT)),
+                self._client.space_id,
+            )
+            body = mapping.compose_body(body, footer)
         payload = mapping.to_update_payload(
             name=name,
             summary=summary,
@@ -326,15 +354,18 @@ class AnytypeGraphRepository:
         async with self._writer():
             key = await self._resolve_relation(link.edge_type, create_missing_relations)
             edge = link.to_edge(anchor=anchor, property_key=key)
-            self._graph.node(edge.source)  # endpoints must exist
+            source = self._graph.node(edge.source)  # endpoints must exist
             self._graph.node(edge.target)
-            targets = await self._current_targets(edge.source, key)
+            obj, targets = await self._current_state(edge.source, key)
             if edge.target not in targets:
-                updated = await self._patch_relations(
-                    edge.source,
-                    mapping.relation_patch_payload(key, [*targets, edge.target]),
-                    [key],
+                payload = mapping.relation_patch_payload(key, [*targets, edge.target])
+                markdown = self._footer_markdown(
+                    obj, source,
+                    [*self._graph.edges(edge.source, Direction.OUT), edge],
                 )
+                if markdown is not None:
+                    payload["markdown"] = markdown  # ADR 013, same PATCH
+                updated = await self._patch_relations(edge.source, payload, [key])
                 self._track_watermark(updated)
             self._graph.add_edge(edge)
             return edge
@@ -345,13 +376,16 @@ class AnytypeGraphRepository:
             self._graph.remove_edge(edge)
             return
         async with self._writer():
-            targets = [
-                t for t in await self._current_targets(edge.source, key)
-                if t != edge.target
-            ]
-            updated = await self._client.update_object(
-                edge.source, mapping.relation_patch_payload(key, targets)
+            obj, current = await self._current_state(edge.source, key)
+            targets = [t for t in current if t != edge.target]
+            payload = mapping.relation_patch_payload(key, targets)
+            markdown = self._footer_markdown(
+                obj, self._graph.node(edge.source),
+                [e for e in self._graph.edges(edge.source, Direction.OUT) if e != edge],
             )
+            if markdown is not None:
+                payload["markdown"] = markdown  # ADR 013, same PATCH
+            updated = await self._client.update_object(edge.source, payload)
             self._graph.remove_edge(edge)
             self._track_watermark(updated)
 
@@ -373,14 +407,18 @@ class AnytypeGraphRepository:
         finally:
             self._pending_writes -= 1
 
-    async def _current_targets(self, source: NodeId, property_key: str) -> list[NodeId]:
-        """Store-truth targets of one relation, read at write time.
+    async def _current_state(
+        self, source: NodeId, property_key: str
+    ) -> tuple[dict[str, Any], list[NodeId]]:
+        """Store-truth object + targets of one relation, read at write time.
 
         Reads are unthrottled (S7), so the extra GET is cheap. This is also
         the precise Q2 race detector: divergence from the index view means a
         human edited this relation since the last (re)sync. The write then
         builds on store truth, so the human's edit SURVIVES instead of being
-        clobbered by an index-derived wholesale-replace PATCH.
+        clobbered by an index-derived wholesale-replace PATCH. The fetched
+        object also carries the current markdown -- exactly what the
+        connections footer (ADR 013) needs, for free.
         """
         obj = await self._client.get_object(source)
         current = mapping.relation_targets(obj, property_key)
@@ -391,6 +429,10 @@ class AnytypeGraphRepository:
                 "building the write on store state so the edit survives",
                 source, property_key, sorted(index_view), sorted(current),
             )
+        return obj, current
+
+    async def _current_targets(self, source: NodeId, property_key: str) -> list[NodeId]:
+        _, current = await self._current_state(source, property_key)
         return current
 
     async def _patch_relations(
@@ -448,6 +490,54 @@ class AnytypeGraphRepository:
             for e in self._graph.edges(source, Direction.OUT)
             if e.property_key == property_key
         ]
+
+    # -- the connections footer (ADR 013) -----------------------------------
+
+    def _connections(
+        self,
+        edges: Iterable[Edge],
+        extra_names: Mapping[NodeId, str] | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """(label, target name, target id) rows, deterministically ordered.
+
+        ``extra_names`` resolves targets not yet in the index (a node being
+        created); unknown targets fall back to the raw id rather than fail
+        a write over a cosmetic line.
+        """
+        names = extra_names or {}
+        rows = []
+        for edge in edges:
+            name = names.get(edge.target) or (
+                self._graph.node(edge.target).name
+                if self._graph.has_node(edge.target) else edge.target
+            )
+            rows.append((edge.type, name, edge.target))
+        rows.sort(key=lambda row: (row[0], row[1].lower(), row[2]))
+        return rows
+
+    def _footer_markdown(
+        self,
+        obj: Mapping[str, Any],
+        node: Node,
+        edges: Iterable[Edge],
+        extra_names: Mapping[NodeId, str] | None = None,
+    ) -> str | None:
+        """The ``markdown`` value to ride an existing PATCH, or ``None``.
+
+        ``None`` means don't touch the body: infra-role nodes never get a
+        footer (write-once by policy), and an unchanged footer is a no-op
+        (every skipped rewrite is a mention-pill spared, WP10c caveat).
+        Composed from ``body_of`` output -- never the raw export (A8).
+        """
+        if node.role in schema.INFRA_ROLES:
+            return None
+        footer = mapping.render_connections_footer(
+            self._connections(edges, extra_names), self._client.space_id
+        )
+        clean_body, current_footer = mapping.body_and_footer_of(obj)
+        if mapping.footers_equal(footer, current_footer):
+            return None
+        return mapping.compose_body(clean_body, footer)
 
     # -- field routing (ADR 012) -------------------------------------------
 
@@ -557,14 +647,15 @@ class AnytypeGraphRepository:
     async def _rollback_create(
         self,
         node_id: NodeId,
-        patched: list[tuple[NodeId, str, list[NodeId]]],
+        patched: list[tuple[NodeId, str, list[NodeId], str | None]],
     ) -> None:
         logger.warning("composite create failed; rolling back node %s", node_id)
-        for source_id, property_key, previous in patched:
+        for source_id, property_key, previous, restore_markdown in patched:
             try:
-                await self._client.update_object(
-                    source_id, mapping.relation_patch_payload(property_key, previous)
-                )
+                payload = mapping.relation_patch_payload(property_key, previous)
+                if restore_markdown is not None:
+                    payload["markdown"] = restore_markdown  # un-render the footer
+                await self._client.update_object(source_id, payload)
             except Exception:  # noqa: BLE001 -- best-effort compensation
                 logger.error("rollback: could not restore %s.%s", source_id, property_key)
         try:
