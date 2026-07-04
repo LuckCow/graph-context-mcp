@@ -47,6 +47,7 @@ from graph_context.application.explorer import Explorer
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
+from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
 from graph_context.domain.graph import GraphIndex
@@ -84,6 +85,9 @@ class Services:
     # WP7: the orchestrator passes a real MutationJournal and drains it per
     # turn; the MCP server keeps the NullJournal (no turn boundary).
     journal: MutationJournal = field(default_factory=NullJournal)
+    # WP11 (ADR 014): None when GC_EMBEDDER=off -- the semantic layer
+    # degrades away and tools fall back to name search alone.
+    projector: SemanticProjector | None = None
 
 
 def build_services(
@@ -92,6 +96,7 @@ def build_services(
     persister: SessionPersister | None = None,
     *,
     journal: MutationJournal | None = None,
+    projector: SemanticProjector | None = None,
 ) -> Services:
     journal = journal or NullJournal()
     return Services(
@@ -103,6 +108,7 @@ def build_services(
         capture=CaptureRecorder(repository, journal=journal),
         persister=persister,
         journal=journal,
+        projector=projector,
     )
 
 
@@ -254,6 +260,9 @@ async def context_tool(
         return presenters.render_overview(build_overview(graph))
     if action == "resync":
         changed = await services.repository.resync()
+        if services.projector is not None and changed:
+            # Keep the embedding cache in step with out-of-band edits.
+            await services.projector.refresh(changed)
         if not changed:
             return "resync: no out-of-band changes."
         names = sorted(

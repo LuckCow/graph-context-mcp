@@ -357,6 +357,7 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
         summary_stale=bool(props.get(PROP_SUMMARY_STALE)),
         story_time=props.get(registry.timeline_key),
         fields=fields,
+        modified_at=effective_modified(obj),
     )
 
 

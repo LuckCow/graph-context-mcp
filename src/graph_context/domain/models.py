@@ -131,3 +131,6 @@ class Node:
     fields: Mapping[str, str] = field(default_factory=dict)
     type_key: str = ""
     role: Role | None = None
+    # Store-clock change stamp (ISO; "" when unknown, e.g. the in-memory
+    # backend). A ranking signal (ADR 016 recency weight), never content.
+    modified_at: str = ""
