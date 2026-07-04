@@ -824,14 +824,17 @@ after WP9.
 
 ---
 
-## WP11 — Semantic search (ADR 014)
+## WP11 — Semantic search + graph-aware ranking (ADRs 014, 016)
 
 **Goal:** "find the node I'm describing" and, later, "find the passage
 that answers this" — as a **derived projection** with a persistent
-embedding *cache*, not a new source of truth. Explicitly NOT in scope
-(decided, with written revisit triggers, in ADR 014): a vector database,
-or any datastore replacing hydration. Opens WP4's parked semantic-search
-item; the tool-surface philosophy applies the WP3 minimalism precedent.
+embedding *cache*, not a new source of truth, ranked by a pipeline in
+which **edges are relevance evidence** (ADR 016): semantic recall seeds,
+graph expansion recruits, spreading activation scores, and every hit
+carries its evidence. Explicitly NOT in scope (decided, with written
+revisit triggers, in ADR 014): a vector database, or any datastore
+replacing hydration. Opens WP4's parked semantic-search item; the
+tool-surface philosophy applies the WP3 minimalism precedent.
 
 ### Deliverables
 
@@ -853,14 +856,37 @@ item; the tool-surface philosophy applies the WP3 minimalism precedent.
   First corpus: `name + summary + reflected fields` per node. Bodies and
   prose chunks are a follow-on stage (reads unthrottled, S7), gated on
   the passage-retrieval need below.
+- **`Ranker` application service (ADR 016)** — the single retrieval
+  entry for the tool layer and, later, orchestrator RAG prefetch:
+  semantic recall (k≈30) → graph expansion (1–2 hops from seeds + the
+  session's focus/recent when session-aware; capped; infra roles
+  excluded; may RECRUIT nodes recall missed) → spreading activation
+  (2–3 iterations over the ≤~100-node candidate subgraph) → fail-closed
+  threshold → top N **with evidence annotations** ("linked to Mira
+  (possesses, strong match); co-referenced by 2 captures").
+  Edge weights compose per edge: query↔edge-label similarity (labels
+  embedded with the same embedder, one cached vector per relation),
+  structural priors (named relations > the `links` mirror; capture
+  co-reference; intent co-touch), and Adamic-Adar degree normalization.
+  **Ranking signal weights are profile/mode data** (ADR 015) — recency
+  weighs up in the assistant's `organizing`, near zero in fiction —
+  tuned against a **golden eval file** of (description → expected node)
+  pairs; weight changes are reviewed as golden diffs.
+- **`Reranker` port + seam (`GC_RERANKER=off|local|voyage`)** — an
+  optional LAST stage; reorder-only, never resurrects thresholded-out
+  candidates, never contributes unexplainable score. Local
+  cross-encoder rides the same container rebuild; Voyage the same
+  allowlist entry. Dogfooding-gated with the passage stage.
 - **Tool surface (augment, don't multiply):**
-  - `find_node` tier 3: exact → substring → **semantic**
+  - `find_node` tier 3: exact → substring → **Ranker**
     (threshold-gated), hits labelled ("semantic matches for …") so the
-    LLM knows it holds a fuzzy match; result lines unchanged
-    (entry-point shape); `type`/`limit` compose as today.
+    LLM knows it holds a fuzzy match; result lines keep the entry-point
+    shape, extended with the evidence line; `type`/`limit` compose as
+    today.
   - `_resolve`'s `NodeNotFound` appends "closest by meaning" candidates
-    with ids — errors are prompts; one change serves every node
-    parameter of every tool.
+    with ids AND evidence — errors are prompts, and evidence lets the
+    model verify before committing a mutation target; one change serves
+    every node parameter of every tool.
   - **Non-feature:** no silent fuzzy resolution, ever — exact resolves,
     semantic suggests. Mutation targets are never guessed.
   - **Reserved, dogfooding-gated:** a `search` tool for passage-level
@@ -876,7 +902,7 @@ item; the tool-surface philosophy applies the WP3 minimalism precedent.
   path config; container rebuild list grows by the local model —
   batch with langgraph + import-linter.
 
-### Decisions (settled — see ADR 014)
+### Decisions (settled — see ADRs 014, 016)
 
 - Persistence follows cost-to-rebuild: GraphIndex ephemeral, embeddings
   cached; both disposable projections of Anytype, never truth.
@@ -886,6 +912,9 @@ item; the tool-surface philosophy applies the WP3 minimalism precedent.
 - Semantic hits are always labelled; thresholds fail closed (no hits
   beats noise hits — the LLM self-corrects from an honest empty better
   than from a confident wrong match).
+- Tools call the Ranker, never the vector index directly; the graph may
+  recruit, the reranker may only reorder; every score decomposes into
+  nameable evidence (ADR 016).
 
 ### Open questions
 
@@ -904,13 +933,21 @@ content-hash idempotency, prune-on-hydrate eviction, threshold behavior.
 Deterministic-embedder tool tests: find_node tier ordering (exact beats
 substring beats semantic; labels correct), resolver errors carry
 suggestions with ids, mutation tools never auto-resolve fuzzily.
-Sync tests: resync re-embeds only changed hashes; deleting the cache file
-converges on next hydrate. Live E2E: cache survives restart; a human
-rename re-embeds on resync.
+Ranker tests (deterministic embedder + hand-built graphs): recruitment
+(a vocabulary-invisible node linked to two strong seeds surfaces),
+edge-label conditioning (the same candidates rank differently under
+queries favoring different relations), links-mirror discount, hub
+normalization, evidence strings name their contributions, thresholded
+candidates never resurrected by any later stage, and the golden eval
+file scores above a floor. Sync tests: resync re-embeds only changed
+hashes; deleting the cache file converges on next hydrate. Live E2E:
+cache survives restart; a human rename re-embeds on resync.
 
-Suggested sizing: **M** (stage 1, node-level) + **S–M** (stage 2,
-passages, if gated in). Independent of WP8; wants the container rebuild
-for any real embedder but ships `GC_EMBEDDER=off`-degradable before it.
+Suggested sizing: **M** (stage 1, node-level) + **M** (Ranker + eval
+golden) + **S–M** (stage 2, passages + reranker adapters, if gated in).
+Independent of WP8; wants the container rebuild for any real embedder
+but ships `GC_EMBEDDER=off`-degradable before it (the graph machinery
+is pure GraphIndex computation and works everywhere).
 
 ---
 

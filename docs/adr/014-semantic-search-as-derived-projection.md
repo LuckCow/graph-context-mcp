@@ -3,7 +3,11 @@
 **Status:** Accepted (2026-07-04) — WP11; reaffirms ADR 002 against a
 datastore migration; opens WP4's parked "semantic search" item (its entry
 criterion — "find the node about X" questions name-search can't answer —
-is now met by the product direction)
+is now met by the product direction). **Amended same day by ADR 016:**
+tools do not query the vector index directly — retrieval flows through
+the graph-aware `Ranker` (semantic recall + graph expansion/recruitment +
+evidence-annotated scoring), with an optional reorder-only cross-encoder
+seam behind `GC_RERANKER`.
 
 ## Context
 
