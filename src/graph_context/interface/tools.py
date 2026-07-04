@@ -28,8 +28,9 @@ Notes:
   in the memory backend and most tests).
 * Capture is the ORCHESTRATOR's job (WP7 auto-capture); the record_prose
   tool was removed 2026-07-04 -- the project is pre-deployment, so no
-  vestigial surface is kept. ProseRecorder survives as the service the
-  harness calls.
+  vestigial surface is kept. CaptureRecorder is the service the harness
+  calls, with the artifact type set by the active mode's CapturePolicy
+  (ADR 015).
 """
 
 from __future__ import annotations
@@ -41,11 +42,11 @@ from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
 
+from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.application.explorer import Explorer
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
-from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
 from graph_context.domain.graph import GraphIndex
@@ -75,7 +76,7 @@ class Services:
     writer: NodeWriter
     reader: NodeReader
     explorer: Explorer
-    prose: ProseRecorder
+    capture: CaptureRecorder
     persister: SessionPersister | None = None  # wired in server lifespan
     # WP7: the orchestrator passes a real MutationJournal and drains it per
     # turn; the MCP server keeps the NullJournal (no turn boundary).
@@ -96,7 +97,7 @@ def build_services(
         writer=NodeWriter(repository, session, journal),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        prose=ProseRecorder(repository, journal=journal),
+        capture=CaptureRecorder(repository, journal=journal),
         persister=persister,
         journal=journal,
     )

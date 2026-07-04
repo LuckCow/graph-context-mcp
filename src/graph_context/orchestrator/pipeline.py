@@ -152,11 +152,15 @@ class Orchestrator:
             )
             if capture.should_capture(reply_text, references, policy.min_chars):
                 # The captured artifact journals itself, so the intent node
-                # below links prompt -> intent -> artifact.
-                await self.services.prose.record(
+                # below links prompt -> intent -> artifact. Its type comes
+                # from the policy: gc_prose for fiction, a native type
+                # (procedure, note, ...) for other activities (ADR 015).
+                await self.services.capture.record(
                     text=reply_text,
                     summary=reply_text.strip().splitlines()[0][:200],
                     references=references,
+                    artifact_type=policy.artifact_type,
+                    references_label=policy.references_label,
                 )
         mutations = self.services.journal.drain()
         intent = await self.provenance.record_turn(

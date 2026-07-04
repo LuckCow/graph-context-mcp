@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from graph_context.application.prose_recorder import ProseRecorder
+from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.interface import tools
 from tests.conftest import World
 
@@ -92,7 +92,7 @@ async def _record_prose_about(services: tools.Services, *node_ids: str) -> str:
     # Through the SERVICE: the record_prose tool was removed 2026-07-04
     # (capture is the orchestrator's job); the traversal-hiding policy
     # this section pins is about the nodes, not how they were made.
-    recorder = ProseRecorder(services.repository, now=lambda: "t")
+    recorder = CaptureRecorder(services.repository, now=lambda: "t")
     node = await recorder.record(
         text="A scene about the vaults.", summary="Scene.",
         references=list(node_ids),

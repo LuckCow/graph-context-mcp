@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationRecord
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
-from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -74,7 +74,7 @@ class TestProvenance:
         self, repository, session
     ):
         mira, _ = await self._touched_world(repository, session)
-        recorder = ProseRecorder(repository, now=lambda: "t")
+        recorder = CaptureRecorder(repository, now=lambda: "t")
         await recorder.record(text="Ash.", summary="s", references=[mira.id])
         view = await NodeReader(repository, session).get_node(mira.id)
         # Neither the intent edge nor the prose references edge shows up.

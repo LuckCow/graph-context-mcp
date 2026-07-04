@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_writer import NodeWriter
-from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.domain.models import LinkSpec, NodeDraft
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -68,7 +68,7 @@ class TestWritersReport:
             NodeDraft("Location", name="Keep", summary="s")
         )
         journal.drain()
-        recorder = ProseRecorder(repository, now=lambda: "t", journal=journal)
+        recorder = CaptureRecorder(repository, now=lambda: "t", journal=journal)
         prose = await recorder.record(
             text="Ash drifted.", summary="s", references=[place.id]
         )

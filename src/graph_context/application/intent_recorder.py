@@ -28,8 +28,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from graph_context.application.capture_recorder import TRUNCATION_MARKER, _utc_now_iso
 from graph_context.application.mutation_journal import MutationRecord
-from graph_context.application.prose_recorder import TRUNCATION_MARKER, _utc_now_iso
 from graph_context.domain.models import LinkSpec, Node, NodeDraft
 from graph_context.ports.graph_repository import GraphRepository
 
