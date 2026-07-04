@@ -141,15 +141,19 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["part_of", "assigned_to"]).
 
 ### find_node
-Find nodes by NAME when you know the name but not the id.
+Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
-Matching is case-insensitive: exact-name matches are returned first, and
-only if there are none does it fall back to substring matches. Each
-result line carries the node id, ready to paste into any other tool.
+Matching is tiered: exact name first, then substring, and if nothing
+matches by name the input is treated as a description and matched by
+MEANING (when semantic search is enabled). Semantic hits are labelled
+and each carries a "why" line (what matched, what it is linked to) so
+you can verify before using an id. Each result line carries the node
+id, ready to paste into any other tool.
 
-name: the name (or fragment) to search for.
+name: the name, name fragment, or a plain-words description
+  (e.g. "the engineer who reads stone").
 type: optional type filter (e.g. "Character") to disambiguate.
-limit: max substring matches to return (default 10).
+limit: max matches to return (default 10).
 
 You usually don't need this first: get_node, explore, find_path,
 update_node and link `other` targets all accept a name directly in place

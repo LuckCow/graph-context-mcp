@@ -17,10 +17,11 @@ silently: the header must never crash a tool response.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from graph_context.application.node_reader import NodeView
+from graph_context.application.ranker import RankedHit
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
@@ -82,6 +83,21 @@ def render_overview(overview: GraphOverview) -> str:
         lines.append(
             f"- {node.name} ({node.type}, id={node.id}){stale}: {node.summary}"
         )
+    return "\n".join(lines)
+
+
+def render_ranked_hits(hits: Sequence[RankedHit]) -> str:
+    """Ranked matches with their evidence (ADR 016) -- one hit per line
+    pair, id in the standard copy-paste position, evidence indented so the
+    LLM can verify the reasoning before committing to an id."""
+    lines = []
+    for hit in hits:
+        node = hit.node
+        lines.append(
+            f"- {node.name} ({node.type}, id={node.id}): {node.summary}"
+        )
+        if hit.evidence:
+            lines.append(f"    why: {'; '.join(hit.evidence)}")
     return "\n".join(lines)
 
 

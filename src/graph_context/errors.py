@@ -65,11 +65,17 @@ class NodeNotFound(GraphContextError):
     points the LLM at the two ways to discover a real id.
     """
 
-    def __init__(self, node_id: str) -> None:
-        super().__init__(
+    def __init__(self, node_id: str, suggestions: str = "") -> None:
+        message = (
             f"no node matches {node_id!r} by id or name; call find_node to "
             "search by name, or context action='overview' for entry-point ids."
         )
+        if suggestions:
+            # ADR 016: the resolver's miss becomes a search surface. The
+            # candidates SUGGEST -- the model must pick an id; a fuzzy match
+            # never resolves silently (ADR 014 non-feature).
+            message += "\nClosest by meaning:\n" + suggestions
+        super().__init__(message)
         self.node_id = node_id
 
 

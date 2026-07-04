@@ -51,13 +51,12 @@ from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
-from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery
-from graph_context.errors import GraphContextError
+from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
 from graph_context.ports.graph_repository import GraphRepository
@@ -164,15 +163,30 @@ async def _note_mutation(services: Services) -> None:
 # -- parsing helpers: error messages are written FOR the LLM ---------------
 
 
-def _resolve(graph: GraphIndex, identifier: str) -> NodeId:
+async def _resolve(services: Services, identifier: str) -> NodeId:
     """Translate a user-supplied id-or-name into a real node id.
 
     Resolution is a tool-layer concern (the same boundary that does all
     ``_parse_*`` normalization), so the application and domain layers keep
     receiving canonical ids. Raises NodeNotFound/AmbiguousNodeName, both
     actionable, when the string does not resolve to exactly one node.
+
+    ADR 016: on a miss, the Ranker (when wired) appends "closest by
+    meaning" candidates WITH evidence to the error -- a suggestion
+    surface, never silent resolution: exact resolves, fuzzy suggests,
+    and mutation targets are never guessed (ADR 014 non-feature).
     """
-    return graph.resolve(identifier).id
+    try:
+        return services.repository.graph.resolve(identifier).id
+    except NodeNotFound:
+        if services.ranker is None:
+            raise
+        hits = await services.ranker.rank(identifier, limit=3)
+        if not hits:
+            raise
+        raise NodeNotFound(
+            identifier, suggestions=presenters.render_ranked_hits(hits)
+        ) from None
 
 
 def _parse_node_type(value: str) -> str:
@@ -203,8 +217,8 @@ def _parse_detail(value: str) -> Detail:
         ) from None
 
 
-def _parse_links(
-    raw: Sequence[dict[str, Any]] | None, graph: GraphIndex
+async def _parse_links(
+    raw: Sequence[dict[str, Any]] | None, services: Services
 ) -> list[LinkSpec]:
     links: list[LinkSpec] = []
     for item in raw or []:
@@ -217,7 +231,7 @@ def _parse_links(
         links.append(
             LinkSpec(
                 edge_type=_parse_edge_type(str(item["edge_type"])),
-                other=_resolve(graph, str(item["other"])),
+                other=await _resolve(services, str(item["other"])),
                 outgoing=bool(item.get("outgoing", True)),
             )
         )
@@ -292,7 +306,7 @@ async def context_tool(
             return "focus cleared (pinned entries kept)."
         if not node_id:
             raise GraphContextError(f"action {action!r} requires node_id")
-        node_id = _resolve(graph, node_id)  # accept a name; validate before mutating
+        node_id = await _resolve(services, node_id)  # accept a name first
         getattr(services.session.focus, "push" if action == "focus" else action)(node_id)
         return f"focus {action}: {graph.node(node_id).name}"
     raise GraphContextError(
@@ -326,7 +340,7 @@ async def create_node_tool(
     )
     node = await services.writer.create_node(
         draft,
-        _parse_links(links, services.repository.graph),
+        await _parse_links(links, services),
         create_missing_relations=create_missing_relations,
     )
     await _note_mutation(services)
@@ -347,13 +361,12 @@ async def update_node_tool(
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
 ) -> str:
-    graph = services.repository.graph
-    node_id = _resolve(graph, node_id)
+    node_id = await _resolve(services, node_id)
     removals = [
         Edge(
-            source=_resolve(graph, str(i["source"])),
+            source=await _resolve(services, str(i["source"])),
             type=_parse_edge_type(str(i["edge_type"])),
-            target=_resolve(graph, str(i["target"])),
+            target=await _resolve(services, str(i["target"])),
             property_key=str(i.get("property_key", "")),
         )
         for i in remove_links or []
@@ -365,7 +378,7 @@ async def update_node_tool(
         description=description,
         story_time=story_time,
         fields=fields,
-        add_links=_parse_links(add_links, graph),
+        add_links=await _parse_links(add_links, services),
         remove_links=removals,
         create_missing_relations=create_missing_relations,
     )
@@ -388,7 +401,7 @@ async def get_node_tool(
     include_provenance: int = 0,
 ) -> str:
     view = await services.reader.get_node(
-        _resolve(services.repository.graph, node_id),
+        await _resolve(services, node_id),
         edge_type_filter=_edge_type_set(edge_types),
         include_provenance=include_provenance,
         excerpt_chars=presenters.EXCERPT_CHARS,
@@ -419,7 +432,7 @@ async def explore_tool(
         exclude_roles = DEFAULT_EXPLORE_EXCLUDE_ROLES
     # Empty start still defaults to the focus-stack top in the Explorer.
     if start:
-        start = _resolve(services.repository.graph, start)
+        start = await _resolve(services, start)
     result = await services.explorer.explore(
         ExploreQuery(
             start=start,
@@ -459,10 +472,9 @@ async def find_path_tool(
     edge_types: list[str] | None = None,
     max_length: int = 4,
 ) -> str:
-    graph = services.repository.graph
     path = await services.explorer.find_path(
-        _resolve(graph, start) if start else None,
-        _resolve(graph, target),
+        await _resolve(services, start) if start else None,
+        await _resolve(services, target),
         edge_types=_edge_type_set(edge_types),
         max_length=max_length,
     )
@@ -479,4 +491,21 @@ async def find_node_tool(
     matches = services.repository.graph.find_by_name(
         name, node_type=type or None, limit=limit
     )
-    return presenters.render_node_matches(matches)
+    if matches or services.ranker is None:
+        return presenters.render_node_matches(matches)
+    # Tier 3 (ADRs 014/016): no name matched -- treat the input as a
+    # DESCRIPTION. Hits are labelled so the LLM knows it holds fuzzy
+    # matches, and each carries its evidence.
+    hits = await services.ranker.rank(name, limit=limit)
+    if type:
+        wanted = type.strip().lower()
+        hits = [
+            h for h in hits
+            if wanted in {h.node.type.lower(), h.node.type_key.lower()}
+        ]
+    if not hits:
+        return presenters.render_node_matches([])  # honest empty + guidance
+    return (
+        f"find_node: no name match; {len(hits)} semantic match(es) for "
+        f"{name!r}:\n{presenters.render_ranked_hits(hits)}"
+    )
