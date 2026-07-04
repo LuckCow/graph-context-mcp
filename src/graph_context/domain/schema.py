@@ -37,11 +37,14 @@ class Role(StrEnum):
     ITEM = "Item"
     PROSE = "Prose"
     SESSION_CONTEXT = "SessionContext"
+    INTENT = "Intent"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
-INFRA_ROLES: frozenset[Role] = frozenset({Role.PROSE, Role.SESSION_CONTEXT})
+INFRA_ROLES: frozenset[Role] = frozenset(
+    {Role.PROSE, Role.SESSION_CONTEXT, Role.INTENT}
+)
 
 
 # Editable seed mapping of Anytype type *key* -> Role: common native space
@@ -61,6 +64,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     # thin gc_ infrastructure we still own
     "gc_prose": Role.PROSE,
     "gc_session_context": Role.SESSION_CONTEXT,
+    "gc_intent": Role.INTENT,
 }
 
 

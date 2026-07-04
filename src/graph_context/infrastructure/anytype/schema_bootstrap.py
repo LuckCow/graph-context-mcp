@@ -33,9 +33,11 @@ logger = logging.getLogger(__name__)
 # gc_ infrastructure types: (key, display name) for the role.
 PROSE_TYPE_KEY = "gc_prose"
 SESSION_TYPE_KEY = "gc_session_context"
+INTENT_TYPE_KEY = "gc_intent"  # WP7/ADR 008: one provenance node per turn
 INFRA_TYPES: dict[str, str] = {
     PROSE_TYPE_KEY: Role.PROSE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
+    INTENT_TYPE_KEY: Role.INTENT.value,
 }
 
 # Starter relation vocabulary (key, display name). Reusable defaults; the
@@ -51,6 +53,7 @@ DEFAULT_EDGE_RELATIONS: list[tuple[str, str]] = [
     ("gc_edge_child_of", "edge: child_of"),
     ("gc_edge_references", "edge: references"),
     ("gc_edge_precedes", "edge: precedes"),
+    ("gc_edge_intent", "edge: intent"),  # intent node -> touched node (WP7)
 ]
 
 
