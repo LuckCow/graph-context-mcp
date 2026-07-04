@@ -39,6 +39,7 @@ import os
 from collections.abc import Awaitable, Callable
 
 from graph_context.application.mutation_journal import MutationJournal
+from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.interface.profiles import DomainProfile
 from graph_context.interface.tools import Services, build_services
@@ -74,11 +75,15 @@ async def build_runtime(
 
         logger.info("backend=memory (development mode; nothing persists)")
         memory_repo = InMemoryGraphRepository(role_overrides=profile.role_overrides)
+        projector, ranker = await _build_semantic(
+            memory_repo, profile, space_id=None
+        )
         return build_services(
             memory_repo,
             session,
             journal=journal,
-            projector=await _build_semantic(memory_repo, space_id=None),
+            projector=projector,
+            ranker=ranker,
         ), teardown
 
     from graph_context.application.session_persister import SessionPersister
@@ -129,9 +134,12 @@ async def build_runtime(
             logger.warning("could not read space name for the project label")
     persister = SessionPersister(store, session)
     teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
-    projector = await _build_semantic(repository, space_id=config.space_id)
+    projector, ranker = await _build_semantic(
+        repository, profile, space_id=config.space_id
+    )
     return build_services(
-        repository, session, persister, journal=journal, projector=projector,
+        repository, session, persister, journal=journal,
+        projector=projector, ranker=ranker,
     ), teardown
 
 
@@ -152,9 +160,10 @@ def _make_embedder(choice: str) -> Embedder | None:
 
 
 async def _build_semantic(
-    repository: GraphRepository, *, space_id: str | None
-) -> SemanticProjector | None:
-    """The semantic projection (ADR 014), or None when GC_EMBEDDER=off.
+    repository: GraphRepository, profile: DomainProfile, *, space_id: str | None
+) -> tuple[SemanticProjector | None, Ranker | None]:
+    """The semantic projection + Ranker (ADRs 014/016), or Nones when
+    GC_EMBEDDER=off.
 
     Anytype spaces get the persistent SQLite cache (one file per space +
     model); the memory backend keeps the cache in memory too -- nothing
@@ -162,7 +171,7 @@ async def _build_semantic(
     """
     embedder = _make_embedder(os.environ.get("GC_EMBEDDER", "off").strip().lower())
     if embedder is None:
-        return None
+        return None, None
     index: SemanticIndex
     if space_id is None:
         from graph_context.infrastructure.semantic.memory_index import (
@@ -186,7 +195,7 @@ async def _build_semantic(
     projector = SemanticProjector(repository, embedder, index)
     embedded = await projector.refresh()  # full pass: seed + prune
     logger.info("semantic projection ready (%d embedded at startup)", embedded)
-    return projector
+    return projector, Ranker(repository, embedder, index, profile.ranking)
 
 
 async def run_teardown(teardown: list[TeardownHook]) -> None:

@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from graph_context.application.ranker import RankingWeights
 from graph_context.domain.schema import Role
 from graph_context.errors import GraphContextError
 
@@ -87,6 +88,9 @@ class DomainProfile:
     # native date property (ISO strings order lexicographically).
     time_property: str = "gc_story_time"
     time_format: str = "number"
+    # Ranking signal weights (ADR 016) -- data, tuned against the eval
+    # golden. Fiction leaves recency at zero; the assistant raises it.
+    ranking: RankingWeights = RankingWeights()
 
     def __post_init__(self) -> None:
         missing = set(TOOL_NAMES) - set(self.tool_docs)
@@ -695,6 +699,9 @@ ASSISTANT = DomainProfile(
     default_mode="organizing",
     time_property="event_date",
     time_format="date",
+    # "The deploy task" usually means the live one: recency matters here
+    # (a weight, never a rule -- ADR 016).
+    ranking=RankingWeights(recency=0.3),
 )
 
 

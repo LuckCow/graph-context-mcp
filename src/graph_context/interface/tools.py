@@ -47,6 +47,7 @@ from graph_context.application.explorer import Explorer
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
+from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
@@ -88,6 +89,7 @@ class Services:
     # WP11 (ADR 014): None when GC_EMBEDDER=off -- the semantic layer
     # degrades away and tools fall back to name search alone.
     projector: SemanticProjector | None = None
+    ranker: Ranker | None = None
 
 
 def build_services(
@@ -97,6 +99,7 @@ def build_services(
     *,
     journal: MutationJournal | None = None,
     projector: SemanticProjector | None = None,
+    ranker: Ranker | None = None,
 ) -> Services:
     journal = journal or NullJournal()
     return Services(
@@ -109,6 +112,7 @@ def build_services(
         persister=persister,
         journal=journal,
         projector=projector,
+        ranker=ranker,
     )
 
 
