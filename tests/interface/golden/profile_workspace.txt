@@ -139,8 +139,8 @@ STALE-SUMMARY SWEEP (before a big update session):
   explore(depth=3, limit=50, only_stale=true, detail="names")
   ...then update_node each with a fresh summary.
 
-Prose and SessionContext nodes are hidden unless explicitly named in
-include_types.
+Captured passages and session bookkeeping are hidden unless explicitly
+named in include_types (e.g. include_types=["Capture"]).
 
 ### find_path
 Find the shortest meaningful connection between two nodes -- "how is

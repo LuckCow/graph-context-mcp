@@ -62,9 +62,12 @@ from graph_context.ports.graph_repository import GraphRepository
 
 logger = logging.getLogger(__name__)
 
-# WP2 decision: bookkeeping (Prose/SessionContext) node *roles* never surface
-# in traversal unless explicitly included. Tool-layer policy, not domain.
-DEFAULT_EXPLORE_EXCLUDE_ROLES = frozenset({Role.PROSE, Role.SESSION_CONTEXT})
+# WP2 decision: bookkeeping node *roles* never surface in traversal unless
+# explicitly included. Tool-layer policy, not domain. (Intent joins via
+# INFRA_ROLES-driven reader suppression; here the explore default.)
+DEFAULT_EXPLORE_EXCLUDE_ROLES = frozenset(
+    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT}
+)
 
 
 @dataclass(slots=True)

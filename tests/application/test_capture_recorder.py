@@ -19,7 +19,7 @@ async def test_record_creates_prose_node_with_references(
         text="Ash over the Undercroft.", summary="Aftermath.",
         references=[world.mira.id, world.undercroft.id],
     )
-    assert node.role is Role.PROSE
+    assert node.role is Role.CAPTURE
     assert node.fields == {"generated_at": "2026-01-01T00:00:00Z"}
     # references edges: Prose -> each source.
     targets = {

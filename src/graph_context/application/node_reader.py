@@ -69,7 +69,7 @@ class NodeReader:
         for edge, neighbor in graph.neighbors(
             node_id, Direction.BOTH, edge_types=edge_type_filter
         ):
-            # WP7: infra-role neighbors (Prose, SessionContext, Intent) are
+            # WP7: infra-role neighbors (Capture, SessionContext, Intent) are
             # bookkeeping -- their edges never clutter the edge groups. The
             # prose/provenance counts below are the deliberate signal.
             if neighbor.role in INFRA_ROLES:

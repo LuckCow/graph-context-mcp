@@ -265,7 +265,7 @@ class TestProvenanceTurns:
         await orchestrator.handle_message("s1", "u", "/mode eager_capture")
         await orchestrator.handle_message("s1", "u", "Write a beat.")
         graph = services.repository.graph
-        prose = [n for n in graph.nodes() if n.role is Role.PROSE]
+        prose = [n for n in graph.nodes() if n.role is Role.CAPTURE]
         assert len(prose) == 1
         mira = graph.resolve("Mira")
         assert {
@@ -282,7 +282,7 @@ class TestProvenanceTurns:
         await orchestrator.handle_message("s1", "u", "/mode authoring")
         await orchestrator.handle_message("s1", "u", "Does she agree?")
         assert [n for n in services.repository.graph.nodes()
-                if n.role is Role.PROSE] == []
+                if n.role is Role.CAPTURE] == []
 
     async def test_subsystem_off_records_nothing(self, services: Services) -> None:
         orchestrator = _orchestrator(services, [

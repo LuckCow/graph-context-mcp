@@ -35,7 +35,9 @@ class Role(StrEnum):
     TECHNOLOGY = "Technology"
     THEME = "Theme"
     ITEM = "Item"
-    PROSE = "Prose"
+    # Captured artifacts (fiction calls them Prose; the gc_prose type key
+    # is frozen for existing spaces -- ADR 015 renamed only the concept).
+    CAPTURE = "Capture"
     SESSION_CONTEXT = "SessionContext"
     INTENT = "Intent"
 
@@ -43,7 +45,7 @@ class Role(StrEnum):
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
 INFRA_ROLES: frozenset[Role] = frozenset(
-    {Role.PROSE, Role.SESSION_CONTEXT, Role.INTENT}
+    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT}
 )
 
 
@@ -62,7 +64,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "theme": Role.THEME,
     "item": Role.ITEM,
     # thin gc_ infrastructure we still own
-    "gc_prose": Role.PROSE,
+    "gc_prose": Role.CAPTURE,
     "gc_session_context": Role.SESSION_CONTEXT,
     "gc_intent": Role.INTENT,
 }

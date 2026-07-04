@@ -13,7 +13,7 @@ class TestResolveRole:
         assert schema.resolve_role("event") is Role.EVENT
 
     def test_gc_infra_keys_resolve(self) -> None:
-        assert schema.resolve_role("gc_prose") is Role.PROSE
+        assert schema.resolve_role("gc_prose") is Role.CAPTURE
         assert schema.resolve_role("gc_session_context") is Role.SESSION_CONTEXT
 
     def test_legacy_gc_entity_keys_are_not_domain_knowledge(self) -> None:

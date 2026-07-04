@@ -42,7 +42,7 @@ class TestTypes:
         reg = _registry()
         known = reg.known_node_types()
         assert "Character" in known and "Realization" in known
-        assert "Prose" not in known  # infra role hidden
+        assert "Capture" not in known  # infra role hidden
 
     def test_legacy_gc_entity_types_resolve_via_overrides(self) -> None:
         # Pre-pivot read-compat (ADR 006): load_registry seeds these.

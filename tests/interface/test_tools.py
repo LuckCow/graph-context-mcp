@@ -105,7 +105,7 @@ async def test_explore_excludes_prose_by_default(
 ) -> None:
     await _record_prose_about(services, world.undercroft.id)
     out = await tools.explore_tool(services, start=world.undercroft.id, depth=1)
-    assert "(Prose" not in _body(out)
+    assert "(Capture" not in _body(out)
 
 
 async def test_explore_includes_prose_when_requested(
@@ -114,9 +114,9 @@ async def test_explore_includes_prose_when_requested(
     await _record_prose_about(services, world.undercroft.id)
     out = await tools.explore_tool(
         services, start=world.undercroft.id, depth=1,
-        include_types=["Prose", "Location"],
+        include_types=["Capture", "Location"],
     )
-    assert "(Prose" in _body(out)
+    assert "(Capture" in _body(out)
 
 
 # -- WP3 stale-summary workflow: only_stale narrows (start exempt) -----------

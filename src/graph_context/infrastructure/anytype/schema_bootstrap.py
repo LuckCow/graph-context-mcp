@@ -4,8 +4,9 @@ The space-reflecting model does NOT create a type per node kind anymore --
 story entities use the user's own native Anytype types. Bootstrap is now
 infra-only and create-if-missing:
 
-* the two ``gc_`` types we still own (Prose passages and the managed
-  SessionContext bookkeeping node);
+* the ``gc_`` types we still own (gc_prose capture artifacts -- display
+  name "Capture" since ADR 015 -- the managed SessionContext node, and
+  gc_intent provenance records);
 * the scalar ``gc_`` properties we write onto native objects (stale flag,
   story-time, fields JSON). Not minted here: descriptions live in the
   object body (ADR 010), and summaries live in the **built-in**
@@ -35,7 +36,7 @@ PROSE_TYPE_KEY = "gc_prose"
 SESSION_TYPE_KEY = "gc_session_context"
 INTENT_TYPE_KEY = "gc_intent"  # WP7/ADR 008: one provenance node per turn
 INFRA_TYPES: dict[str, str] = {
-    PROSE_TYPE_KEY: Role.PROSE.value,
+    PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
     INTENT_TYPE_KEY: Role.INTENT.value,
 }
