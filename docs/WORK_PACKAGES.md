@@ -824,7 +824,32 @@ after WP9.
 
 ---
 
-## WP11 — Semantic search + graph-aware ranking (ADRs 014, 016)
+## WP11 — Semantic search + graph-aware ranking (ADRs 014, 016) — **stage 1 shipped 2026-07-04**
+
+**Status:** node-level search + the full Ranker are live and
+`GC_EMBEDDER=off`-degradable as designed (off = byte-identical old
+behavior). Shipped: `Embedder`/`SemanticIndex` ports with the
+deterministic `HashingEmbedder` (`GC_EMBEDDER=hash`) and in-memory +
+SQLite cache adapters (contract-certified; restart survival and
+per-model isolation pinned); `SemanticProjector` (corpus = name + type +
+summary + fields, `modified_at` excluded from the hash so store touches
+never re-embed; full pass + prune after hydrate, incremental from
+resync); `Node.modified_at` (the ADR 016 recency signal); the **Ranker**
+exactly per ADR 016 — recruitment, infra look-through connectors
+(capture co-reference / intent co-touch), query↔edge-label conditioning
+with cached label vectors, links-mirror + Adamic-Adar discounts,
+profile-weighted recency, evidence strings from actual contributions
+(one real bug caught in test: connector conduits flowed into nodes the
+propagation skipped); `find_node` tier 3 + resolver "closest by
+meaning" suggestions (never-fuzzily-resolve pinned by test); and the
+**ranking eval golden** (`tests/semantic/ranking_eval.toml`, per-case k
+— the relation-query case honestly sits at k=5 under the bag-of-words
+embedder). Demo: `scripts/demo_wp11_search.py`. **Deferred:** passage
+stage 2 + the reserved `search` tool (dogfooding gate), reranker
+adapters + real embedders (container rebuild), live-E2E cache-restart
+run (wants a real embedder), and orchestrator RAG prefetch (the
+Ranker's `session_seeds` parameter is ready for it). Original spec
+follows.
 
 **Goal:** "find the node I'm describing" and, later, "find the passage
 that answers this" — as a **derived projection** with a persistent
