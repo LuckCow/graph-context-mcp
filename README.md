@@ -8,7 +8,7 @@ This repository contains the vertical slice (WP0), the **Anytype adapter (WP1)**
 
 **Live-server status:** the WP1 spike was run against a real local Anytype (API `2025-11-08`, 2026-06-21) and the assumption-driven corrections are applied in `infrastructure/anytype/` (resync via `POST /search`, endpoint-split page caps, timestamps-from-properties, `plural_name` on type creation). Node descriptions live in the object **body** ([ADR 010](docs/adr/010-descriptions-in-the-body.md)): created via `body`, updated via the `markdown` PATCH key (A7 — the S6 "write-once" finding was corrected 2026-07-02), fetched on demand and never hydrated. The mapping assumptions A1–A8 in `mapping.py` are mirrored by `mock_server.py`; a live-gated E2E suite (`ANYTYPE_E2E=1`) runs the same contracts against a real server.
 
-Try it: `PYTHONPATH=src python scripts/demo_wp2_tools.py` — drives the full tool loop in-process (composite create → scene-assembly `explore` → `find_path` → `record_prose` → stale-summary sweep → resync reporting → actionable errors) against the mock-backed repository.
+Try it: `PYTHONPATH=src python scripts/demo_wp2_tools.py` — drives the full tool loop in-process (composite create → scene-assembly `explore` → `find_path` → stale-summary sweep → resync reporting → actionable errors) against the mock-backed repository.
 
 ```
 pip install -e ".[dev]"
@@ -95,9 +95,9 @@ Because all three are container defaults inherited by `docker exec` — and `PYT
 }
 ```
 
-To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.) Set `GC_STORE_LLM_INPUT=0` to stop `record_prose` from persisting assembled prompts (`llm_input`) into the space — a privacy/size knob; the prose text and `llm_output` are stored either way.
+To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.) Set `GC_STORE_LLM_INPUT=0` to withhold prompt text from the orchestrator's provenance (intent) nodes — the tool-call trace is kept either way.
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `record_prose`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`. (Prose/artifact capture is the orchestrator harness's job — WP7 auto-capture; there is no capture tool.) Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
 
 ## Architecture in one paragraph
 
@@ -130,9 +130,9 @@ interface  ──▶  application  ──▶  domain
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand descriptions/prose |
 | `ports/session_store.py` | Session-snapshot contract | Plain-dict snapshots; lenient load (corrupt → `None`) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
-| `application/node_reader.py` | `get_node` use-case | Grouped edges + WP3 `include_prose` reverse-reference excerpts |
+| `application/node_reader.py` | `get_node` use-case | Grouped edges + WP7 `include_provenance` excerpts |
 | `application/explorer.py` | `explore` / `find_path` use-case | Resolves focus-stack defaults |
-| `application/prose_recorder.py` | `record_prose` use-case | Write-once-by-policy body (text + delimited llm_input/output), explicit references |
+| `application/prose_recorder.py` | Capture service (orchestrator-called) | Write-once-by-policy body, explicit references |
 | `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh` |
 | `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` | Reference impls; certified by `tests/contract` |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |

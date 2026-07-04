@@ -25,8 +25,6 @@ Run:  PYTHONPATH=src python -m graph_context.interface.server
 Done since the WP2/WP3 scaffold (integrated against the live-server WP1):
 * AnytypeSessionStore is wired into the lifespan (load_or_fresh on startup,
   debounced flush via tools' note_mutation, final flush on teardown).
-* `get_node` exposes include_prose (NodeReader grew the reverse-reference
-  lookup + on-demand body excerpts).
 * Structured per-call logging with durations lives at the tools.guarded
   seam (one INFO line per call: tool, outcome, duration; no payloads).
 """
@@ -142,13 +140,12 @@ async def get_node(
     ctx: Context[Any, Any, Any],
     node_id: str,
     edge_types: list[str] | None = None,
-    include_prose: int = 0,
     include_provenance: int = 0,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.get_node_tool(
         _services(ctx), node_id=node_id, edge_types=edge_types,
-        include_prose=include_prose, include_provenance=include_provenance,
+        include_provenance=include_provenance,
     )
 
 
@@ -200,21 +197,6 @@ async def find_node(
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.find_node_tool(
         _services(ctx), name=name, type=type, limit=limit,
-    )
-
-
-@mcp.tool(description=_PROFILE.tool_docs["record_prose"])
-async def record_prose(
-    ctx: Context[Any, Any, Any],
-    text: str,
-    summary: str,
-    references: list[str],
-    title: str = "",
-) -> str:
-    """LLM-facing description supplied by the active profile (profiles.py)."""
-    return await tools.record_prose_tool(
-        _services(ctx), text=text, summary=summary, references=references,
-        title=title,
     )
 
 

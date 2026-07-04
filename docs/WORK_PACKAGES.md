@@ -360,7 +360,11 @@ roles and `gc_intent`/`gc_edge_intent` the bootstrap; authoring auto-capture
 so the intent links prompt → intent → artifact + sources;
 `get_node(include_provenance=N)` mirrors `include_prose` and infra-role
 neighbors left the edge groups; `record_prose` retired `llm_input`/
-`llm_output`/`model` (it survives as the harness-less voluntary path);
+`llm_output`/`model` (and was then **removed entirely on 2026-07-04** —
+the project is pre-deployment, so no vestigial surface is kept;
+ProseRecorder survives as the service the harness calls, and the
+include_prose read surface went with it — captures reference their
+sources, sources do not track their captures);
 `GC_PROVENANCE` toggles the subsystem, `GC_STORE_LLM_INPUT` now governs
 intent-prompt storage. Demo: `scripts/demo_wp7_provenance.py` — the
 scripted model calls no capture tool and the harness records everything.

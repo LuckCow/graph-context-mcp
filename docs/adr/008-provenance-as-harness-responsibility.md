@@ -1,6 +1,6 @@
 # ADR 008: Provenance is a harness responsibility (intent nodes + automatic capture)
 
-**Status:** Accepted (2026-07-02) — depends on ADR 007; amends WP3's
+**Status:** Accepted (2026-07-02); amended 2026-07-04 — the `record_prose` tool was removed entirely rather than kept as the harness-less voluntary path (pre-deployment, no frozen surface); capture is exclusively the harness's job — depends on ADR 007; amends WP3's
 `record_prose` design
 
 ## Context

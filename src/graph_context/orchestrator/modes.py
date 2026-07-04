@@ -36,12 +36,9 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     "explore": tools.explore_tool,
     "find_path": tools.find_path_tool,
     "find_node": tools.find_node_tool,
-    "record_prose": tools.record_prose_tool,
 }
 
-MUTATION_TOOLS: frozenset[str] = frozenset(
-    {"create_node", "update_node", "record_prose"}
-)
+MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})
 
 TOOL_BINDINGS: Mapping[Mode, Mapping[str, ToolFn]] = {
     Mode.WORLD_MODELING: _FULL_SURFACE,

@@ -32,7 +32,6 @@ TOOL_NAMES: tuple[str, ...] = (
     "explore",
     "find_path",
     "find_node",
-    "record_prose",
 )
 
 
@@ -205,10 +204,6 @@ explore(depth=1, detail="full") over repeated get_node calls.
 node_id accepts a node NAME as well as an id (resolved for you; an
 ambiguous name reports its candidates so you can pick one).
 edge_types: optional filter, e.g. ["participated_in", "knows"].
-include_prose: how many recently-recorded prose passages that reference
-  this node to attach (default 0; most-recent first, with excerpts) --
-  the "how was this described last time?" consistency lookup. Try 1-3
-  before re-describing a returning location or character.
 include_provenance: how many intent records that touched this node to
   attach (default 0; most-recent first, with excerpts) -- the "who
   changed this, and why?" audit lookup. The response notes when such
@@ -256,15 +251,7 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only social edges: ["knows", "member_of"]).
 """,
     "find_node": _FIND_NODE_DOC,
-    "record_prose": """\
-Save rendered prose INTO the graph so future scenes stay consistent.
 
-Call after writing any scene/passage the user keeps. references is
-REQUIRED and must list every node id whose content shaped the prose
-(the characters present, the location, the events depicted) -- this
-powers later consistency checks. summary: one-liner of what the passage
-covers.
-""",
 }
 
 FICTION = DomainProfile(
@@ -359,11 +346,6 @@ explore(depth=1, detail="full") over repeated get_node calls.
 node_id accepts a node NAME as well as an id (resolved for you; an
 ambiguous name reports its candidates so you can pick one).
 edge_types: optional filter, e.g. ["works_on", "member_of"].
-include_prose: how many recently-captured passages (meeting notes,
-  decision records, saved summaries) that reference this node to attach
-  (default 0; most-recent first, with excerpts) -- the "what was written
-  about this last time?" lookup. Try 1-3 before re-summarizing a
-  recurring topic.
 include_provenance: how many intent records that touched this node to
   attach (default 0; most-recent first, with excerpts) -- the "who
   changed this, and why?" audit lookup. The response notes when such
@@ -412,15 +394,7 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["member_of", "works_on"]).
 """,
     "find_node": _FIND_NODE_DOC,
-    "record_prose": """\
-Save a text artifact (meeting notes, a decision record, a report
-section) INTO the graph so future work builds on it.
 
-Call after producing any passage the user keeps. references is REQUIRED
-and must list every node id whose content shaped the text (the people
-involved, the project, the decisions discussed) -- this powers later
-consistency lookups. summary: one-liner of what the passage covers.
-""",
 }
 
 WORKSPACE = DomainProfile(

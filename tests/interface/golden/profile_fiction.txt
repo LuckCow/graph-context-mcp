@@ -101,10 +101,6 @@ explore(depth=1, detail="full") over repeated get_node calls.
 node_id accepts a node NAME as well as an id (resolved for you; an
 ambiguous name reports its candidates so you can pick one).
 edge_types: optional filter, e.g. ["participated_in", "knows"].
-include_prose: how many recently-recorded prose passages that reference
-  this node to attach (default 0; most-recent first, with excerpts) --
-  the "how was this described last time?" consistency lookup. Try 1-3
-  before re-describing a returning location or character.
 include_provenance: how many intent records that touched this node to
   attach (default 0; most-recent first, with excerpts) -- the "who
   changed this, and why?" audit lookup. The response notes when such
@@ -167,12 +163,3 @@ update_node and link `other` targets all accept a name directly in place
 of an id and resolve it for you. Reach for find_node to browse, to
 disambiguate when a name is ambiguous, or to confirm a node exists.
 For a cold start with no name in mind, use context action='overview'.
-
-### record_prose
-Save rendered prose INTO the graph so future scenes stay consistent.
-
-Call after writing any scene/passage the user keeps. references is
-REQUIRED and must list every node id whose content shaped the prose
-(the characters present, the location, the events depicted) -- this
-powers later consistency checks. summary: one-liner of what the passage
-covers.

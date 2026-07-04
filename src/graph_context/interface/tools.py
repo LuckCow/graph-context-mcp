@@ -26,8 +26,10 @@ Notes:
 * Writes call `_note_mutation(services)`, which drives the debounced
   SessionPersister wired in server.py's lifespan (a no-op when absent, as
   in the memory backend and most tests).
-* WP3 surface is complete here: `record_prose`, `only_stale`, and
-  `get_node include_prose` (NodeReader grew the reverse-reference lookup).
+* Capture is the ORCHESTRATOR's job (WP7 auto-capture); the record_prose
+  tool was removed 2026-07-04 -- the project is pre-deployment, so no
+  vestigial surface is kept. ProseRecorder survives as the service the
+  harness calls.
 """
 
 from __future__ import annotations
@@ -366,15 +368,13 @@ async def get_node_tool(
     services: Services,
     node_id: str,
     edge_types: list[str] | None = None,
-    include_prose: int = 0,
     include_provenance: int = 0,
 ) -> str:
     view = await services.reader.get_node(
         _resolve(services.repository.graph, node_id),
         edge_type_filter=_edge_type_set(edge_types),
-        include_prose=include_prose,
         include_provenance=include_provenance,
-        excerpt_chars=presenters.PROSE_EXCERPT_CHARS,
+        excerpt_chars=presenters.EXCERPT_CHARS,
     )
     return presenters.render_node_view(view)
 
@@ -463,30 +463,3 @@ async def find_node_tool(
         name, node_type=type or None, limit=limit
     )
     return presenters.render_node_matches(matches)
-
-
-@guarded
-async def record_prose_tool(
-    services: Services,
-    text: str,
-    summary: str,
-    references: list[str],
-    title: str = "",
-) -> str:
-    if not references:
-        raise GraphContextError(
-            "record_prose requires at least one reference: list the node ids "
-            "whose context was used to render this prose (provenance must be "
-            "explicit; nothing is inferred from the focus stack)"
-        )
-    node = await services.prose.record(
-        text=text,
-        summary=summary,
-        references=references,
-        title=title,
-    )
-    await _note_mutation(services)
-    return (
-        f"recorded prose {node.name!r} (id={node.id}) referencing "
-        f"{len(references)} node(s)."
-    )
