@@ -914,6 +914,86 @@ for any real embedder but ships `GC_EMBEDDER=off`-degradable before it.
 
 ---
 
+## WP12 — Configurable activity modes & general capture (ADR 015)
+
+**Goal:** the behavior layer generalizes the way the storage layer already
+did — a work assistant with *Record Procedure* becomes a configuration
+entry, not a fork. Modes become data (`ModeSpec`: goal prompt + binding +
+capture policy), capture grows per-mode artifact types, the time axis and
+the vocabulary follow the profile. Depends on WP6 (mode machinery) and
+WP7 (capture pipeline); lands best BEFORE the LangGraph driver so the
+driver is born taking its system prompt from the active spec.
+
+### Deliverables
+
+- **`ModeSpec` + loader** (`orchestrator/modes.py` rework): specs carry
+  `name` / `goal` / `mutating` / optional `CapturePolicy(artifact_type,
+  references_label, min_chars)`. The binding tables, "unavailable, not
+  refused" boundary, `/mode` command (now listing loaded specs), and
+  per-session mode state are unchanged mechanisms fed by specs. Profiles
+  ship defaults (fiction: today's two modes verbatim; assistant: e.g.
+  `record_procedure`, `meeting_notes`); `GC_MODES_FILE` (TOML) adds or
+  overrides per deployment. Bad specs fail loudly at startup — specs are
+  prompts and get golden tests like docstrings.
+- **`CaptureRecorder`** (rename + generalize `ProseRecorder`): artifact
+  type key, references label, and threshold from the active policy;
+  `gc_prose` is the fiction default. Journal/intent integration
+  untouched. Native-typed artifacts are first-class (no infra hiding);
+  only `gc_prose` keeps it. The pipeline's `_finish_turn` reads the
+  active spec's policy instead of the hardcoded constants.
+- **Goal prompt → driver seam:** `LLMDriver.decide` gains the active
+  spec's goal as part of its inputs (transcript, tools, goal), so the
+  LangGraph driver lands against the final shape. ScriptedDriver ignores
+  it, as ever.
+- **Profile-declared time axis:** the profile names the Event-role
+  timeline property — `gc_story_time` (fiction) or a native date
+  property (assistant; ISO strings sort, so `as_of` generalizes to an
+  ordered timeline value). Domain contract becomes "comparable ordinal",
+  adapter maps the configured source both ways; docstrings reframe
+  `story_time`/`as_of` per profile.
+- **Vocabulary:** `Role.PROSE` → `Role.CAPTURE` (concept only; the
+  `gc_prose` key frozen); presenter/docstring "prose" strings become
+  profile fragments. A dogfooded **`assistant` profile**
+  (tasks/procedures/notes) supersedes the guessed parts of `workspace`.
+- README: assistant quickstart; demo script — scripted driver runs
+  `record_procedure` end-to-end (goal prompt in, `procedure` node with
+  references + intent chain out).
+
+### Decisions (settled — see ADR 015)
+
+- Modes are data; the enum dies. Config precedence: code defaults <
+  `GC_MODES_FILE`; **in-space mode objects are the stated direction**,
+  deferred together with WP5's per-space-profile question (same feature).
+- Capture artifacts of native types are ordinary nodes — visible,
+  searchable, footered; hiding is a `gc_prose` property, not a capture
+  property.
+- The timeline is an ordered value with a profile-named source; no
+  second time mechanism.
+
+### Open questions
+
+- Spec validation depth (does a capture artifact_type get checked
+  against the space at startup or first use?).
+- Should `/mode` switching remain fully explicit, or may a spec declare
+  itself the session default per profile? (v1: explicit; fiction keeps
+  world_modeling default.)
+- How much of `workspace`'s docstring set survives contact with real
+  assistant dogfooding.
+
+### Tests
+
+Spec loader: defaults + file override precedence, loud failure on bad
+specs, golden rendering of shipped specs. Bindings: a read-only spec's
+table lacks mutation tools (same assertion style as WP6). Capture: a
+`record_procedure` turn produces a native `procedure` artifact with
+references + intent linkage; thresholds respected; `gc_prose` fiction
+path unchanged. Time axis: `as_of` filters on the profile-named property
+in both backends. Vocabulary goldens per profile.
+
+Suggested sizing: **L** (modes+capture M, time axis M, vocabulary S).
+
+---
+
 ## Sequencing
 
 ```
@@ -958,6 +1038,11 @@ and rebuild-coupled only for the embedder itself: the ports, cache, tool
 tiering, and resolver suggestions all ship `GC_EMBEDDER=off`-degradable
 beforehand. Batch the local model into the same container rebuild as
 langgraph + import-linter.
+
+WP12 (activity modes & general capture, ADR 015) follows WP6+WP7 and
+should land BEFORE the LangGraph driver — the driver is then born taking
+its system prompt from the active ModeSpec instead of being retrofitted.
+WP11 and WP12 are independent of each other.
 
 ## Risk register (top items)
 
