@@ -85,7 +85,6 @@ def build_services(
     session: SessionState,
     persister: SessionPersister | None = None,
     *,
-    store_llm_input: bool = True,
     journal: MutationJournal | None = None,
 ) -> Services:
     journal = journal or NullJournal()
@@ -95,9 +94,7 @@ def build_services(
         writer=NodeWriter(repository, session, journal),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        prose=ProseRecorder(
-            repository, store_llm_input=store_llm_input, journal=journal
-        ),
+        prose=ProseRecorder(repository, journal=journal),
         persister=persister,
         journal=journal,
     )
@@ -475,9 +472,6 @@ async def record_prose_tool(
     summary: str,
     references: list[str],
     title: str = "",
-    llm_input: str = "",
-    llm_output: str = "",
-    model: str = "",
 ) -> str:
     if not references:
         raise GraphContextError(
@@ -490,9 +484,6 @@ async def record_prose_tool(
         summary=summary,
         references=references,
         title=title,
-        llm_input=llm_input,
-        llm_output=llm_output,
-        model=model,
     )
     await _note_mutation(services)
     return (

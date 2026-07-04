@@ -345,7 +345,28 @@ the quarantine.
 
 ---
 
-## WP7 — Provenance & capture pipeline (ADR 008)
+## WP7 — Provenance & capture pipeline (ADR 008) — **shipped 2026-07-04**
+
+**Status:** complete against the framework-free WP6 harness; every
+deliverable below landed. `MutationJournal` (writers report at the source;
+NullJournal in the MCP server, drained per turn in the orchestrator);
+`IntentRecorder` (one `gc_intent` node per mutating turn — verbatim prompt,
+condensed tool trace, created-vs-modified detail, `intent` edges to every
+touched node, user/model attribution; read-only turns write nothing; the
+privacy knob scrubs prompt text from the body AND the node name/summary —
+names render in list views, caught by test); `Role.INTENT` joined the infra
+roles and `gc_intent`/`gc_edge_intent` the bootstrap; authoring auto-capture
+(exact-name entity linking, `MIN_CAPTURE_CHARS` guard) journals its artifact
+so the intent links prompt → intent → artifact + sources;
+`get_node(include_provenance=N)` mirrors `include_prose` and infra-role
+neighbors left the edge groups; `record_prose` retired `llm_input`/
+`llm_output`/`model` (it survives as the harness-less voluntary path);
+`GC_PROVENANCE` toggles the subsystem, `GC_STORE_LLM_INPUT` now governs
+intent-prompt storage. Demo: `scripts/demo_wp7_provenance.py` — the
+scripted model calls no capture tool and the harness records everything.
+Attribution note: `user_id`/`model` live in the intent node's fields (not
+first-class `gc_` properties as the original spec sketched) — promote them
+only if Set-filtering by user becomes a real need. Original spec follows.
 
 **Goal:** provenance becomes automatic — intent nodes journaled per mutating
 turn, authoring output captured with references, `record_prose`'s `llm_*`

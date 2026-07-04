@@ -17,10 +17,10 @@ async def test_record_creates_prose_node_with_references(
     recorder = ProseRecorder(repository, now=lambda: "2026-01-01T00:00:00Z")
     node = await recorder.record(
         text="Ash over the Undercroft.", summary="Aftermath.",
-        references=[world.mira.id, world.undercroft.id], model="demo",
+        references=[world.mira.id, world.undercroft.id],
     )
     assert node.role is Role.PROSE
-    assert node.fields == {"model": "demo", "generated_at": "2026-01-01T00:00:00Z"}
+    assert node.fields == {"generated_at": "2026-01-01T00:00:00Z"}
     # references edges: Prose -> each source.
     targets = {
         e.target
@@ -43,31 +43,16 @@ async def test_record_does_not_touch_the_focus_stack(
     assert list(session.recent.items) == recent_before
 
 
-async def test_body_assembles_delimited_llm_sections(
+async def test_body_is_the_rendered_text_alone(
     repository: InMemoryGraphRepository, world: World
 ) -> None:
+    """WP7 retired the llm_* body sections: generation provenance lives on
+    intent nodes (ADR 008); prose bodies carry only the text itself."""
     recorder = ProseRecorder(repository, now=lambda: "t")
     node = await recorder.record(
         text="rendered", summary="s", references=[world.mira.id],
-        llm_input="the prompt", llm_output="the completion",
     )
-    body = await repository.fetch_body(node.id)
-    assert body.startswith("rendered")
-    assert pr.LLM_INPUT_HEADER in body and "the prompt" in body
-    assert pr.LLM_OUTPUT_HEADER in body and "the completion" in body
-
-
-async def test_store_llm_input_false_drops_the_input_section(
-    repository: InMemoryGraphRepository, world: World
-) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t", store_llm_input=False)
-    node = await recorder.record(
-        text="rendered", summary="s", references=[world.mira.id],
-        llm_input="the prompt", llm_output="the completion",
-    )
-    body = await repository.fetch_body(node.id)
-    assert pr.LLM_INPUT_HEADER not in body and "the prompt" not in body
-    assert pr.LLM_OUTPUT_HEADER in body and "the completion" in body  # kept
+    assert await repository.fetch_body(node.id) == "rendered"
 
 
 async def test_oversized_body_is_truncated_with_marker(

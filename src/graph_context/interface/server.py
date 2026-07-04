@@ -210,14 +210,11 @@ async def record_prose(
     summary: str,
     references: list[str],
     title: str = "",
-    llm_input: str = "",
-    llm_output: str = "",
-    model: str = "",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.record_prose_tool(
         _services(ctx), text=text, summary=summary, references=references,
-        title=title, llm_input=llm_input, llm_output=llm_output, model=model,
+        title=title,
     )
 
 

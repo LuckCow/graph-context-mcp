@@ -209,6 +209,10 @@ include_prose: how many recently-recorded prose passages that reference
   this node to attach (default 0; most-recent first, with excerpts) --
   the "how was this described last time?" consistency lookup. Try 1-3
   before re-describing a returning location or character.
+include_provenance: how many intent records that touched this node to
+  attach (default 0; most-recent first, with excerpts) -- the "who
+  changed this, and why?" audit lookup. The response notes when such
+  records exist.
 """,
     "explore": """\
 Walk the graph outward from a node. THE general retrieval primitive.
@@ -259,8 +263,7 @@ Call after writing any scene/passage the user keeps. references is
 REQUIRED and must list every node id whose content shaped the prose
 (the characters present, the location, the events depicted) -- this
 powers later consistency checks. summary: one-liner of what the passage
-covers. Optionally store the generation inputs (llm_input/llm_output/
-model) for provenance.
+covers.
 """,
 }
 
@@ -361,6 +364,10 @@ include_prose: how many recently-captured passages (meeting notes,
   (default 0; most-recent first, with excerpts) -- the "what was written
   about this last time?" lookup. Try 1-3 before re-summarizing a
   recurring topic.
+include_provenance: how many intent records that touched this node to
+  attach (default 0; most-recent first, with excerpts) -- the "who
+  changed this, and why?" audit lookup. The response notes when such
+  records exist.
 """,
     "explore": """\
 Walk the graph outward from a node. THE general retrieval primitive.
@@ -413,8 +420,6 @@ Call after producing any passage the user keeps. references is REQUIRED
 and must list every node id whose content shaped the text (the people
 involved, the project, the decisions discussed) -- this powers later
 consistency lookups. summary: one-liner of what the passage covers.
-Optionally store the generation inputs (llm_input/llm_output/model) for
-provenance.
 """,
 }
 

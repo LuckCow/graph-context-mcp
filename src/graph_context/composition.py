@@ -14,8 +14,11 @@ Environment surface (unchanged from the server's original wiring):
 
 * ``GC_BACKEND``           -- ``anytype`` (default) or ``memory``.
 * ``GC_PROJECT_NAME``      -- initial project label (cosmetic).
-* ``GC_STORE_LLM_INPUT``   -- WP3 privacy knob for record_prose.
 * ``GC_FIELD_DENYLIST``    -- ADR 012 field-reflection silences.
+
+(``GC_STORE_LLM_INPUT`` moved to the orchestrator's root: WP7 retired
+record_prose's llm_* parameters, so the knob now governs intent-node
+prompt storage instead.)
 * Anytype connection env is read by ``AnytypeConfig.from_env``.
 
 The active :class:`~graph_context.interface.profiles.DomainProfile` is a
@@ -52,11 +55,6 @@ async def build_runtime(
 
     backend = os.environ.get("GC_BACKEND", "anytype")
     session = SessionState(project=os.environ.get("GC_PROJECT_NAME"))
-    # WP3 privacy/size knob: GC_STORE_LLM_INPUT=0 stops record_prose from
-    # persisting assembled prompts (llm_input) into the space.
-    store_llm_input = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
-        "0", "false", "no",
-    }
     teardown: list[TeardownHook] = []
 
     logger.info("profile=%s (%s)", profile.name, profile.description)
@@ -69,7 +67,6 @@ async def build_runtime(
         return build_services(
             InMemoryGraphRepository(role_overrides=profile.role_overrides),
             session,
-            store_llm_input=store_llm_input,
             journal=journal,
         ), teardown
 
@@ -120,8 +117,7 @@ async def build_runtime(
     persister = SessionPersister(store, session)
     teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
     return build_services(
-        repository, session, persister,
-        store_llm_input=store_llm_input, journal=journal,
+        repository, session, persister, journal=journal,
     ), teardown
 
 

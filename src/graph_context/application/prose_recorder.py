@@ -3,28 +3,28 @@
 Prose lives in the graph (proposal, "Story layer") so consistency checks
 ("how was this place described last time?") are queryable. A Prose node:
 
-* ``body``     -- the rendered text, then delimited llm_input/llm_output
-                  sections (write-once *by policy*; see NodeDraft.body).
+* ``body``     -- the rendered text (write-once *by policy*; see
+                  NodeDraft.body).
 * ``summary``  -- one-liner, required like every node.
-* ``fields``   -- generation metadata (model, generated_at).
+* ``fields``   -- generation metadata (generated_at).
 * ``references`` edges to every source node used to generate it. These
   are *explicit only* (settled in WORK_PACKAGES WP3): no auto-referencing
   of the focus stack -- provenance must be honest.
+
+WP7 retired the ``llm_input``/``llm_output``/``model`` parameters (and
+their body sections): generation provenance is the HARNESS's job now --
+the orchestrator journals every mutating turn into an intent node (ADR
+008), which carries the verbatim prompt, tool trace, and model
+attribution. ``record_prose`` survives as the voluntary capture path for
+harness-less MCP clients: text + summary + references, nothing more.
 
 Spike S6 (resolved): bodies of 50 KB / 250 KB / 1 MB all created and
 round-tripped against the live server with no practical size ceiling.
 Bodies are API-editable after all (A7, ADR 010), so prose being write-once
 is a *policy* choice -- provenance must not be editable -- no longer an
-API limitation. PROSE_BODY_CAP is likewise a *product* bound (keep stored
-prompts from bloating the space without limit), not a technical one; it is
-set well inside the confirmed-good range and keeps the truncation marker
-because silent truncation is worse than none.
-
-``store_llm_input=False`` (env ``GC_STORE_LLM_INPUT=0`` at the composition
-root) drops the llm_input section entirely -- the WP3 privacy/size knob:
-stored prompts aid debugging but bloat the space and may repeat the user's
-own notes verbatim. llm_output is kept either way (it is the model's text,
-usually near-identical to the prose itself).
+API limitation. PROSE_BODY_CAP is likewise a *product* bound, not a
+technical one; it is set well inside the confirmed-good range and keeps
+the truncation marker because silent truncation is worse than none.
 """
 
 from __future__ import annotations
@@ -39,9 +39,6 @@ from graph_context.ports.graph_repository import GraphRepository
 PROSE_TYPE = "gc_prose"  # thin gc_ infra type for prose passages
 REFERENCES_LABEL = "references"  # Prose -> source relation label
 PROSE_BODY_CAP = 500_000  # chars; product bound, well inside S6's 1 MB ceiling
-SECTION_DELIM = "\n\n---\n"
-LLM_INPUT_HEADER = "### gc:llm_input"
-LLM_OUTPUT_HEADER = "### gc:llm_output"
 TRUNCATION_MARKER = "\n[truncated]"
 
 
@@ -57,12 +54,10 @@ class ProseRecorder:
         repository: GraphRepository,
         *,
         now: Callable[[], str] = _utc_now_iso,  # injectable for tests
-        store_llm_input: bool = True,
         journal: MutationJournal | None = None,
     ) -> None:
         self._repository = repository
         self._now = now
-        self._store_llm_input = store_llm_input
         self._journal = journal or NullJournal()
 
     async def record(
@@ -72,18 +67,13 @@ class ProseRecorder:
         summary: str,
         references: Sequence[NodeId],
         title: str = "",
-        llm_input: str = "",
-        llm_output: str = "",
-        model: str = "",
     ) -> Node:
         draft = NodeDraft(
             type=PROSE_TYPE,
             name=title or _derive_title(text),
             summary=summary,
-            fields={"model": model, "generated_at": self._now()},
-            body=_assemble_body(
-                text, llm_input if self._store_llm_input else "", llm_output
-            ),
+            fields={"generated_at": self._now()},
+            body=_capped(text),
         )
         links = [
             LinkSpec(REFERENCES_LABEL, other=node_id) for node_id in references
@@ -101,13 +91,7 @@ def _derive_title(text: str) -> str:
     return first_line[:48] + ("…" if len(first_line) > 48 else "")
 
 
-def _assemble_body(text: str, llm_input: str, llm_output: str) -> str:
-    parts = [text]
-    if llm_input:
-        parts.append(f"{LLM_INPUT_HEADER}\n{llm_input}")
-    if llm_output:
-        parts.append(f"{LLM_OUTPUT_HEADER}\n{llm_output}")
-    body = SECTION_DELIM.join(parts)
-    if len(body) > PROSE_BODY_CAP:
-        body = body[: PROSE_BODY_CAP - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
-    return body
+def _capped(text: str) -> str:
+    if len(text) > PROSE_BODY_CAP:
+        return text[: PROSE_BODY_CAP - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
+    return text
