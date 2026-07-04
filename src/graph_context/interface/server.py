@@ -143,11 +143,12 @@ async def get_node(
     node_id: str,
     edge_types: list[str] | None = None,
     include_prose: int = 0,
+    include_provenance: int = 0,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.get_node_tool(
         _services(ctx), node_id=node_id, edge_types=edge_types,
-        include_prose=include_prose,
+        include_prose=include_prose, include_provenance=include_provenance,
     )
 
 

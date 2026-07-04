@@ -193,6 +193,17 @@ def render_node_view(view: NodeView) -> str:
     elif node.role not in INFRA_ROLES:
         # An explicit signal so "no prior prose" is never an inference.
         lines.append("prose: none recorded")
+    if view.provenance:
+        lines.append(
+            f"provenance ({len(view.provenance)} of {view.provenance_count}):"
+        )
+        for intent_node, excerpt in view.provenance:
+            lines.append(f"  {intent_node.name} (id={intent_node.id}): {excerpt}")
+    elif view.provenance_count > 0:
+        lines.append(
+            f"provenance: {view.provenance_count} intent record(s) touched this "
+            "node (pass include_provenance=1-3 to view)"
+        )
     return "\n".join(lines)
 
 

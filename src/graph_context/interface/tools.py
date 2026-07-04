@@ -370,11 +370,13 @@ async def get_node_tool(
     node_id: str,
     edge_types: list[str] | None = None,
     include_prose: int = 0,
+    include_provenance: int = 0,
 ) -> str:
     view = await services.reader.get_node(
         _resolve(services.repository.graph, node_id),
         edge_type_filter=_edge_type_set(edge_types),
         include_prose=include_prose,
+        include_provenance=include_provenance,
         excerpt_chars=presenters.PROSE_EXCERPT_CHARS,
     )
     return presenters.render_node_view(view)

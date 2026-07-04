@@ -24,13 +24,14 @@ from dataclasses import dataclass, field
 
 from graph_context.domain.graph import Direction
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import Role
+from graph_context.domain.schema import INFRA_ROLES, Role
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 
 DEFAULT_EXCERPT_CHARS = 300  # mirror of presenters.PROSE_EXCERPT_CHARS default
 
 REFERENCES_LABEL = "references"  # Prose -> source edge label (cleaned)
+INTENT_LABEL = "intent"  # intent node -> touched node edge label (WP7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,10 @@ class NodeView:
     # (index-only, no body fetches) so "does prose exist?" is a signal the
     # presenter can surface, never an inference.
     prose_count: int = 0
+    # WP7: (intent node, body excerpt) pairs, most-recent first; empty
+    # unless include_provenance was requested. Mirrors prose exactly.
+    provenance: tuple[tuple[Node, str], ...] = field(default=())
+    provenance_count: int = 0
 
 
 class NodeReader:
@@ -65,6 +70,7 @@ class NodeReader:
         *,
         edge_type_filter: Iterable[str] | None = None,
         include_prose: int = 0,
+        include_provenance: int = 0,
         excerpt_chars: int = DEFAULT_EXCERPT_CHARS,
     ) -> NodeView:
         graph = self._repository.graph
@@ -73,12 +79,23 @@ class NodeReader:
         for edge, neighbor in graph.neighbors(
             node_id, Direction.BOTH, edge_types=edge_type_filter
         ):
+            # WP7: infra-role neighbors (Prose, SessionContext, Intent) are
+            # bookkeeping -- their edges never clutter the edge groups. The
+            # prose/provenance counts below are the deliberate signal.
+            if neighbor.role in INFRA_ROLES:
+                continue
             grouped.setdefault(edge.type, []).append((edge, neighbor))
         body = await self._repository.fetch_body(node_id)
         prose_nodes = self._referencing_prose(node_id)
         prose: tuple[tuple[Node, str], ...] = ()
         if include_prose > 0:
             prose = await self._excerpts(prose_nodes[:include_prose], excerpt_chars)
+        intent_nodes = self._referencing_intents(node_id)
+        provenance: tuple[tuple[Node, str], ...] = ()
+        if include_provenance > 0:
+            provenance = await self._excerpts(
+                intent_nodes[:include_provenance], excerpt_chars
+            )
         self._session.touch(node_id)
         return NodeView(
             node=node,
@@ -86,6 +103,8 @@ class NodeReader:
             body=body,
             prose=prose,
             prose_count=len(prose_nodes),
+            provenance=provenance,
+            provenance_count=len(intent_nodes),
         )
 
     def _referencing_prose(self, node_id: NodeId) -> list[Node]:
@@ -106,6 +125,18 @@ class NodeReader:
             key=lambda n: n.fields.get("generated_at", ""), reverse=True
         )
         return prose_nodes
+
+    def _referencing_intents(self, node_id: NodeId) -> list[Node]:
+        """Intent nodes that touched this node, most-recent first (WP7)."""
+        intents = [
+            neighbor
+            for _, neighbor in self._repository.graph.neighbors(
+                node_id, Direction.IN, edge_types=[INTENT_LABEL]
+            )
+            if neighbor.role is Role.INTENT
+        ]
+        intents.sort(key=lambda n: n.fields.get("generated_at", ""), reverse=True)
+        return intents
 
     async def _excerpts(
         self, prose_nodes: list[Node], excerpt_chars: int
