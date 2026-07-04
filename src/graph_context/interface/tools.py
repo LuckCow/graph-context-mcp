@@ -35,11 +35,12 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
 
 from graph_context.application.explorer import Explorer
+from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
 from graph_context.application.prose_recorder import ProseRecorder
@@ -74,6 +75,9 @@ class Services:
     explorer: Explorer
     prose: ProseRecorder
     persister: SessionPersister | None = None  # wired in server lifespan
+    # WP7: the orchestrator passes a real MutationJournal and drains it per
+    # turn; the MCP server keeps the NullJournal (no turn boundary).
+    journal: MutationJournal = field(default_factory=NullJournal)
 
 
 def build_services(
@@ -82,15 +86,20 @@ def build_services(
     persister: SessionPersister | None = None,
     *,
     store_llm_input: bool = True,
+    journal: MutationJournal | None = None,
 ) -> Services:
+    journal = journal or NullJournal()
     return Services(
         repository=repository,
         session=session,
-        writer=NodeWriter(repository, session),
+        writer=NodeWriter(repository, session, journal),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        prose=ProseRecorder(repository, store_llm_input=store_llm_input),
+        prose=ProseRecorder(
+            repository, store_llm_input=store_llm_input, journal=journal
+        ),
         persister=persister,
+        journal=journal,
     )
 
 

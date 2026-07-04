@@ -32,6 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
+from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.domain.models import LinkSpec, Node, NodeDraft, NodeId
 from graph_context.ports.graph_repository import GraphRepository
 
@@ -57,10 +58,12 @@ class ProseRecorder:
         *,
         now: Callable[[], str] = _utc_now_iso,  # injectable for tests
         store_llm_input: bool = True,
+        journal: MutationJournal | None = None,
     ) -> None:
         self._repository = repository
         self._now = now
         self._store_llm_input = store_llm_input
+        self._journal = journal or NullJournal()
 
     async def record(
         self,
@@ -88,7 +91,9 @@ class ProseRecorder:
         # Deliberately no session.touch: Prose is an infra role hidden from
         # traversal, so it must not squat on the focus stack. The sources are
         # already in focus from the reads that preceded rendering.
-        return await self._repository.create_node(draft, links)
+        node = await self._repository.create_node(draft, links)
+        self._journal.created(node.id)  # the captured artifact (WP7)
+        return node
 
 
 def _derive_title(text: str) -> str:

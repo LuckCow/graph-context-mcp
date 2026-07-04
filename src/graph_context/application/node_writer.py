@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.domain import schema
 from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
 from graph_context.domain.session import SessionState
@@ -30,9 +31,17 @@ from graph_context.ports.graph_repository import GraphRepository
 class NodeWriter:
     """Composite, rule-enforcing writes against the story-world graph."""
 
-    def __init__(self, repository: GraphRepository, session: SessionState) -> None:
+    def __init__(
+        self,
+        repository: GraphRepository,
+        session: SessionState,
+        journal: MutationJournal | None = None,
+    ) -> None:
         self._repository = repository
         self._session = session
+        # WP7: writers report touched nodes at the source; the default
+        # NullJournal keeps the MCP server's behavior unchanged.
+        self._journal = journal or NullJournal()
 
     async def create_node(
         self,
@@ -49,6 +58,12 @@ class NodeWriter:
         node = await self._repository.create_node(
             draft, links, create_missing_relations=create_missing_relations
         )
+        self._journal.created(node.id)
+        for link in links:
+            # A link write mutates the edge's SOURCE object's relation list;
+            # the new node's own links landed with the create.
+            if not link.outgoing:
+                self._journal.modified(link.other)
         self._session.touch(node.id)
         for link in links:
             if self._session.focus.top != link.other:  # keep new node on top
@@ -86,9 +101,14 @@ class NodeWriter:
             await self._repository.add_link(
                 node_id, link, create_missing_relations=create_missing_relations
             )
+            if not link.outgoing:
+                self._journal.modified(link.other)
         for edge in remove_links:
             await self._repository.remove_link(edge)
+            if edge.source != node_id:
+                self._journal.modified(edge.source)
 
+        self._journal.modified(node_id)
         self._session.touch(node_id)
         return self._repository.graph.node(node_id)
 
