@@ -7,6 +7,9 @@ dependencies = ["httpx>=0.27", "mcp>=1.2"]          # domain stays dependency-fr
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10", "import-linter>=2"]
+# ADR 007: the agentic pipeline's framework, quarantined to orchestrator/.
+# Installable once the devcontainer image carries it (egress firewall).
+orchestrator = ["langgraph>=0.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,6 +38,7 @@ mypy_path = "src"
 # The dependency rule (README "Architecture in one paragraph"), enforced.
 [tool.importlinter]
 root_package = "graph_context"
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Layers: interface -> application -> domain"
@@ -66,3 +70,49 @@ source_modules = [
     "graph_context.interface.profiles",
 ]
 forbidden_modules = ["graph_context.infrastructure"]
+
+# ADR 007: the orchestrator is a SECOND interface adapter. It reuses the
+# tool wrappers but never the MCP module, and only its composition root
+# (cli.py, like interface/server.py) may import infrastructure.
+[[tool.importlinter.contracts]]
+name = "Orchestrator never imports the MCP composition root"
+type = "forbidden"
+source_modules = ["graph_context.orchestrator"]
+forbidden_modules = ["graph_context.interface.server", "mcp"]
+
+[[tool.importlinter.contracts]]
+name = "Only the orchestrator's composition root imports infrastructure"
+type = "forbidden"
+source_modules = [
+    "graph_context.orchestrator.modes",
+    "graph_context.orchestrator.drivers",
+    "graph_context.orchestrator.pipeline",
+]
+forbidden_modules = ["graph_context.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing imports the orchestrator"
+type = "forbidden"
+source_modules = [
+    "graph_context.domain",
+    "graph_context.ports",
+    "graph_context.application",
+    "graph_context.interface",
+    "graph_context.infrastructure",
+    "graph_context.composition",
+]
+forbidden_modules = ["graph_context.orchestrator"]
+
+# ADR 007 quarantine: a framework swap must stay orchestrator-internal.
+[[tool.importlinter.contracts]]
+name = "LangGraph never leaks outside the orchestrator"
+type = "forbidden"
+source_modules = [
+    "graph_context.domain",
+    "graph_context.ports",
+    "graph_context.application",
+    "graph_context.interface",
+    "graph_context.infrastructure",
+    "graph_context.composition",
+]
+forbidden_modules = ["langgraph", "langchain", "langchain_core"]

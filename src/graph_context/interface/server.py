@@ -1,8 +1,9 @@
 """Composition root: the MCP server (WP2).
 
-The ONLY module that imports the MCP SDK and the only one allowed to
-import infrastructure. Wiring: config -> client -> bootstrap -> repository
--> hydrate -> session (restored via SessionStore) -> services -> tools.
+The ONLY module that imports the MCP SDK. The build itself (config ->
+client -> bootstrap -> repository -> hydrate -> session -> services) lives
+in graph_context/composition.py, shared with the orchestrator's composition
+root (ADR 007) -- one wiring, two roots.
 
 Backends (env `GC_BACKEND`):
 * `anytype` (default) -- requires ANYTYPE_SPACE_ID, a key (ANYTYPE_API_KEY or
@@ -41,9 +42,9 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from graph_context.domain.session import SessionState
+from graph_context import composition
 from graph_context.interface import profiles, tools
-from graph_context.interface.tools import Services, build_services
+from graph_context.interface.tools import Services
 
 logger = logging.getLogger(__name__)
 
@@ -60,91 +61,15 @@ class AppContext:
     teardown: list[Any]
 
 
-async def _build_services() -> tuple[Services, list[Any]]:
-    backend = os.environ.get("GC_BACKEND", "anytype")
-    session = SessionState(project=os.environ.get("GC_PROJECT_NAME"))
-    # WP3 privacy/size knob: GC_STORE_LLM_INPUT=0 stops record_prose from
-    # persisting assembled prompts (llm_input) into the space.
-    store_llm_input = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
-        "0", "false", "no",
-    }
-    teardown: list[Any] = []
-
-    logger.info("profile=%s (%s)", _PROFILE.name, _PROFILE.description)
-    if backend == "memory":
-        from graph_context.infrastructure.memory.fake_repository import (
-            InMemoryGraphRepository,
-        )
-
-        logger.info("backend=memory (development mode; nothing persists)")
-        return build_services(
-            InMemoryGraphRepository(role_overrides=_PROFILE.role_overrides),
-            session,
-            store_llm_input=store_llm_input,
-        ), teardown
-
-    from graph_context.application.session_persister import SessionPersister
-    from graph_context.infrastructure.anytype.client import AnytypeClient
-    from graph_context.infrastructure.anytype.config import AnytypeConfig
-    from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
-    from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
-    from graph_context.infrastructure.anytype.session_repository import (
-        AnytypeSessionStore,
-    )
-
-    config = AnytypeConfig.from_env()
-    client = AnytypeClient(config)
-    teardown.append(client.aclose)
-    await ensure_schema(client)
-    # GC_FIELD_DENYLIST (ADR 012): comma-separated property keys to hide
-    # from field reflection, on top of the built-in system-noise denylist.
-    field_denylist = frozenset(
-        key.strip()
-        for key in os.environ.get("GC_FIELD_DENYLIST", "").split(",")
-        if key.strip()
-    )
-    repository = AnytypeGraphRepository(
-        client,
-        role_overrides=_PROFILE.role_overrides,
-        field_denylist=field_denylist,
-    )
-    await repository.hydrate()
-    logger.info(
-        "hydrated space %s: %d nodes / %d edges",
-        config.space_id,
-        repository.graph.node_count(),
-        repository.graph.edge_count(),
-    )
-    # Restore the working session from the SessionContext meta-node, and
-    # arrange a debounced flush (note_mutation in tools) + a final flush on
-    # shutdown. A corrupt/missing snapshot degrades to the fresh session.
-    store = AnytypeSessionStore(client)
-    session = await SessionPersister.load_or_fresh(store, session)
-    if not session.project:
-        # Derived cosmetic default: the space's own name. Never blocks startup;
-        # GC_PROJECT_NAME and a persisted set_project both take precedence.
-        try:
-            session.project = (await client.get_space()).get("name") or None
-        except Exception:  # noqa: BLE001
-            logger.warning("could not read space name for the project label")
-    persister = SessionPersister(store, session)
-    teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
-    return build_services(
-        repository, session, persister, store_llm_input=store_llm_input
-    ), teardown
-
-
 @asynccontextmanager
 async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
-    services, teardown = await _build_services()
+    # The build itself is shared with the orchestrator's composition root
+    # (ADR 007): one wiring, two roots -- see graph_context/composition.py.
+    services, teardown = await composition.build_runtime(_PROFILE)
     try:
         yield AppContext(services=services, teardown=teardown)
     finally:
-        for hook in reversed(teardown):
-            try:
-                await hook()
-            except Exception:  # noqa: BLE001
-                logger.exception("teardown hook failed")
+        await composition.run_teardown(teardown)
 
 
 mcp = FastMCP("graph-context", lifespan=lifespan)
