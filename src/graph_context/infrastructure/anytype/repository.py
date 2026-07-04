@@ -38,7 +38,14 @@ from typing import Any
 
 from graph_context.domain import schema
 from graph_context.domain.graph import Direction, GraphIndex
-from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
+from graph_context.domain.models import (
+    Edge,
+    LinkSpec,
+    Node,
+    NodeDraft,
+    NodeId,
+    TimelineValue,
+)
 from graph_context.domain.schema import Role
 from graph_context.errors import (
     GraphContextError,
@@ -95,6 +102,7 @@ class AnytypeGraphRepository:
         *,
         role_overrides: Mapping[str, Role] | None = None,
         field_denylist: Iterable[str] = (),
+        timeline: tuple[str, str] = mapping.DEFAULT_TIMELINE,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._client = client
@@ -106,9 +114,13 @@ class AnytypeGraphRepository:
         # Space-specific field-reflection silences (GC_FIELD_DENYLIST,
         # ADR 012); merged with the system denylist inside the registry.
         self._field_denylist: frozenset[str] = frozenset(field_denylist)
+        # Profile-declared (property key, format) for the Event timeline
+        # (ADR 015); gc_story_time/number is the fiction default.
+        self._timeline = timeline
         self._registry = SpaceRegistry(
             role_overrides=dict(self._role_overrides),
             hidden_field_keys=self._field_denylist,
+            timeline_key=timeline[0],
         )
         # ADR 009: the single-writer seam. Every store mutation runs inside
         # this FIFO lock, and relation-list PATCH payloads are materialized
@@ -161,6 +173,7 @@ class AnytypeGraphRepository:
         self._registry = await load_registry(
             self._client, extra_role_overrides=self._role_overrides,
             hidden_field_keys=self._field_denylist,
+            timeline_key=self._timeline[0],
         )
         self._graph, watermark, stamps = await sync.load_index(
             self._client, self._registry
@@ -177,6 +190,7 @@ class AnytypeGraphRepository:
         self._registry = await load_registry(
             self._client, extra_role_overrides=self._role_overrides,
             hidden_field_keys=self._field_denylist,
+            timeline_key=self._timeline[0],
         )
         fetched = await sync.fetch_changes(self._client, self._watermark)
         unseen = [
@@ -242,6 +256,7 @@ class AnytypeGraphRepository:
                     mapping.to_create_payload(
                         draft, type_key=type_key,
                         native_properties=native_fields, fields_blob=blob,
+                        timeline=self._timeline,
                     )
                 )
             )
@@ -312,7 +327,7 @@ class AnytypeGraphRepository:
         summary: str | None = None,
         summary_stale: bool | None = None,
         body: str | None = None,
-        story_time: float | None = None,
+        story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node:
         existing = self._graph.node(node_id)  # NodeNotFound before any API call
@@ -336,6 +351,7 @@ class AnytypeGraphRepository:
             story_time=story_time,
             fields=blob,
             native_properties=native_fields,
+            timeline=self._timeline,
         )
         async with self._writer():
             updated = await self._send_tolerating_fresh_tags(

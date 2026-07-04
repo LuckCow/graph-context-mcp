@@ -23,7 +23,14 @@ from collections.abc import Mapping, Sequence
 
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.domain import schema
-from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
+from graph_context.domain.models import (
+    Edge,
+    LinkSpec,
+    Node,
+    NodeDraft,
+    NodeId,
+    TimelineValue,
+)
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 
@@ -77,7 +84,7 @@ class NodeWriter:
         name: str | None = None,
         summary: str | None = None,
         description: str | None = None,
-        story_time: float | None = None,
+        story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
         add_links: Sequence[LinkSpec] = (),
         remove_links: Sequence[Edge] = (),

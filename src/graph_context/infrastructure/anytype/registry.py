@@ -59,6 +59,9 @@ class SpaceRegistry:
     # Extra property keys hidden from field reflection (GC_FIELD_DENYLIST);
     # merged with mapping.SYSTEM_PROPERTY_DENYLIST in reflects_field().
     hidden_field_keys: frozenset[str] = frozenset()
+    # The profile-declared timeline property (ADR 015): surfaced as
+    # Node.story_time, so it must not ALSO reflect into fields.
+    timeline_key: str = mapping.PROP_STORY_TIME
 
     # -- types ----------------------------------------------------------
 
@@ -144,6 +147,7 @@ class SpaceRegistry:
             fmt in mapping.REFLECTED_FIELD_FORMATS
             and not key.startswith(mapping.GC_PREFIX)
             and key != mapping.PROP_SUMMARY
+            and key != self.timeline_key  # surfaced as story_time (ADR 015)
             and key not in mapping.SYSTEM_PROPERTY_DENYLIST
             and key not in self.hidden_field_keys
         )
@@ -168,6 +172,7 @@ async def load_registry(
     client: AnytypeClient,
     extra_role_overrides: Mapping[str, Role] | None = None,
     hidden_field_keys: frozenset[str] = frozenset(),
+    timeline_key: str = mapping.PROP_STORY_TIME,
 ) -> SpaceRegistry:
     """Build a registry from the space's live types and properties.
 
@@ -193,4 +198,5 @@ async def load_registry(
         types_by_key=types_by_key,
         role_overrides={**LEGACY_TYPE_ROLES, **(extra_role_overrides or {})},
         hidden_field_keys=hidden_field_keys,
+        timeline_key=timeline_key,
     )

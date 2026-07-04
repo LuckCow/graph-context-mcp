@@ -58,8 +58,16 @@ DEFAULT_EDGE_RELATIONS: list[tuple[str, str]] = [
 ]
 
 
-async def ensure_schema(client: AnytypeClient) -> None:
-    """Create any missing gc_ infrastructure types and properties."""
+async def ensure_schema(
+    client: AnytypeClient,
+    timeline: tuple[str, str] = mapping.DEFAULT_TIMELINE,
+) -> None:
+    """Create any missing gc_ infrastructure types and properties.
+
+    ``timeline`` is the profile-declared Event-timeline property (ADR 015);
+    a native date key an assistant profile names may not exist yet in a
+    fresh space, and an inline create naming an unknown property 400s.
+    """
     existing_types = {t["key"] async for t in client.list_types()}
     for key, name in INFRA_TYPES.items():
         if key not in existing_types:
@@ -72,6 +80,14 @@ async def ensure_schema(client: AnytypeClient) -> None:
             })
 
     existing_properties = {p["key"] async for p in client.list_properties()}
+    timeline_key, timeline_format = timeline
+    if timeline_key not in existing_properties:
+        logger.info("bootstrap: creating timeline property %s (%s)",
+                    timeline_key, timeline_format)
+        await client.create_property(
+            {"key": timeline_key, "name": timeline_key, "format": timeline_format}
+        )
+        existing_properties.add(timeline_key)
     for key, fmt in mapping.SCALAR_PROPERTIES.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)

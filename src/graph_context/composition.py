@@ -82,7 +82,8 @@ async def build_runtime(
     config = AnytypeConfig.from_env()
     client = AnytypeClient(config)
     teardown.append(client.aclose)
-    await ensure_schema(client)
+    timeline = (profile.time_property, profile.time_format)  # ADR 015
+    await ensure_schema(client, timeline=timeline)
     # GC_FIELD_DENYLIST (ADR 012): comma-separated property keys to hide
     # from field reflection, on top of the built-in system-noise denylist.
     field_denylist = frozenset(
@@ -94,6 +95,7 @@ async def build_runtime(
         client,
         role_overrides=profile.role_overrides,
         field_denylist=field_denylist,
+        timeline=timeline,
     )
     await repository.hydrate()
     logger.info(

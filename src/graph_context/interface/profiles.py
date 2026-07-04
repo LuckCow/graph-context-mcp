@@ -82,6 +82,11 @@ class DomainProfile:
     role_overrides: Mapping[str, Role]
     mode_specs: tuple[ModeSpec, ...] = ()
     default_mode: str = "world_modeling"
+    # The Event-role timeline source (ADR 015): a property key + format.
+    # Fiction keeps the gc_story_time number; a date-axis profile names a
+    # native date property (ISO strings order lexicographically).
+    time_property: str = "gc_story_time"
+    time_format: str = "number"
 
     def __post_init__(self) -> None:
         missing = set(TOOL_NAMES) - set(self.tool_docs)

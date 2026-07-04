@@ -78,8 +78,13 @@ GC_EDGE_PREFIX = "gc_edge_"
 # surface's "description", which is the long-form body (ADR 010).
 PROP_SUMMARY = "description"
 PROP_SUMMARY_STALE = "gc_summary_stale"
-PROP_STORY_TIME = "gc_story_time"
+PROP_STORY_TIME = "gc_story_time"  # the DEFAULT timeline property (ADR 015)
 PROP_FIELDS = "gc_fields"
+
+# The timeline source is profile-declared (ADR 015): fiction keeps the
+# gc_story_time number; a date-axis profile names a native date property
+# (ISO strings order lexicographically). One representation per space.
+DEFAULT_TIMELINE: tuple[str, str] = (PROP_STORY_TIME, "number")
 
 # Retired keys. Each survives only for its migration script under
 # scripts/; nothing in the server reads or writes them.
@@ -173,6 +178,7 @@ def to_create_payload(
     type_key: str,
     native_properties: Sequence[dict[str, Any]] = (),
     fields_blob: Mapping[str, str] | None = None,
+    timeline: tuple[str, str] = DEFAULT_TIMELINE,
 ) -> dict[str, Any]:
     """Build the POST body for a node's system properties only.
 
@@ -187,6 +193,8 @@ def to_create_payload(
     values resolved to existing tags -- inline select entries are validated
     by POST, so resolution must precede it); ``fields_blob`` is the residual
     written to ``gc_fields`` (defaults to all of ``draft.fields``).
+    ``timeline`` is the profile-declared (key, format) the story_time value
+    writes to (ADR 015).
     """
     blob = dict(draft.fields) if fields_blob is None else dict(fields_blob)
     properties = [
@@ -196,7 +204,7 @@ def to_create_payload(
         *native_properties,
     ]
     if draft.story_time is not None:
-        properties.append(property_entry(PROP_STORY_TIME, "number", draft.story_time))
+        properties.append(property_entry(timeline[0], timeline[1], draft.story_time))
     payload: dict[str, Any] = {
         "name": draft.name,
         "type_key": type_key,
@@ -217,9 +225,10 @@ def to_update_payload(
     summary: str | None = None,
     summary_stale: bool | None = None,
     body: str | None = None,
-    story_time: float | None = None,
+    story_time: float | str | None = None,
     fields: Mapping[str, str] | None = None,
     native_properties: Sequence[dict[str, Any]] = (),
+    timeline: tuple[str, str] = DEFAULT_TIMELINE,
 ) -> dict[str, Any]:
     """Build a PATCH body containing only the provided changes.
 
@@ -235,7 +244,7 @@ def to_update_payload(
     if summary_stale is not None:
         properties.append(property_entry(PROP_SUMMARY_STALE, "checkbox", summary_stale))
     if story_time is not None:
-        properties.append(property_entry(PROP_STORY_TIME, "number", story_time))
+        properties.append(property_entry(timeline[0], timeline[1], story_time))
     if fields is not None:
         properties.append(property_entry(PROP_FIELDS, "text", json.dumps(dict(fields))))
     payload: dict[str, Any] = {}
@@ -346,7 +355,7 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
         name=obj.get("name", ""),
         summary=props.get(PROP_SUMMARY) or "",
         summary_stale=bool(props.get(PROP_SUMMARY_STALE)),
-        story_time=props.get(PROP_STORY_TIME),
+        story_time=props.get(registry.timeline_key),
         fields=fields,
     )
 

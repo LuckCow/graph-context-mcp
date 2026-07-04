@@ -20,6 +20,14 @@ from graph_context.domain.schema import Role
 NodeId = str
 """Opaque node identifier, owned by the storage layer."""
 
+TimelineValue = float | str
+"""A node's position on the Event timeline (ADR 015): any ORDERED value.
+
+Fiction uses numbers (``gc_story_time``); an assistant profile names a
+native date property, whose ISO-8601 strings order lexicographically. A
+space uses ONE representation -- values are compared against ``as_of``
+and must be mutually comparable."""
+
 
 @dataclass(frozen=True, slots=True)
 class Edge:
@@ -87,7 +95,7 @@ class NodeDraft:
     type: str
     name: str
     summary: str
-    story_time: float | None = None
+    story_time: TimelineValue | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     body: str = ""
     # A single emoji shown on the page, in lists, and in the graph view.
@@ -119,7 +127,7 @@ class Node:
     name: str
     summary: str
     summary_stale: bool = False
-    story_time: float | None = None
+    story_time: TimelineValue | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     type_key: str = ""
     role: Role | None = None

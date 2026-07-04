@@ -99,7 +99,7 @@ def validate_new_node(
     role: Role | None,
     name: str,
     summary: str,
-    story_time: float | None,
+    story_time: float | str | None,
 ) -> None:
     """Enforce creation invariants from the proposal.
 

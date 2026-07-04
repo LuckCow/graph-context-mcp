@@ -24,8 +24,9 @@ from collections import deque
 from dataclasses import dataclass
 
 from graph_context.domain.graph import GraphIndex
-from graph_context.domain.models import Edge, Node, NodeId
+from graph_context.domain.models import Edge, Node, NodeId, TimelineValue
 from graph_context.domain.schema import Role
+from graph_context.errors import GraphContextError
 
 MAX_DEPTH = 3
 DEFAULT_DEPTH = 1
@@ -41,7 +42,7 @@ class ExploreQuery:
     include_node_types: frozenset[str] | None = None
     exclude_node_types: frozenset[str] = frozenset()
     edge_types: frozenset[str] | None = None
-    as_of: float | None = None
+    as_of: TimelineValue | None = None
     include_future: bool = False
     limit: int = DEFAULT_LIMIT
     exclude_roles: frozenset[Role] = frozenset()
@@ -119,7 +120,25 @@ def _admits(node: Node, query: ExploreQuery) -> bool:
         and not query.include_future
         and node.role is Role.EVENT
         and node.story_time is not None
-        and node.story_time > query.as_of
+        and _after(node.story_time, query.as_of)
     ):
         return False
     return True
+
+
+def _after(story_time: TimelineValue, as_of: TimelineValue) -> bool:
+    """``story_time > as_of`` with an ACTIONABLE mixed-type failure.
+
+    A space uses one timeline representation (ADR 015: numbers for
+    fiction, ISO dates for a date-axis profile); the guard turns the
+    TypeError an LLM would trip with a wrong-typed ``as_of`` into a
+    self-correcting message.
+    """
+    try:
+        return story_time > as_of  # type: ignore[operator]
+    except TypeError:
+        raise GraphContextError(
+            f"as_of {as_of!r} is not comparable with this space's timeline "
+            f"values (e.g. {story_time!r}); pass as_of in the same form as "
+            "story_time values shown by get_node/explore"
+        ) from None
