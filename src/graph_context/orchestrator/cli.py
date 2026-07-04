@@ -27,6 +27,7 @@ from graph_context import composition
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.interface import profiles
+from graph_context.orchestrator import modes
 from graph_context.orchestrator.drivers import LLMTurn, ToolCall, TranscriptEvent
 from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
 
@@ -51,6 +52,7 @@ class ManualDriver:
         self,
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
+        goal: str = "",
     ) -> LLMTurn:
         last = transcript[-1]
         if last.kind == "tool":
@@ -91,9 +93,12 @@ async def main() -> None:
         IntentRecorder(services.repository, store_prompt=store_prompt)
         if provenance_on else None
     )
+    # ADR 015: profile defaults + optional GC_MODES_FILE (TOML) overlay;
+    # bad specs fail loudly here, before the loop starts.
+    registry = modes.load_registry(profile, os.environ.get("GC_MODES_FILE"))
     orchestrator = Orchestrator(
         services=services, driver=ManualDriver(), profile=profile,
-        provenance=recorder, model_name="manual",
+        registry=registry, provenance=recorder, model_name="manual",
     )
     print(f"graph-context orchestrator (profile={profile.name}). {_HELP}")
     try:

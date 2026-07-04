@@ -8,9 +8,10 @@ over this function -- ``session_id`` is the transport's thread/channel,
 today).
 
 Mode switching is an EXPLICIT user command (settled in WP6): ``/mode
-authoring`` / ``/mode world_modeling``, handled here so every transport
-gets it for free. Mode is per-session; the underlying focus-stack session
-is still the process-wide one (per-session ``SessionState`` is WP8).
+<name>`` over whatever specs the deployment loaded (ADR 015), handled here
+so every transport gets it for free. Mode is per-session; the underlying
+focus-stack session is still the process-wide one (per-session
+``SessionState`` is WP8).
 
 Turn-local transcripts: the driver sees the current turn's events only.
 Cross-turn conversation memory is deliberately the DRIVER's concern (the
@@ -25,11 +26,11 @@ import logging
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
-from graph_context.interface.profiles import DomainProfile
+from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.tools import Services
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
-from graph_context.orchestrator.modes import Mode
+from graph_context.orchestrator.modes import ModeRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class ReplyEvent:
 
 @dataclass(slots=True)
 class _SessionState:
-    mode: Mode = Mode.WORLD_MODELING
+    mode: str  # a loaded ModeSpec name
 
 
 @dataclass(slots=True)
@@ -69,13 +70,19 @@ class Orchestrator:
     services: Services
     driver: LLMDriver
     profile: DomainProfile
+    registry: ModeRegistry
     provenance: IntentRecorder | None = None
     model_name: str = ""  # attribution for intent nodes (gc_model)
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
 
-    def mode_of(self, session_id: str) -> Mode:
+    def mode_of(self, session_id: str) -> str:
         return self._session(session_id).mode
+
+    def _spec(self, state: _SessionState) -> ModeSpec:
+        spec = self.registry.get(state.mode)
+        assert spec is not None  # sessions only ever hold loaded names
+        return spec
 
     async def handle_message(
         self, session_id: str, user_id: str, text: str
@@ -85,16 +92,17 @@ class Orchestrator:
         if stripped.startswith("/mode"):
             return [self._switch_mode(state, stripped)]
 
+        spec = self._spec(state)
         logger.info(
-            "turn session=%s user=%s mode=%s", session_id, user_id, state.mode
+            "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
-        tools = modes.tool_docs(state.mode, self.profile)
+        tools = modes.tool_docs(spec, self.profile)
         transcript: list[TranscriptEvent] = [TranscriptEvent("user", stripped)]
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
         reply_text = ""
         for _ in range(self.max_tool_calls):
-            turn = await self.driver.decide(transcript, tools)
+            turn = await self.driver.decide(transcript, tools, spec.goal)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -104,14 +112,14 @@ class Orchestrator:
                     call.name, json.dumps(dict(call.arguments), default=str)
                 ))
                 result = await modes.invoke(
-                    state.mode, call.name, self.services, call.arguments
+                    spec, call.name, self.services, call.arguments
                 )
                 if result is None:
                     # The binding boundary's runtime face: actionable for a
                     # driver, visible to the user as a notice.
                     result = (
                         f"tool {call.name!r} is not available in "
-                        f"{state.mode.value} mode; available: "
+                        f"{spec.name} mode; available: "
                         f"{', '.join(sorted(tools))}"
                     )
                     events.append(ReplyEvent(result, kind="error"))
@@ -122,27 +130,29 @@ class Orchestrator:
                 "the driver replied; the turn was cut short.",
                 kind="notice",
             ))
-        await self._finish_turn(state, user_id, stripped, reply_text, trace)
+        await self._finish_turn(spec, user_id, stripped, reply_text, trace)
         return events
 
     async def _finish_turn(
         self,
-        state: _SessionState,
+        spec: ModeSpec,
         user_id: str,
         prompt: str,
         reply_text: str,
         trace: list[ToolTrace],
     ) -> None:
-        """WP7 turn boundary: auto-capture, then drain -> intent node."""
+        """WP7 turn boundary: auto-capture (per the spec's policy), then
+        drain -> intent node."""
         if self.provenance is None:
             return
-        if state.mode is Mode.AUTHORING and reply_text:
+        policy = spec.capture
+        if policy is not None and reply_text:
             references = capture.entity_links(
                 reply_text, self.services.repository.graph
             )
-            if capture.should_capture(reply_text, references):
-                # The captured artifact journals itself (ProseRecorder), so
-                # the intent node below links prompt -> intent -> artifact.
+            if capture.should_capture(reply_text, references, policy.min_chars):
+                # The captured artifact journals itself, so the intent node
+                # below links prompt -> intent -> artifact.
                 await self.services.prose.record(
                     text=reply_text,
                     summary=reply_text.strip().splitlines()[0][:200],
@@ -161,26 +171,28 @@ class Orchestrator:
                         intent.id, len(mutations))
 
     def _session(self, session_id: str) -> _SessionState:
-        return self._sessions.setdefault(session_id, _SessionState())
+        return self._sessions.setdefault(
+            session_id, _SessionState(mode=self.registry.default)
+        )
 
     def _switch_mode(self, state: _SessionState, command: str) -> ReplyEvent:
         argument = command.removeprefix("/mode").strip().lower()
         if not argument:
             return ReplyEvent(
-                f"mode: {state.mode.value}; switch with /mode "
-                f"{{{' | '.join(m.value for m in Mode)}}}",
+                f"mode: {state.mode}; switch with /mode "
+                f"{{{' | '.join(self.registry.names())}}}",
                 kind="notice",
             )
-        try:
-            state.mode = Mode(argument)
-        except ValueError:
+        spec = self.registry.get(argument)
+        if spec is None:
             return ReplyEvent(
                 f"unknown mode {argument!r}; allowed: "
-                f"{', '.join(m.value for m in Mode)}",
+                f"{', '.join(self.registry.names())}",
                 kind="error",
             )
-        bound = ", ".join(sorted(modes.TOOL_BINDINGS[state.mode]))
+        state.mode = spec.name
+        bound = ", ".join(sorted(modes.binding_for(spec)))
         return ReplyEvent(
-            f"mode switched to {state.mode.value}; bound tools: {bound}",
+            f"mode switched to {spec.name}; bound tools: {bound}",
             kind="notice",
         )

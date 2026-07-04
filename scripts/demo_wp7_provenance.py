@@ -20,6 +20,7 @@ from graph_context.domain.schema import Role
 from graph_context.interface import tools
 from graph_context.interface.profiles import get_profile
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver, ToolCall
+from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
 
 SCENE = (
@@ -39,6 +40,7 @@ async def main() -> None:
     orchestrator = Orchestrator(
         services=services,
         profile=profile,
+        registry=load_registry(profile),
         provenance=IntentRecorder(services.repository),
         model_name="scripted-demo",
         driver=ScriptedDriver([

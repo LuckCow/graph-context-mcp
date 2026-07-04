@@ -52,8 +52,10 @@ class LLMDriver(Protocol):
         self,
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
+        goal: str,
     ) -> LLMTurn:
-        """Choose the next step given the transcript and the bound tools."""
+        """Choose the next step given the transcript, bound tools, and the
+        active mode's goal prompt (ADR 015 -- the system-prompt fragment)."""
         ...
 
 
@@ -73,6 +75,7 @@ class ScriptedDriver:
         self,
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
+        goal: str = "",
     ) -> LLMTurn:
         if self._cursor >= len(self._turns):
             return LLMTurn(reply="(script exhausted)")

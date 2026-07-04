@@ -36,13 +36,52 @@ TOOL_NAMES: tuple[str, ...] = (
 
 
 @dataclass(frozen=True, slots=True)
+class CapturePolicy:
+    """What an activity mode's auto-capture produces (ADR 015).
+
+    ``artifact_type`` is a type identifier the space must resolve
+    (``gc_prose`` for fiction prose; a native type like ``procedure`` for
+    an assistant). Native-typed artifacts are first-class nodes -- only
+    ``gc_prose`` keeps the infra-role hiding.
+    """
+
+    artifact_type: str = "gc_prose"
+    references_label: str = "references"
+    min_chars: int = 200
+
+
+@dataclass(frozen=True, slots=True)
+class ModeSpec:
+    """One activity mode: data, not an enum member (ADR 015).
+
+    ``goal`` is the system-prompt fragment handed to the LLM driver --
+    specs are prompts and get the golden-test review bar. ``mutating``
+    picks the tool binding (full surface vs read-only + context);
+    ``capture`` enables harness-side auto-capture of substantial replies.
+    """
+
+    name: str
+    goal: str
+    mutating: bool = False
+    capture: CapturePolicy | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or not self.name.replace("_", "").isalnum():
+            raise ValueError(f"mode name must be a slug, got {self.name!r}")
+        if not self.goal.strip():
+            raise ValueError(f"mode {self.name!r} needs a non-empty goal prompt")
+
+
+@dataclass(frozen=True, slots=True)
 class DomainProfile:
-    """One deployment's framing: prompt text + type-key -> Role additions."""
+    """One deployment's framing: prompt text, roles, and activity modes."""
 
     name: str
     description: str
     tool_docs: Mapping[str, str]
     role_overrides: Mapping[str, Role]
+    mode_specs: tuple[ModeSpec, ...] = ()
+    default_mode: str = "world_modeling"
 
     def __post_init__(self) -> None:
         missing = set(TOOL_NAMES) - set(self.tool_docs)
@@ -51,6 +90,14 @@ class DomainProfile:
             raise ValueError(
                 f"profile {self.name!r} tool_docs mismatch: "
                 f"missing={sorted(missing)} extra={sorted(extra)}"
+            )
+        names = [spec.name for spec in self.mode_specs]
+        if len(names) != len(set(names)):
+            raise ValueError(f"profile {self.name!r} has duplicate mode names")
+        if self.mode_specs and self.default_mode not in names:
+            raise ValueError(
+                f"profile {self.name!r} default_mode {self.default_mode!r} "
+                f"is not among its modes {names}"
             )
 
 
@@ -254,11 +301,37 @@ path more meaningful (e.g. only social edges: ["knows", "member_of"]).
 
 }
 
+_FICTION_MODES = (
+    ModeSpec(
+        name="world_modeling",
+        goal=(
+            "You are building and maintaining a story-world knowledge graph. "
+            "Create and update nodes for characters, places, events, and "
+            "ideas as the user develops the world; link them as you go; keep "
+            "every summary current. The graph is the source of truth -- "
+            "capture decisions into it rather than leaving them in chat."
+        ),
+        mutating=True,
+    ),
+    ModeSpec(
+        name="authoring",
+        goal=(
+            "You are writing prose inside an established story world. Gather "
+            "context with the read tools (explore from the scene's nodes; "
+            "get_node for full descriptions) and write in the world's voice. "
+            "You cannot modify the graph in this mode -- substantial passages "
+            "you produce are captured automatically with their sources."
+        ),
+        capture=CapturePolicy(artifact_type="gc_prose"),
+    ),
+)
+
 FICTION = DomainProfile(
     name="fiction",
     description="story-world building and prose rendering (the original surface)",
     tool_docs=_FICTION_DOCS,
     role_overrides={},  # DEFAULT_TYPE_ROLES already speaks fiction
+    mode_specs=_FICTION_MODES,
 )
 
 
@@ -397,10 +470,36 @@ path more meaningful (e.g. only org edges: ["member_of", "works_on"]).
 
 }
 
+_WORKSPACE_MODES = (
+    ModeSpec(
+        name="world_modeling",
+        goal=(
+            "You are maintaining a work knowledge base. Create and update "
+            "nodes for people, teams, projects, meetings, and decisions as "
+            "the user works; link them as you go; keep every summary "
+            "current. The graph is the source of truth -- capture decisions "
+            "into it rather than leaving them in chat."
+        ),
+        mutating=True,
+    ),
+    ModeSpec(
+        name="authoring",
+        goal=(
+            "You are drafting work documents (briefs, summaries, reports) "
+            "from an established knowledge base. Gather context with the "
+            "read tools and write clearly. You cannot modify the graph in "
+            "this mode -- substantial drafts you produce are captured "
+            "automatically with their sources."
+        ),
+        capture=CapturePolicy(artifact_type="gc_prose"),
+    ),
+)
+
 WORKSPACE = DomainProfile(
     name="workspace",
     description="work knowledge base (people, teams, projects, meetings, decisions)",
     tool_docs=_WORKSPACE_DOCS,
+    mode_specs=_WORKSPACE_MODES,
     role_overrides={
         # Only Role.EVENT changes behavior (story_time invariant + as_of
         # timeline); the rest are cosmetic role names for error suggestions.

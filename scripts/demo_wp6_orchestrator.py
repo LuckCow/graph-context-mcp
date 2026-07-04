@@ -14,6 +14,7 @@ import os
 from graph_context import composition
 from graph_context.interface.profiles import get_profile
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver, ToolCall
+from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
 
 
@@ -24,6 +25,7 @@ async def main() -> None:
     orchestrator = Orchestrator(
         services=services,
         profile=profile,
+        registry=load_registry(profile),
         driver=ScriptedDriver([
             # Turn 1 (world_modeling): create, then reply.
             LLMTurn(tool_calls=(ToolCall("create_node", {

@@ -20,9 +20,9 @@ from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import NodeId
 from graph_context.domain.schema import INFRA_ROLES
 
-# Below this many characters a reply is conversation, not an artifact worth
-# a node. Tunable by dogfooding (WP7 open question territory).
-MIN_CAPTURE_CHARS = 200
+# Fallback substantiality threshold; each mode's CapturePolicy carries its
+# own (ADR 015). Below this a reply is conversation, not an artifact.
+DEFAULT_MIN_CAPTURE_CHARS = 200
 
 
 def entity_links(text: str, graph: GraphIndex) -> list[NodeId]:
@@ -42,6 +42,10 @@ def entity_links(text: str, graph: GraphIndex) -> list[NodeId]:
     return [node_id for _, node_id in hits]
 
 
-def should_capture(text: str, references: list[NodeId]) -> bool:
+def should_capture(
+    text: str,
+    references: list[NodeId],
+    min_chars: int = DEFAULT_MIN_CAPTURE_CHARS,
+) -> bool:
     """An artifact is text long enough to matter that touches the world."""
-    return len(text.strip()) >= MIN_CAPTURE_CHARS and bool(references)
+    return len(text.strip()) >= min_chars and bool(references)
