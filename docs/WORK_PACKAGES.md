@@ -820,6 +820,96 @@ after WP9.
 
 ---
 
+## WP11 — Semantic search (ADR 014)
+
+**Goal:** "find the node I'm describing" and, later, "find the passage
+that answers this" — as a **derived projection** with a persistent
+embedding *cache*, not a new source of truth. Explicitly NOT in scope
+(decided, with written revisit triggers, in ADR 014): a vector database,
+or any datastore replacing hydration. Opens WP4's parked semantic-search
+item; the tool-surface philosophy applies the WP3 minimalism precedent.
+
+### Deliverables
+
+- **Ports** (`ports/`): `Embedder` (`embed(texts) -> vectors`; model name
+  surfaced for cache keying) and `SemanticIndex` (`upsert(node_id,
+  content_hash, chunks)`, `prune(live_ids)`, `query(text, limit,
+  threshold) -> scored node ids`). Contract-tested fakes: a deterministic
+  toy embedder (hashing-based) so similarity tests are stable offline.
+- **Infrastructure:** SQLite cache adapter (one file per space, keyed by
+  `(node_id, content_hash, model)`; documented as disposable); exact
+  brute-force cosine query in memory; embedder adapters per
+  `GC_EMBEDDER` — `local` (sentence-transformers, model baked into the
+  container image at rebuild; egress forbids ad-hoc downloads) and/or
+  `voyage` (needs a firewall allowlist entry + key). Both behind the
+  port; quality-vs-image-weight decided by dogfooding, not architecture.
+- **Sync integration:** hydrate seeds/prunes the cache against the live
+  id set (this is where S4's invisible deletions get handled — as cache
+  eviction); resync re-embeds only nodes whose content hash changed.
+  First corpus: `name + summary + reflected fields` per node. Bodies and
+  prose chunks are a follow-on stage (reads unthrottled, S7), gated on
+  the passage-retrieval need below.
+- **Tool surface (augment, don't multiply):**
+  - `find_node` tier 3: exact → substring → **semantic**
+    (threshold-gated), hits labelled ("semantic matches for …") so the
+    LLM knows it holds a fuzzy match; result lines unchanged
+    (entry-point shape); `type`/`limit` compose as today.
+  - `_resolve`'s `NodeNotFound` appends "closest by meaning" candidates
+    with ids — errors are prompts; one change serves every node
+    parameter of every tool.
+  - **Non-feature:** no silent fuzzy resolution, ever — exact resolves,
+    semantic suggests. Mutation targets are never guessed.
+  - **Reserved, dogfooding-gated:** a `search` tool for passage-level
+    retrieval (excerpts anchored to nodes) — different result shape,
+    honestly a ninth tool IF the find_node tier + `include_prose` prove
+    insufficient. Orchestrator RAG is expected to be harness-side
+    prefetch (no tool surface).
+- **Docstrings** teach the division of labor: semantic finds the door,
+  `explore` walks the house (describe → find_node → explore). Goldens
+  regenerate.
+- **Config/infra:** `GC_EMBEDDER` (+ `off` default until the rebuild
+  ships an embedder, so the tier degrades to today's behavior); cache
+  path config; container rebuild list grows by the local model —
+  batch with langgraph + import-linter.
+
+### Decisions (settled — see ADR 014)
+
+- Persistence follows cost-to-rebuild: GraphIndex ephemeral, embeddings
+  cached; both disposable projections of Anytype, never truth.
+- SQLite + exact cosine; a vector DB has a written trigger (~100k+
+  chunks), not a speculative slot. Datastore-replacing-hydration has a
+  written "no" (revisit ~5k nodes / multi-process need).
+- Semantic hits are always labelled; thresholds fail closed (no hits
+  beats noise hits — the LLM self-corrects from an honest empty better
+  than from a confident wrong match).
+
+### Open questions
+
+- Embedder default after rebuild (local vs voyage) — dogfood both behind
+  the port; chunk size for bodies/prose when stage 2 lands.
+- Threshold + max semantic candidates in resolver errors (start small:
+  3); tune from transcripts like the explore-full knobs.
+- Should `find_node` semantic tier also run when substring matches exist
+  but are weak? v1: no — tiers are strictly fallback; revisit if
+  dogfooding shows shadowing.
+
+### Tests
+
+Contract suite over fake + SQLite index: upsert/prune/query round-trip,
+content-hash idempotency, prune-on-hydrate eviction, threshold behavior.
+Deterministic-embedder tool tests: find_node tier ordering (exact beats
+substring beats semantic; labels correct), resolver errors carry
+suggestions with ids, mutation tools never auto-resolve fuzzily.
+Sync tests: resync re-embeds only changed hashes; deleting the cache file
+converges on next hydrate. Live E2E: cache survives restart; a human
+rename re-embeds on resync.
+
+Suggested sizing: **M** (stage 1, node-level) + **S–M** (stage 2,
+passages, if gated in). Independent of WP8; wants the container rebuild
+for any real embedder but ships `GC_EMBEDDER=off`-degradable before it.
+
+---
+
 ## Sequencing
 
 ```
@@ -857,7 +947,13 @@ WP10 (attribute reflection, summary → built-in description, connections
 footer) is likewise storage-track and independent of WP5–WP8. Internal
 order: 10b before (or with) 10a; 10c after WP9 (it builds on the body
 machinery; its UI-rendering gate is resolved — deep links confirmed
-clickable and PATCH-stable).
+clickable and PATCH-stable). **[Shipped 2026-07-02.]**
+
+WP11 (semantic search, ADR 014) is storage-track, independent of WP5–WP8,
+and rebuild-coupled only for the embedder itself: the ports, cache, tool
+tiering, and resolver suggestions all ship `GC_EMBEDDER=off`-degradable
+beforehand. Batch the local model into the same container rebuild as
+langgraph + import-linter.
 
 ## Risk register (top items)
 
@@ -876,4 +972,6 @@ clickable and PATCH-stable).
 | One user's prompts exposed to all space members via intent nodes | privacy review at WP8 | Per-user consent knob; `[prompt withheld]` marker keeps the trace usable |
 | `explore full` body fan-out bloats latency/context (WP9) | dogfooding transcripts | Fetches are unthrottled reads; add caps/excerpts/`include_bodies` knobs — tune options, not the architecture |
 | Connections footer clobbers human body text (WP10c) | footer/description diff in dogfooding | Server owns ONLY below the delimiter; append when unmatched, never merge; strip is whitespace-tolerant (normalization) |
+| Semantic matches mutate the wrong node (WP11) | a fuzzy match silently resolving | Non-feature by decision: exact resolves, semantic SUGGESTS; mutation targets are never guessed (ADR 014) |
+| Embedding cache drifts from the store (WP11) | stale hits after human edits | Cache keyed by content hash, pruned on hydrate; deleting the file always converges — it is a projection, never truth |
 | Body write-back degrades human mention pills (WP9 update path; widened by WP10c) | humans report pills turning into plain links | Document (plain links in bot-maintained descriptions); regenerate footer only when its content changes |
