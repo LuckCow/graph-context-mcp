@@ -268,7 +268,28 @@ registry; the workspace demo end-to-end against the fake.
 
 ---
 
-## WP6 — Orchestrator skeleton (ADR 007)
+## WP6 — Orchestrator skeleton (ADR 007) — **core shipped 2026-07-04 (framework-free)**
+
+**Status:** everything except the LangGraph driver is done, built so the
+framework arrives as a thin driver rather than the architecture (langgraph
+is not in the container until the rebuild). Shipped: the shared service
+builder (`graph_context/composition.py` — one wiring, both roots delegate);
+`orchestrator/` with mode→tool-binding tables (authoring literally lacks
+the mutation tools), the `LLMDriver` seam (`drivers.py` — transcript + the
+active mode's tool docs in, tool calls or a reply out; `ScriptedDriver` for
+tests/demos), `handle_message(session_id, user_id, text) → reply events`
+with explicit per-session `/mode` switching and a per-turn tool budget; a
+CLI loop (`python -m graph_context.orchestrator.cli`, `ManualDriver` —
+you play the model until the real driver lands); import-linter contracts
+(orchestrator never imports `interface/server.py`/`mcp`, only `cli.py`
+touches infrastructure, nothing imports orchestrator, langgraph never
+leaks out — external-package check enabled); the `[orchestrator]` extra;
+and the acceptance demo (`scripts/demo_wp6_orchestrator.py`: a scripted
+model TRIES to mutate in authoring mode and cannot). **Remaining after the
+container rebuild:** the LangGraph/Anthropic driver behind the existing
+`LLMDriver` protocol (cross-turn memory = the framework's thread state,
+deliberately left to it), and running `lint-imports` locally. Original
+spec follows.
 
 **Goal:** a runnable agentic pipeline in this repo with two modes and
 harness-owned tool binding, reusing the existing tool layer. No provenance
