@@ -73,7 +73,7 @@ async def main() -> None:
 
     graph = services.repository.graph
     intents = [n for n in graph.nodes() if n.role is Role.INTENT]
-    prose = [n for n in graph.nodes() if n.role is Role.PROSE]
+    prose = [n for n in graph.nodes() if n.role is Role.CAPTURE]
     print(f"\nharness left behind: {len(intents)} intent node(s), "
           f"{len(prose)} captured artifact(s) -- the model called no capture tool.")
     for intent in intents:

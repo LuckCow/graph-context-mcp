@@ -914,7 +914,25 @@ for any real embedder but ships `GC_EMBEDDER=off`-degradable before it.
 
 ---
 
-## WP12 — Configurable activity modes & general capture (ADR 015)
+## WP12 — Configurable activity modes & general capture (ADR 015) — **shipped 2026-07-04**
+
+**Status:** complete. ModeSpec/CapturePolicy live in `profiles.py`; the
+loader (`orchestrator/modes.py`) overlays `GC_MODES_FILE` TOML onto profile
+defaults with loud load-time failures; the driver seam receives the active
+spec's goal (the LangGraph driver lands against the final shape);
+`CaptureRecorder` produces policy-typed artifacts (native types are
+first-class -- a recorded `procedure` is work product, only `gc_prose`
+keeps infra hiding); `Role.PROSE` → `Role.CAPTURE` (keys frozen); the
+timeline is profile-declared (`TimelineValue = float | str`, adapter maps
+the configured property both ways, `ensure_schema` creates a missing
+native date key, `reflects_field` excludes it, and the domain's one
+`as_of` comparison fails actionably on mixed types); and a shipped
+**`assistant` profile** (organizing / record_procedure / meeting_notes,
+`event_date` axis) with golden-pinned docstrings + the acceptance demo
+(`scripts/demo_wp12_assistant.py`: no capture tool called, a first-class
+`procedure` node with references and the intent chain left behind).
+Deferred as stated: in-space mode objects (with WP5's per-space-profile
+question) and dogfooding-driven docstring revision. Original spec follows.
 
 **Goal:** the behavior layer generalizes the way the storage layer already
 did — a work assistant with *Record Procedure* becomes a configuration

@@ -79,15 +79,14 @@ async def main() -> None:
     show("how is alice related to the decision?", await tools.find_path_tool(
         svc, target=decision, start=alice))
 
-    show("capture the meeting notes", await tools.record_prose_tool(
-        svc,
+    # Capture is the orchestrator's job now (WP7/WP12): the CaptureRecorder
+    # service stands in here for what an authoring-mode turn does itself.
+    await svc.capture.record(
         text="Attendees agreed to move blob data to object storage in Q3. "
              "Alice to draft the migration plan.",
         summary="Q3 replatform sync: object storage adopted.",
-        references=[meeting, decision, alice], model="demo"))
-
-    show("what was written about alice last time?", await tools.get_node_tool(
-        svc, node_id=alice, include_prose=1))
+        references=[meeting, decision, alice],
+    )
 
     show("overview (cold-start map)", await tools.context_tool(svc, action="overview"))
 

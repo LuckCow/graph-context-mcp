@@ -518,4 +518,186 @@ WORKSPACE = DomainProfile(
 )
 
 
-PROFILES: dict[str, DomainProfile] = {p.name: p for p in (FICTION, WORKSPACE)}
+# ---------------------------------------------------------------------------
+# Assistant: a personal work assistant & note taker (WP12/ADR 015). Tasks,
+# procedures, and notes are first-class native types (no roles needed);
+# meetings/milestones are Event-role so the timeline works -- over REAL
+# dates (time_property=event_date), not a story number. Capture modes
+# produce native-typed artifacts: a recorded procedure is work product.
+# ---------------------------------------------------------------------------
+
+_ASSISTANT_DOCS: dict[str, str] = {
+    "context": """\
+Inspect or adjust the working session: graph stats, focus stack, resync.
+
+Actions:
+  get          -- graph statistics (node/edge counts, stale summaries).
+  overview     -- DERIVED entry-point map for a cold start: per-type
+                  counts plus the highest-degree "hub" nodes with name,
+                  type, id and summary. START HERE in a fresh session to
+                  obtain node ids for explore / get_node / focus. (alias: map)
+  resync       -- pull in edits made directly in Anytype; reports which
+                  nodes changed. Use at the start of a work session.
+  focus        -- push node_id onto the focus stack (queries default to
+                  the top of this stack when no start is given).
+  pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
+  remove       -- drop node_id from the focus stack.
+  clear        -- empty the focus stack (pinned entries survive).
+  set_project  -- relabel the project shown in the header (cosmetic; one
+                  server is bound to one Anytype space).
+
+Every tool response begins with `[project | focus | recent]` -- this tool
+is how you manage what appears there.
+""",
+    "create_node": """\
+Create a node in the user's workspace and its initial links in ONE call.
+
+type: an existing type in the Anytype space (e.g. Task, Procedure, Note,
+  Meeting, Person, Project -- whatever the space defines). An unmatched
+  type is reported back with the list of known types.
+summary: REQUIRED one-liner; keep it current -- exploration shows it.
+description: long-form text (a task's context, a procedure's overview, a
+  meeting's agenda). Stored as the node's Anytype page BODY, where the
+  user reads and edits it directly; returned by get_node and
+  explore(detail="full"). Write it for the page, in Markdown.
+story_time: REQUIRED for an Event-role node (meetings, milestones): an
+  ISO date like "2026-07-04". The parameter name is historical; read it
+  as "when".
+fields: {"key": "value"} attributes. A key matching one of the space's
+  own properties (e.g. status, priority, due -- by key or display name)
+  writes THAT property, visible and filterable in Anytype; select
+  options match by name and are created when new; multi-select values
+  are comma-separated names. Unmatched keys are kept in a bot-only
+  extras store.
+links: list of {"edge_type", "other" (target node id OR name),
+  "outgoing" (default true)}. `other` accepts a node name -- it is
+  resolved for you. Reuse an existing relation (e.g. part_of, assigned_to,
+  documents, or any relation already in the space); a label with no
+  existing relation is surfaced for approval; set
+  create_missing_relations=true to create it on the fly.
+icon: a single emoji for the page, shown in lists and the graph view --
+  pick one that fits (a checkbox for a task, a clipboard for a
+  procedure, a calendar for a meeting). Optional.
+
+Prefer linking at creation over separate update_node calls. Do not list
+the node's links in the description -- a Connections section is
+maintained automatically at the bottom of the page.
+""",
+    "update_node": _UPDATE_NODE_DOC,
+    "get_node": """\
+Read ONE node in depth: all fields plus every edge grouped by type,
+with neighbor names and ids. Use when you need the full picture of a
+single item; use `explore` to see a neighborhood instead. The full
+description (the node's Anytype page body) is fetched fresh on every
+call, so the user's latest edits are always included.
+
+node_id accepts a node NAME as well as an id (resolved for you; an
+ambiguous name reports its candidates so you can pick one).
+edge_types: optional filter, e.g. ["part_of", "assigned_to"].
+include_provenance: how many intent records that touched this node to
+  attach (default 0; most-recent first, with excerpts) -- the "who
+  changed this, and why?" audit lookup. The response notes when such
+  records exist.
+""",
+    "explore": """\
+Walk the graph outward from a node. THE general retrieval primitive.
+
+In a fresh session the focus stack is empty; call context
+action="overview" first to get a starting node id (or pass a node name
+as `start` -- it is resolved for you).
+
+start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
+detail: names | summaries (default) | full.
+as_of: an ISO date cutoff -- Event-role nodes (meetings, milestones)
+after it are hidden (the state of things as of that date);
+include_future=true restores them (planned/upcoming work). limit caps
+results (default 25; the response says when it truncated).
+
+A TASK or PROJECT BRIEF is an explore configuration, not a separate tool:
+  explore(start="<project id>", depth=2,
+          include_types=["Task", "Person", "Procedure"],
+          detail="summaries")
+
+DEEP CONTEXT (about to write a summary or repeat a procedure):
+  explore(start="<node id>", depth=1, detail="full")
+returns the FULL descriptions of the node and every neighbor in ONE
+call -- do not fetch neighbors one-by-one with get_node.
+Caution: "full" emits complete, untruncated descriptions; keep
+depth=1 and use `limit`.
+
+STALE-SUMMARY SWEEP (before a review session):
+  explore(depth=3, limit=50, only_stale=true, detail="names")
+  ...then update_node each with a fresh summary.
+
+Captured passages and session bookkeeping are hidden unless explicitly
+named in include_types (e.g. include_types=["Capture"]).
+""",
+    "find_path": """\
+Find the shortest meaningful connection between two nodes -- "how does
+this task relate to that decision?" Surfaces non-obvious links.
+`target` and `start` each accept a node id OR name (resolved for you).
+start: empty = focus-stack top. Edge direction is ignored for
+reachability but shown in the result. Restrict edge_types to make the
+path more meaningful (e.g. only org edges: ["part_of", "assigned_to"]).
+""",
+    "find_node": _FIND_NODE_DOC,
+}
+
+_ASSISTANT_MODES = (
+    ModeSpec(
+        name="organizing",
+        goal=(
+            "You are a work assistant maintaining the user's knowledge "
+            "base. Create and update nodes for tasks, procedures, notes, "
+            "meetings, and people as the user works; link them as you go; "
+            "keep every summary current. The graph is the source of truth "
+            "-- capture decisions into it rather than leaving them in chat."
+        ),
+        mutating=True,
+    ),
+    ModeSpec(
+        name="record_procedure",
+        goal=(
+            "The user is doing something they want to be able to repeat. "
+            "Notate each step they describe -- commands, clicks, decisions, "
+            "gotchas -- as a clean numbered procedure, naming the systems "
+            "and items involved by their node names where they exist. Ask "
+            "for the step outcome when it is unclear. Your write-up is "
+            "captured automatically as a procedure with its references."
+        ),
+        capture=CapturePolicy(artifact_type="procedure", min_chars=120),
+    ),
+    ModeSpec(
+        name="meeting_notes",
+        goal=(
+            "The user is in or has just left a meeting. Turn what they "
+            "tell you into structured notes: attendees, decisions, action "
+            "items, open questions -- naming people and projects by their "
+            "node names where they exist. Your notes are captured "
+            "automatically with their references."
+        ),
+        capture=CapturePolicy(artifact_type="note", min_chars=120),
+    ),
+)
+
+ASSISTANT = DomainProfile(
+    name="assistant",
+    description="personal work assistant & note taker (tasks, procedures, notes)",
+    tool_docs=_ASSISTANT_DOCS,
+    role_overrides={
+        "person": Role.CHARACTER,
+        "team": Role.ORGANIZATION,
+        "meeting": Role.EVENT,
+        "milestone": Role.EVENT,
+        "tool": Role.TECHNOLOGY,
+    },
+    mode_specs=_ASSISTANT_MODES,
+    default_mode="organizing",
+    time_property="event_date",
+    time_format="date",
+)
+
+
+PROFILES: dict[str, DomainProfile] = {
+    p.name: p for p in (FICTION, WORKSPACE, ASSISTANT)
+}

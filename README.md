@@ -18,18 +18,19 @@ ruff check src tests
 
 ## Domain profiles (GC_PROFILE)
 
-The schema is space-reflecting and domain-neutral (ADR 006); what a profile changes is **framing**: the tool docstrings the LLM reads (they are prompts) and a few native type-key → role mappings. Wire format never changes — storage keys (`gc_story_time`, `gc_prose`, …), tool names, and parameters are identical across profiles, so switching profiles never migrates data.
+The schema is space-reflecting and domain-neutral (ADR 006); what a profile changes is **framing and behavior configuration** (ADR 015): the tool docstrings the LLM reads (they are prompts), native type-key → role mappings, the orchestrator's **activity modes** (each a goal prompt + tool binding + capture policy), and the **timeline source**. Tool names and parameters are identical across profiles.
 
-| | `fiction` (default) | `workspace` |
-|---|---|---|
-| Framing | characters, scenes, foreshadowing | people, projects, meetings, decisions |
-| Worked examples | scene assembly, rendering prep | meeting/decision briefs, deep context |
-| Extra Event-role types | — (`event` is already mapped) | `meeting`, `decision`, `milestone` (timeline over real time: epoch seconds or YYYYMMDD in `story_time`) |
+| | `fiction` (default) | `workspace` | `assistant` |
+|---|---|---|---|
+| Framing | characters, scenes, foreshadowing | people, projects, meetings, decisions | tasks, procedures, notes |
+| Activity modes | `world_modeling`, `authoring` (captures prose) | `world_modeling`, `authoring` (captures drafts) | `organizing`, `record_procedure` (captures native `procedure` nodes), `meeting_notes` (captures `note` nodes) |
+| Timeline | `gc_story_time` (a story number) | `gc_story_time` (epoch/YYYYMMDD) | `event_date` (real ISO dates; `as_of="2026-07-04"`) |
 
-Select with `GC_PROFILE=workspace` (unset = `fiction`; existing setups see zero change). Try the work-KB surface in-process:
+Select with `GC_PROFILE=<name>` (unset = `fiction`; existing setups see zero change). Deployments can add or override activity modes via a `GC_MODES_FILE` TOML file — *Record Procedure is a configuration entry, not a fork*. Try the surfaces in-process:
 
 ```
 PYTHONPATH=src python scripts/demo_workspace_profile.py
+PYTHONPATH=src python scripts/demo_wp12_assistant.py   # record_procedure end-to-end
 ```
 
 Profile docstrings are pinned by golden snapshot tests (`tests/interface/golden/`) — editing them is prompt engineering, and the golden diff is the review artifact (`GC_REGEN_GOLDENS=1 pytest tests/interface/test_profiles.py` to regenerate deliberately).
