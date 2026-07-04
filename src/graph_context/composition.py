@@ -29,6 +29,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 
+from graph_context.application.mutation_journal import MutationJournal
 from graph_context.interface.profiles import DomainProfile
 from graph_context.interface.tools import Services, build_services
 
@@ -39,6 +40,8 @@ TeardownHook = Callable[[], Awaitable[None]]
 
 async def build_runtime(
     profile: DomainProfile,
+    *,
+    journal: MutationJournal | None = None,
 ) -> tuple[Services, list[TeardownHook]]:
     """Build the full service bundle for one process.
 
@@ -67,6 +70,7 @@ async def build_runtime(
             InMemoryGraphRepository(role_overrides=profile.role_overrides),
             session,
             store_llm_input=store_llm_input,
+            journal=journal,
         ), teardown
 
     from graph_context.application.session_persister import SessionPersister
@@ -116,7 +120,8 @@ async def build_runtime(
     persister = SessionPersister(store, session)
     teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
     return build_services(
-        repository, session, persister, store_llm_input=store_llm_input
+        repository, session, persister,
+        store_llm_input=store_llm_input, journal=journal,
     ), teardown
 
 

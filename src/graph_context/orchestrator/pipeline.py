@@ -20,12 +20,14 @@ LangGraph thread arrives with the framework) -- the seam's contract stays
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 
+from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.interface.profiles import DomainProfile
 from graph_context.interface.tools import Services
-from graph_context.orchestrator import modes
+from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
 from graph_context.orchestrator.modes import Mode
 
@@ -54,11 +56,21 @@ class _SessionState:
 
 @dataclass(slots=True)
 class Orchestrator:
-    """The pipeline: modes bind tools, a driver decides, tools run here."""
+    """The pipeline: modes bind tools, a driver decides, tools run here.
+
+    ``provenance`` is the WP7 subsystem toggle: when an IntentRecorder is
+    wired, every turn ends by draining the journal -- one intent node per
+    mutating turn, nothing for read-only turns -- and authoring-mode
+    replies that mention known nodes are auto-captured as Prose (the
+    capture is journalled too, so the intent links the artifact). ``None``
+    switches the whole subsystem off.
+    """
 
     services: Services
     driver: LLMDriver
     profile: DomainProfile
+    provenance: IntentRecorder | None = None
+    model_name: str = ""  # attribution for intent nodes (gc_model)
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
 
@@ -79,12 +91,18 @@ class Orchestrator:
         tools = modes.tool_docs(state.mode, self.profile)
         transcript: list[TranscriptEvent] = [TranscriptEvent("user", stripped)]
         events: list[ReplyEvent] = []
+        trace: list[ToolTrace] = []
+        reply_text = ""
         for _ in range(self.max_tool_calls):
             turn = await self.driver.decide(transcript, tools)
             if not turn.tool_calls:
-                events.append(ReplyEvent(turn.reply))
-                return events
+                reply_text = turn.reply
+                events.append(ReplyEvent(reply_text))
+                break
             for call in turn.tool_calls:
+                trace.append(ToolTrace(
+                    call.name, json.dumps(dict(call.arguments), default=str)
+                ))
                 result = await modes.invoke(
                     state.mode, call.name, self.services, call.arguments
                 )
@@ -98,12 +116,49 @@ class Orchestrator:
                     )
                     events.append(ReplyEvent(result, kind="error"))
                 transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
-        events.append(ReplyEvent(
-            f"tool budget exhausted ({self.max_tool_calls} calls) before the "
-            "driver replied; the turn was cut short.",
-            kind="notice",
-        ))
+        else:
+            events.append(ReplyEvent(
+                f"tool budget exhausted ({self.max_tool_calls} calls) before "
+                "the driver replied; the turn was cut short.",
+                kind="notice",
+            ))
+        await self._finish_turn(state, user_id, stripped, reply_text, trace)
         return events
+
+    async def _finish_turn(
+        self,
+        state: _SessionState,
+        user_id: str,
+        prompt: str,
+        reply_text: str,
+        trace: list[ToolTrace],
+    ) -> None:
+        """WP7 turn boundary: auto-capture, then drain -> intent node."""
+        if self.provenance is None:
+            return
+        if state.mode is Mode.AUTHORING and reply_text:
+            references = capture.entity_links(
+                reply_text, self.services.repository.graph
+            )
+            if capture.should_capture(reply_text, references):
+                # The captured artifact journals itself (ProseRecorder), so
+                # the intent node below links prompt -> intent -> artifact.
+                await self.services.prose.record(
+                    text=reply_text,
+                    summary=reply_text.strip().splitlines()[0][:200],
+                    references=references,
+                )
+        mutations = self.services.journal.drain()
+        intent = await self.provenance.record_turn(
+            prompt=prompt,
+            mutations=mutations,
+            trace=trace,
+            user_id=user_id,
+            model=self.model_name,
+        )
+        if intent is not None:
+            logger.info("provenance: recorded %s (%d touches)",
+                        intent.id, len(mutations))
 
     def _session(self, session_id: str) -> _SessionState:
         return self._sessions.setdefault(session_id, _SessionState())

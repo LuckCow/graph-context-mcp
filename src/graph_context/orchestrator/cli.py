@@ -24,6 +24,8 @@ import os
 from collections.abc import Mapping, Sequence
 
 from graph_context import composition
+from graph_context.application.intent_recorder import IntentRecorder
+from graph_context.application.mutation_journal import MutationJournal
 from graph_context.interface import profiles
 from graph_context.orchestrator.drivers import LLMTurn, ToolCall, TranscriptEvent
 from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
@@ -75,9 +77,23 @@ def _print_event(event: ReplyEvent) -> None:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     profile = profiles.get_profile(os.environ.get("GC_PROFILE"))
-    services, teardown = await composition.build_runtime(profile)
+    # WP7 provenance subsystem: on by default; GC_PROVENANCE=0 disables.
+    # GC_STORE_LLM_INPUT=0 withholds prompt text from intent nodes.
+    provenance_on = os.environ.get("GC_PROVENANCE", "1").lower() not in {
+        "0", "false", "no",
+    }
+    store_prompt = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
+        "0", "false", "no",
+    }
+    journal = MutationJournal() if provenance_on else None
+    services, teardown = await composition.build_runtime(profile, journal=journal)
+    recorder = (
+        IntentRecorder(services.repository, store_prompt=store_prompt)
+        if provenance_on else None
+    )
     orchestrator = Orchestrator(
-        services=services, driver=ManualDriver(), profile=profile
+        services=services, driver=ManualDriver(), profile=profile,
+        provenance=recorder, model_name="manual",
     )
     print(f"graph-context orchestrator (profile={profile.name}). {_HELP}")
     try:

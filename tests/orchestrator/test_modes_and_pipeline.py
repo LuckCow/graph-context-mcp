@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import pytest
 
+from graph_context.application.intent_recorder import IntentRecorder
+from graph_context.application.mutation_journal import MutationJournal
 from graph_context.domain.models import NodeDraft
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface.profiles import TOOL_NAMES, get_profile
@@ -159,3 +162,107 @@ class TestPipeline:
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         assert any("not available in authoring mode" in text for text in seen)
+
+
+def _provenance_orchestrator(
+    turns: list[LLMTurn],
+) -> tuple[Orchestrator, Services]:
+    profile = get_profile("fiction")
+    journal = MutationJournal()
+    services = build_services(
+        InMemoryGraphRepository(role_overrides=profile.role_overrides),
+        SessionState(project="Ashfall"),
+        journal=journal,
+    )
+    orchestrator = Orchestrator(
+        services=services,
+        driver=ScriptedDriver(turns),
+        profile=profile,
+        provenance=IntentRecorder(services.repository, now=lambda: "T0"),
+        model_name="scripted",
+    )
+    return orchestrator, services
+
+
+def _intent_nodes(services: Services) -> list:
+    return [n for n in services.repository.graph.nodes() if n.role is Role.INTENT]
+
+
+class TestProvenanceTurns:
+    """WP7 end-to-end at the seam: one intent node per mutating turn."""
+
+    async def test_mutating_turn_records_one_intent_with_trace(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ])
+        await orchestrator.handle_message("s1", "cli:nick", "Add Mira.")
+        (intent,) = _intent_nodes(services)
+        assert intent.name.startswith("Intent: Add Mira.")
+        assert intent.fields["user_id"] == "cli:nick"
+        assert intent.fields["model"] == "scripted"
+        mira = services.repository.graph.resolve("Mira")
+        assert {e.target for e in services.repository.graph.edges(intent.id)} == {
+            mira.id
+        }
+        body = await services.repository.fetch_body(intent.id)
+        assert "create_node" in body and "Add Mira." in body
+
+    async def test_read_only_turn_records_nothing(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(ToolCall("context", {"action": "get"}),)),
+            LLMTurn(reply="All quiet."),
+        ])
+        await orchestrator.handle_message("s1", "u", "How big is the world?")
+        assert _intent_nodes(services) == []
+
+    async def test_authoring_reply_is_captured_with_references(self) -> None:
+        long_scene = (
+            "Mira walked the vault line counting cracks in the old stone. "
+        ) * 5  # > MIN_CAPTURE_CHARS, mentions Mira
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="created"),
+            LLMTurn(reply=long_scene),
+        ])
+        await orchestrator.handle_message("s1", "u", "Add Mira.")
+        await orchestrator.handle_message("s1", "u", "/mode authoring")
+        await orchestrator.handle_message("s1", "u", "Write Mira at the vaults.")
+        graph = services.repository.graph
+        prose = [n for n in graph.nodes() if n.role is Role.PROSE]
+        assert len(prose) == 1
+        mira = graph.resolve("Mira")
+        references = {
+            e.target for e in graph.edges(prose[0].id) if e.type == "references"
+        }
+        assert references == {mira.id}
+        # Two intent nodes total (both turns mutated); the authoring one
+        # links the captured artifact: prompt -> intent -> artifact.
+        intents = _intent_nodes(services)
+        assert len(intents) == 2
+        authoring_intent = next(
+            i for i in intents if "Write Mira" in i.name
+        )
+        assert prose[0].id in {
+            e.target for e in graph.edges(authoring_intent.id)
+        }
+
+    async def test_short_authoring_reply_is_not_captured(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="created"),
+            LLMTurn(reply="Mira nods."),  # mentions her, but conversation-sized
+        ])
+        await orchestrator.handle_message("s1", "u", "Add Mira.")
+        await orchestrator.handle_message("s1", "u", "/mode authoring")
+        await orchestrator.handle_message("s1", "u", "Does she agree?")
+        assert [n for n in services.repository.graph.nodes()
+                if n.role is Role.PROSE] == []
+
+    async def test_subsystem_off_records_nothing(self, services: Services) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="done"),
+        ])  # no provenance wired
+        await orchestrator.handle_message("s1", "u", "Add Mira.")
+        assert _intent_nodes(services) == []
