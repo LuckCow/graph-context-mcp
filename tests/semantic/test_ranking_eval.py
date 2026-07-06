@@ -4,6 +4,11 @@ Every case in ranking_eval.toml must place its expected node in the
 TOP-3 for its query. Tuning RankingWeights is legitimate exactly when
 this suite stays green -- and extending the eval file IS the review
 artifact for ranking changes, like docstring goldens are for prompts.
+
+The suite runs under every embedder that can run here: the hashing
+embedder always (CI's deterministic floor -- eval queries are written
+for word overlap), the local sentence-transformers model when its
+weights are in the HF cache (the devcontainer bakes them).
 """
 
 from __future__ import annotations
@@ -20,9 +25,28 @@ from graph_context.domain.models import LinkSpec, NodeDraft
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.infrastructure.semantic.hashing_embedder import HashingEmbedder
 from graph_context.infrastructure.semantic.memory_index import InMemorySemanticIndex
+from graph_context.ports.semantic import Embedder
+from tests.semantic.test_local_embedder import DEFAULT_MODEL, model_cached
 
 _EVAL = Path(__file__).parent / "ranking_eval.toml"
 CASES = tomllib.loads(_EVAL.read_text())["case"]
+
+_local_singleton: Embedder | None = None
+
+
+def _embedder(kind: str) -> Embedder:
+    if kind == "hash":
+        return HashingEmbedder()
+    if not model_cached():
+        pytest.skip(f"{DEFAULT_MODEL} not in the local HF cache")
+    global _local_singleton  # one model load for the whole run
+    if _local_singleton is None:
+        from graph_context.infrastructure.semantic.local_embedder import (
+            SentenceTransformerEmbedder,
+        )
+
+        _local_singleton = SentenceTransformerEmbedder()
+    return _local_singleton
 
 
 async def _eval_world() -> InMemoryGraphRepository:
@@ -69,10 +93,11 @@ async def _eval_world() -> InMemoryGraphRepository:
     return r
 
 
+@pytest.mark.parametrize("embedder_kind", ["hash", "local"])
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["query"][:40])
-async def test_expected_node_in_top_k(case: dict) -> None:
+async def test_expected_node_in_top_k(case: dict, embedder_kind: str) -> None:
     repository = await _eval_world()
-    embedder = HashingEmbedder()
+    embedder = _embedder(embedder_kind)
     index = InMemorySemanticIndex()
     await SemanticProjector(repository, embedder, index).refresh()
     ranker = Ranker(repository, embedder, index)

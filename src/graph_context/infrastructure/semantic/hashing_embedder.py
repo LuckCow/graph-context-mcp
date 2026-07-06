@@ -2,9 +2,9 @@
 
 The feature-hashing trick: each token hashes to a dimension and a sign;
 texts sharing vocabulary land near each other. Weak on synonyms (it is
-word overlap, not meaning), which is exactly why it is honest as the
-pre-rebuild default OFF and invaluable in tests: similarity is stable
-across runs and machines, so ranking tests can assert on ordering.
+word overlap, not meaning) -- :class:`SentenceTransformerEmbedder` is
+the one that understands them -- but invaluable in tests: similarity is
+stable across runs and machines, so ranking tests can assert on ordering.
 
 Selected with ``GC_EMBEDDER=hash`` (demos, offline dev); the golden eval
 file runs against it in CI, so eval queries are written for overlap.

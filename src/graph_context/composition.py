@@ -15,9 +15,11 @@ Environment surface (unchanged from the server's original wiring):
 * ``GC_BACKEND``           -- ``anytype`` (default) or ``memory``.
 * ``GC_PROJECT_NAME``      -- initial project label (cosmetic).
 * ``GC_FIELD_DENYLIST``    -- ADR 012 field-reflection silences.
-* ``GC_EMBEDDER``          -- ``off`` (default) or ``hash`` (deterministic,
-                              model-free); real models arrive with the
-                              container rebuild (ADR 014).
+* ``GC_EMBEDDER``          -- ``off`` (default), ``hash`` (deterministic,
+                              model-free), or ``local`` (the baked
+                              sentence-transformers model, ADR 014).
+* ``GC_EMBEDDER_MODEL``    -- model-name override for ``local`` (defaults
+                              to the model the image bakes).
 * ``GC_SEMANTIC_CACHE``    -- embedding-cache directory (default
                               ``~/.cache/graph-context``); files are
                               disposable projections.
@@ -153,10 +155,16 @@ def _make_embedder(choice: str) -> Embedder | None:
         )
 
         return HashingEmbedder()
-    raise ValueError(
-        f"unknown GC_EMBEDDER {choice!r}; allowed: off, hash "
-        "(model-backed embedders arrive with the container rebuild)"
-    )
+    if choice == "local":
+        from graph_context.infrastructure.semantic.local_embedder import (
+            SentenceTransformerEmbedder,
+        )
+
+        model_name = os.environ.get("GC_EMBEDDER_MODEL", "").strip()
+        if model_name:
+            return SentenceTransformerEmbedder(model_name)
+        return SentenceTransformerEmbedder()
+    raise ValueError(f"unknown GC_EMBEDDER {choice!r}; allowed: off, hash, local")
 
 
 async def _build_semantic(
