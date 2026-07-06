@@ -53,9 +53,15 @@ services:
       # Default space for the live backend: the "TestWorld" space. Not a secret
       # (just an identifier); override per-launch with -e ANYTYPE_SPACE_ID=… .
       ANYTYPE_SPACE_ID: "bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"
+      # Discord bot transport (WP8). Same file-not-env-var discipline as the
+      # Anytype key above. GC_DISCORD_CHANNELS is the channel allowlist:
+      # the bot ignores every channel not listed (id, not name).
+      DISCORD_BOT_TOKEN_FILE: "/run/secrets/discord_bot_token"
+      GC_DISCORD_CHANNELS: "1523551542123298896"
 
     secrets:
       - anytype_api_key
+      - discord_bot_token
 
 volumes:
   claude-config:
@@ -66,3 +72,5 @@ volumes:
 secrets:
   anytype_api_key:
     file: ./secrets/anytype_api_key
+  discord_bot_token:
+    file: ./secrets/discord_bot_token

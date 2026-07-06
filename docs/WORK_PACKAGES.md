@@ -498,6 +498,18 @@ carry `gc_user_id`/`gc_model`).
   the transport adapter; presenters stay transport-neutral. One message =
   one turn = at most one intent node. Transport egress joins the
   devcontainer firewall allowlist (or the bot runs outside the container).
+  **Discord shipped 2026-07-06, verified live.** The per-message policy
+  (channel-allowlist gate, `discord:<id>` identity, 2k chunking, and a
+  process-wide turn lock until per-session state lands) is plain logic in
+  `orchestrator/discord_transport.py`; only the composition-root shim
+  `discord_bot.py` imports discord.py (import-linter-enforced, same
+  quarantine as the agent frameworks). Runtime wiring shared with the CLI
+  was extracted to `orchestrator/bootstrap.py`, so `GC_DRIVER=manual`
+  works over Discord too. Config: `GC_DISCORD_CHANNELS` allowlist (unset =
+  serve nowhere, loudly) + `DISCORD_BOT_TOKEN_FILE` secret; egress =
+  `discord.com`, `gateway.discord.gg`, and the `162.159.128.0/20` anycast
+  block that per-session resume gateways resolve into. Telegram/Slack
+  stay open, per-deployment.
 - **Single-writer delta queue** (settled — see decisions). **Core shipped
   2026-07-02 (ADR 009):** FIFO single-writer seam in the adapter,
   store-truth PATCH materialization via fresh GET in the critical section,

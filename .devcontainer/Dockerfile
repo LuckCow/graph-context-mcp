@@ -45,7 +45,7 @@ RUN pip install --no-cache-dir hatchling \
     && python -c "import tomllib,subprocess,sys; \
 p=tomllib.load(open('/tmp/pyproject.toml','rb'))['project']; \
 opt=p.get('optional-dependencies',{}); \
-deps=list(p.get('dependencies',[])) + list(opt.get('dev',[])) + list(opt.get('orchestrator',[])); \
+deps=list(p.get('dependencies',[])) + list(opt.get('dev',[])) + list(opt.get('orchestrator',[])) + list(opt.get('bot',[])); \
 subprocess.check_call([sys.executable,'-m','pip','install','--no-cache-dir',*deps]) if deps else None" \
     && rm /tmp/pyproject.toml
 

@@ -43,6 +43,17 @@ The server speaks **stdio** (one process per client; no network port). Run it di
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
 ```
 
+## Running the orchestrator (CLI / Discord)
+
+The orchestrator is the agentic harness over the same tool surface (WP6): a driver decides, activity modes bind tools, provenance records each mutating turn. Both transports share one runtime (`orchestrator/bootstrap.py`) and differ only in their message loop.
+
+```
+GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # keyboard loop; dev backend
+python -m graph_context.orchestrator.discord_bot                           # Discord bot (WP8), live backend by default
+```
+
+The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels in `GC_DISCORD_CHANNELS` — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; unset allowlist = serve nowhere, loudly). It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription; `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. Sessions are per-channel: `/mode <name>` switches the mode for that channel.
+
 ## Connecting Claude Desktop (from the dev container)
 
 Claude Desktop runs on your **host**; the server runs **inside the dev container**. The host can't launch the container's Python directly, so Claude Desktop starts the server *inside the already-running container* over stdio with `docker exec -i`. (This is also how VS Code attaches — the container's compose `environment:` is inherited by every `docker exec` session, so the in-container env vars below are already set; the `-e` flags just pin the per-launch ones.)
