@@ -268,7 +268,77 @@ registry; the workspace demo end-to-end against the fake.
 
 ---
 
-## WP6 — Orchestrator skeleton (ADR 007)
+## WP6 — Orchestrator skeleton (ADR 007) — **shipped in full 2026-07-06 (core 2026-07-04; real driver 2026-07-06)**
+
+**Status:** everything except the LangGraph driver is done, built so the
+framework arrives as a thin driver rather than the architecture (langgraph
+is not in the container until the rebuild). Shipped: the shared service
+builder (`graph_context/composition.py` — one wiring, both roots delegate);
+`orchestrator/` with mode→tool-binding tables (authoring literally lacks
+the mutation tools), the `LLMDriver` seam (`drivers.py` — transcript + the
+active mode's tool docs in, tool calls or a reply out; `ScriptedDriver` for
+tests/demos), `handle_message(session_id, user_id, text) → reply events`
+with explicit per-session `/mode` switching and a per-turn tool budget; a
+CLI loop (`python -m graph_context.orchestrator.cli`, `ManualDriver` —
+you play the model until the real driver lands); import-linter contracts
+(orchestrator never imports `interface/server.py`/`mcp`, only `cli.py`
+touches infrastructure, nothing imports orchestrator, langgraph never
+leaks out — external-package check enabled); the `[orchestrator]` extra;
+and the acceptance demo (`scripts/demo_wp6_orchestrator.py`: a scripted
+model TRIES to mutate in authoring mode and cannot). **Remaining after the
+container rebuild:** the LangGraph/Anthropic driver behind the existing
+`LLMDriver` protocol (cross-turn memory = the framework's thread state,
+deliberately left to it), and running `lint-imports` locally.
+
+**Rebuild addendum (2026-07-06):** the rebuild landed langgraph +
+import-linter; `lint-imports` runs locally and keeps all 7 contracts.
+The driver itself is **still blocked**: the image carries langgraph but
+no model-access SDK yet.
+
+**Model access = Claude subscription via the Agent SDK (decided
+2026-07-06).** The driver bills the user's Claude plan (Max), not API
+credits, which rules out the raw `anthropic` SDK (API-key/credit
+billing; consumer-OAuth use outside Claude Code violates the ToS) in
+favor of **`claude-agent-sdk`** — it drives the Claude Code CLI, whose
+subscription OAuth is the sanctioned path (since 2026-06-15 Anthropic
+explicitly covers third-party apps authenticating with a subscription
+through the Agent SDK, with a separate monthly Agent SDK credit).
+`claude-agent-sdk>=0.2` is in the `[orchestrator]` extra; the container
+rebuild installs it (PyPI is firewalled at runtime). Auth needs nothing
+new: the devcontainer's `claude-config` volume persists the `claude
+login` OAuth credential (`~/.claude/.credentials.json`, subscriptionType
+max) across rebuilds. For headless deployments without the volume,
+generate a long-lived token on a Pro/Max account with `claude
+setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN`. Do NOT set
+`ANTHROPIC_API_KEY` in the container env — it would shadow the
+subscription and bill credits.
+
+**Driver shipped (2026-07-06):** `orchestrator/claude_driver.py` fits
+the SDK's own agentic loop behind the existing `LLMDriver.decide` seam —
+the pipeline keeps owning tool execution, the per-turn budget, WP7
+journaling, and the binding boundary. How: the active mode's bound tools
+are registered as in-process MCP tools (a second face of the ADR 007
+boundary — unbound tools don't exist in the session; Claude Code's
+built-ins are disabled), and the SDK's permission callback DENIES every
+call with `interrupt=True`, so the SDK never executes anything — the
+requested calls are harvested from the streamed assistant message and
+returned as the decision. Tool input schemas are **derived from the tool
+wrappers' Python signatures** (`derive_schema`; one source of truth,
+`additionalProperties: false`) after a live failure with an open schema
+— the model echoed the schema's own keys back as arguments. Each
+`decide()` is a fresh stateless CLI session over the rendered turn-local
+transcript; cross-turn memory is deliberately still absent — the SDK's
+session-resume machinery is the lever when dogfooding wants it, which
+also means **langgraph sits installed but unused**; whether it ever
+earns its place is now an open question, not a plan. CLI selection:
+`GC_DRIVER=claude` (default; `manual` keeps the keyboard stand-in),
+`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune the model. Verified live:
+unit tests (self-skip without the SDK — CI installs only `[dev]`), the
+gated `GC_CLAUDE_E2E=1` e2e (tool-call capture + reply path), and
+`scripts/demo_claude_driver.py` — the WP6 acceptance with the REAL
+model: it creates Mira in world_modeling and correctly reports it
+cannot mutate in authoring (store unchanged). **WP6 is now fully
+shipped.** Original spec follows.
 
 **Goal:** a runnable agentic pipeline in this repo with two modes and
 harness-owned tool binding, reusing the existing tool layer. No provenance
@@ -324,7 +394,32 @@ the quarantine.
 
 ---
 
-## WP7 — Provenance & capture pipeline (ADR 008)
+## WP7 — Provenance & capture pipeline (ADR 008) — **shipped 2026-07-04**
+
+**Status:** complete against the framework-free WP6 harness; every
+deliverable below landed. `MutationJournal` (writers report at the source;
+NullJournal in the MCP server, drained per turn in the orchestrator);
+`IntentRecorder` (one `gc_intent` node per mutating turn — verbatim prompt,
+condensed tool trace, created-vs-modified detail, `intent` edges to every
+touched node, user/model attribution; read-only turns write nothing; the
+privacy knob scrubs prompt text from the body AND the node name/summary —
+names render in list views, caught by test); `Role.INTENT` joined the infra
+roles and `gc_intent`/`gc_edge_intent` the bootstrap; authoring auto-capture
+(exact-name entity linking, `MIN_CAPTURE_CHARS` guard) journals its artifact
+so the intent links prompt → intent → artifact + sources;
+`get_node(include_provenance=N)` mirrors `include_prose` and infra-role
+neighbors left the edge groups; `record_prose` retired `llm_input`/
+`llm_output`/`model` (and was then **removed entirely on 2026-07-04** —
+the project is pre-deployment, so no vestigial surface is kept;
+ProseRecorder survives as the service the harness calls, and the
+include_prose read surface went with it — captures reference their
+sources, sources do not track their captures);
+`GC_PROVENANCE` toggles the subsystem, `GC_STORE_LLM_INPUT` now governs
+intent-prompt storage. Demo: `scripts/demo_wp7_provenance.py` — the
+scripted model calls no capture tool and the harness records everything.
+Attribution note: `user_id`/`model` live in the intent node's fields (not
+first-class `gc_` properties as the original spec sketched) — promote them
+only if Set-filtering by user becomes a real need. Original spec follows.
 
 **Goal:** provenance becomes automatic — intent nodes journaled per mutating
 turn, authoring output captured with references, `record_prose`'s `llm_*`
@@ -403,6 +498,18 @@ carry `gc_user_id`/`gc_model`).
   the transport adapter; presenters stay transport-neutral. One message =
   one turn = at most one intent node. Transport egress joins the
   devcontainer firewall allowlist (or the bot runs outside the container).
+  **Discord shipped 2026-07-06, verified live.** The per-message policy
+  (channel-allowlist gate, `discord:<id>` identity, 2k chunking, and a
+  process-wide turn lock until per-session state lands) is plain logic in
+  `orchestrator/discord_transport.py`; only the composition-root shim
+  `discord_bot.py` imports discord.py (import-linter-enforced, same
+  quarantine as the agent frameworks). Runtime wiring shared with the CLI
+  was extracted to `orchestrator/bootstrap.py`, so `GC_DRIVER=manual`
+  works over Discord too. Config: `GC_DISCORD_CHANNELS` allowlist (unset =
+  serve nowhere, loudly) + `DISCORD_BOT_TOKEN_FILE` secret; egress =
+  `discord.com`, `gateway.discord.gg`, and the `162.159.128.0/20` anycast
+  block that per-session resume gateways resolve into. Telegram/Slack
+  stay open, per-deployment.
 - **Single-writer delta queue** (settled — see decisions). **Core shipped
   2026-07-02 (ADR 009):** FIFO single-writer seam in the adapter,
   store-truth PATCH materialization via fresh GET in the critical section,
@@ -778,6 +885,269 @@ after WP9.
 
 ---
 
+## WP11 — Semantic search + graph-aware ranking (ADRs 014, 016) — **stage 1 shipped 2026-07-04**
+
+**Status:** node-level search + the full Ranker are live and
+`GC_EMBEDDER=off`-degradable as designed (off = byte-identical old
+behavior). Shipped: `Embedder`/`SemanticIndex` ports with the
+deterministic `HashingEmbedder` (`GC_EMBEDDER=hash`) and in-memory +
+SQLite cache adapters (contract-certified; restart survival and
+per-model isolation pinned); `SemanticProjector` (corpus = name + type +
+summary + fields, `modified_at` excluded from the hash so store touches
+never re-embed; full pass + prune after hydrate, incremental from
+resync); `Node.modified_at` (the ADR 016 recency signal); the **Ranker**
+exactly per ADR 016 — recruitment, infra look-through connectors
+(capture co-reference / intent co-touch), query↔edge-label conditioning
+with cached label vectors, links-mirror + Adamic-Adar discounts,
+profile-weighted recency, evidence strings from actual contributions
+(one real bug caught in test: connector conduits flowed into nodes the
+propagation skipped); `find_node` tier 3 + resolver "closest by
+meaning" suggestions (never-fuzzily-resolve pinned by test); and the
+**ranking eval golden** (`tests/semantic/ranking_eval.toml`, per-case k
+— the relation-query case honestly sits at k=5 under the bag-of-words
+embedder). Demo: `scripts/demo_wp11_search.py`. **Deferred:** passage
+stage 2 + the reserved `search` tool (dogfooding gate), reranker
+adapters + real embedders (container rebuild), live-E2E cache-restart
+run (wants a real embedder), and orchestrator RAG prefetch (the
+Ranker's `session_seeds` parameter is ready for it).
+
+**Rebuild addendum (2026-07-06):** the real local embedder shipped —
+`GC_EMBEDDER=local` selects `SentenceTransformerEmbedder` over the
+image-baked `BAAI/bge-small-en-v1.5` (`GC_EMBEDDER_MODEL` overrides;
+`HF_HUB_OFFLINE=1` keeps loads off the network). The ranking eval
+golden now runs under both embedders — all six cases pass under the
+real model (the relation-query case still honestly at k=5) — and the
+deferred live-E2E run happened: cache survives restart with zero
+re-embeds, a human rename re-embeds exactly one node (19/19 live).
+**Still deferred:** passage stage 2 + the `search` tool (dogfooding
+gate), reranker adapters (gated WITH stage 2; no cross-encoder is baked
+in the image), the Voyage embedder (firewall allowlist + key), the
+`off`→`local` default flip (a dogfooding call — model load adds startup
+seconds), and orchestrator RAG prefetch. Original spec follows.
+
+**Goal:** "find the node I'm describing" and, later, "find the passage
+that answers this" — as a **derived projection** with a persistent
+embedding *cache*, not a new source of truth, ranked by a pipeline in
+which **edges are relevance evidence** (ADR 016): semantic recall seeds,
+graph expansion recruits, spreading activation scores, and every hit
+carries its evidence. Explicitly NOT in scope (decided, with written
+revisit triggers, in ADR 014): a vector database, or any datastore
+replacing hydration. Opens WP4's parked semantic-search item; the
+tool-surface philosophy applies the WP3 minimalism precedent.
+
+### Deliverables
+
+- **Ports** (`ports/`): `Embedder` (`embed(texts) -> vectors`; model name
+  surfaced for cache keying) and `SemanticIndex` (`upsert(node_id,
+  content_hash, chunks)`, `prune(live_ids)`, `query(text, limit,
+  threshold) -> scored node ids`). Contract-tested fakes: a deterministic
+  toy embedder (hashing-based) so similarity tests are stable offline.
+- **Infrastructure:** SQLite cache adapter (one file per space, keyed by
+  `(node_id, content_hash, model)`; documented as disposable); exact
+  brute-force cosine query in memory; embedder adapters per
+  `GC_EMBEDDER` — `local` (sentence-transformers, model baked into the
+  container image at rebuild; egress forbids ad-hoc downloads) and/or
+  `voyage` (needs a firewall allowlist entry + key). Both behind the
+  port; quality-vs-image-weight decided by dogfooding, not architecture.
+- **Sync integration:** hydrate seeds/prunes the cache against the live
+  id set (this is where S4's invisible deletions get handled — as cache
+  eviction); resync re-embeds only nodes whose content hash changed.
+  First corpus: `name + summary + reflected fields` per node. Bodies and
+  prose chunks are a follow-on stage (reads unthrottled, S7), gated on
+  the passage-retrieval need below.
+- **`Ranker` application service (ADR 016)** — the single retrieval
+  entry for the tool layer and, later, orchestrator RAG prefetch:
+  semantic recall (k≈30) → graph expansion (1–2 hops from seeds + the
+  session's focus/recent when session-aware; capped; infra roles
+  excluded; may RECRUIT nodes recall missed) → spreading activation
+  (2–3 iterations over the ≤~100-node candidate subgraph) → fail-closed
+  threshold → top N **with evidence annotations** ("linked to Mira
+  (possesses, strong match); co-referenced by 2 captures").
+  Edge weights compose per edge: query↔edge-label similarity (labels
+  embedded with the same embedder, one cached vector per relation),
+  structural priors (named relations > the `links` mirror; capture
+  co-reference; intent co-touch), and Adamic-Adar degree normalization.
+  **Ranking signal weights are profile/mode data** (ADR 015) — recency
+  weighs up in the assistant's `organizing`, near zero in fiction —
+  tuned against a **golden eval file** of (description → expected node)
+  pairs; weight changes are reviewed as golden diffs.
+- **`Reranker` port + seam (`GC_RERANKER=off|local|voyage`)** — an
+  optional LAST stage; reorder-only, never resurrects thresholded-out
+  candidates, never contributes unexplainable score. Local
+  cross-encoder rides the same container rebuild; Voyage the same
+  allowlist entry. Dogfooding-gated with the passage stage.
+- **Tool surface (augment, don't multiply):**
+  - `find_node` tier 3: exact → substring → **Ranker**
+    (threshold-gated), hits labelled ("semantic matches for …") so the
+    LLM knows it holds a fuzzy match; result lines keep the entry-point
+    shape, extended with the evidence line; `type`/`limit` compose as
+    today.
+  - `_resolve`'s `NodeNotFound` appends "closest by meaning" candidates
+    with ids AND evidence — errors are prompts, and evidence lets the
+    model verify before committing a mutation target; one change serves
+    every node parameter of every tool.
+  - **Non-feature:** no silent fuzzy resolution, ever — exact resolves,
+    semantic suggests. Mutation targets are never guessed.
+  - **Reserved, dogfooding-gated:** a `search` tool for passage-level
+    retrieval (excerpts anchored to nodes) — different result shape,
+    honestly a ninth tool IF the find_node tier + `include_prose` prove
+    insufficient. Orchestrator RAG is expected to be harness-side
+    prefetch (no tool surface).
+- **Docstrings** teach the division of labor: semantic finds the door,
+  `explore` walks the house (describe → find_node → explore). Goldens
+  regenerate.
+- **Config/infra:** `GC_EMBEDDER` (+ `off` default until the rebuild
+  ships an embedder, so the tier degrades to today's behavior); cache
+  path config; container rebuild list grows by the local model —
+  batch with langgraph + import-linter.
+
+### Decisions (settled — see ADRs 014, 016)
+
+- Persistence follows cost-to-rebuild: GraphIndex ephemeral, embeddings
+  cached; both disposable projections of Anytype, never truth.
+- SQLite + exact cosine; a vector DB has a written trigger (~100k+
+  chunks), not a speculative slot. Datastore-replacing-hydration has a
+  written "no" (revisit ~5k nodes / multi-process need).
+- Semantic hits are always labelled; thresholds fail closed (no hits
+  beats noise hits — the LLM self-corrects from an honest empty better
+  than from a confident wrong match).
+- Tools call the Ranker, never the vector index directly; the graph may
+  recruit, the reranker may only reorder; every score decomposes into
+  nameable evidence (ADR 016).
+
+### Open questions
+
+- Embedder default after rebuild (local vs voyage) — dogfood both behind
+  the port; chunk size for bodies/prose when stage 2 lands.
+- Threshold + max semantic candidates in resolver errors (start small:
+  3); tune from transcripts like the explore-full knobs.
+- Should `find_node` semantic tier also run when substring matches exist
+  but are weak? v1: no — tiers are strictly fallback; revisit if
+  dogfooding shows shadowing.
+
+### Tests
+
+Contract suite over fake + SQLite index: upsert/prune/query round-trip,
+content-hash idempotency, prune-on-hydrate eviction, threshold behavior.
+Deterministic-embedder tool tests: find_node tier ordering (exact beats
+substring beats semantic; labels correct), resolver errors carry
+suggestions with ids, mutation tools never auto-resolve fuzzily.
+Ranker tests (deterministic embedder + hand-built graphs): recruitment
+(a vocabulary-invisible node linked to two strong seeds surfaces),
+edge-label conditioning (the same candidates rank differently under
+queries favoring different relations), links-mirror discount, hub
+normalization, evidence strings name their contributions, thresholded
+candidates never resurrected by any later stage, and the golden eval
+file scores above a floor. Sync tests: resync re-embeds only changed
+hashes; deleting the cache file converges on next hydrate. Live E2E:
+cache survives restart; a human rename re-embeds on resync.
+
+Suggested sizing: **M** (stage 1, node-level) + **M** (Ranker + eval
+golden) + **S–M** (stage 2, passages + reranker adapters, if gated in).
+Independent of WP8; wants the container rebuild for any real embedder
+but ships `GC_EMBEDDER=off`-degradable before it (the graph machinery
+is pure GraphIndex computation and works everywhere).
+
+---
+
+## WP12 — Configurable activity modes & general capture (ADR 015) — **shipped 2026-07-04**
+
+**Status:** complete. ModeSpec/CapturePolicy live in `profiles.py`; the
+loader (`orchestrator/modes.py`) overlays `GC_MODES_FILE` TOML onto profile
+defaults with loud load-time failures; the driver seam receives the active
+spec's goal (the LangGraph driver lands against the final shape);
+`CaptureRecorder` produces policy-typed artifacts (native types are
+first-class -- a recorded `procedure` is work product, only `gc_prose`
+keeps infra hiding); `Role.PROSE` → `Role.CAPTURE` (keys frozen); the
+timeline is profile-declared (`TimelineValue = float | str`, adapter maps
+the configured property both ways, `ensure_schema` creates a missing
+native date key, `reflects_field` excludes it, and the domain's one
+`as_of` comparison fails actionably on mixed types); and a shipped
+**`assistant` profile** (organizing / record_procedure / meeting_notes,
+`event_date` axis) with golden-pinned docstrings + the acceptance demo
+(`scripts/demo_wp12_assistant.py`: no capture tool called, a first-class
+`procedure` node with references and the intent chain left behind).
+Deferred as stated: in-space mode objects (with WP5's per-space-profile
+question) and dogfooding-driven docstring revision. Original spec follows.
+
+**Goal:** the behavior layer generalizes the way the storage layer already
+did — a work assistant with *Record Procedure* becomes a configuration
+entry, not a fork. Modes become data (`ModeSpec`: goal prompt + binding +
+capture policy), capture grows per-mode artifact types, the time axis and
+the vocabulary follow the profile. Depends on WP6 (mode machinery) and
+WP7 (capture pipeline); lands best BEFORE the LangGraph driver so the
+driver is born taking its system prompt from the active spec.
+
+### Deliverables
+
+- **`ModeSpec` + loader** (`orchestrator/modes.py` rework): specs carry
+  `name` / `goal` / `mutating` / optional `CapturePolicy(artifact_type,
+  references_label, min_chars)`. The binding tables, "unavailable, not
+  refused" boundary, `/mode` command (now listing loaded specs), and
+  per-session mode state are unchanged mechanisms fed by specs. Profiles
+  ship defaults (fiction: today's two modes verbatim; assistant: e.g.
+  `record_procedure`, `meeting_notes`); `GC_MODES_FILE` (TOML) adds or
+  overrides per deployment. Bad specs fail loudly at startup — specs are
+  prompts and get golden tests like docstrings.
+- **`CaptureRecorder`** (rename + generalize `ProseRecorder`): artifact
+  type key, references label, and threshold from the active policy;
+  `gc_prose` is the fiction default. Journal/intent integration
+  untouched. Native-typed artifacts are first-class (no infra hiding);
+  only `gc_prose` keeps it. The pipeline's `_finish_turn` reads the
+  active spec's policy instead of the hardcoded constants.
+- **Goal prompt → driver seam:** `LLMDriver.decide` gains the active
+  spec's goal as part of its inputs (transcript, tools, goal), so the
+  LangGraph driver lands against the final shape. ScriptedDriver ignores
+  it, as ever.
+- **Profile-declared time axis:** the profile names the Event-role
+  timeline property — `gc_story_time` (fiction) or a native date
+  property (assistant; ISO strings sort, so `as_of` generalizes to an
+  ordered timeline value). Domain contract becomes "comparable ordinal",
+  adapter maps the configured source both ways; docstrings reframe
+  `story_time`/`as_of` per profile.
+- **Vocabulary:** `Role.PROSE` → `Role.CAPTURE` (concept only; the
+  `gc_prose` key frozen); presenter/docstring "prose" strings become
+  profile fragments. A dogfooded **`assistant` profile**
+  (tasks/procedures/notes) supersedes the guessed parts of `workspace`.
+- README: assistant quickstart; demo script — scripted driver runs
+  `record_procedure` end-to-end (goal prompt in, `procedure` node with
+  references + intent chain out).
+
+### Decisions (settled — see ADR 015)
+
+- Modes are data; the enum dies. Config precedence: code defaults <
+  `GC_MODES_FILE`; **in-space mode objects are the stated direction**,
+  deferred together with WP5's per-space-profile question (same feature).
+- Capture artifacts of native types are ordinary nodes — visible,
+  searchable, footered; hiding is a `gc_prose` property, not a capture
+  property.
+- The timeline is an ordered value with a profile-named source; no
+  second time mechanism.
+
+### Open questions
+
+- Spec validation depth (does a capture artifact_type get checked
+  against the space at startup or first use?).
+- Should `/mode` switching remain fully explicit, or may a spec declare
+  itself the session default per profile? (v1: explicit; fiction keeps
+  world_modeling default.)
+- How much of `workspace`'s docstring set survives contact with real
+  assistant dogfooding.
+
+### Tests
+
+Spec loader: defaults + file override precedence, loud failure on bad
+specs, golden rendering of shipped specs. Bindings: a read-only spec's
+table lacks mutation tools (same assertion style as WP6). Capture: a
+`record_procedure` turn produces a native `procedure` artifact with
+references + intent linkage; thresholds respected; `gc_prose` fiction
+path unchanged. Time axis: `as_of` filters on the profile-named property
+in both backends. Vocabulary goldens per profile.
+
+Suggested sizing: **L** (modes+capture M, time axis M, vocabulary S).
+
+---
+
 ## Sequencing
 
 ```
@@ -815,7 +1185,18 @@ WP10 (attribute reflection, summary → built-in description, connections
 footer) is likewise storage-track and independent of WP5–WP8. Internal
 order: 10b before (or with) 10a; 10c after WP9 (it builds on the body
 machinery; its UI-rendering gate is resolved — deep links confirmed
-clickable and PATCH-stable).
+clickable and PATCH-stable). **[Shipped 2026-07-02.]**
+
+WP11 (semantic search, ADR 014) is storage-track, independent of WP5–WP8,
+and rebuild-coupled only for the embedder itself: the ports, cache, tool
+tiering, and resolver suggestions all ship `GC_EMBEDDER=off`-degradable
+beforehand. Batch the local model into the same container rebuild as
+langgraph + import-linter.
+
+WP12 (activity modes & general capture, ADR 015) follows WP6+WP7 and
+should land BEFORE the LangGraph driver — the driver is then born taking
+its system prompt from the active ModeSpec instead of being retrofitted.
+WP11 and WP12 are independent of each other.
 
 ## Risk register (top items)
 
@@ -834,4 +1215,6 @@ clickable and PATCH-stable).
 | One user's prompts exposed to all space members via intent nodes | privacy review at WP8 | Per-user consent knob; `[prompt withheld]` marker keeps the trace usable |
 | `explore full` body fan-out bloats latency/context (WP9) | dogfooding transcripts | Fetches are unthrottled reads; add caps/excerpts/`include_bodies` knobs — tune options, not the architecture |
 | Connections footer clobbers human body text (WP10c) | footer/description diff in dogfooding | Server owns ONLY below the delimiter; append when unmatched, never merge; strip is whitespace-tolerant (normalization) |
+| Semantic matches mutate the wrong node (WP11) | a fuzzy match silently resolving | Non-feature by decision: exact resolves, semantic SUGGESTS; mutation targets are never guessed (ADR 014) |
+| Embedding cache drifts from the store (WP11) | stale hits after human edits | Cache keyed by content hash, pruned on hydrate; deleting the file always converges — it is a projection, never truth |
 | Body write-back degrades human mention pills (WP9 update path; widened by WP10c) | humans report pills turning into plain links | Document (plain links in bot-maintained descriptions); regenerate footer only when its content changes |

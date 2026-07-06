@@ -102,7 +102,7 @@ class TestNameResolution:
         g.upsert_node(_named("id-mara", "Mara Stone"))
         g.upsert_node(_named("id-epstein", "The Epstein Class", "Organization"))
         g.upsert_node(
-            _named("id-prose", "FamiLinc scene", "Prose", role=Role.PROSE)
+            _named("id-prose", "FamiLinc scene", "Capture", role=Role.CAPTURE)
         )
         return g
 

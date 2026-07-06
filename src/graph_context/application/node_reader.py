@@ -4,13 +4,12 @@ Returns a :class:`NodeView`: the node plus its incident edges grouped by
 edge type, each with the neighbor attached so the presenter can render
 "participated_in -> Siege of Brakk" without further lookups.
 
-WP3 ``include_prose`` (resolved): the "how was this place described last
-time?" consistency lookup. When ``include_prose`` > 0, the reader returns
-up to that many Prose nodes that ``references`` this node, most-recent
-first (by Prose ``fields["generated_at"]``), each with a body excerpt
-fetched on demand via ``repository.fetch_body`` and capped at
-``excerpt_chars``. The reverse-reference lookup is one index call:
-``graph.neighbors(node_id, Direction.IN, edge_types=["references"])``.
+Provenance is the only sidecar lookup (WP7 ``include_provenance``): intent
+nodes that touched this node, most-recent first, with body excerpts
+fetched on demand. Prose tracking was removed 2026-07-04 -- references
+point FROM a capture TO its sources; the sources do not track what was
+written about them. (Retrieving relevant passages becomes WP11's
+semantic/passage search, a better fit than reverse-edge bookkeeping.)
 
 The excerpt budget (``excerpt_chars``) is a *presentation* concern and is
 injected by the tool layer (default keeps this use-case self-contained);
@@ -24,13 +23,13 @@ from dataclasses import dataclass, field
 
 from graph_context.domain.graph import Direction
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import Role
+from graph_context.domain.schema import INFRA_ROLES, Role
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 
-DEFAULT_EXCERPT_CHARS = 300  # mirror of presenters.PROSE_EXCERPT_CHARS default
+DEFAULT_EXCERPT_CHARS = 300  # mirror of presenters.EXCERPT_CHARS default
 
-REFERENCES_LABEL = "references"  # Prose -> source edge label (cleaned)
+INTENT_LABEL = "intent"  # intent node -> touched node edge label (WP7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +42,10 @@ class NodeView:
     # (ADR 010) -- get_node is "working with the node directly", so the
     # full text always rides along.
     body: str = ""
-    # WP3: (prose node, body excerpt) pairs, most-recent first; empty
-    # unless include_prose was requested.
-    prose: tuple[tuple[Node, str], ...] = field(default=())
-    # Total Prose passages referencing this node -- always populated
-    # (index-only, no body fetches) so "does prose exist?" is a signal the
-    # presenter can surface, never an inference.
-    prose_count: int = 0
+    # WP7: (intent node, body excerpt) pairs, most-recent first; empty
+    # unless include_provenance was requested.
+    provenance: tuple[tuple[Node, str], ...] = field(default=())
+    provenance_count: int = 0
 
 
 class NodeReader:
@@ -64,7 +60,7 @@ class NodeReader:
         node_id: NodeId,
         *,
         edge_type_filter: Iterable[str] | None = None,
-        include_prose: int = 0,
+        include_provenance: int = 0,
         excerpt_chars: int = DEFAULT_EXCERPT_CHARS,
     ) -> NodeView:
         graph = self._repository.graph
@@ -73,48 +69,48 @@ class NodeReader:
         for edge, neighbor in graph.neighbors(
             node_id, Direction.BOTH, edge_types=edge_type_filter
         ):
+            # WP7: infra-role neighbors (Capture, SessionContext, Intent) are
+            # bookkeeping -- their edges never clutter the edge groups. The
+            # prose/provenance counts below are the deliberate signal.
+            if neighbor.role in INFRA_ROLES:
+                continue
             grouped.setdefault(edge.type, []).append((edge, neighbor))
         body = await self._repository.fetch_body(node_id)
-        prose_nodes = self._referencing_prose(node_id)
-        prose: tuple[tuple[Node, str], ...] = ()
-        if include_prose > 0:
-            prose = await self._excerpts(prose_nodes[:include_prose], excerpt_chars)
+        intent_nodes = self._referencing_intents(node_id)
+        provenance: tuple[tuple[Node, str], ...] = ()
+        if include_provenance > 0:
+            provenance = await self._excerpts(
+                intent_nodes[:include_provenance], excerpt_chars
+            )
         self._session.touch(node_id)
         return NodeView(
             node=node,
             edges={k: tuple(v) for k, v in sorted(grouped.items(), key=lambda i: i[0])},
             body=body,
-            prose=prose,
-            prose_count=len(prose_nodes),
+            provenance=provenance,
+            provenance_count=len(intent_nodes),
         )
 
-    def _referencing_prose(self, node_id: NodeId) -> list[Node]:
-        """Prose nodes referencing this node, most-recent first. Index-only.
-
-        Incoming `references` edges originate on Prose nodes (Prose -> here);
-        the role filter keeps a human-created `references` relation between
-        story nodes from posing as prose.
-        """
-        prose_nodes = [
+    def _referencing_intents(self, node_id: NodeId) -> list[Node]:
+        """Intent nodes that touched this node, most-recent first (WP7)."""
+        intents = [
             neighbor
             for _, neighbor in self._repository.graph.neighbors(
-                node_id, Direction.IN, edge_types=[REFERENCES_LABEL]
+                node_id, Direction.IN, edge_types=[INTENT_LABEL]
             )
-            if neighbor.role is Role.PROSE
+            if neighbor.role is Role.INTENT
         ]
-        prose_nodes.sort(
-            key=lambda n: n.fields.get("generated_at", ""), reverse=True
-        )
-        return prose_nodes
+        intents.sort(key=lambda n: n.fields.get("generated_at", ""), reverse=True)
+        return intents
 
     async def _excerpts(
-        self, prose_nodes: list[Node], excerpt_chars: int
+        self, nodes: list[Node], excerpt_chars: int
     ) -> tuple[tuple[Node, str], ...]:
         out: list[tuple[Node, str]] = []
-        for prose_node in prose_nodes:
-            body = await self._repository.fetch_body(prose_node.id)
+        for node in nodes:
+            body = await self._repository.fetch_body(node.id)
             excerpt = body[:excerpt_chars]
             if len(body) > excerpt_chars:
                 excerpt += "…"
-            out.append((prose_node, excerpt))
+            out.append((node, excerpt))
         return tuple(out)

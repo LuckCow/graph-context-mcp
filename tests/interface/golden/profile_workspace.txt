@@ -103,11 +103,10 @@ explore(depth=1, detail="full") over repeated get_node calls.
 node_id accepts a node NAME as well as an id (resolved for you; an
 ambiguous name reports its candidates so you can pick one).
 edge_types: optional filter, e.g. ["works_on", "member_of"].
-include_prose: how many recently-captured passages (meeting notes,
-  decision records, saved summaries) that reference this node to attach
-  (default 0; most-recent first, with excerpts) -- the "what was written
-  about this last time?" lookup. Try 1-3 before re-summarizing a
-  recurring topic.
+include_provenance: how many intent records that touched this node to
+  attach (default 0; most-recent first, with excerpts) -- the "who
+  changed this, and why?" audit lookup. The response notes when such
+  records exist.
 
 ### explore
 Walk the graph outward from a node. THE general retrieval primitive.
@@ -140,8 +139,8 @@ STALE-SUMMARY SWEEP (before a big update session):
   explore(depth=3, limit=50, only_stale=true, detail="names")
   ...then update_node each with a fresh summary.
 
-Prose and SessionContext nodes are hidden unless explicitly named in
-include_types.
+Captured passages and session bookkeeping are hidden unless explicitly
+named in include_types (e.g. include_types=["Capture"]).
 
 ### find_path
 Find the shortest meaningful connection between two nodes -- "how is
@@ -152,29 +151,22 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["member_of", "works_on"]).
 
 ### find_node
-Find nodes by NAME when you know the name but not the id.
+Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
-Matching is case-insensitive: exact-name matches are returned first, and
-only if there are none does it fall back to substring matches. Each
-result line carries the node id, ready to paste into any other tool.
+Matching is tiered: exact name first, then substring, and if nothing
+matches by name the input is treated as a description and matched by
+MEANING (when semantic search is enabled). Semantic hits are labelled
+and each carries a "why" line (what matched, what it is linked to) so
+you can verify before using an id. Each result line carries the node
+id, ready to paste into any other tool.
 
-name: the name (or fragment) to search for.
+name: the name, name fragment, or a plain-words description
+  (e.g. "the engineer who reads stone").
 type: optional type filter (e.g. "Character") to disambiguate.
-limit: max substring matches to return (default 10).
+limit: max matches to return (default 10).
 
 You usually don't need this first: get_node, explore, find_path,
 update_node and link `other` targets all accept a name directly in place
 of an id and resolve it for you. Reach for find_node to browse, to
 disambiguate when a name is ambiguous, or to confirm a node exists.
 For a cold start with no name in mind, use context action='overview'.
-
-### record_prose
-Save a text artifact (meeting notes, a decision record, a report
-section) INTO the graph so future work builds on it.
-
-Call after producing any passage the user keeps. references is REQUIRED
-and must list every node id whose content shaped the text (the people
-involved, the project, the decisions discussed) -- this powers later
-consistency lookups. summary: one-liner of what the passage covers.
-Optionally store the generation inputs (llm_input/llm_output/model) for
-provenance.

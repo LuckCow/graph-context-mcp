@@ -17,22 +17,22 @@ silently: the header must never crash a tool response.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from graph_context.application.node_reader import NodeView
+from graph_context.application.ranker import RankedHit
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
-from graph_context.domain.schema import INFRA_ROLES
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreResult
 
 _RECENT_SHOWN = 3
 _FOCUS_SHOWN = 3  # header shows the top of the stack, not the whole working set
 _HEADER_NAME_CHARS = 32  # ellipsize pathological titles; the header is an echo
-PROSE_EXCERPT_CHARS = 300  # WP3 starting point; tune by dogfooding
+EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
 
 
 class Detail(StrEnum):
@@ -83,6 +83,21 @@ def render_overview(overview: GraphOverview) -> str:
         lines.append(
             f"- {node.name} ({node.type}, id={node.id}){stale}: {node.summary}"
         )
+    return "\n".join(lines)
+
+
+def render_ranked_hits(hits: Sequence[RankedHit]) -> str:
+    """Ranked matches with their evidence (ADR 016) -- one hit per line
+    pair, id in the standard copy-paste position, evidence indented so the
+    LLM can verify the reasoning before committing to an id."""
+    lines = []
+    for hit in hits:
+        node = hit.node
+        lines.append(
+            f"- {node.name} ({node.type}, id={node.id}): {node.summary}"
+        )
+        if hit.evidence:
+            lines.append(f"    why: {'; '.join(hit.evidence)}")
     return "\n".join(lines)
 
 
@@ -154,8 +169,8 @@ def render_node_view(view: NodeView) -> str:
     Arrow direction is derived per edge: ``->`` when the focal node is the
     source, ``<-`` when it is the target -- so "Mira participated_in ->
     Siege" and "Siege participated_in <- Mira" read correctly from either
-    side. A requested prose section (WP3 ``include_prose``) is appended,
-    most-recent first, with body excerpts.
+    side. A requested provenance section (WP7 ``include_provenance``) is
+    appended, most-recent first, with body excerpts.
     """
     node = view.node
     stale = " [summary stale]" if node.summary_stale else ""
@@ -181,18 +196,17 @@ def render_node_view(view: NodeView) -> str:
                 )
     else:
         lines.append("edges: none")
-    if view.prose:
-        lines.append(f"prose ({len(view.prose)} of {view.prose_count}):")
-        for prose_node, excerpt in view.prose:
-            lines.append(f"  {prose_node.name} (id={prose_node.id}): {excerpt}")
-    elif view.prose_count > 0:
+    if view.provenance:
         lines.append(
-            f"prose: {view.prose_count} passage(s) reference this node "
-            "(pass include_prose=1-3 to view)"
+            f"provenance ({len(view.provenance)} of {view.provenance_count}):"
         )
-    elif node.role not in INFRA_ROLES:
-        # An explicit signal so "no prior prose" is never an inference.
-        lines.append("prose: none recorded")
+        for intent_node, excerpt in view.provenance:
+            lines.append(f"  {intent_node.name} (id={intent_node.id}): {excerpt}")
+    elif view.provenance_count > 0:
+        lines.append(
+            f"provenance: {view.provenance_count} intent record(s) touched this "
+            "node (pass include_provenance=1-3 to view)"
+        )
     return "\n".join(lines)
 
 

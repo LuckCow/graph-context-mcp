@@ -26,8 +26,11 @@ Notes:
 * Writes call `_note_mutation(services)`, which drives the debounced
   SessionPersister wired in server.py's lifespan (a no-op when absent, as
   in the memory backend and most tests).
-* WP3 surface is complete here: `record_prose`, `only_stale`, and
-  `get_node include_prose` (NodeReader grew the reverse-reference lookup).
+* Capture is the ORCHESTRATOR's job (WP7 auto-capture); the record_prose
+  tool was removed 2026-07-04 -- the project is pre-deployment, so no
+  vestigial surface is kept. CaptureRecorder is the service the harness
+  calls, with the artifact type set by the active mode's CapturePolicy
+  (ADR 015).
 """
 
 from __future__ import annotations
@@ -35,32 +38,37 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
 
+from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.application.explorer import Explorer
+from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
-from graph_context.application.prose_recorder import ProseRecorder
+from graph_context.application.ranker import Ranker
+from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
-from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery
-from graph_context.errors import GraphContextError
+from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
 from graph_context.ports.graph_repository import GraphRepository
 
 logger = logging.getLogger(__name__)
 
-# WP2 decision: bookkeeping (Prose/SessionContext) node *roles* never surface
-# in traversal unless explicitly included. Tool-layer policy, not domain.
-DEFAULT_EXPLORE_EXCLUDE_ROLES = frozenset({Role.PROSE, Role.SESSION_CONTEXT})
+# WP2 decision: bookkeeping node *roles* never surface in traversal unless
+# explicitly included. Tool-layer policy, not domain. (Intent joins via
+# INFRA_ROLES-driven reader suppression; here the explore default.)
+DEFAULT_EXPLORE_EXCLUDE_ROLES = frozenset(
+    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT}
+)
 
 
 @dataclass(slots=True)
@@ -72,8 +80,15 @@ class Services:
     writer: NodeWriter
     reader: NodeReader
     explorer: Explorer
-    prose: ProseRecorder
+    capture: CaptureRecorder
     persister: SessionPersister | None = None  # wired in server lifespan
+    # WP7: the orchestrator passes a real MutationJournal and drains it per
+    # turn; the MCP server keeps the NullJournal (no turn boundary).
+    journal: MutationJournal = field(default_factory=NullJournal)
+    # WP11 (ADR 014): None when GC_EMBEDDER=off -- the semantic layer
+    # degrades away and tools fall back to name search alone.
+    projector: SemanticProjector | None = None
+    ranker: Ranker | None = None
 
 
 def build_services(
@@ -81,16 +96,22 @@ def build_services(
     session: SessionState,
     persister: SessionPersister | None = None,
     *,
-    store_llm_input: bool = True,
+    journal: MutationJournal | None = None,
+    projector: SemanticProjector | None = None,
+    ranker: Ranker | None = None,
 ) -> Services:
+    journal = journal or NullJournal()
     return Services(
         repository=repository,
         session=session,
-        writer=NodeWriter(repository, session),
+        writer=NodeWriter(repository, session, journal),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        prose=ProseRecorder(repository, store_llm_input=store_llm_input),
+        capture=CaptureRecorder(repository, journal=journal),
         persister=persister,
+        journal=journal,
+        projector=projector,
+        ranker=ranker,
     )
 
 
@@ -142,15 +163,30 @@ async def _note_mutation(services: Services) -> None:
 # -- parsing helpers: error messages are written FOR the LLM ---------------
 
 
-def _resolve(graph: GraphIndex, identifier: str) -> NodeId:
+async def _resolve(services: Services, identifier: str) -> NodeId:
     """Translate a user-supplied id-or-name into a real node id.
 
     Resolution is a tool-layer concern (the same boundary that does all
     ``_parse_*`` normalization), so the application and domain layers keep
     receiving canonical ids. Raises NodeNotFound/AmbiguousNodeName, both
     actionable, when the string does not resolve to exactly one node.
+
+    ADR 016: on a miss, the Ranker (when wired) appends "closest by
+    meaning" candidates WITH evidence to the error -- a suggestion
+    surface, never silent resolution: exact resolves, fuzzy suggests,
+    and mutation targets are never guessed (ADR 014 non-feature).
     """
-    return graph.resolve(identifier).id
+    try:
+        return services.repository.graph.resolve(identifier).id
+    except NodeNotFound:
+        if services.ranker is None:
+            raise
+        hits = await services.ranker.rank(identifier, limit=3)
+        if not hits:
+            raise
+        raise NodeNotFound(
+            identifier, suggestions=presenters.render_ranked_hits(hits)
+        ) from None
 
 
 def _parse_node_type(value: str) -> str:
@@ -181,8 +217,8 @@ def _parse_detail(value: str) -> Detail:
         ) from None
 
 
-def _parse_links(
-    raw: Sequence[dict[str, Any]] | None, graph: GraphIndex
+async def _parse_links(
+    raw: Sequence[dict[str, Any]] | None, services: Services
 ) -> list[LinkSpec]:
     links: list[LinkSpec] = []
     for item in raw or []:
@@ -195,7 +231,7 @@ def _parse_links(
         links.append(
             LinkSpec(
                 edge_type=_parse_edge_type(str(item["edge_type"])),
-                other=_resolve(graph, str(item["other"])),
+                other=await _resolve(services, str(item["other"])),
                 outgoing=bool(item.get("outgoing", True)),
             )
         )
@@ -242,6 +278,9 @@ async def context_tool(
         return presenters.render_overview(build_overview(graph))
     if action == "resync":
         changed = await services.repository.resync()
+        if services.projector is not None and changed:
+            # Keep the embedding cache in step with out-of-band edits.
+            await services.projector.refresh(changed)
         if not changed:
             return "resync: no out-of-band changes."
         names = sorted(
@@ -267,7 +306,7 @@ async def context_tool(
             return "focus cleared (pinned entries kept)."
         if not node_id:
             raise GraphContextError(f"action {action!r} requires node_id")
-        node_id = _resolve(graph, node_id)  # accept a name; validate before mutating
+        node_id = await _resolve(services, node_id)  # accept a name first
         getattr(services.session.focus, "push" if action == "focus" else action)(node_id)
         return f"focus {action}: {graph.node(node_id).name}"
     raise GraphContextError(
@@ -283,7 +322,7 @@ async def create_node_tool(
     name: str,
     summary: str,
     description: str = "",
-    story_time: float | None = None,
+    story_time: float | str | None = None,
     fields: dict[str, str] | None = None,
     links: list[dict[str, Any]] | None = None,
     icon: str = "",
@@ -301,7 +340,7 @@ async def create_node_tool(
     )
     node = await services.writer.create_node(
         draft,
-        _parse_links(links, services.repository.graph),
+        await _parse_links(links, services),
         create_missing_relations=create_missing_relations,
     )
     await _note_mutation(services)
@@ -316,19 +355,18 @@ async def update_node_tool(
     name: str | None = None,
     summary: str | None = None,
     description: str | None = None,
-    story_time: float | None = None,
+    story_time: float | str | None = None,
     fields: dict[str, str] | None = None,
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
 ) -> str:
-    graph = services.repository.graph
-    node_id = _resolve(graph, node_id)
+    node_id = await _resolve(services, node_id)
     removals = [
         Edge(
-            source=_resolve(graph, str(i["source"])),
+            source=await _resolve(services, str(i["source"])),
             type=_parse_edge_type(str(i["edge_type"])),
-            target=_resolve(graph, str(i["target"])),
+            target=await _resolve(services, str(i["target"])),
             property_key=str(i.get("property_key", "")),
         )
         for i in remove_links or []
@@ -340,7 +378,7 @@ async def update_node_tool(
         description=description,
         story_time=story_time,
         fields=fields,
-        add_links=_parse_links(add_links, graph),
+        add_links=await _parse_links(add_links, services),
         remove_links=removals,
         create_missing_relations=create_missing_relations,
     )
@@ -360,13 +398,13 @@ async def get_node_tool(
     services: Services,
     node_id: str,
     edge_types: list[str] | None = None,
-    include_prose: int = 0,
+    include_provenance: int = 0,
 ) -> str:
     view = await services.reader.get_node(
-        _resolve(services.repository.graph, node_id),
+        await _resolve(services, node_id),
         edge_type_filter=_edge_type_set(edge_types),
-        include_prose=include_prose,
-        excerpt_chars=presenters.PROSE_EXCERPT_CHARS,
+        include_provenance=include_provenance,
+        excerpt_chars=presenters.EXCERPT_CHARS,
     )
     return presenters.render_node_view(view)
 
@@ -379,7 +417,7 @@ async def explore_tool(
     include_types: list[str] | None = None,
     exclude_types: list[str] | None = None,
     edge_types: list[str] | None = None,
-    as_of: float | None = None,
+    as_of: float | str | None = None,
     include_future: bool = False,
     limit: int = 25,
     detail: str = "summaries",
@@ -394,7 +432,7 @@ async def explore_tool(
         exclude_roles = DEFAULT_EXPLORE_EXCLUDE_ROLES
     # Empty start still defaults to the focus-stack top in the Explorer.
     if start:
-        start = _resolve(services.repository.graph, start)
+        start = await _resolve(services, start)
     result = await services.explorer.explore(
         ExploreQuery(
             start=start,
@@ -434,10 +472,9 @@ async def find_path_tool(
     edge_types: list[str] | None = None,
     max_length: int = 4,
 ) -> str:
-    graph = services.repository.graph
     path = await services.explorer.find_path(
-        _resolve(graph, start) if start else None,
-        _resolve(graph, target),
+        await _resolve(services, start) if start else None,
+        await _resolve(services, target),
         edge_types=_edge_type_set(edge_types),
         max_length=max_length,
     )
@@ -454,37 +491,21 @@ async def find_node_tool(
     matches = services.repository.graph.find_by_name(
         name, node_type=type or None, limit=limit
     )
-    return presenters.render_node_matches(matches)
-
-
-@guarded
-async def record_prose_tool(
-    services: Services,
-    text: str,
-    summary: str,
-    references: list[str],
-    title: str = "",
-    llm_input: str = "",
-    llm_output: str = "",
-    model: str = "",
-) -> str:
-    if not references:
-        raise GraphContextError(
-            "record_prose requires at least one reference: list the node ids "
-            "whose context was used to render this prose (provenance must be "
-            "explicit; nothing is inferred from the focus stack)"
-        )
-    node = await services.prose.record(
-        text=text,
-        summary=summary,
-        references=references,
-        title=title,
-        llm_input=llm_input,
-        llm_output=llm_output,
-        model=model,
-    )
-    await _note_mutation(services)
+    if matches or services.ranker is None:
+        return presenters.render_node_matches(matches)
+    # Tier 3 (ADRs 014/016): no name matched -- treat the input as a
+    # DESCRIPTION. Hits are labelled so the LLM knows it holds fuzzy
+    # matches, and each carries its evidence.
+    hits = await services.ranker.rank(name, limit=limit)
+    if type:
+        wanted = type.strip().lower()
+        hits = [
+            h for h in hits
+            if wanted in {h.node.type.lower(), h.node.type_key.lower()}
+        ]
+    if not hits:
+        return presenters.render_node_matches([])  # honest empty + guidance
     return (
-        f"recorded prose {node.name!r} (id={node.id}) referencing "
-        f"{len(references)} node(s)."
+        f"find_node: no name match; {len(hits)} semantic match(es) for "
+        f"{name!r}:\n{presenters.render_ranked_hits(hits)}"
     )

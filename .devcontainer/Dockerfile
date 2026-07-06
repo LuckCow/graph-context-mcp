@@ -30,16 +30,22 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g @anthropic-ai/claude-code
 
+# Torch first, from the CPU-only wheel index: sentence-transformers depends on
+# torch, and the default PyPI wheel drags in ~5 GB of CUDA libraries this
+# container can't use. Pre-installing it makes pip's resolver reuse it below.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 # Install the build backend + the project's dependencies at image build time,
-# so the locked-down container never needs PyPI at runtime. BOTH the runtime
-# `dependencies` and the `optional-dependencies.dev` lists are read straight
-# from pyproject.toml (single source of truth): to add any package, add it to
-# the appropriate list there and rebuild — no edits needed here.
+# so the locked-down container never needs PyPI at runtime. The runtime
+# `dependencies` plus the `dev` and `orchestrator` optional groups are read
+# straight from pyproject.toml (single source of truth): to add any package,
+# add it to the appropriate list there and rebuild — no edits needed here.
 COPY pyproject.toml /tmp/pyproject.toml
 RUN pip install --no-cache-dir hatchling \
     && python -c "import tomllib,subprocess,sys; \
 p=tomllib.load(open('/tmp/pyproject.toml','rb'))['project']; \
-deps=list(p.get('dependencies',[])) + list(p.get('optional-dependencies',{}).get('dev',[])); \
+opt=p.get('optional-dependencies',{}); \
+deps=list(p.get('dependencies',[])) + list(opt.get('dev',[])) + list(opt.get('orchestrator',[])) + list(opt.get('bot',[])); \
 subprocess.check_call([sys.executable,'-m','pip','install','--no-cache-dir',*deps]) if deps else None" \
     && rm /tmp/pyproject.toml
 
@@ -69,4 +75,15 @@ RUN mkdir -p /home/${USERNAME}/.claude \
 ENV PYTHONPATH=/workspaces/graph-context-mcp/src
 
 USER ${USERNAME}
+
+# ADR 014: bake the local embedding model into the image at build time —
+# the egress firewall forbids downloading it at runtime. Runs as ${USERNAME}
+# so the HF cache lands in ~/.cache/huggingface where the runtime finds it.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
+
+# From here on the hub is unreachable (firewall), so never even try: without
+# this, every model load starts with a metadata request that has to time out
+# before huggingface_hub falls back to the baked cache.
+ENV HF_HUB_OFFLINE=1
+
 WORKDIR /workspaces/graph-context-mcp

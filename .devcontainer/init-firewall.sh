@@ -89,6 +89,9 @@ ALLOWED_DOMAINS=(
     "update.code.visualstudio.com"
     "vscode.download.prss.microsoft.com"
     "marketplace.visualstudio.com"
+    # Discord bot transport (WP8): REST API + Gateway websocket, both outbound.
+    "discord.com"
+    "gateway.discord.gg"
     # Uncomment if you want pip access at runtime (dev deps are pre-baked in the image):
     # "pypi.org"
     # "files.pythonhosted.org"
@@ -104,6 +107,14 @@ for domain in "${ALLOWED_DOMAINS[@]}"; do
         ipset add allowed-domains "$ip" 2>/dev/null || true
     done <<< "$ips"
 done
+
+# --- Discord anycast block ----------------------------------------------------
+# After connecting, Discord hands the client a per-session resume_gateway_url
+# (e.g. gateway-us-east1-b.discord.gg) that is dialed on every reconnect and
+# can't be resolved at firewall-init time. All Discord hosts — REST, gateway,
+# and resume gateways — resolve into this Discord-dedicated Cloudflare /20,
+# so the CIDR covers resumes and IP rotation across restarts.
+ipset add allowed-domains "162.159.128.0/20" 2>/dev/null || true
 
 # --- Docker host (Anytype desktop local API only) ----------------------------
 HOST_IPV4="$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1; exit}' || true)"

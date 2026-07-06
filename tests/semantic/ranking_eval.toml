@@ -1,0 +1,37 @@
+# Ranking eval golden (ADR 016): (description -> expected node) pairs.
+#
+# THE review artifact for weight changes: RankingWeights tuning must keep
+# every entry in the top-3 (tests/semantic/test_ranking_eval.py). Queries
+# are written for the deterministic HashingEmbedder (word overlap), so this
+# floor is meaningful in CI without a model; grow it from dogfooding
+# transcripts, and revisit phrasing when a real embedder lands.
+#
+# The fixture world lives in test_ranking_eval.py next to this file.
+
+[[case]]
+query = "the exiled siege engineer"
+expect = "Mira"
+
+[[case]]
+query = "the vaults beneath the city"
+expect = "The Undercroft"
+
+[[case]]
+query = "the year long siege of the city"
+expect = "Siege of Brakk"
+
+[[case]]
+query = "the blade wielded in the siege"     # recruitment-assisted
+expect = "Ashbrand"
+
+[[case]]
+query = "the senior product executive"
+expect = "Renata Voss"
+
+[[case]]
+query = "who knows the siege engineer"       # edge-label conditioned
+expect = "Orla"
+# k=5: with the bag-of-words embedder, the entities the query NAMES
+# legitimately outscore the relational answer; a real embedder should
+# let this tighten back to the default 3.
+k = 5

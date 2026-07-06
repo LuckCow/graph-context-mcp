@@ -1,9 +1,10 @@
 """WP2/WP3 smoke demo: drive the tool functions in-process (no MCP client).
 
 Exercises the full loop a real session would: create, explore with scene-
-assembly parameters, find_path, record_prose, stale-summary workflow,
-resync reporting -- against the MockAnytype-backed repository, so this is
-also an end-to-end pass through every layer.
+assembly parameters, find_path, stale-summary workflow, resync
+reporting -- against the MockAnytype-backed repository, so this is also
+an end-to-end pass through every layer. (Prose capture is the
+orchestrator's job now -- see demo_wp7_provenance.py.)
 
 Run:  PYTHONPATH=src python scripts/demo_wp2_tools.py
 """
@@ -52,11 +53,6 @@ async def main() -> None:
         detail="summaries", as_of=10))
 
     show("find_path", await tools.find_path_tool(svc, target=mira, start=siege))
-
-    show("record prose", await tools.record_prose_tool(
-        svc, text="Ash drifted over the Undercroft as Mira counted the dead.",
-        summary="Mira surveys the aftermath of the siege.",
-        references=[mira, siege], model="demo"))
 
     show("update without summary -> stale", await tools.update_node_tool(
         svc, node_id=mira, description="Now leads the survivors."))

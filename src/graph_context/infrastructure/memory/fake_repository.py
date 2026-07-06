@@ -24,7 +24,14 @@ from typing import Any
 
 from graph_context.domain import schema
 from graph_context.domain.graph import GraphIndex
-from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
+from graph_context.domain.models import (
+    Edge,
+    LinkSpec,
+    Node,
+    NodeDraft,
+    NodeId,
+    TimelineValue,
+)
 from graph_context.domain.schema import Role
 
 
@@ -84,7 +91,7 @@ class InMemoryGraphRepository:
         summary: str | None = None,
         summary_stale: bool | None = None,
         body: str | None = None,
-        story_time: float | None = None,
+        story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
     ) -> Node:
         changes: dict[str, Any] = {

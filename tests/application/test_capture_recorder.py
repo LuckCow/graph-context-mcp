@@ -1,9 +1,9 @@
-"""ProseRecorder tests (WP3): body assembly, truncation, references edges."""
+"""CaptureRecorder tests (WP3): body assembly, truncation, references edges."""
 
 from __future__ import annotations
 
-from graph_context.application import prose_recorder as pr
-from graph_context.application.prose_recorder import ProseRecorder
+from graph_context.application import capture_recorder as pr
+from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.domain.graph import Direction
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
@@ -14,13 +14,13 @@ from tests.conftest import World
 async def test_record_creates_prose_node_with_references(
     repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "2026-01-01T00:00:00Z")
+    recorder = CaptureRecorder(repository, now=lambda: "2026-01-01T00:00:00Z")
     node = await recorder.record(
         text="Ash over the Undercroft.", summary="Aftermath.",
-        references=[world.mira.id, world.undercroft.id], model="demo",
+        references=[world.mira.id, world.undercroft.id],
     )
-    assert node.role is Role.PROSE
-    assert node.fields == {"model": "demo", "generated_at": "2026-01-01T00:00:00Z"}
+    assert node.role is Role.CAPTURE
+    assert node.fields == {"generated_at": "2026-01-01T00:00:00Z"}
     # references edges: Prose -> each source.
     targets = {
         e.target
@@ -37,43 +37,28 @@ async def test_record_does_not_touch_the_focus_stack(
     session.touch(world.mira.id)
     focus_before = list(session.focus.entries)
     recent_before = list(session.recent.items)
-    recorder = ProseRecorder(repository, now=lambda: "t")
+    recorder = CaptureRecorder(repository, now=lambda: "t")
     await recorder.record(text="rendered", summary="s", references=[world.mira.id])
     assert list(session.focus.entries) == focus_before
     assert list(session.recent.items) == recent_before
 
 
-async def test_body_assembles_delimited_llm_sections(
+async def test_body_is_the_rendered_text_alone(
     repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t")
+    """WP7 retired the llm_* body sections: generation provenance lives on
+    intent nodes (ADR 008); prose bodies carry only the text itself."""
+    recorder = CaptureRecorder(repository, now=lambda: "t")
     node = await recorder.record(
         text="rendered", summary="s", references=[world.mira.id],
-        llm_input="the prompt", llm_output="the completion",
     )
-    body = await repository.fetch_body(node.id)
-    assert body.startswith("rendered")
-    assert pr.LLM_INPUT_HEADER in body and "the prompt" in body
-    assert pr.LLM_OUTPUT_HEADER in body and "the completion" in body
-
-
-async def test_store_llm_input_false_drops_the_input_section(
-    repository: InMemoryGraphRepository, world: World
-) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t", store_llm_input=False)
-    node = await recorder.record(
-        text="rendered", summary="s", references=[world.mira.id],
-        llm_input="the prompt", llm_output="the completion",
-    )
-    body = await repository.fetch_body(node.id)
-    assert pr.LLM_INPUT_HEADER not in body and "the prompt" not in body
-    assert pr.LLM_OUTPUT_HEADER in body and "the completion" in body  # kept
+    assert await repository.fetch_body(node.id) == "rendered"
 
 
 async def test_oversized_body_is_truncated_with_marker(
     repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t")
+    recorder = CaptureRecorder(repository, now=lambda: "t")
     huge = "z" * (pr.PROSE_BODY_CAP + 1000)
     node = await recorder.record(text=huge, summary="s", references=[world.mira.id])
     body = await repository.fetch_body(node.id)
@@ -84,9 +69,32 @@ async def test_oversized_body_is_truncated_with_marker(
 async def test_title_defaults_to_first_line(
     repository: InMemoryGraphRepository, world: World
 ) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t")
+    recorder = CaptureRecorder(repository, now=lambda: "t")
     node = await recorder.record(
         text="The vaults were silent.\nThen the bells.", summary="s",
         references=[world.mira.id],
     )
     assert node.name == "The vaults were silent."
+
+
+async def test_native_artifact_type_is_first_class(
+    repository: InMemoryGraphRepository, world: World
+) -> None:
+    """ADR 015: a policy-supplied native type (procedure) produces an
+    ordinary node -- no infra role, visible to traversal -- while gc_prose
+    stays the hidden fiction default."""
+    recorder = CaptureRecorder(repository, now=lambda: "t")
+    node = await recorder.record(
+        text="1. Open the panel. 2. Reset the breaker.",
+        summary="Reset procedure.",
+        references=[world.undercroft.id],
+        artifact_type="procedure",
+        title="Breaker reset",
+    )
+    assert node.role is None          # first-class, not bookkeeping
+    assert node.type_key == "procedure"
+    targets = {
+        e.target
+        for e in repository.graph.edges(node.id, Direction.OUT, ["references"])
+    }
+    assert targets == {world.undercroft.id}

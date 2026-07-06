@@ -9,7 +9,6 @@ equality.
 from __future__ import annotations
 
 from graph_context.application.node_reader import NodeReader
-from graph_context.application.prose_recorder import ProseRecorder
 from graph_context.domain import pathfinding
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -40,38 +39,6 @@ async def test_render_node_view_marks_stale_summary(
     reader = NodeReader(repository, session)
     out = presenters.render_node_view(await reader.get_node(world.mira.id))
     assert "[summary stale]" in out.splitlines()[0]
-
-
-async def test_render_node_view_signals_no_prose_explicitly(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
-) -> None:
-    reader = NodeReader(repository, session)
-    out = presenters.render_node_view(await reader.get_node(world.mira.id))
-    assert "prose: none recorded" in out
-
-
-async def test_render_node_view_shows_prose_count_without_excerpts(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
-) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t")
-    await recorder.record(text="scene", summary="s", references=[world.mira.id])
-    reader = NodeReader(repository, session)
-    out = presenters.render_node_view(await reader.get_node(world.mira.id))
-    assert "prose: 1 passage(s) reference this node (pass include_prose" in out
-
-
-async def test_render_node_view_titles_excerpts_with_n_of_m(
-    repository: InMemoryGraphRepository, session: SessionState, world: World
-) -> None:
-    recorder = ProseRecorder(repository, now=lambda: "t")
-    for i in range(3):
-        await recorder.record(
-            text=f"scene {i}", summary="s", references=[world.mira.id]
-        )
-    reader = NodeReader(repository, session)
-    view = await reader.get_node(world.mira.id, include_prose=2)
-    out = presenters.render_node_view(view)
-    assert "prose (2 of 3):" in out
 
 
 def test_render_path_renders_the_chain(

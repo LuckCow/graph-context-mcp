@@ -65,7 +65,9 @@ class TestProfileSelection:
 class TestProfileFraming:
     """The two profiles genuinely diverge where the domain shows."""
 
-    @pytest.mark.parametrize("profile", [FICTION, WORKSPACE], ids=lambda p: p.name)
+    @pytest.mark.parametrize(
+        "profile", list(PROFILES.values()), ids=lambda p: p.name
+    )
     def test_docstrings_match_golden(self, profile: DomainProfile) -> None:
         path = GOLDEN_DIR / f"profile_{profile.name}.txt"
         rendered = _render(profile)

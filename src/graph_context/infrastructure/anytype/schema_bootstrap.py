@@ -4,8 +4,9 @@ The space-reflecting model does NOT create a type per node kind anymore --
 story entities use the user's own native Anytype types. Bootstrap is now
 infra-only and create-if-missing:
 
-* the two ``gc_`` types we still own (Prose passages and the managed
-  SessionContext bookkeeping node);
+* the ``gc_`` types we still own (gc_prose capture artifacts -- display
+  name "Capture" since ADR 015 -- the managed SessionContext node, and
+  gc_intent provenance records);
 * the scalar ``gc_`` properties we write onto native objects (stale flag,
   story-time, fields JSON). Not minted here: descriptions live in the
   object body (ADR 010), and summaries live in the **built-in**
@@ -33,9 +34,11 @@ logger = logging.getLogger(__name__)
 # gc_ infrastructure types: (key, display name) for the role.
 PROSE_TYPE_KEY = "gc_prose"
 SESSION_TYPE_KEY = "gc_session_context"
+INTENT_TYPE_KEY = "gc_intent"  # WP7/ADR 008: one provenance node per turn
 INFRA_TYPES: dict[str, str] = {
-    PROSE_TYPE_KEY: Role.PROSE.value,
+    PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
+    INTENT_TYPE_KEY: Role.INTENT.value,
 }
 
 # Starter relation vocabulary (key, display name). Reusable defaults; the
@@ -51,11 +54,20 @@ DEFAULT_EDGE_RELATIONS: list[tuple[str, str]] = [
     ("gc_edge_child_of", "edge: child_of"),
     ("gc_edge_references", "edge: references"),
     ("gc_edge_precedes", "edge: precedes"),
+    ("gc_edge_intent", "edge: intent"),  # intent node -> touched node (WP7)
 ]
 
 
-async def ensure_schema(client: AnytypeClient) -> None:
-    """Create any missing gc_ infrastructure types and properties."""
+async def ensure_schema(
+    client: AnytypeClient,
+    timeline: tuple[str, str] = mapping.DEFAULT_TIMELINE,
+) -> None:
+    """Create any missing gc_ infrastructure types and properties.
+
+    ``timeline`` is the profile-declared Event-timeline property (ADR 015);
+    a native date key an assistant profile names may not exist yet in a
+    fresh space, and an inline create naming an unknown property 400s.
+    """
     existing_types = {t["key"] async for t in client.list_types()}
     for key, name in INFRA_TYPES.items():
         if key not in existing_types:
@@ -68,6 +80,14 @@ async def ensure_schema(client: AnytypeClient) -> None:
             })
 
     existing_properties = {p["key"] async for p in client.list_properties()}
+    timeline_key, timeline_format = timeline
+    if timeline_key not in existing_properties:
+        logger.info("bootstrap: creating timeline property %s (%s)",
+                    timeline_key, timeline_format)
+        await client.create_property(
+            {"key": timeline_key, "name": timeline_key, "format": timeline_format}
+        )
+        existing_properties.add(timeline_key)
     for key, fmt in mapping.SCALAR_PROPERTIES.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)

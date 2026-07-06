@@ -29,7 +29,7 @@ def _world() -> GraphIndex:
 class TestStoryFiltering:
     def test_infra_roles_excluded_from_counts_and_hubs(self) -> None:
         g = _world()
-        g.upsert_node(_node("p", "Prose", Role.PROSE))
+        g.upsert_node(_node("p", "Capture", Role.CAPTURE))
         g.upsert_node(_node("s", "SessionContext", Role.SESSION_CONTEXT))
         g.add_edge(Edge("p", "references", "hub"))  # give prose a high degree
 
@@ -37,7 +37,7 @@ class TestStoryFiltering:
 
         assert overview.total_story_nodes == 4  # hub, loc, ev1, ev2
         types = {tc.type for tc in overview.type_counts}
-        assert "Prose" not in types and "SessionContext" not in types
+        assert "Capture" not in types and "SessionContext" not in types
         hub_ids = {h.node.id for h in overview.hubs}
         assert "p" not in hub_ids and "s" not in hub_ids
 
