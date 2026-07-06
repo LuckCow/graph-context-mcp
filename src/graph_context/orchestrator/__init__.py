@@ -14,10 +14,11 @@ Layout:
                      refused.
 * ``drivers.py``  -- the LLM seam: a driver decides each step (tool calls
                      or a final reply). ``ScriptedDriver`` powers tests and
-                     demos; the LangGraph/Anthropic driver plugs in here
-                     once the image carries the Anthropic SDK (langgraph
-                     itself is installed), and NOTHING outside this
-                     package may import the framework.
+                     demos; the real driver plugs in here once the image
+                     carries ``claude-agent-sdk`` (subscription-billed
+                     model access via Claude Code; langgraph itself is
+                     installed), and NOTHING outside this package may
+                     import either framework.
 * ``pipeline.py`` -- ``Orchestrator.handle_message``: the transport-
                      agnostic entry seam (CLI first; chat transports in
                      WP8).

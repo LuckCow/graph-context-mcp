@@ -293,9 +293,32 @@ deliberately left to it), and running `lint-imports` locally.
 **Rebuild addendum (2026-07-06):** the rebuild landed langgraph +
 import-linter; `lint-imports` runs locally and keeps all 7 contracts.
 The driver itself is **still blocked**: the image carries langgraph but
-not the `anthropic` SDK. The firewall already allowlists
-`api.anthropic.com`, so adding `anthropic` to the container build (the
-`[orchestrator]` extra + rebuild) is the one remaining prerequisite.
+no model-access SDK yet.
+
+**Model access = Claude subscription via the Agent SDK (decided
+2026-07-06).** The driver bills the user's Claude plan (Max), not API
+credits, which rules out the raw `anthropic` SDK (API-key/credit
+billing; consumer-OAuth use outside Claude Code violates the ToS) in
+favor of **`claude-agent-sdk`** — it drives the Claude Code CLI, whose
+subscription OAuth is the sanctioned path (since 2026-06-15 Anthropic
+explicitly covers third-party apps authenticating with a subscription
+through the Agent SDK, with a separate monthly Agent SDK credit).
+`claude-agent-sdk>=0.2` is in the `[orchestrator]` extra; the next
+container rebuild installs it (PyPI is firewalled at runtime). Auth
+needs nothing new: the devcontainer's `claude-config` volume persists
+the `claude login` OAuth credential (`~/.claude/.credentials.json`,
+subscriptionType max) across rebuilds, and the headless path is
+verified working in-container (`claude -p` answered on the stored
+credential; the firewall already allowlists `api.anthropic.com` and
+`claude.ai`). For headless deployments without the volume, generate a
+long-lived token on a Pro/Max account with `claude setup-token` and set
+`CLAUDE_CODE_OAUTH_TOKEN`. Do NOT set `ANTHROPIC_API_KEY` in the
+container env — it would shadow the subscription and bill credits.
+Driver-design note for implementation: the Agent SDK runs its own
+agentic loop (custom tools = in-process MCP servers, gated by
+`allowed_tools`), so the `LLMDriver.decide` seam will either wrap a
+single-decision turn or the mode binding moves into the SDK's tool
+allowlist — reconcile against ADR 007 when the driver lands.
 Original spec follows.
 
 **Goal:** a runnable agentic pipeline in this repo with two modes and

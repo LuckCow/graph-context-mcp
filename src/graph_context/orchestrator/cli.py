@@ -4,9 +4,9 @@ A thin loop over ``Orchestrator.handle_message`` -- exactly the shape the
 WP8 chat transports will take. This is the only orchestrator module allowed
 to import infrastructure (via the shared builder; import-linter-enforced).
 
-Until the LangGraph/Anthropic driver lands (the image has langgraph but
-not yet the Anthropic SDK), the CLI ships with ``ManualDriver``: you play
-the model. ``/tool <name> {json}``
+Until the real driver lands (the image has langgraph but not yet
+``claude-agent-sdk``, the subscription-authenticated model access), the
+CLI ships with ``ManualDriver``: you play the model. ``/tool <name> {json}``
 issues one tool call through the ACTIVE MODE's binding -- which makes the
 mode boundary tangible at the keyboard: switch with ``/mode authoring`` and
 ``/tool create_node ...`` comes back "not available", because the binding
