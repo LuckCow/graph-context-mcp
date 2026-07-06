@@ -1,8 +1,8 @@
 # graph-context-mcp
 
-An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the original and default surface) or a **work knowledge base** (people, teams, projects, meetings, decisions). See `docs/` (proposal) for the full design.
+An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the original and default surface), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes). See `docs/` (proposal) for the full design.
 
-This repository contains the vertical slice (WP0), the **Anytype adapter (WP1)**, the **MCP tool layer (WP2)**, and the **story layer (WP3)**: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the eight v1 tools, body-backed node descriptions ([ADR 010](docs/adr/010-descriptions-in-the-body.md)), write-once-by-policy Prose bodies, and debounced `SessionContext` persistence behind a `SessionStore` port.
+This repository contains, from the storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the seven tools, body-backed node descriptions ([ADR 010](docs/adr/010-descriptions-in-the-body.md)), write-once-by-policy capture bodies, and debounced `SessionContext` persistence behind a `SessionStore` port. Above it: an **orchestrator harness** (WP6 — mode-bound tools, a real Claude driver on your subscription), **automatic provenance** (WP7 — one intent node per mutating turn, auto-capture in authoring modes), a **Discord transport** (WP8, first slice), **semantic search with graph-aware ranking** ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md), WP11), and **configurable activity modes** ([ADR 015](docs/adr/015-configurable-activity-modes.md), WP12).
 
 **Space-reflecting (v2, [ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation (yours or bootstrapped) is a labelled edge. There is no closed `gc_` vocabulary anymore; `gc_` keys survive only for infrastructure (Prose, SessionContext, and the stale-flag/story-time/fields scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), and long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)). Architecture decisions live in [`docs/adr/`](docs/adr/).
 
@@ -52,7 +52,7 @@ GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # ke
 python -m graph_context.orchestrator.discord_bot                           # Discord bot (WP8), live backend by default
 ```
 
-The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels in `GC_DISCORD_CHANNELS` — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; unset allowlist = serve nowhere, loudly). It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription; `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. Sessions are per-channel: `/mode <name>` switches the mode for that channel.
+The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels in `GC_DISCORD_CHANNELS` — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; unset allowlist = serve nowhere, loudly). It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. The **mode** is per-channel (`/mode <name>` switches it for that channel); the underlying focus-stack session is still process-wide — a turn lock serializes concurrent messages until WP8's per-session state lands. Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
 
 ## Connecting Claude Desktop (from the dev container)
 
@@ -85,7 +85,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the eight tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
+**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the seven tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
 
 ### Graduating to the live Anytype backend
 
@@ -111,6 +111,12 @@ To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`co
 
 Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`. (Prose/artifact capture is the orchestrator harness's job — WP7 auto-capture; there is no capture tool.) Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
 
+## Semantic search (GC_EMBEDDER)
+
+"Find the node I'm describing" — as a **derived projection**, never a new source of truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)). `GC_EMBEDDER` selects the embedder: `off` (default — byte-identical to pre-WP11 behavior), `hash` (deterministic bag-of-words, used by the offline test suite), or `local` (sentence-transformers over the image-baked `BAAI/bge-small-en-v1.5`; `GC_EMBEDDER_MODEL` overrides). Embeddings live in a SQLite cache (`GC_SEMANTIC_CACHE`, default `~/.cache/graph-context`) keyed by `(node_id, content_hash, model)` — deleting the file always converges on the next hydrate; it is disposable by design.
+
+When enabled, `find_node` gains a third tier (exact → substring → semantic, hits labelled so the LLM knows it holds a fuzzy match) and `NodeNotFound` errors append "closest by meaning" candidates with ids and evidence. Retrieval runs through the **Ranker** ([ADR 016](docs/adr/016-graph-aware-ranking.md)): semantic recall seeds, graph expansion recruits (edges are relevance evidence), spreading activation scores, and every hit carries a nameable evidence line ("linked to Mira (possesses, strong match)"). **Non-feature by decision:** semantic never silently resolves a mutation target — exact resolves, semantic *suggests*. Try it: `PYTHONPATH=src python scripts/demo_wp11_search.py`; the ranking eval golden lives at `tests/semantic/ranking_eval.toml`.
+
 ## Architecture in one paragraph
 
 Anytype is durable storage and the *human editing surface* — but its API only text-searches names/snippets, so all graph traversal happens in an in-memory `GraphIndex`: a **derived, rebuildable projection** that repository adapters keep coherent (write-through on our writes, hydrate/resync for edits humans make directly in the Anytype UI). Everything above storage follows a strict dependency rule:
@@ -126,7 +132,7 @@ interface  ──▶  application  ──▶  domain
                                                      Anytype adapter)
 ```
 
-**The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition root (`interface/server.py`) and tests.
+**The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition roots — `interface/server.py` and the orchestrator's (`cli.py`, `bootstrap.py`, `discord_bot.py`), both delegating to the shared service builder `composition.py` — and tests. The orchestrator is a **second interface adapter** ([ADR 007](docs/adr/007-orchestrator-second-interface-adapter.md)): it reuses `interface/tools.py` but never the MCP module, and agent/transport frameworks (claude-agent-sdk, langgraph, discord.py) never leak outside it. All of this is machine-enforced: eight import-linter contracts in `pyproject.toml` fail CI on violation.
 
 ## Layout
 
@@ -141,12 +147,19 @@ interface  ──▶  application  ──▶  domain
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand descriptions/prose |
 | `ports/session_store.py` | Session-snapshot contract | Plain-dict snapshots; lenient load (corrupt → `None`) |
+| `ports/semantic.py` | `Embedder` + `SemanticIndex` contracts | Embeddings are a cache keyed by content hash + model, never truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
 | `application/node_reader.py` | `get_node` use-case | Grouped edges + WP7 `include_provenance` excerpts |
 | `application/explorer.py` | `explore` / `find_path` use-case | Resolves focus-stack defaults |
-| `application/prose_recorder.py` | Capture service (orchestrator-called) | Write-once-by-policy body, explicit references |
+| `application/capture_recorder.py` | Capture service (orchestrator-called) | Policy-typed artifacts ([ADR 015](docs/adr/015-configurable-activity-modes.md)); native types are first-class, only `gc_prose` keeps infra hiding |
+| `application/mutation_journal.py` | Writers report created/modified ids at the source | `NullJournal` in the MCP server; drained per turn in the orchestrator |
+| `application/intent_recorder.py` | One `gc_intent` node per mutating turn | Provenance is a harness responsibility ([ADR 008](docs/adr/008-provenance-as-harness-responsibility.md)) |
+| `application/semantic_projector.py` | The embedding cache tracks the graph | Full pass + prune after hydrate; incremental from resync; store touches never re-embed |
+| `application/ranker.py` | Graph-aware retrieval ([ADR 016](docs/adr/016-graph-aware-ranking.md)) | Recall seeds → graph recruits → activation scores; every hit carries evidence |
 | `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh` |
+| `composition.py` | Shared service builder | One wiring; both composition roots delegate to it |
 | `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` | Reference impls; certified by `tests/contract` |
+| `infrastructure/semantic/` | Hash + sentence-transformers embedders; memory + SQLite index | `GC_EMBEDDER` selects; the SQLite cache file is disposable |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
 | `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A8) live here |
 | `infrastructure/anytype/registry.py` | `SpaceRegistry`: the space's live types/relations | Resolves requested types & relation labels to existing keys; unknown labels surface for approval |
@@ -156,8 +169,16 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps) |
 | `interface/presenters.py` | Context header + detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The eight tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
-| `interface/server.py` | Composition root | Only module importing infrastructure + the MCP SDK; lifespan wiring |
+| `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
+| `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
+| `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
+| `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; drains the journal into an intent node at turn end |
+| `orchestrator/modes.py` | `ModeSpec` loader (`GC_MODES_FILE` overlay) | Unbound tools don't exist in the session — unavailable, not refused |
+| `orchestrator/drivers.py` | `LLMDriver` seam + scripted/manual drivers | Transcript + tool docs + mode goal in; tool calls or a reply out |
+| `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |
+| `orchestrator/capture.py` | Authoring auto-capture | Exact-name entity linking; the harness records what tools used to ask for |
+| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by CLI and Discord; `GC_DRIVER` / `GC_PROVENANCE` resolution |
+| `orchestrator/discord_transport.py` + `discord_bot.py` | Discord adapter (WP8) | Per-message policy is plain logic; only the composition-root shim imports discord.py |
 
 ## Conventions to carry forward
 
@@ -171,6 +192,11 @@ interface  ──▶  application  ──▶  domain
 
 ## Status & what's next
 
-WP0–WP3 are complete and green against the mock (and the live-gated E2E suite): the Anytype adapter, the eight-tool MCP server, write-once Prose bodies, and debounced `SessionContext` persistence. The WP1 live-server spike has been run and its corrections applied (see "Live-server status" above and `docs/WORK_PACKAGES.md`), and the space-reflecting pivot ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)) landed after WP3 — see the status addendum in `docs/WORK_PACKAGES.md`. Definition of Done holds: `pytest`, `ruff`, and `mypy --strict` are all clean; CI runs them plus `lint-imports` on every push.
+**Shipped** (full history + specs in `docs/WORK_PACKAGES.md`): WP0–WP3 (storage core, seven-tool MCP server, capture bodies, session persistence), the space-reflecting pivot ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)), WP5 (domain profiles), WP6 (orchestrator harness incl. the real Claude driver, 2026-07-06), WP7 (automatic provenance + auto-capture), WP9 (descriptions in the body), WP10 (attribute reflection, summary in the built-in description, connections footer), WP11 stage 1 (semantic search + graph-aware ranking, incl. the local embedder), and WP12 (configurable activity modes + the `assistant` profile). WP8 is **partially shipped**: the single-writer delta queue core ([ADR 009](docs/adr/009-single-writer-delta-queue.md)) and the Discord transport are live. Definition of Done holds: `pytest`, `ruff`, `mypy --strict`, and `lint-imports` are all clean; CI runs exactly these on every push.
 
-WP4 (parked — entry criteria, not specs; see `docs/WORK_PACKAGES.md`): knowledge-query helper, staleness propagation to neighbors, type extensibility (`propose_type`), multi-user `SessionContext`, semantic search over summaries.
+**Open work, in rough order of proximity:**
+
+- **WP8 remainder (multi-user):** per-session `SessionState` (the Discord bot currently serializes turns behind a process-wide lock), per-user mode authorization, per-user prompt-storage consent, Telegram/Slack transports, queue pacing/fairness/user-facing depth feedback.
+- **WP11 deferred items (dogfooding-gated):** passage-level stage 2 + the reserved `search` tool, reranker adapters, the Voyage embedder (needs a firewall allowlist entry + key), the `GC_EMBEDDER` `off`→`local` default flip, orchestrator RAG prefetch (the Ranker's `session_seeds` parameter is ready for it).
+- **Cross-turn driver memory:** each `decide()` is deliberately a fresh stateless session; the SDK's session-resume machinery is the lever when dogfooding wants it. langgraph sits installed but unused — whether it ever earns its place is an open question.
+- **WP4 (still parked — entry criteria, not specs):** knowledge-query helper, staleness propagation to neighbors, type extensibility (`propose_type`). (Its semantic-search item shipped as WP11; its multi-user item was superseded by WP8.)
