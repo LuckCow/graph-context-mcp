@@ -1,7 +1,31 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest)"
+      "Bash(python -m pytest)",
+      "Bash(GC_REGEN_GOLDENS=1 python -m pytest tests/interface/test_profiles.py tests/contract -q)",
+      "Bash(PYTHONPATH=src python scripts/demo_workspace_profile.py)",
+      "Bash(python -m pytest -q)",
+      "Bash(ruff check *)",
+      "Bash(mypy src *)",
+      "Bash(lint-imports)",
+      "Bash(python -m importlinter)",
+      "Bash(python -c \"import importlinter, os; print\\(os.path.dirname\\(importlinter.__file__\\)\\)\")",
+      "Bash(find / -name \"lint-imports\" -type f)",
+      "Bash(pip install *)",
+      "Bash(PYTHONPATH=src GC_BACKEND=memory GC_PROFILE=nonsense python -c \"import graph_context.interface.server\")",
+      "Bash(PYTHONPATH=src GC_PROFILE=workspace python -c ' *)",
+      "Bash(python -m pytest tests/contract -q -k concurrent)",
+      "Bash(bash /tmp/claude-1000/-workspaces-graph-context-mcp/05bd9fe4-8758-4d3d-be48-7ddb34f8fb39/scratchpad/combined_patch_spike.sh)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(PYTHONPATH=src python scripts/demo_wp2_tools.py)",
+      "Bash(python -m pytest tests/interface/test_profiles.py -q)",
+      "Bash(python -m pytest tests/contract -q)",
+      "Bash(ANYTYPE_E2E=1 python -m pytest tests/e2e -q)",
+      "Bash(python3 -)",
+      "Bash(python -m pytest tests/orchestrator -q)",
+      "Bash(python -m pytest tests/application/test_node_reader.py::TestProvenance::test_infra_edges_never_reach_the_edge_groups -q)",
+      "Bash(python -m pytest tests/semantic/test_ranker.py::test_graph_recruits_a_vocabulary_invisible_node -q)"
     ]
   }
 }
