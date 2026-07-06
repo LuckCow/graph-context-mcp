@@ -21,7 +21,8 @@ async def main() -> None:
     os.environ["GC_BACKEND"] = "memory"
     os.environ.setdefault("GC_EMBEDDER", "hash")
     profile = get_profile("fiction")
-    services, teardown = await composition.build_runtime(profile)
+    built = await composition.build_runtime(profile)
+    services, teardown = built.services, built.teardown
 
     async def show(label: str, out: str) -> None:
         print(f"\n### {label}\n{out.split(chr(10), 1)[1]}")

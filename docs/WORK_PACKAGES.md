@@ -1067,8 +1067,21 @@ native date key, `reflects_field` excludes it, and the domain's one
 `event_date` axis) with golden-pinned docstrings + the acceptance demo
 (`scripts/demo_wp12_assistant.py`: no capture tool called, a first-class
 `procedure` node with references and the intent chain left behind).
-Deferred as stated: in-space mode objects (with WP5's per-space-profile
-question) and dogfooding-driven docstring revision. Original spec follows.
+
+**In-space mode objects landed 2026-07-06** (ADR 015 amendment): a
+`gc_activity_mode` object per mode -- name slugifies to the `/mode` name,
+page body is the goal, `gc_mode_mutating`/`gc_capture_*` properties carry
+the binding and capture policy, archiving disables. Read through a
+`ModeStore` port (SessionStore-shaped; fake + mock-backed contract tests,
+`InMemoryModeStore` for `GC_BACKEND=memory`); precedence is profile
+defaults < `GC_MODES_FILE` < in-space; every `/mode` command re-reads all
+sources (any transport), degrading to the last good registry on a broken
+object with an error naming it. `ensure_schema` mints the type with its
+fields attached and seeds a one-time "Example Mode" template whose body
+documents the feature -- including that edits apply on the next `/mode`.
+Still deferred: per-space *profile* selection (WP5's question; rides the
+same config-object seam when it lands) and dogfooding-driven docstring
+revision. Original spec follows.
 
 **Goal:** the behavior layer generalizes the way the storage layer already
 did — a work assistant with *Record Procedure* becomes a configuration

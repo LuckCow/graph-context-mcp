@@ -105,6 +105,22 @@ SCALAR_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_FIELDS: "text",
 }
 
+# Activity Mode config objects (ADR 015 amendment): the human-editable
+# fields of a gc_activity_mode object. Kept OUT of SCALAR_PROPERTIES --
+# these live only on mode objects, never on ordinary nodes. The goal is
+# the object BODY (read via body_of), so it needs no property.
+PROP_MODE_MUTATING = "gc_mode_mutating"
+PROP_CAPTURE_TYPE = "gc_capture_type"
+PROP_CAPTURE_REFERENCES = "gc_capture_references"
+PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
+
+MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
+    PROP_MODE_MUTATING: "checkbox",
+    PROP_CAPTURE_TYPE: "text",
+    PROP_CAPTURE_REFERENCES: "text",
+    PROP_CAPTURE_MIN_CHARS: "number",
+}
+
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``
 # body links are mirrored here, so reading it surfaces inline links as edges.
 GENERIC_LINK_KEY = "links"

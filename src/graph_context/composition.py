@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.ranker import Ranker
@@ -46,6 +47,7 @@ from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.interface.profiles import DomainProfile
 from graph_context.interface.tools import Services, build_services
 from graph_context.ports.graph_repository import GraphRepository
+from graph_context.ports.mode_store import ModeStore
 from graph_context.ports.semantic import Embedder, SemanticIndex
 
 logger = logging.getLogger(__name__)
@@ -53,15 +55,26 @@ logger = logging.getLogger(__name__)
 TeardownHook = Callable[[], Awaitable[None]]
 
 
+@dataclass(frozen=True, slots=True)
+class BuiltRuntime:
+    """One process's wired backend: services, config stores, shutdown."""
+
+    services: Services
+    mode_store: ModeStore
+    teardown: list[TeardownHook]
+
+
 async def build_runtime(
     profile: DomainProfile,
     *,
     journal: MutationJournal | None = None,
-) -> tuple[Services, list[TeardownHook]]:
+) -> BuiltRuntime:
     """Build the full service bundle for one process.
 
-    Returns the services plus teardown hooks to run in reverse order on
-    shutdown (session flush before client close).
+    The returned teardown hooks run in reverse order on shutdown (session
+    flush before client close). The mode store reads the space's Activity
+    Mode config objects (ADR 015 amendment); the memory backend's is empty,
+    so profile defaults apply.
     """
     from graph_context.domain.session import SessionState
 
@@ -71,6 +84,9 @@ async def build_runtime(
 
     logger.info("profile=%s (%s)", profile.name, profile.description)
     if backend == "memory":
+        from graph_context.infrastructure.memory.fake_mode_store import (
+            InMemoryModeStore,
+        )
         from graph_context.infrastructure.memory.fake_repository import (
             InMemoryGraphRepository,
         )
@@ -80,17 +96,22 @@ async def build_runtime(
         projector, ranker = await _build_semantic(
             memory_repo, profile, space_id=None
         )
-        return build_services(
-            memory_repo,
-            session,
-            journal=journal,
-            projector=projector,
-            ranker=ranker,
-        ), teardown
+        return BuiltRuntime(
+            services=build_services(
+                memory_repo,
+                session,
+                journal=journal,
+                projector=projector,
+                ranker=ranker,
+            ),
+            mode_store=InMemoryModeStore(),
+            teardown=teardown,
+        )
 
     from graph_context.application.session_persister import SessionPersister
     from graph_context.infrastructure.anytype.client import AnytypeClient
     from graph_context.infrastructure.anytype.config import AnytypeConfig
+    from graph_context.infrastructure.anytype.mode_store import AnytypeModeStore
     from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
     from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
     from graph_context.infrastructure.anytype.session_repository import (
@@ -139,10 +160,14 @@ async def build_runtime(
     projector, ranker = await _build_semantic(
         repository, profile, space_id=config.space_id
     )
-    return build_services(
-        repository, session, persister, journal=journal,
-        projector=projector, ranker=ranker,
-    ), teardown
+    return BuiltRuntime(
+        services=build_services(
+            repository, session, persister, journal=journal,
+            projector=projector, ranker=ranker,
+        ),
+        mode_store=AnytypeModeStore(client),
+        teardown=teardown,
+    )
 
 
 def _make_embedder(choice: str) -> Embedder | None:

@@ -146,19 +146,31 @@ async def build_orchestrator() -> Runtime:
         "0", "false", "no",
     }
     journal = MutationJournal() if provenance_on else None
-    services, teardown = await composition.build_runtime(profile, journal=journal)
+    built = await composition.build_runtime(profile, journal=journal)
+    services = built.services
     recorder = (
         IntentRecorder(services.repository, store_prompt=store_prompt)
         if provenance_on else None
     )
-    # ADR 015: profile defaults + optional GC_MODES_FILE (TOML) overlay.
-    registry = modes.load_registry(profile, os.environ.get("GC_MODES_FILE"))
+    # ADR 015: profile defaults, overlaid by the optional GC_MODES_FILE
+    # TOML and by the space's own Activity Mode objects (in-space wins).
+    # The same closure re-reads all three sources on every /mode command,
+    # so an edit made in Anytype applies without a restart.
+    modes_file = os.environ.get("GC_MODES_FILE")
+
+    async def reload_registry() -> modes.ModeRegistry:
+        return modes.load_registry(
+            profile, modes_file, in_space=await built.mode_store.load()
+        )
+
+    registry = await reload_registry()  # startup: bad specs fail loudly here
     driver, model_name, help_line = build_driver()
     orchestrator = Orchestrator(
         services=services, driver=driver, profile=profile,
         registry=registry, provenance=recorder, model_name=model_name,
+        reload_registry=reload_registry,
     )
     return Runtime(
         orchestrator=orchestrator, profile=profile,
-        help_line=help_line, teardown=teardown,
+        help_line=help_line, teardown=built.teardown,
     )

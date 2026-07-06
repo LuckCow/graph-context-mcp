@@ -15,6 +15,12 @@ class TestResolveRole:
     def test_gc_infra_keys_resolve(self) -> None:
         assert schema.resolve_role("gc_prose") is Role.CAPTURE
         assert schema.resolve_role("gc_session_context") is Role.SESSION_CONTEXT
+        assert schema.resolve_role("gc_activity_mode") is Role.MODE
+
+    def test_mode_role_is_infra_hidden(self) -> None:
+        # ADR 015 amendment: mode config objects are the human's editing
+        # surface, never the LLM's traversal data.
+        assert Role.MODE in schema.INFRA_ROLES
 
     def test_legacy_gc_entity_keys_are_not_domain_knowledge(self) -> None:
         # Pre-pivot read-compat lives in the Anytype adapter's registry

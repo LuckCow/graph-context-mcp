@@ -337,6 +337,12 @@ class MockAnytype:
         if not body.get("key") or not body.get("plural_name"):
             # The live API requires both (spike: a missing plural_name 400s).
             return self._error(400, "bad_request")
+        # An inline ``properties`` list attaches the fields to the type AND
+        # creates them as space properties (live-confirmed 2026-07-06).
+        for entry in body.get("properties", []):
+            self._properties.setdefault(
+                entry["key"], {"id": self._new_id(), **entry}
+            )
         self._types[body["key"]] = {"id": self._new_id(), **body}
         return httpx.Response(201, json={"type": self._types[body["key"]]})
 

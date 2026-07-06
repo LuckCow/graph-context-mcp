@@ -40,12 +40,15 @@ class Role(StrEnum):
     CAPTURE = "Capture"
     SESSION_CONTEXT = "SessionContext"
     INTENT = "Intent"
+    # In-space activity-mode config objects (ADR 015 amendment): humans
+    # browse and edit them in Anytype; the LLM's traversal never sees them.
+    MODE = "ActivityMode"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
 INFRA_ROLES: frozenset[Role] = frozenset(
-    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT}
+    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE}
 )
 
 
@@ -67,6 +70,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_prose": Role.CAPTURE,
     "gc_session_context": Role.SESSION_CONTEXT,
     "gc_intent": Role.INTENT,
+    "gc_activity_mode": Role.MODE,
 }
 
 
