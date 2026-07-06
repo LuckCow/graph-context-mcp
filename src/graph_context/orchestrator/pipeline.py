@@ -39,7 +39,7 @@ from graph_context.orchestrator.modes import ModeRegistry
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_TOOL_CALLS = 8  # per turn; a loop guard, not a feature
+DEFAULT_MAX_TOOL_CALLS = 16  # per turn; a loop guard, not a feature
 
 
 @dataclass(frozen=True, slots=True)

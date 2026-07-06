@@ -12,8 +12,11 @@ PIPELINE executes tools) instead of letting it run:
 * The active mode's bound tools are registered as in-process MCP tools,
   so the model sees native tool calling. Only the binding's tools exist
   in the session -- the ADR 007 boundary again, enforced a second time at
-  registration. Claude Code's own built-ins (Bash, Read, ...) are
-  disabled outright.
+  registration. ``session_options`` is the single place capability is
+  configured: Claude Code's own built-ins (Bash, Read, Write, ...) are
+  disabled outright (``tools=[]``) and no filesystem settings are loaded
+  (``setting_sources=[]``), so host-machine settings cannot inject MCP
+  servers, permissions, or hooks into the session.
 * The permission callback (``can_use_tool``) DENIES every call with
   ``interrupt=True``. The SDK never executes a handler; the requested
   calls are harvested from the streamed assistant message and returned as
@@ -43,9 +46,11 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from claude_agent_sdk import (
     AssistantMessage,
+    CanUseTool,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     EffortLevel,
+    McpSdkServerConfig,
     PermissionResultAllow,
     PermissionResultDeny,
     SdkMcpTool,
@@ -167,6 +172,39 @@ def sdk_tools(
     ]
 
 
+def session_options(
+    server: McpSdkServerConfig,
+    goal: str,
+    *,
+    model: str | None,
+    effort: EffortLevel | None,
+    can_use_tool: CanUseTool,
+    cli_path: str | None,
+) -> ClaudeAgentOptions:
+    """The session's capability boundary, in one place.
+
+    The bound graph-context tools are the WHOLE surface (ADR 007):
+
+    * ``tools=[]`` disables every Claude Code built-in (Read, Write, Bash,
+      WebSearch, ...). The empty list is load-bearing -- ``None`` would
+      mean "the CLI's full default toolset".
+    * ``setting_sources=[]`` is SDK isolation mode: without it the CLI
+      loads user/project/local settings from the host filesystem, which
+      can inject extra MCP servers, permission grants, and hooks into
+      the session.
+    """
+    return ClaudeAgentOptions(
+        mcp_servers={_SERVER_NAME: server},
+        tools=[],
+        setting_sources=[],
+        system_prompt=f"{goal}\n\n{_GUIDANCE}".strip(),
+        model=model,
+        effort=effort,
+        can_use_tool=can_use_tool,
+        cli_path=cli_path,
+    )
+
+
 class ClaudeAgentDriver:
     """LLMDriver over the Claude Code CLI (subscription-authenticated).
 
@@ -212,10 +250,9 @@ class ClaudeAgentDriver:
                 message="the harness executes tool calls", interrupt=True
             )
 
-        options = ClaudeAgentOptions(
-            mcp_servers={_SERVER_NAME: server},
-            tools=[],  # no Claude Code built-ins: the binding is the whole surface
-            system_prompt=f"{goal}\n\n{_GUIDANCE}".strip(),
+        options = session_options(
+            server,
+            goal,
             model=self._model,
             effort=self._effort,
             can_use_tool=capture_and_stop,

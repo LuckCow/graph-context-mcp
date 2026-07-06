@@ -19,6 +19,7 @@ from graph_context.orchestrator.claude_driver import (  # noqa: E402
     local_tool_name,
     render_transcript,
     sdk_tools,
+    session_options,
 )
 from graph_context.orchestrator.drivers import TranscriptEvent  # noqa: E402
 
@@ -101,3 +102,34 @@ class TestToolRegistration:
         assert local_tool_name("mcp__gc__get_node") == "get_node"
         # Defensive: an already-local name passes through unchanged.
         assert local_tool_name("get_node") == "get_node"
+
+
+class TestSessionCapabilityBoundary:
+    """The binding is the WHOLE surface (ADR 007): no Claude Code
+    built-ins (Read, Write, Bash, ...), no filesystem settings that could
+    smuggle extra MCP servers or permissions into the session."""
+
+    def _options(self):
+        async def deny(name, tool_input, context):  # pragma: no cover
+            raise AssertionError("never invoked here")
+
+        server = {"type": "sdk", "name": "gc", "instance": object()}
+        return session_options(
+            server, "goal", model=None, effort=None, can_use_tool=deny,
+            cli_path=None,
+        )
+
+    def test_builtin_tools_are_disabled_by_the_empty_list(self):
+        options = self._options()
+        # [] means "no built-ins"; None would mean "the CLI's full default
+        # toolset" -- the empty list is the entire boundary here.
+        assert options.tools == []
+        assert options.tools is not None
+
+    def test_only_the_gc_server_is_registered(self):
+        assert list(self._options().mcp_servers) == ["gc"]
+
+    def test_filesystem_settings_are_not_loaded(self):
+        # None = load user+project+local settings (CLI default), which can
+        # inject MCP servers, permission grants, and hooks. [] = isolation.
+        assert self._options().setting_sources == []
