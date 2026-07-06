@@ -268,7 +268,7 @@ registry; the workspace demo end-to-end against the fake.
 
 ---
 
-## WP6 — Orchestrator skeleton (ADR 007) — **core shipped 2026-07-04 (framework-free)**
+## WP6 — Orchestrator skeleton (ADR 007) — **shipped in full 2026-07-06 (core 2026-07-04; real driver 2026-07-06)**
 
 **Status:** everything except the LangGraph driver is done, built so the
 framework arrives as a thin driver rather than the architecture (langgraph
@@ -303,23 +303,42 @@ favor of **`claude-agent-sdk`** — it drives the Claude Code CLI, whose
 subscription OAuth is the sanctioned path (since 2026-06-15 Anthropic
 explicitly covers third-party apps authenticating with a subscription
 through the Agent SDK, with a separate monthly Agent SDK credit).
-`claude-agent-sdk>=0.2` is in the `[orchestrator]` extra; the next
-container rebuild installs it (PyPI is firewalled at runtime). Auth
-needs nothing new: the devcontainer's `claude-config` volume persists
-the `claude login` OAuth credential (`~/.claude/.credentials.json`,
-subscriptionType max) across rebuilds, and the headless path is
-verified working in-container (`claude -p` answered on the stored
-credential; the firewall already allowlists `api.anthropic.com` and
-`claude.ai`). For headless deployments without the volume, generate a
-long-lived token on a Pro/Max account with `claude setup-token` and set
-`CLAUDE_CODE_OAUTH_TOKEN`. Do NOT set `ANTHROPIC_API_KEY` in the
-container env — it would shadow the subscription and bill credits.
-Driver-design note for implementation: the Agent SDK runs its own
-agentic loop (custom tools = in-process MCP servers, gated by
-`allowed_tools`), so the `LLMDriver.decide` seam will either wrap a
-single-decision turn or the mode binding moves into the SDK's tool
-allowlist — reconcile against ADR 007 when the driver lands.
-Original spec follows.
+`claude-agent-sdk>=0.2` is in the `[orchestrator]` extra; the container
+rebuild installs it (PyPI is firewalled at runtime). Auth needs nothing
+new: the devcontainer's `claude-config` volume persists the `claude
+login` OAuth credential (`~/.claude/.credentials.json`, subscriptionType
+max) across rebuilds. For headless deployments without the volume,
+generate a long-lived token on a Pro/Max account with `claude
+setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN`. Do NOT set
+`ANTHROPIC_API_KEY` in the container env — it would shadow the
+subscription and bill credits.
+
+**Driver shipped (2026-07-06):** `orchestrator/claude_driver.py` fits
+the SDK's own agentic loop behind the existing `LLMDriver.decide` seam —
+the pipeline keeps owning tool execution, the per-turn budget, WP7
+journaling, and the binding boundary. How: the active mode's bound tools
+are registered as in-process MCP tools (a second face of the ADR 007
+boundary — unbound tools don't exist in the session; Claude Code's
+built-ins are disabled), and the SDK's permission callback DENIES every
+call with `interrupt=True`, so the SDK never executes anything — the
+requested calls are harvested from the streamed assistant message and
+returned as the decision. Tool input schemas are **derived from the tool
+wrappers' Python signatures** (`derive_schema`; one source of truth,
+`additionalProperties: false`) after a live failure with an open schema
+— the model echoed the schema's own keys back as arguments. Each
+`decide()` is a fresh stateless CLI session over the rendered turn-local
+transcript; cross-turn memory is deliberately still absent — the SDK's
+session-resume machinery is the lever when dogfooding wants it, which
+also means **langgraph sits installed but unused**; whether it ever
+earns its place is now an open question, not a plan. CLI selection:
+`GC_DRIVER=claude` (default; `manual` keeps the keyboard stand-in),
+`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune the model. Verified live:
+unit tests (self-skip without the SDK — CI installs only `[dev]`), the
+gated `GC_CLAUDE_E2E=1` e2e (tool-call capture + reply path), and
+`scripts/demo_claude_driver.py` — the WP6 acceptance with the REAL
+model: it creates Mira in world_modeling and correctly reports it
+cannot mutate in authoring (store unchanged). **WP6 is now fully
+shipped.** Original spec follows.
 
 **Goal:** a runnable agentic pipeline in this repo with two modes and
 harness-owned tool binding, reusing the existing tool layer. No provenance

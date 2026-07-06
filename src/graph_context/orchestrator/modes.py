@@ -60,6 +60,12 @@ def binding_for(spec: ModeSpec) -> Mapping[str, ToolFn]:
     return _FULL_SURFACE if spec.mutating else _READ_SURFACE
 
 
+def full_surface() -> Mapping[str, ToolFn]:
+    """Every tool any spec can bind -- drivers derive schemas from the
+    wrappers' signatures (one source of truth, never a maintained table)."""
+    return dict(_FULL_SURFACE)
+
+
 def tool_docs(spec: ModeSpec, profile: DomainProfile) -> Mapping[str, str]:
     """The LLM-facing docs for a spec's binding -- what the driver may call.
 

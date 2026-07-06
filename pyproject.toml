@@ -44,6 +44,12 @@ python_version = "3.11"
 strict = true
 mypy_path = "src"
 
+# CI installs only [dev]; the [orchestrator] extra (claude-agent-sdk) is
+# devcontainer-image-only (egress firewall). Typed normally where installed.
+[[tool.mypy.overrides]]
+module = "claude_agent_sdk.*"
+ignore_missing_imports = true
+
 # The dependency rule (README "Architecture in one paragraph"), enforced.
 [tool.importlinter]
 root_package = "graph_context"
@@ -114,7 +120,7 @@ forbidden_modules = ["graph_context.orchestrator"]
 
 # ADR 007 quarantine: a framework swap must stay orchestrator-internal.
 [[tool.importlinter.contracts]]
-name = "LangGraph never leaks outside the orchestrator"
+name = "Agent frameworks never leak outside the orchestrator"
 type = "forbidden"
 source_modules = [
     "graph_context.domain",
@@ -124,4 +130,4 @@ source_modules = [
     "graph_context.infrastructure",
     "graph_context.composition",
 ]
-forbidden_modules = ["langgraph", "langchain", "langchain_core"]
+forbidden_modules = ["langgraph", "langchain", "langchain_core", "claude_agent_sdk"]
