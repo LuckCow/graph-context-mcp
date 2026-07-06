@@ -1,8 +1,10 @@
 """Client behavior: pagination, retry, error translation, budgets."""
 
+import httpx
 import pytest
 
-from graph_context.infrastructure.anytype.config import AnytypeApiError
+from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.config import AnytypeApiError, AnytypeConfig
 
 
 class TestPagination:
@@ -43,3 +45,22 @@ class TestRetry:
         with pytest.raises(AnytypeApiError):
             await client.get_object("anything")
         assert len(mock.request_log) == before + 1  # exactly one attempt
+
+
+class TestTransportErrors:
+    async def test_transport_failures_translate_to_api_error(self):
+        # Connection refused / timeout must surface as the one error family
+        # the rest of the system catches, never a raw httpx exception.
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        config = AnytypeConfig(api_key="test", space_id="sp1")
+        client = AnytypeClient(config, transport=httpx.MockTransport(refuse))
+        try:
+            with pytest.raises(AnytypeApiError) as excinfo:
+                await client.get_space()
+            assert excinfo.value.status == 0
+            assert excinfo.value.code == "transport"
+            assert isinstance(excinfo.value.__cause__, httpx.ConnectError)
+        finally:
+            await client.aclose()

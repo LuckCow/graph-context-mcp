@@ -245,7 +245,7 @@ class Orchestrator:
         try:
             self.registry = await self.reload_registry()
         except Exception as err:  # noqa: BLE001  -- any refresh failure degrades
-            logger.warning("mode registry refresh failed: %s", err)
+            logger.warning("mode registry refresh failed: %s", err, exc_info=True)
             return [ReplyEvent(
                 f"mode reload failed, keeping the previously loaded modes: "
                 f"{err}",

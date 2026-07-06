@@ -29,6 +29,7 @@ from typing import Any
 from graph_context.domain.schema import Role
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.config import AnytypeApiError
 
 logger = logging.getLogger(__name__)
 
@@ -169,5 +170,7 @@ async def _seed_example_mode(client: AnytypeClient) -> None:
                 ),
             ],
         })
-    except Exception:  # noqa: BLE001
-        logger.warning("bootstrap: could not seed the example Activity Mode")
+    except AnytypeApiError:
+        logger.warning(
+            "bootstrap: could not seed the example Activity Mode", exc_info=True
+        )

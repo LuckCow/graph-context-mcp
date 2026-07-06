@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
+from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import DomainProfile
 from graph_context.interface.tools import Services, build_services
 from graph_context.ports.graph_repository import GraphRepository
@@ -153,8 +154,10 @@ async def build_runtime(
         # GC_PROJECT_NAME and a persisted set_project both take precedence.
         try:
             session.project = (await client.get_space()).get("name") or None
-        except Exception:  # noqa: BLE001
-            logger.warning("could not read space name for the project label")
+        except GraphContextError:
+            logger.warning(
+                "could not read space name for the project label", exc_info=True
+            )
     persister = SessionPersister(store, session)
     teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
     projector, ranker = await _build_semantic(
@@ -236,5 +239,5 @@ async def run_teardown(teardown: list[TeardownHook]) -> None:
     for hook in reversed(teardown):
         try:
             await hook()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("teardown hook failed")

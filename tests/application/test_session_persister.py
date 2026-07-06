@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain.session import FocusEntry, FocusStack, SessionState
+from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_session_store import InMemorySessionStore
 
 
@@ -57,9 +60,10 @@ async def test_load_or_fresh_returns_fresh_when_empty() -> None:
 
 
 async def test_load_or_fresh_degrades_on_unreadable_store() -> None:
+    # The port contract: I/O failures surface as GraphContextError.
     class Boom:
         async def load(self) -> dict[str, Any] | None:
-            raise RuntimeError("store on fire")
+            raise GraphContextError("store on fire")
 
         async def save(self, snapshot: dict[str, Any]) -> None:  # pragma: no cover
             ...
@@ -67,6 +71,19 @@ async def test_load_or_fresh_degrades_on_unreadable_store() -> None:
     fresh = SessionState(project="Fresh")
     restored = await SessionPersister.load_or_fresh(Boom(), fresh)
     assert restored is fresh  # never crashes startup
+
+
+async def test_load_or_fresh_propagates_programming_errors() -> None:
+    # A bug in a store must crash loudly, not silently discard the session.
+    class Buggy:
+        async def load(self) -> dict[str, Any] | None:
+            raise RuntimeError("a bug, not an I/O failure")
+
+        async def save(self, snapshot: dict[str, Any]) -> None:  # pragma: no cover
+            ...
+
+    with pytest.raises(RuntimeError):
+        await SessionPersister.load_or_fresh(Buggy(), SessionState())
 
 
 async def test_from_snapshot_is_lenient_about_partial_data() -> None:

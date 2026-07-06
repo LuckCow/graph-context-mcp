@@ -12,6 +12,10 @@ Contract:
   a broken snapshot must never prevent startup.
 * ``save`` overwrites; last write wins. Callers are expected to debounce
   (see ``application/session_persister.py``) -- implementations should not.
+* I/O failures (store unreachable, backend errors) must surface as
+  ``GraphContextError`` subclasses -- that is what the lenient-load path
+  in ``SessionPersister`` catches. Anything else is treated as a bug and
+  propagates.
 """
 
 from __future__ import annotations
