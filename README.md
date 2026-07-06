@@ -131,7 +131,7 @@ Because all three are container defaults inherited by `docker exec` — and `PYT
 
 To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.) Set `GC_STORE_LLM_INPUT=0` to withhold prompt text from the orchestrator's provenance (intent) nodes — the tool-call trace is kept either way.
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`. (Prose/artifact capture is the orchestrator harness's job — WP7 auto-capture; there is no capture tool.) Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Every response is prefixed with a `[project | focus | recent]` context header; validation errors echo the allowed values (they are written for an LLM to self-correct). Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`. (Prose/artifact capture is the orchestrator harness's job — WP7 auto-capture; there is no capture tool.) Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Validation errors echo the allowed values (they are written for an LLM to self-correct). (Responses used to be prefixed with a `[project | focus | recent]` context header; it was removed 2026-07-06 as token waste — the session still tracks focus and recent nodes.) Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
 
 ## Semantic search (GC_EMBEDDER)
 
@@ -192,8 +192,8 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
 | `infrastructure/anytype/mode_store.py` | `AnytypeModeStore` | One mode per `gc_activity_mode` object: name → `/mode` slug, page body → goal, archive = disable |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps) |
-| `interface/presenters.py` | Context header + detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
+| `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
+| `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
 | `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
 | `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
 | `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; drains the journal into an intent node at turn end |

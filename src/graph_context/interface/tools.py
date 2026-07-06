@@ -5,18 +5,21 @@ keeping the implementations here (plain async functions over a
 :class:`Services` bundle) means they are testable in-process without an
 MCP client, and the SDK never leaks below the composition root.
 
-Three invariants every tool maintains -- enforced by ``guarded``, the one
+Two invariants every tool maintains -- enforced by ``guarded``, the one
 wrapper everything goes through:
 
-1. **Context echo.** Every response, success or error, begins with the
-   session header. A tool that forgets the header is unrepresentable.
-2. **Errors are prompts.** Any :class:`GraphContextError` is returned as
+1. **Errors are prompts.** Any :class:`GraphContextError` is returned as
    ``ERROR: <message>`` -- its message is written for an LLM trying to
    self-correct, so parse failures must list the allowed values (see the
    ``_parse_*`` helpers). Unexpected exceptions are logged server-side and
    returned as a generic message: never leak stack traces into a story.
-3. **Policy stays here.** e.g. `explore` excludes Prose/SessionContext by
+2. **Policy stays here.** e.g. `explore` excludes Prose/SessionContext by
    default (WP2 decision) -- the domain traversal remains policy-free.
+
+(The per-response ``[project | focus | recent]`` context header was
+removed 2026-07-06 as token waste. Session state -- the focus stack and
+recent-history ring -- is still tracked for traversal defaults and
+future features; it just isn't echoed on every response.)
 
 Notes:
 * `context` actions `set_project` / `resync`: resync is wired; project
@@ -121,7 +124,7 @@ def build_services(
 def guarded(
     fn: Callable[..., Awaitable[str]],
 ) -> Callable[..., Awaitable[str]]:
-    """Header on every response; GraphContextError -> actionable ERROR line.
+    """GraphContextError -> actionable ERROR line; nothing else escapes.
 
     Also the single seam for structured per-call logging (WP2 deliverable):
     one INFO line per tool with name, ok/error outcome, and duration.
@@ -147,10 +150,7 @@ def guarded(
                 "tool=%s outcome=%s duration_ms=%.1f",
                 fn.__name__, outcome, (time.perf_counter() - start) * 1000,
             )
-        header = presenters.render_context_header(
-            services.session, services.repository.graph
-        )
-        return f"{header}\n{body}"
+        return body
 
     return wrapper
 

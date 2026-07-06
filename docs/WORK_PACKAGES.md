@@ -181,7 +181,7 @@ In-process tool invocation against the fake (FastMCP supports direct call/test c
 
 ### Open questions
 
-- Surface the stale-summary count in the header itself (e.g., `| stale: 4`)? Cheap and useful; decide by trying it during dogfooding.
+- ~~Surface the stale-summary count in the header itself (e.g., `| stale: 4`)?~~ **Moot 2026-07-06:** the per-response context header was removed entirely as token waste (session focus/recent tracking is kept for query defaults and future features). Stale counts remain visible via `context action="get"` and per-node `[summary stale]` markers.
 - Whether `context` should support `focus pop` distinctly from `remove` (proposal mentions pop; the stack API has `remove`) — pick one verb set and align tool + `FocusStack` naming.
 - Parameter naming consistency pass before first external use: this is the public, hard-to-change surface. Schedule a 1-hour review with the team on names/defaults of all tool parameters.
 

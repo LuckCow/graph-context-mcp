@@ -1,18 +1,12 @@
 """Presenters: turning domain results into the strings tools return.
 
-The proposal's "context echo" lives here: every tool response begins with
-a compact header rendered from :class:`SessionState`, e.g.::
-
-    [project: Ashfall | focus: Mira (Character), The Undercroft (Location) | recent: Siege of Brakk]
-
 Detail levels (``names`` / ``summaries`` / ``full``) are an interface
 concern -- the traversal always returns full nodes; how much of each node
 reaches the LLM's context window is decided at the edge. Keeping this out
 of the domain means response-budget tuning never touches tested logic.
 
-Nodes referenced by the session but missing from the graph (deleted, or
-removed by an out-of-band human edit before a resync) are skipped
-silently: the header must never crash a tool response.
+(The ``[project | focus | recent]`` context-header echo that used to open
+every response was removed 2026-07-06 as token waste.)
 """
 
 from __future__ import annotations
@@ -22,16 +16,11 @@ from enum import StrEnum
 
 from graph_context.application.node_reader import NodeView
 from graph_context.application.ranker import RankedHit
-from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
-from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreResult
 
-_RECENT_SHOWN = 3
-_FOCUS_SHOWN = 3  # header shows the top of the stack, not the whole working set
-_HEADER_NAME_CHARS = 32  # ellipsize pathological titles; the header is an echo
 EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
 
 
@@ -39,26 +28,6 @@ class Detail(StrEnum):
     NAMES = "names"
     SUMMARIES = "summaries"
     FULL = "full"
-
-
-def render_context_header(session: SessionState, graph: GraphIndex) -> str:
-    project = session.project or "-"
-    focus_entries = [
-        entry for entry in session.focus.entries if graph.has_node(entry.node_id)
-    ]
-    focus_parts = [
-        _name_with_type(graph, entry.node_id, pinned=entry.pinned)
-        for entry in focus_entries[:_FOCUS_SHOWN]
-    ]
-    if len(focus_entries) > _FOCUS_SHOWN:
-        focus_parts.append(f"(+{len(focus_entries) - _FOCUS_SHOWN} more)")
-    focus = ", ".join(focus_parts)
-    recent = ", ".join(
-        _truncate(graph.node(node_id).name)
-        for node_id in session.recent.items[:_RECENT_SHOWN]
-        if graph.has_node(node_id)
-    )
-    return f"[project: {project} | focus: {focus or '-'} | recent: {recent or '-'}]"
 
 
 def render_overview(overview: GraphOverview) -> str:
@@ -151,16 +120,6 @@ def _render_hit_line(node: Node, depth: int, detail: Detail, body: str = "") -> 
     if detail is Detail.SUMMARIES or not body:
         return f"{base}{stale}: {node.summary}"
     return f"{base}{stale}: {node.summary}\n{indent}    {body}"
-
-
-def _name_with_type(graph: GraphIndex, node_id: str, *, pinned: bool) -> str:
-    node = graph.node(node_id)
-    pin_mark = "*" if pinned else ""
-    return f"{_truncate(node.name)}{pin_mark} ({node.type})"
-
-
-def _truncate(name: str, limit: int = _HEADER_NAME_CHARS) -> str:
-    return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
 def render_node_view(view: NodeView) -> str:

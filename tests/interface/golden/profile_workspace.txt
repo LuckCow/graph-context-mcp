@@ -16,11 +16,8 @@ Actions:
   pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
   remove       -- drop node_id from the focus stack.
   clear        -- empty the focus stack (pinned entries survive).
-  set_project  -- relabel the project shown in the header (cosmetic; one
-                  server is bound to one Anytype space).
-
-Every tool response begins with `[project | focus | recent]` -- this tool
-is how you manage what appears there.
+  set_project  -- relabel the session's project (cosmetic; one server is
+                  bound to one Anytype space).
 
 ### create_node
 Create a knowledge-base node and its initial links in ONE call.

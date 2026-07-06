@@ -1,10 +1,10 @@
 """Session state: the focus stack and recent-history breadcrumbs.
 
-The proposal's "context echo" depends on this module: every tool response
-renders a header from :class:`SessionState`, and queries that omit a start
-node default to ``focus.top``. Scene work touches several entities at
-once, so the working set is a small *stack* (default 6) rather than a
-single current-node pointer.
+Queries that omit a start node default to ``focus.top``, and the
+recent-history ring records what the session has touched (kept for future
+features; it is no longer echoed on responses). Scene work touches several
+entities at once, so the working set is a small *stack* (default 6) rather
+than a single current-node pointer.
 
 Rules:
     * ``push`` moves an already-present id to the top instead of
@@ -145,7 +145,7 @@ class RecentHistory:
 
 @dataclass(slots=True)
 class SessionState:
-    """Everything the context header renders and query defaults read."""
+    """The session's working set: query defaults and touch history."""
 
     project: str | None = None
     focus: FocusStack = field(default_factory=FocusStack)

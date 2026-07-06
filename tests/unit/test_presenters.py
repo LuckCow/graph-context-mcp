@@ -1,47 +1,14 @@
-"""Presenters: context header and detail shaping."""
+"""Presenters: detail shaping and derived views."""
 
-from graph_context.domain.models import Node, NodeDraft
+from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview, HubNode, TypeCount
 from graph_context.domain.traversal import ExploreQuery, explore
 from graph_context.interface.presenters import (
     Detail,
-    render_context_header,
     render_explore_result,
     render_overview,
 )
 from tests.conftest import World
-
-
-class TestContextHeader:
-    async def test_header_shows_project_focus_and_recent(self, repository, session, world: World):
-        header = render_context_header(session, repository.graph)
-        assert header.startswith("[project: Ashfall | focus: Ashbrand (Item)")
-        assert "| recent:" in header and header.endswith("]")
-
-    async def test_header_skips_nodes_missing_from_graph(self, repository, session, world: World):
-        repository.graph.remove_node(world.ashbrand.id)
-        header = render_context_header(session, repository.graph)
-        assert "Ashbrand" not in header  # no crash, entry skipped
-
-    async def test_header_caps_focus_at_three_with_overflow_count(
-        self, repository, session, world: World
-    ):
-        # The world fixture pushed five nodes onto the focus stack.
-        header = render_context_header(session, repository.graph)
-        focus_section = header.split("| focus: ")[1].split(" | recent:")[0]
-        assert focus_section.count("(") == 4  # 3 "(Type)" markers + the overflow
-        assert "(+2 more)" in focus_section
-
-    async def test_header_truncates_long_names_with_ellipsis(
-        self, repository, session, writer, world: World
-    ):
-        long_name = "The Vesta Briefing — Joseph's First Recommendation to Delay"
-        await writer.create_node(
-            NodeDraft("Event", name=long_name, summary="s", story_time=1)
-        )
-        header = render_context_header(session, repository.graph)
-        assert long_name not in header
-        assert f"{long_name[:31]}…" in header
 
 
 class TestDetailLevels:
