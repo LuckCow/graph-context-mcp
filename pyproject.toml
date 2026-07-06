@@ -112,6 +112,7 @@ source_modules = [
     "graph_context.orchestrator.modes",
     "graph_context.orchestrator.drivers",
     "graph_context.orchestrator.pipeline",
+    "graph_context.orchestrator.turn_log",
     "graph_context.orchestrator.discord_transport",
 ]
 forbidden_modules = ["graph_context.infrastructure"]
@@ -126,6 +127,7 @@ source_modules = [
     "graph_context.orchestrator.modes",
     "graph_context.orchestrator.drivers",
     "graph_context.orchestrator.pipeline",
+    "graph_context.orchestrator.turn_log",
     "graph_context.orchestrator.capture",
     "graph_context.orchestrator.claude_driver",
     "graph_context.orchestrator.bootstrap",

@@ -386,6 +386,7 @@ class TestProvenanceTurns:
         (intent,) = _intent_nodes(services)
         assert intent.name.startswith("Intent: Add Mira.")
         assert intent.fields["user_id"] == "cli:nick"
+        assert intent.fields["mode"] == "world_modeling"  # the active binding
         mira = services.repository.graph.resolve("Mira")
         assert {e.target for e in services.repository.graph.edges(intent.id)} == {
             mira.id

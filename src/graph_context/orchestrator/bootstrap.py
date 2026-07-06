@@ -42,8 +42,11 @@ from graph_context.orchestrator.drivers import (
     TranscriptEvent,
 )
 from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TURN_LOG = "logs/turns.jsonl"  # relative to the process cwd
 
 MANUAL_HELP = (
     "you are the model (GC_DRIVER=manual): /tool <name> {json-args} runs a "
@@ -120,6 +123,32 @@ def build_driver() -> tuple[LLMDriver, str, str]:
     )
 
 
+def build_turn_log() -> TurnLog | None:
+    """``GC_TURN_LOG`` resolution -> the turn diary, or None (disabled).
+
+    The value is the JSONL path (default ``logs/turns.jsonl``); ``0`` /
+    ``false`` / ``no`` / ``off`` switches the diary off entirely.
+    ``GC_TURN_LOG_MAX_BYTES`` caps the file -- past it the oldest
+    entries are dropped -- and, like every other config knob, a value
+    that isn't a positive integer fails loudly at startup.
+    """
+    raw_path = os.environ.get("GC_TURN_LOG", DEFAULT_TURN_LOG).strip()
+    if raw_path.lower() in {"", "0", "false", "no", "off"}:
+        return None
+    raw_max = os.environ.get("GC_TURN_LOG_MAX_BYTES", "").strip()
+    if not raw_max:
+        return TurnLog(raw_path)
+    try:
+        max_bytes = int(raw_max)
+    except ValueError:
+        max_bytes = 0
+    if max_bytes <= 0:
+        raise GraphContextError(
+            f"GC_TURN_LOG_MAX_BYTES must be a positive integer, got {raw_max!r}"
+        )
+    return TurnLog(raw_path, max_bytes=max_bytes)
+
+
 @dataclass(frozen=True, slots=True)
 class Runtime:
     """Everything a transport loop needs, plus the shutdown hooks."""
@@ -135,8 +164,10 @@ async def build_orchestrator() -> Runtime:
 
     Honors ``GC_PROFILE``, ``GC_PROVENANCE`` (on by default; ``0``
     disables), ``GC_STORE_LLM_INPUT`` (``0`` withholds prompt text from
-    intent nodes), ``GC_MODES_FILE``, and ``GC_DRIVER``. Bad specs and
-    driver config fail loudly here, before any loop starts.
+    intent nodes), ``GC_MODES_FILE``, ``GC_DRIVER``, and ``GC_TURN_LOG``
+    / ``GC_TURN_LOG_MAX_BYTES`` (the full-fidelity turn diary; see
+    :func:`build_turn_log`). Bad specs and driver config fail loudly
+    here, before any loop starts.
     """
     profile = profiles.get_profile(os.environ.get("GC_PROFILE"))
     provenance_on = os.environ.get("GC_PROVENANCE", "1").lower() not in {
@@ -168,7 +199,7 @@ async def build_orchestrator() -> Runtime:
     orchestrator = Orchestrator(
         services=services, driver=driver, profile=profile,
         registry=registry, provenance=recorder, model_name=model_name,
-        reload_registry=reload_registry,
+        reload_registry=reload_registry, turn_log=build_turn_log(),
     )
     return Runtime(
         orchestrator=orchestrator, profile=profile,

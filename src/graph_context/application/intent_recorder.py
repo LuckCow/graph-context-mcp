@@ -10,8 +10,10 @@ exactly one ``gc_intent`` node is written:
              trace, and the created-vs-modified detail -- capped with the
              truncation marker. Write-once *by policy* (ADR 010): a
              provenance record must not be editable.
-* fields  -- ``user_id`` / ``model`` / ``generated_at`` attribution (in a
-             shared space Anytype's own creator shows only the bot).
+* fields  -- ``user_id`` / ``model`` / ``mode`` / ``generated_at``
+             attribution (in a shared space Anytype's own creator shows
+             only the bot; ``mode`` names the activity mode whose binding
+             allowed the mutation).
 * links   -- one ``intent`` edge to EVERY touched node, populated at
              creation (one write per turn).
 
@@ -70,6 +72,7 @@ class IntentRecorder:
         trace: Sequence[ToolTrace] = (),
         user_id: str = "",
         model: str = "",
+        mode: str = "",
     ) -> Node | None:
         """Persist the turn's provenance; ``None`` for a read-only turn."""
         if not mutations:
@@ -85,6 +88,7 @@ class IntentRecorder:
             fields={
                 "user_id": user_id,
                 "model": model,
+                "mode": mode,
                 "generated_at": stamp,
             },
             body=_assemble_body(shown, trace, mutations),

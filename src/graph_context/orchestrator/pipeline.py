@@ -36,6 +36,7 @@ from graph_context.interface.tools import Services
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
 from graph_context.orchestrator.modes import ModeRegistry
+from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,11 @@ class Orchestrator:
     replies that mention known nodes are auto-captured as Prose (the
     capture is journalled too, so the intent links the artifact). ``None``
     switches the whole subsystem off.
+
+    ``turn_log`` is the same shape of toggle for the full-fidelity turn
+    diary: when wired, every message logs its input, each driver
+    decision, each tool call with its complete output, and the final
+    reply events (see ``turn_log.py``). ``None`` logs nothing.
     """
 
     services: Services
@@ -77,6 +83,7 @@ class Orchestrator:
     profile: DomainProfile
     registry: ModeRegistry
     provenance: IntentRecorder | None = None
+    turn_log: TurnLog | None = None
     # ADR 015 amendment: re-reads every config source (profile defaults,
     # GC_MODES_FILE, in-space Activity Mode objects). None (tests, no
     # config store) keeps the loaded registry for the process lifetime.
@@ -107,8 +114,14 @@ class Orchestrator:
     ) -> list[ReplyEvent]:
         state = self._session(session_id)
         stripped = text.strip()
+        if self.turn_log:
+            self.turn_log.user_message(session_id, state.mode, user_id, stripped)
         if stripped.startswith("/mode"):
-            return await self._switch_mode(state, stripped)
+            mode_events = await self._switch_mode(state, stripped)
+            if self.turn_log:
+                # state.mode is post-switch: the mode the session is IN now.
+                self.turn_log.turn_end(session_id, state.mode, mode_events)
+            return mode_events
 
         spec = self._spec(state)
         logger.info(
@@ -121,6 +134,8 @@ class Orchestrator:
         reply_text = ""
         for _ in range(self.max_tool_calls):
             turn = await self.driver.decide(transcript, tools, spec.goal)
+            if self.turn_log:
+                self.turn_log.llm_turn(session_id, spec.name, turn)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -141,6 +156,8 @@ class Orchestrator:
                         f"{', '.join(sorted(tools))}"
                     )
                     events.append(ReplyEvent(result, kind="error"))
+                if self.turn_log:
+                    self.turn_log.tool_result(session_id, spec.name, call, result)
                 transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
         else:
             events.append(ReplyEvent(
@@ -149,6 +166,8 @@ class Orchestrator:
                 kind="notice",
             ))
         await self._finish_turn(spec, user_id, stripped, reply_text, trace)
+        if self.turn_log:
+            self.turn_log.turn_end(session_id, spec.name, events)
         return events
 
     async def _finish_turn(
@@ -187,6 +206,7 @@ class Orchestrator:
             trace=trace,
             user_id=user_id,
             model=self.model_name,
+            mode=spec.name,
         )
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
