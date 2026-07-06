@@ -10,8 +10,6 @@ An MCP server exposing a story-world knowledge graph backed by [Anytype](https:/
 
 The devcontainer applies an egress firewall (`.devcontainer/init-firewall.sh`): **most web connections are blocked**. Don't assume `curl`/`pip install <new-package>` will reach the internet. If a new package or dependency is needed, **ask the user first** — they will add it to the Docker container setup.
 
-The workspace is a 9p mount of a Windows drive, and Edit/Write may spuriously report `ENOENT: no such file or directory, statx` **even though the write succeeded** (stale 9p negative dentries; anthropics/claude-code#28015). Don't blindly ignore it and don't blindly retry: verify with `git diff` or `grep` whether the change actually landed, then proceed accordingly.
-
 ## Commands
 
 ```bash
@@ -25,8 +23,6 @@ lint-imports                    # layer/dependency rule (import-linter contracts
 ```
 
 Definition of Done = all four green; CI (`.github/workflows/ci.yml`) runs exactly these on every push.
-
-> **Known gap (2026-07-02):** `lint-imports` is not installed in the container (pip is egress-blocked; add `import-linter` — and `langgraph` for WP6 — at the next container rebuild). Skip it locally until then; CI still enforces the contracts on push.
 
 ```bash
 PYTHONPATH=src python scripts/demo_wp2_tools.py                              # drive the full tool loop in-process (mock-backed)
