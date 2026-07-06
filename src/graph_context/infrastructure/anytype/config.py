@@ -50,14 +50,17 @@ class AnytypeConfig:
     timeout_seconds: float = 10.0
 
     @classmethod
-    def from_env(cls) -> AnytypeConfig:
+    def from_env(cls, space_id: str | None = None) -> AnytypeConfig:
+        """Read connection env; an explicit ``space_id`` (channel-bound
+        spaces, ADR 017) wins over ``ANYTYPE_SPACE_ID``."""
         api_key = _resolve_api_key()
-        try:
-            space_id = os.environ["ANYTYPE_SPACE_ID"]
-        except KeyError as missing:
-            raise GraphContextError(
-                f"missing required environment variable: {missing.args[0]}"
-            ) from None
+        if space_id is None:
+            try:
+                space_id = os.environ["ANYTYPE_SPACE_ID"]
+            except KeyError as missing:
+                raise GraphContextError(
+                    f"missing required environment variable: {missing.args[0]}"
+                ) from None
         # In the container the secret is file-mounted and the base URL points at
         # the host's Anytype (host.docker.internal); both arrive under the
         # ``*_API_*`` names. Accept the bare names too for a host-local run.

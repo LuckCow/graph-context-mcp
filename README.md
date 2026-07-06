@@ -61,7 +61,20 @@ GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # ke
 python -m graph_context.orchestrator.discord_bot                           # Discord bot (WP8), live backend by default
 ```
 
-The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels in `GC_DISCORD_CHANNELS` — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; unset allowlist = serve nowhere, loudly). It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. The **mode** is per-channel (`/mode <name>` switches it for that channel); the underlying focus-stack session is still process-wide — a turn lock serializes concurrent messages until WP8's per-session state lands. Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes). Every turn is also written in full — the user's message, each model decision, every tool call with its complete output, and the final replies, each entry stamped with the active mode — to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB; the oldest entries are dropped once exceeded).
+The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels you configure — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; no channel config = serve nowhere, loudly). Two configuration shapes ([ADR 017](docs/adr/017-channel-bound-spaces.md)):
+
+- **`GC_DISCORD_CHANNELS`** (legacy allowlist): every listed channel shares the one env-configured runtime (`ANYTYPE_SPACE_ID`, `GC_PROFILE`), and a shared turn lock serializes their messages.
+- **`GC_CHANNELS_FILE`** (channel-bound spaces): a TOML file mapping each channel to its **own Anytype space**, with optional per-channel `profile`, `project` label, and `modes_file`; each channel gets a fully independent runtime (own graph, focus/recent session persisted in its own space, provenance journal), and only same-channel turns serialize. One channel per space — a space holds a single SessionContext node. Setting both variables is ambiguous and fails at startup.
+
+```toml
+[channels.1523551542123298896]
+space_id   = "bafyre..."        # required
+profile    = "fiction"          # optional; defaults to GC_PROFILE
+project    = "Ashfall"          # optional cosmetic label
+modes_file = "ashfall-modes.toml"  # optional; overrides GC_MODES_FILE for this channel
+```
+
+It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. The **mode** is per-channel (`/mode <name>` switches it for that channel). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes). Every turn is also written in full — the user's message, each model decision, every tool call with its complete output, and the final replies, each entry stamped with the active mode — to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB; the oldest entries are dropped once exceeded).
 
 ## Connecting Claude Desktop (from the dev container)
 
@@ -189,7 +202,8 @@ interface  ──▶  application  ──▶  domain
 | `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |
 | `orchestrator/capture.py` | Authoring auto-capture | Exact-name entity linking; the harness records what tools used to ask for |
 | `orchestrator/turn_log.py` | Full-fidelity turn diary (JSONL) | Input, every driver decision, every tool call + complete output, final replies; byte-capped — oldest entries drop |
-| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by CLI and Discord; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution |
+| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by CLI and Discord; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution; builds one runtime per channel binding (ADR 017) |
+| `orchestrator/channels.py` | Channel→space bindings (`GC_CHANNELS_FILE`, ADR 017) | Plain parsing/validation; one channel per space, enforced at startup |
 | `orchestrator/discord_transport.py` + `discord_bot.py` | Discord adapter (WP8) | Per-message policy is plain logic; only the composition-root shim imports discord.py |
 
 ## Conventions to carry forward
@@ -204,11 +218,11 @@ interface  ──▶  application  ──▶  domain
 
 ## Status & what's next
 
-**Shipped** (full history + specs in `docs/WORK_PACKAGES.md`): WP0–WP3 (storage core, seven-tool MCP server, capture bodies, session persistence), the space-reflecting pivot ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)), WP5 (domain profiles), WP6 (orchestrator harness incl. the real Claude driver, 2026-07-06), WP7 (automatic provenance + auto-capture), WP9 (descriptions in the body), WP10 (attribute reflection, summary in the built-in description, connections footer), WP11 stage 1 (semantic search + graph-aware ranking, incl. the local embedder), and WP12 (configurable activity modes + the `assistant` profile). WP8 is **partially shipped**: the single-writer delta queue core ([ADR 009](docs/adr/009-single-writer-delta-queue.md)) and the Discord transport are live. Definition of Done holds: `pytest`, `ruff`, `mypy --strict`, and `lint-imports` are all clean; CI runs exactly these on every push.
+**Shipped** (full history + specs in `docs/WORK_PACKAGES.md`): WP0–WP3 (storage core, seven-tool MCP server, capture bodies, session persistence), the space-reflecting pivot ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)), WP5 (domain profiles), WP6 (orchestrator harness incl. the real Claude driver, 2026-07-06), WP7 (automatic provenance + auto-capture), WP9 (descriptions in the body), WP10 (attribute reflection, summary in the built-in description, connections footer), WP11 stage 1 (semantic search + graph-aware ranking, incl. the local embedder), and WP12 (configurable activity modes + the `assistant` profile). WP8 is **partially shipped**: the single-writer delta queue core ([ADR 009](docs/adr/009-single-writer-delta-queue.md)), the Discord transport, and channel-bound spaces ([ADR 017](docs/adr/017-channel-bound-spaces.md) — one Discord channel per Anytype space, with per-channel profile, session, and modes) are live. Definition of Done holds: `pytest`, `ruff`, `mypy --strict`, and `lint-imports` are all clean; CI runs exactly these on every push.
 
 **Open work, in rough order of proximity:**
 
-- **WP8 remainder (multi-user):** per-session `SessionState` (the Discord bot currently serializes turns behind a process-wide lock), per-user mode authorization, per-user prompt-storage consent, Telegram/Slack transports, queue pacing/fairness/user-facing depth feedback.
+- **WP8 remainder (multi-user):** per-user `SessionState` *within* one space (channels bound to different spaces already have independent sessions; same-channel turns still serialize behind that route's lock), per-user mode authorization, per-user prompt-storage consent, Telegram/Slack transports, queue pacing/fairness/user-facing depth feedback.
 - **WP11 deferred items (dogfooding-gated):** passage-level stage 2 + the reserved `search` tool, reranker adapters, the Voyage embedder (needs a firewall allowlist entry + key), the `GC_EMBEDDER` `off`→`local` default flip, orchestrator RAG prefetch (the Ranker's `session_seeds` parameter is ready for it).
 - **Cross-turn driver memory:** each `decide()` is deliberately a fresh stateless session; the SDK's session-resume machinery is the lever when dogfooding wants it. langgraph sits installed but unused — whether it ever earns its place is an open question.
 - **WP4 (still parked — entry criteria, not specs):** knowledge-query helper, staleness propagation to neighbors, type extensibility (`propose_type`). (Its semantic-search item shipped as WP11; its multi-user item was superseded by WP8.)

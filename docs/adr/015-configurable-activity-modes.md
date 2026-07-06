@@ -146,4 +146,7 @@ back to the registry default with a notice.
 **Still deferred:** per-space *profile* selection (WP5's question). The
 profile drives `ensure_schema` and role overrides before the repository
 exists, a bootstrapping problem this feature doesn't need; when it lands,
-it should ride the same config-object seam.
+it should ride the same config-object seam. *(Landed 2026-07-06 for the
+orchestrator path via ADR 017's channel bindings — the static file names
+each space's profile before its schema bootstrap runs. The stdio MCP
+server still reads `GC_PROFILE`.)*

@@ -69,18 +69,25 @@ async def build_runtime(
     profile: DomainProfile,
     *,
     journal: MutationJournal | None = None,
+    space_id: str | None = None,
+    project: str | None = None,
 ) -> BuiltRuntime:
-    """Build the full service bundle for one process.
+    """Build the full service bundle for one runtime.
 
     The returned teardown hooks run in reverse order on shutdown (session
     flush before client close). The mode store reads the space's Activity
     Mode config objects (ADR 015 amendment); the memory backend's is empty,
     so profile defaults apply.
+
+    ``space_id``/``project`` override ``ANYTYPE_SPACE_ID``/``GC_PROJECT_NAME``
+    so one process can host several runtimes bound to different spaces
+    (channel-bound spaces, ADR 017); left ``None``, the env applies and a
+    process gets exactly one runtime, as before.
     """
     from graph_context.domain.session import SessionState
 
     backend = os.environ.get("GC_BACKEND", "anytype")
-    session = SessionState(project=os.environ.get("GC_PROJECT_NAME"))
+    session = SessionState(project=project or os.environ.get("GC_PROJECT_NAME"))
     teardown: list[TeardownHook] = []
 
     logger.info("profile=%s (%s)", profile.name, profile.description)
@@ -119,7 +126,7 @@ async def build_runtime(
         AnytypeSessionStore,
     )
 
-    config = AnytypeConfig.from_env()
+    config = AnytypeConfig.from_env(space_id)
     client = AnytypeClient(config)
     teardown.append(client.aclose)
     timeline = (profile.time_property, profile.time_format)  # ADR 015

@@ -83,6 +83,23 @@ async def test_anytype_store_overwrites_in_place(anytype_client: AnytypeClient) 
     assert (await AnytypeSessionStore(anytype_client).load())["project"] == "Second"
 
 
+async def test_two_spaces_persist_sessions_independently() -> None:
+    """ADR 017: each channel's runtime saves to its own space's
+    SessionContext node -- neighbors never see each other's snapshot."""
+    stores = []
+    for space in ("space-a", "space-b"):
+        mock = MockAnytype(space_id=space)
+        client = AnytypeClient(
+            AnytypeConfig(api_key="t", space_id=space), transport=mock.transport
+        )
+        await ensure_schema(client)
+        stores.append(AnytypeSessionStore(client))
+    await stores[0].save(SNAPSHOT)
+    await stores[1].save({**SNAPSHOT, "project": "Fieldwork"})
+    assert (await stores[0].load())["project"] == "Ashfall"
+    assert (await stores[1].load())["project"] == "Fieldwork"
+
+
 async def test_anytype_store_corrupt_json_loads_none(
     anytype_client: AnytypeClient,
 ) -> None:

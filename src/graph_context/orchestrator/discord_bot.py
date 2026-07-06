@@ -14,8 +14,13 @@ Config (composed in .devcontainer/docker-compose.yml):
   DISCORD_BOT_TOKEN_FILE  file holding the bot token -- a file, not an
                           env var, for the same leak reasons as the
                           Anytype key
-  GC_DISCORD_CHANNELS     channel id(s) the bot serves; everything else
-                          is ignored, not refused
+  GC_CHANNELS_FILE        channel->space bindings TOML (ADR 017): each
+                          channel gets its own space, profile, project
+                          label, and modes file
+  GC_DISCORD_CHANNELS     legacy allowlist: channel id(s) served by ONE
+                          env-configured runtime; mutually exclusive
+                          with GC_CHANNELS_FILE. Unmapped channels are
+                          ignored, not refused, in both forms
 
 The Discord-side prerequisite is the MESSAGE CONTENT privileged intent
 (developer portal -> Bot -> intents); without it every guild message
@@ -37,7 +42,6 @@ from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.discord_transport import (
     DiscordTurnHandler,
     InboundMessage,
-    parse_channel_allowlist,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,11 +74,8 @@ async def main() -> None:
         ) from err
 
     token = _read_token()
-    allowed = parse_channel_allowlist(os.environ.get("GC_DISCORD_CHANNELS"))
-    runtime = await bootstrap.build_orchestrator()
-    handler = DiscordTurnHandler(
-        orchestrator=runtime.orchestrator, allowed_channels=allowed
-    )
+    runtimes = await bootstrap.build_channel_runtimes()
+    handler = DiscordTurnHandler(routes=runtimes.routes)
 
     intents = discord.Intents.default()
     intents.message_content = True  # ALSO needs enabling in the dev portal
@@ -82,9 +83,12 @@ async def main() -> None:
     client = discord.Client(intents=intents)
 
     async def on_ready() -> None:
+        served = "; ".join(
+            f"{cid}: {desc}" for cid, desc in sorted(runtimes.descriptions.items())
+        )
         logger.info(
-            "discord: logged in as %s; serving channels %s (profile=%s). %s",
-            client.user, sorted(allowed), runtime.profile.name, runtime.help_line,
+            "discord: logged in as %s; serving %s. %s",
+            client.user, served, runtimes.help_line,
         )
 
     async def on_message(message: discord.Message) -> None:
@@ -117,7 +121,7 @@ async def main() -> None:
         async with client:
             await client.start(token)
     finally:
-        await composition.run_teardown(runtime.teardown)
+        await composition.run_teardown(runtimes.teardown)
 
 
 if __name__ == "__main__":

@@ -15,8 +15,10 @@ import pytest
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
+from graph_context.interface import tools
 from graph_context.interface.profiles import get_profile
 from graph_context.interface.tools import build_services
+from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.discord_transport import (
     DISCORD_MESSAGE_LIMIT,
     DiscordTurnHandler,
@@ -31,21 +33,24 @@ from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
 
 FICTION = get_profile("fiction")
 ALLOWED_CHANNEL = 1523551542123298896
+OTHER_CHANNEL = 1523551542123298897
 
 
-def _handler(turns: list[LLMTurn] | None = None) -> DiscordTurnHandler:
+def _route(turns: list[LLMTurn] | None = None, project: str = "Ashfall") -> ChannelRoute:
+    """One channel's runtime over its own in-memory world (ADR 017)."""
     services = build_services(
         InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
-        SessionState(project="Ashfall"),
+        SessionState(project=project),
     )
     orchestrator = Orchestrator(
         services=services, driver=ScriptedDriver(turns or []),
         profile=FICTION, registry=load_registry(FICTION),
     )
-    return DiscordTurnHandler(
-        orchestrator=orchestrator,
-        allowed_channels=frozenset({ALLOWED_CHANNEL}),
-    )
+    return ChannelRoute(orchestrator=orchestrator)
+
+
+def _handler(turns: list[LLMTurn] | None = None) -> DiscordTurnHandler:
+    return DiscordTurnHandler(routes={ALLOWED_CHANNEL: _route(turns)})
 
 
 def _message(**overrides: object) -> InboundMessage:
@@ -98,7 +103,8 @@ class TestTurn:
 
         await handler.run_turn(_message(content="/mode authoring"), send)
         session = f"discord:{ALLOWED_CHANNEL}"
-        assert handler.orchestrator.mode_of(session) == "authoring"
+        orchestrator = handler.routes[ALLOWED_CHANNEL].orchestrator
+        assert orchestrator.mode_of(session) == "authoring"
         assert sends and sends[0].startswith("[notice] ")
 
     async def test_a_long_reply_is_chunked_under_the_discord_limit(self) -> None:
@@ -111,9 +117,11 @@ class TestTurn:
         await handler.run_turn(_message(), send)
         assert [len(s) for s in sends] == [2000, 500]
 
-    async def test_concurrent_messages_run_one_turn_at_a_time(self) -> None:
-        """The focus-stack session is process-wide until WP8's per-session
-        state lands, so turns must not interleave tool calls."""
+    async def test_concurrent_messages_in_one_channel_run_one_turn_at_a_time(
+        self,
+    ) -> None:
+        """A route's runtime holds one focus-stack session, so turns on
+        the same channel must not interleave tool calls."""
         active = 0
         overlaps: list[int] = []
 
@@ -127,7 +135,7 @@ class TestTurn:
                 return LLMTurn(reply="done")
 
         handler = _handler()
-        handler.orchestrator.driver = SlowDriver()
+        handler.routes[ALLOWED_CHANNEL].orchestrator.driver = SlowDriver()
 
         async def send(text: str) -> None:
             pass
@@ -135,6 +143,101 @@ class TestTurn:
         await asyncio.gather(
             handler.run_turn(_message(content="one"), send),
             handler.run_turn(_message(content="two"), send),
+        )
+        assert max(overlaps) == 1
+
+
+class TestRouting:
+    """ADR 017: each channel's route is its own world; routes never share
+    session state, and only same-route turns serialize."""
+
+    def _two_channel_handler(self) -> DiscordTurnHandler:
+        return DiscordTurnHandler(routes={
+            ALLOWED_CHANNEL: _route(project="Ashfall"),
+            OTHER_CHANNEL: _route(project="Fieldwork"),
+        })
+
+    async def test_messages_route_to_their_channels_orchestrator(self) -> None:
+        handler = self._two_channel_handler()
+        sends: list[str] = []
+
+        async def send(text: str) -> None:
+            sends.append(text)
+
+        await handler.run_turn(_message(content="/mode authoring"), send)
+        first = handler.routes[ALLOWED_CHANNEL].orchestrator
+        second = handler.routes[OTHER_CHANNEL].orchestrator
+        assert first.mode_of(f"discord:{ALLOWED_CHANNEL}") == "authoring"
+        assert second.mode_of(f"discord:{OTHER_CHANNEL}") != "authoring"
+
+    async def test_work_in_one_channel_never_leaks_into_another(self) -> None:
+        """Each route owns its graph and session: a node created (and
+        focused) through channel A is invisible to channel B."""
+        handler = self._two_channel_handler()
+        first = handler.routes[ALLOWED_CHANNEL].orchestrator
+        second = handler.routes[OTHER_CHANNEL].orchestrator
+        reply = await tools.create_node_tool(
+            first.services, type="character", name="Mira", summary="A courier."
+        )
+        assert "Mira" in reply
+        assert first.services.repository.graph.node_count() == 1
+        assert second.services.repository.graph.node_count() == 0
+        assert second.services.session.focus.entries == ()
+
+    async def test_turns_in_different_channels_may_interleave(self) -> None:
+        active = 0
+        overlaps: list[int] = []
+
+        class SlowDriver:
+            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+                nonlocal active
+                active += 1
+                overlaps.append(active)
+                await asyncio.sleep(0)  # yield inside the turn
+                await asyncio.sleep(0)
+                active -= 1
+                return LLMTurn(reply="done")
+
+        handler = self._two_channel_handler()
+        driver = SlowDriver()
+        handler.routes[ALLOWED_CHANNEL].orchestrator.driver = driver
+        handler.routes[OTHER_CHANNEL].orchestrator.driver = driver
+
+        async def send(text: str) -> None:
+            pass
+
+        await asyncio.gather(
+            handler.run_turn(_message(content="one"), send),
+            handler.run_turn(_message(channel_id=OTHER_CHANNEL, content="two"), send),
+        )
+        assert max(overlaps) == 2
+
+    async def test_channels_sharing_one_route_still_serialize(self) -> None:
+        """The legacy allowlist maps every channel to one shared route."""
+        active = 0
+        overlaps: list[int] = []
+
+        class SlowDriver:
+            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+                nonlocal active
+                active += 1
+                overlaps.append(active)
+                await asyncio.sleep(0)
+                active -= 1
+                return LLMTurn(reply="done")
+
+        shared = _route()
+        shared.orchestrator.driver = SlowDriver()
+        handler = DiscordTurnHandler(
+            routes={ALLOWED_CHANNEL: shared, OTHER_CHANNEL: shared}
+        )
+
+        async def send(text: str) -> None:
+            pass
+
+        await asyncio.gather(
+            handler.run_turn(_message(content="one"), send),
+            handler.run_turn(_message(channel_id=OTHER_CHANNEL, content="two"), send),
         )
         assert max(overlaps) == 1
 

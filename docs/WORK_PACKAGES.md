@@ -499,17 +499,26 @@ carry `gc_user_id`/`gc_model`).
   one turn = at most one intent node. Transport egress joins the
   devcontainer firewall allowlist (or the bot runs outside the container).
   **Discord shipped 2026-07-06, verified live.** The per-message policy
-  (channel-allowlist gate, `discord:<id>` identity, 2k chunking, and a
-  process-wide turn lock until per-session state lands) is plain logic in
-  `orchestrator/discord_transport.py`; only the composition-root shim
-  `discord_bot.py` imports discord.py (import-linter-enforced, same
-  quarantine as the agent frameworks). Runtime wiring shared with the CLI
-  was extracted to `orchestrator/bootstrap.py`, so `GC_DRIVER=manual`
-  works over Discord too. Config: `GC_DISCORD_CHANNELS` allowlist (unset =
-  serve nowhere, loudly) + `DISCORD_BOT_TOKEN_FILE` secret; egress =
-  `discord.com`, `gateway.discord.gg`, and the `162.159.128.0/20` anycast
-  block that per-session resume gateways resolve into. Telegram/Slack
-  stay open, per-deployment.
+  (channel gate, `discord:<id>` identity, 2k chunking, a per-route turn
+  lock) is plain logic in `orchestrator/discord_transport.py`; only the
+  composition-root shim `discord_bot.py` imports discord.py
+  (import-linter-enforced, same quarantine as the agent frameworks).
+  Runtime wiring shared with the CLI was extracted to
+  `orchestrator/bootstrap.py`, so `GC_DRIVER=manual` works over Discord
+  too. Config: `GC_CHANNELS_FILE` channel→space bindings (ADR 017) or
+  the legacy `GC_DISCORD_CHANNELS` allowlist (unset = serve nowhere,
+  loudly) + `DISCORD_BOT_TOKEN_FILE` secret; egress = `discord.com`,
+  `gateway.discord.gg`, and the `162.159.128.0/20` anycast block that
+  per-session resume gateways resolve into. Telegram/Slack stay open,
+  per-deployment. **Channel-bound spaces shipped 2026-07-06 (ADR 017):**
+  each Discord channel can bind its own Anytype space, profile, project
+  label, and modes file, declared statically in `GC_CHANNELS_FILE`; the
+  bot builds one full runtime per binding (own repository/GraphIndex,
+  SessionState persisted to that space's SessionContext node, journal,
+  mode store), turns serialize per route instead of process-wide, and
+  startup is sequential + fail-fast. One channel per space (a space
+  holds one SessionContext node) until the keyed session store below
+  lands.
 - **Single-writer delta queue** (settled — see decisions). **Core shipped
   2026-07-02 (ADR 009):** FIFO single-writer seam in the adapter,
   store-truth PATCH materialization via fresh GET in the critical section,
@@ -537,6 +546,10 @@ carry `gc_user_id`/`gc_model`).
   load/flush (one `gc_session_context` node per session; debounce
   discipline unchanged); fake + contract tests move with it. The MCP
   server keeps its single implicit session — behavior unchanged.
+  **Channel-scoped slice shipped 2026-07-06 (ADR 017):** channels bound
+  to different spaces get fully independent `SessionState` (persisted
+  per space) for free; per-user sessions *within* one space still need
+  the keyed store above.
 - **Authorization at the bot layer.** Channel and user allowlists;
   per-user *mode* availability (WP6's mode binding extends per-user — e.g.
   authoring for everyone, world-modeling for editors). Config-driven for

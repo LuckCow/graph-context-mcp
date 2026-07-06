@@ -3,6 +3,7 @@
 import httpx
 import pytest
 
+from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeApiError, AnytypeConfig
 
@@ -64,3 +65,21 @@ class TestTransportErrors:
             assert isinstance(excinfo.value.__cause__, httpx.ConnectError)
         finally:
             await client.aclose()
+
+
+class TestConfigFromEnv:
+    def test_an_explicit_space_id_overrides_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ADR 017: channel bindings hand from_env their space directly."""
+        monkeypatch.setenv("ANYTYPE_API_KEY", "k")
+        monkeypatch.setenv("ANYTYPE_SPACE_ID", "env-space")
+        assert AnytypeConfig.from_env("bound-space").space_id == "bound-space"
+
+    def test_without_an_explicit_space_the_env_var_is_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ANYTYPE_API_KEY", "k")
+        monkeypatch.delenv("ANYTYPE_SPACE_ID", raising=False)
+        with pytest.raises(GraphContextError, match="ANYTYPE_SPACE_ID"):
+            AnytypeConfig.from_env()

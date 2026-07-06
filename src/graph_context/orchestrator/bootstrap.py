@@ -35,6 +35,8 @@ from graph_context.errors import GraphContextError
 from graph_context.interface import profiles
 from graph_context.interface.profiles import DomainProfile
 from graph_context.orchestrator import modes
+from graph_context.orchestrator.channels import ChannelRoute, load_channel_bindings
+from graph_context.orchestrator.discord_transport import parse_channel_allowlist
 from graph_context.orchestrator.drivers import (
     LLMDriver,
     LLMTurn,
@@ -159,6 +161,78 @@ class Runtime:
     teardown: list[TeardownHook]
 
 
+@dataclass(frozen=True, slots=True)
+class ChannelRuntimes:
+    """The Discord bot's routing table: every served channel, wired.
+
+    In legacy allowlist mode all channels share one route (one runtime,
+    one lock -- today's serialization preserved); with a channels file
+    each binding gets its own (ADR 017).
+    """
+
+    routes: Mapping[int, ChannelRoute]
+    descriptions: Mapping[int, str]  # channel id -> "space=..., profile=..."
+    help_line: str
+    teardown: list[TeardownHook]
+
+
+async def _assemble_runtime(
+    profile: DomainProfile,
+    driver: LLMDriver,
+    model_name: str,
+    help_line: str,
+    turn_log: TurnLog | None,
+    *,
+    space_id: str | None = None,
+    project: str | None = None,
+    modes_file: str | None = None,
+) -> Runtime:
+    """One fully wired runtime: services, provenance, mode registry.
+
+    Everything space-bound multiplies per call -- the journal included
+    (a shared journal would attribute one channel's mutations to another
+    channel's intent node); the driver and turn log are shared, both
+    per-turn stateless. ``modes_file`` overrides ``GC_MODES_FILE`` for
+    this runtime (per-channel modes, ADR 017).
+    """
+    provenance_on = os.environ.get("GC_PROVENANCE", "1").lower() not in {
+        "0", "false", "no",
+    }
+    store_prompt = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
+        "0", "false", "no",
+    }
+    journal = MutationJournal() if provenance_on else None
+    built = await composition.build_runtime(
+        profile, journal=journal, space_id=space_id, project=project
+    )
+    services = built.services
+    recorder = (
+        IntentRecorder(services.repository, store_prompt=store_prompt)
+        if provenance_on else None
+    )
+    # ADR 015: profile defaults, overlaid by the modes file TOML and by
+    # the space's own Activity Mode objects (in-space wins). The same
+    # closure re-reads all three sources on every /mode command, so an
+    # edit made in Anytype applies without a restart.
+    modes_file = modes_file or os.environ.get("GC_MODES_FILE")
+
+    async def reload_registry() -> modes.ModeRegistry:
+        return modes.load_registry(
+            profile, modes_file, in_space=await built.mode_store.load()
+        )
+
+    registry = await reload_registry()  # startup: bad specs fail loudly here
+    orchestrator = Orchestrator(
+        services=services, driver=driver, profile=profile,
+        registry=registry, provenance=recorder, model_name=model_name,
+        reload_registry=reload_registry, turn_log=turn_log,
+    )
+    return Runtime(
+        orchestrator=orchestrator, profile=profile,
+        help_line=help_line, teardown=built.teardown,
+    )
+
+
 async def build_orchestrator() -> Runtime:
     """Env-driven assembly shared by every transport ``main()``.
 
@@ -170,38 +244,79 @@ async def build_orchestrator() -> Runtime:
     here, before any loop starts.
     """
     profile = profiles.get_profile(os.environ.get("GC_PROFILE"))
-    provenance_on = os.environ.get("GC_PROVENANCE", "1").lower() not in {
-        "0", "false", "no",
-    }
-    store_prompt = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
-        "0", "false", "no",
-    }
-    journal = MutationJournal() if provenance_on else None
-    built = await composition.build_runtime(profile, journal=journal)
-    services = built.services
-    recorder = (
-        IntentRecorder(services.repository, store_prompt=store_prompt)
-        if provenance_on else None
+    driver, model_name, help_line = build_driver()
+    return await _assemble_runtime(
+        profile, driver, model_name, help_line, build_turn_log()
     )
-    # ADR 015: profile defaults, overlaid by the optional GC_MODES_FILE
-    # TOML and by the space's own Activity Mode objects (in-space wins).
-    # The same closure re-reads all three sources on every /mode command,
-    # so an edit made in Anytype applies without a restart.
-    modes_file = os.environ.get("GC_MODES_FILE")
 
-    async def reload_registry() -> modes.ModeRegistry:
-        return modes.load_registry(
-            profile, modes_file, in_space=await built.mode_store.load()
+
+async def build_channel_runtimes() -> ChannelRuntimes:
+    """The Discord composition: channel bindings -> per-space runtimes.
+
+    ``GC_CHANNELS_FILE`` set -> one runtime per binding, assembled
+    SEQUENTIALLY (concurrent ``ensure_schema`` bursts would just trip the
+    live server's ~1 write/s throttle) and failing the whole bot if any
+    space fails -- a half-alive bot silently ignoring a channel is the
+    worse failure mode. Unset -> exactly today's behavior: the
+    ``GC_DISCORD_CHANNELS`` allowlist over one env-configured runtime,
+    every channel sharing one route (and so one turn lock). Setting both
+    is ambiguous and fails loudly.
+    """
+    channels_file = os.environ.get("GC_CHANNELS_FILE", "").strip()
+    legacy_raw = os.environ.get("GC_DISCORD_CHANNELS")
+    if channels_file and legacy_raw:
+        raise GraphContextError(
+            "both GC_CHANNELS_FILE and GC_DISCORD_CHANNELS are set; the "
+            "channels file replaces the allowlist -- unset one"
+        )
+    driver, model_name, help_line = build_driver()
+    turn_log = build_turn_log()
+
+    if not channels_file:
+        allowed = parse_channel_allowlist(legacy_raw)
+        runtime = await _assemble_runtime(
+            profiles.get_profile(os.environ.get("GC_PROFILE")),
+            driver, model_name, help_line, turn_log,
+        )
+        shared = ChannelRoute(orchestrator=runtime.orchestrator)
+        space = os.environ.get("ANYTYPE_SPACE_ID", "(env)")
+        return ChannelRuntimes(
+            routes={cid: shared for cid in allowed},
+            descriptions={
+                cid: f"space={space}, profile={runtime.profile.name}"
+                for cid in allowed
+            },
+            help_line=help_line,
+            teardown=runtime.teardown,
         )
 
-    registry = await reload_registry()  # startup: bad specs fail loudly here
-    driver, model_name, help_line = build_driver()
-    orchestrator = Orchestrator(
-        services=services, driver=driver, profile=profile,
-        registry=registry, provenance=recorder, model_name=model_name,
-        reload_registry=reload_registry, turn_log=build_turn_log(),
-    )
-    return Runtime(
-        orchestrator=orchestrator, profile=profile,
-        help_line=help_line, teardown=built.teardown,
+    bindings = load_channel_bindings(channels_file, os.environ.get("GC_PROFILE"))
+    routes: dict[int, ChannelRoute] = {}
+    descriptions: dict[int, str] = {}
+    teardown: list[TeardownHook] = []
+    for binding in bindings:
+        try:
+            runtime = await _assemble_runtime(
+                binding.profile, driver, model_name, help_line, turn_log,
+                space_id=binding.space_id, project=binding.project,
+                modes_file=binding.modes_file,
+            )
+        except GraphContextError as err:
+            await composition.run_teardown(teardown)  # close what already built
+            raise GraphContextError(
+                f"channel {binding.channel_id} (space {binding.space_id}) "
+                f"failed to start: {err}"
+            ) from err
+        routes[binding.channel_id] = ChannelRoute(orchestrator=runtime.orchestrator)
+        descriptions[binding.channel_id] = (
+            f"space={binding.space_id}, profile={binding.profile.name}"
+        )
+        teardown.extend(runtime.teardown)
+        logger.info(
+            "channel %d -> space %s (profile=%s)",
+            binding.channel_id, binding.space_id, binding.profile.name,
+        )
+    return ChannelRuntimes(
+        routes=routes, descriptions=descriptions,
+        help_line=help_line, teardown=teardown,
     )
