@@ -41,7 +41,12 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class LLMTurn:
-    """A driver's decision: either tool calls to run, or the final reply."""
+    """A driver's decision: tool calls to run, the final reply, or both.
+
+    Text bundled with tool calls is normally preamble the pipeline
+    ignores; on a turn's final decision (after ``LAST_TURN_WARNING``) it
+    counts as the reply, so a warned driver can land one last update AND
+    answer."""
 
     reply: str = ""
     tool_calls: tuple[ToolCall, ...] = ()

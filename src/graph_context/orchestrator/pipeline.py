@@ -42,6 +42,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOOL_CALLS = 16  # per turn; a loop guard, not a feature
 
+# Injected before the budget's final decide so the driver lands the turn
+# instead of being cut off mid-plan; its consumer is an LLM.
+LAST_TURN_WARNING = (
+    "[harness] Tool budget: this is your FINAL decision for this turn. "
+    "You may include one last batch of tool calls -- they WILL be "
+    "executed, but no results will come back to you. Put your final "
+    "answer to the user in this same message as text: whatever text you "
+    "send now IS your reply."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ReplyEvent:
@@ -132,7 +142,10 @@ class Orchestrator:
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
         reply_text = ""
-        for _ in range(self.max_tool_calls):
+        for decisions_left in range(self.max_tool_calls, 0, -1):
+            final_decision = decisions_left == 1
+            if final_decision:
+                transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(transcript, tools, spec.goal)
             if self.turn_log:
                 self.turn_log.llm_turn(session_id, spec.name, turn)
@@ -159,10 +172,17 @@ class Orchestrator:
                 if self.turn_log:
                     self.turn_log.tool_result(session_id, spec.name, call, result)
                 transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
+            if final_decision and turn.reply.strip():
+                # The warned driver bundled its answer with a last update:
+                # the calls just ran, the text is the reply.
+                reply_text = turn.reply
+                events.append(ReplyEvent(reply_text))
+                break
         else:
             events.append(ReplyEvent(
-                f"tool budget exhausted ({self.max_tool_calls} calls) before "
-                "the driver replied; the turn was cut short.",
+                f"tool budget exhausted ({self.max_tool_calls} decisions): "
+                "the final tool calls ran, but the driver bundled no reply "
+                "text despite the warning; the turn was cut short.",
                 kind="notice",
             ))
         await self._finish_turn(spec, user_id, stripped, reply_text, trace)

@@ -25,9 +25,14 @@ from graph_context.interface.profiles import (
 )
 from graph_context.interface.tools import Services, build_services
 from graph_context.orchestrator import modes
-from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver, ToolCall
+from graph_context.orchestrator.drivers import (
+    LLMTurn,
+    ScriptedDriver,
+    ToolCall,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.modes import MUTATION_TOOLS, binding_for, load_registry
-from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.pipeline import LAST_TURN_WARNING, Orchestrator
 
 FICTION = get_profile("fiction")
 AUTHORING = next(s for s in FICTION.mode_specs if s.name == "authoring")
@@ -181,6 +186,18 @@ def _orchestrator(services: Services, turns: list[LLMTurn]) -> Orchestrator:
 CREATE_MIRA = ToolCall("create_node", {
     "type": "Character", "name": "Mira", "summary": "Exiled siege engineer.",
 })
+
+
+class _TranscriptRecordingDriver(ScriptedDriver):
+    """Scripted, but keeps what the pipeline SHOWED it at each decision."""
+
+    def __init__(self, turns: list[LLMTurn]) -> None:
+        super().__init__(turns)
+        self.transcripts: list[tuple[TranscriptEvent, ...]] = []
+
+    async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+        self.transcripts.append(tuple(transcript))
+        return await super().decide(transcript, tools, goal)
 
 
 class TestPipeline:
@@ -340,6 +357,65 @@ class TestPipeline:
         events = await orchestrator.handle_message("s1", "u1", "loop forever")
         assert events[-1].kind == "notice"
         assert "budget exhausted" in events[-1].text
+
+    async def test_only_the_final_decision_is_warned(
+        self, services: Services
+    ) -> None:
+        """The driver hears about the cutoff exactly once, right before its
+        last decision, so it can answer instead of being cut off."""
+        probe = ToolCall("context", {"action": "get"})
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(tool_calls=(probe,)),
+            LLMTurn(tool_calls=(probe,)),
+            LLMTurn(reply="Best answer from what I gathered."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION), max_tool_calls=3,
+        )
+        events = await orchestrator.handle_message("s1", "u1", "dig deep")
+        warned = [
+            any(e.text == LAST_TURN_WARNING for e in transcript)
+            for transcript in driver.transcripts
+        ]
+        assert warned == [False, False, True]
+        # the warned driver replied, so the turn ends normally: no notice
+        assert [e.kind for e in events] == ["reply"]
+        assert events[0].text == "Best answer from what I gathered."
+
+    async def test_final_decision_bundles_a_last_update_with_the_reply(
+        self, services: Services
+    ) -> None:
+        """A warned driver may land one last update AND answer: the calls
+        run, and the text that is normally ignored preamble IS the reply."""
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="Mira now exists.", tool_calls=(CREATE_MIRA,)),
+        ])
+        orchestrator.max_tool_calls = 1
+        events = await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        assert services.repository.graph.find_by_name("Mira")  # update ran
+        assert [e.kind for e in events] == ["reply"]  # and no cutoff notice
+        assert events[0].text == "Mira now exists."
+
+    async def test_final_update_without_reply_text_is_still_cut_short(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [LLMTurn(tool_calls=(CREATE_MIRA,))])
+        orchestrator.max_tool_calls = 1
+        events = await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        assert services.repository.graph.find_by_name("Mira")  # update ran
+        assert events[-1].kind == "notice"
+        assert "budget exhausted" in events[-1].text
+
+    async def test_preamble_text_on_a_non_final_decision_is_not_a_reply(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="Creating Mira now...", tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira now exists."),
+        ])
+        events = await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        assert [e.text for e in events] == ["Mira now exists."]
 
 
 def _provenance_orchestrator(
