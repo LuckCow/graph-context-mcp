@@ -37,7 +37,8 @@ async def main() -> None:
     os.environ["GC_BACKEND"] = "memory"
     profile = get_profile("assistant")
     journal = MutationJournal()
-    services, teardown = await composition.build_runtime(profile, journal=journal)
+    built = await composition.build_runtime(profile, journal=journal)
+    services, teardown = built.services, built.teardown
     registry = load_registry(profile)
     orchestrator = Orchestrator(
         services=services,

@@ -22,7 +22,8 @@ from graph_context.orchestrator.pipeline import Orchestrator
 async def main() -> None:
     os.environ["GC_BACKEND"] = "memory"
     profile = get_profile("fiction")
-    services, teardown = await composition.build_runtime(profile)
+    built = await composition.build_runtime(profile)
+    services, teardown = built.services, built.teardown
     orchestrator = Orchestrator(
         services=services,
         profile=profile,

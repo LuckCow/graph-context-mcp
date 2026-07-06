@@ -80,7 +80,13 @@ class AnytypeClient:
         last_error: AnytypeApiError | None = None
         for attempt in range(self._config.max_retries + 1):
             self.request_count += 1
-            response = await self._http.request(method, path, params=params, json=json)
+            try:
+                response = await self._http.request(method, path, params=params, json=json)
+            except httpx.HTTPError as err:
+                # Transport-level failure (connection refused, timeout, ...):
+                # translate so callers see one error family, per the module
+                # contract. status=0 marks "no HTTP response at all".
+                raise AnytypeApiError(0, "transport", str(err), path) from err
             if response.status_code < 400:
                 return response.json() if response.content else {}
             error = self._to_error(response, path)

@@ -63,11 +63,13 @@ class AppContext:
 async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
     # The build itself is shared with the orchestrator's composition root
     # (ADR 007): one wiring, two roots -- see graph_context/composition.py.
-    services, teardown = await composition.build_runtime(_PROFILE)
+    # The runtime's mode store is unused here: activity modes are an
+    # orchestrator concept; the MCP surface binds every tool (ADR 007).
+    built = await composition.build_runtime(_PROFILE)
     try:
-        yield AppContext(services=services, teardown=teardown)
+        yield AppContext(services=built.services, teardown=built.teardown)
     finally:
-        await composition.run_teardown(teardown)
+        await composition.run_teardown(built.teardown)
 
 
 mcp = FastMCP("graph-context", lifespan=lifespan)

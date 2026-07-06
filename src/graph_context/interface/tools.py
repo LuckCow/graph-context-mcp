@@ -138,7 +138,7 @@ def guarded(
         except GraphContextError as known:
             outcome = "error"
             body = f"ERROR: {known}"
-        except Exception:  # noqa: BLE001 -- never leak a traceback into a story
+        except Exception:  # never leak a traceback into a story
             outcome = "error"
             logger.exception("unexpected error in tool %s", fn.__name__)
             body = "ERROR: internal error; details were logged server-side."

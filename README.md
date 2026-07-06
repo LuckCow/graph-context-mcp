@@ -35,6 +35,15 @@ PYTHONPATH=src python scripts/demo_wp12_assistant.py   # record_procedure end-to
 
 Profile docstrings are pinned by golden snapshot tests (`tests/interface/golden/`) — editing them is prompt engineering, and the golden diff is the review artifact (`GC_REGEN_GOLDENS=1 pytest tests/interface/test_profiles.py` to regenerate deliberately).
 
+### Editing modes inside Anytype
+
+Modes are also configurable **in the space itself** (ADR 015 amendment): every object of the bootstrap-minted **Activity Mode** type defines one mode. The first run seeds an *Example Mode* template whose body walks through the fields; the short version:
+
+- The object **name** becomes the `/mode` name ("Faithful Scribe" → `/mode faithful_scribe`); naming it after a built-in (e.g. `world_modeling`) overrides that mode.
+- The **page body** is the goal prompt the model follows — e.g. *"Record only what the user explicitly states; organize and link it, but never invent or embellish details."*
+- Tick **`gc_mode_mutating`** to allow graph edits; fill **`gc_capture_type`** (plus optional `gc_capture_references`, `gc_capture_min_chars`) to auto-capture substantial replies; **archive** the object to disable the mode.
+- Edits apply when `/mode` is next used in chat (any transport, Discord included) — `/mode` reloads and lists, `/mode <name>` switches. No restart. Precedence: profile defaults < `GC_MODES_FILE` < in-space.
+
 ## Running the MCP server
 
 The server speaks **stdio** (one process per client; no network port). Run it directly only for a quick local check:
@@ -52,7 +61,7 @@ GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # ke
 python -m graph_context.orchestrator.discord_bot                           # Discord bot (WP8), live backend by default
 ```
 
-The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels in `GC_DISCORD_CHANNELS` — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; unset allowlist = serve nowhere, loudly). It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. The **mode** is per-channel (`/mode <name>` switches it for that channel); the underlying focus-stack session is still process-wide — a turn lock serializes concurrent messages until WP8's per-session state lands. Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
+The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels in `GC_DISCORD_CHANNELS` — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; unset allowlist = serve nowhere, loudly). It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer (egress rules in `.devcontainer/init-firewall.sh`); the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty. `GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`) and works over Discord too. The **mode** is per-channel (`/mode <name>` switches it for that channel); the underlying focus-stack session is still process-wide — a turn lock serializes concurrent messages until WP8's per-session state lands. Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes). Every turn is also written in full — the user's message, each model decision, every tool call with its complete output, and the final replies, each entry stamped with the active mode — to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB; the oldest entries are dropped once exceeded).
 
 ## Connecting Claude Desktop (from the dev container)
 
@@ -147,6 +156,7 @@ interface  ──▶  application  ──▶  domain
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand descriptions/prose |
 | `ports/session_store.py` | Session-snapshot contract | Plain-dict snapshots; lenient load (corrupt → `None`) |
+| `ports/mode_store.py` | Activity-Mode config contract | Plain payload dicts; validation lives in the loader, not the store |
 | `ports/semantic.py` | `Embedder` + `SemanticIndex` contracts | Embeddings are a cache keyed by content hash + model, never truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
 | `application/node_reader.py` | `get_node` use-case | Grouped edges + WP7 `include_provenance` excerpts |
@@ -158,26 +168,28 @@ interface  ──▶  application  ──▶  domain
 | `application/ranker.py` | Graph-aware retrieval ([ADR 016](docs/adr/016-graph-aware-ranking.md)) | Recall seeds → graph recruits → activation scores; every hit carries evidence |
 | `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh` |
 | `composition.py` | Shared service builder | One wiring; both composition roots delegate to it |
-| `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` | Reference impls; certified by `tests/contract` |
+| `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` + `InMemoryModeStore` | Reference impls; certified by `tests/contract` |
 | `infrastructure/semantic/` | Hash + sentence-transformers embedders; memory + SQLite index | `GC_EMBEDDER` selects; the SQLite cache file is disposable |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
 | `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A8) live here |
 | `infrastructure/anytype/registry.py` | `SpaceRegistry`: the space's live types/relations | Resolves requested types & relation labels to existing keys; unknown labels surface for approval |
-| `infrastructure/anytype/schema_bootstrap.py` | Idempotent **infra-only** bootstrap | gc_ infra types (Prose, SessionContext), scalar gc_ properties, starter `gc_edge_*` relations — story entities use the space's native types |
+| `infrastructure/anytype/schema_bootstrap.py` | Idempotent **infra-only** bootstrap | gc_ infra types (Prose, SessionContext, Activity Mode + its example object), scalar gc_ properties, starter `gc_edge_*` relations — story entities use the space's native types |
 | `infrastructure/anytype/sync.py` | Hydrate / resync engine | Lenient reads, strict writes; search-based modified-since |
 | `infrastructure/anytype/repository.py` | `AnytypeGraphRepository` | Persist-first write-through; composite rollback; self-write suppression |
 | `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
+| `infrastructure/anytype/mode_store.py` | `AnytypeModeStore` | One mode per `gc_activity_mode` object: name → `/mode` slug, page body → goal, archive = disable |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps) |
 | `interface/presenters.py` | Context header + detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
 | `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: header + actionable errors + per-call logging |
 | `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
 | `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
 | `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; drains the journal into an intent node at turn end |
-| `orchestrator/modes.py` | `ModeSpec` loader (`GC_MODES_FILE` overlay) | Unbound tools don't exist in the session — unavailable, not refused |
+| `orchestrator/modes.py` | `ModeSpec` loader (profile < `GC_MODES_FILE` < in-space) | Unbound tools don't exist in the session — unavailable, not refused; `/mode` re-reads all sources |
 | `orchestrator/drivers.py` | `LLMDriver` seam + scripted/manual drivers | Transcript + tool docs + mode goal in; tool calls or a reply out |
 | `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |
 | `orchestrator/capture.py` | Authoring auto-capture | Exact-name entity linking; the harness records what tools used to ask for |
-| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by CLI and Discord; `GC_DRIVER` / `GC_PROVENANCE` resolution |
+| `orchestrator/turn_log.py` | Full-fidelity turn diary (JSONL) | Input, every driver decision, every tool call + complete output, final replies; byte-capped — oldest entries drop |
+| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by CLI and Discord; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution |
 | `orchestrator/discord_transport.py` + `discord_bot.py` | Discord adapter (WP8) | Per-message policy is plain logic; only the composition-root shim imports discord.py |
 
 ## Conventions to carry forward

@@ -95,6 +95,74 @@ goal = "Overridden authoring goal."
             load_registry(FICTION, str(tmp_path / "absent.toml"))
 
 
+def _mode_payload(**overrides) -> dict:
+    """One in-space Activity Mode payload, ModeStore-port shaped."""
+    payload = {
+        "name": "Faithful Scribe",
+        "goal": "Record only what the user explicitly states.",
+        "mutating": True,
+        "capture": None,
+        "origin": "'Faithful Scribe' (obj-1)",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestInSpaceOverlay:
+    """ADR 015 amendment: the space's Activity Mode objects win."""
+
+    def test_in_space_adds_a_mode_with_a_slugged_name(self) -> None:
+        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        scribe = registry.get("faithful_scribe")
+        assert scribe is not None and scribe.mutating
+        assert scribe.goal == "Record only what the user explicitly states."
+        assert registry.default == "world_modeling"  # untouched
+
+    def test_in_space_overrides_profile_and_toml(self, tmp_path) -> None:
+        modes_file = tmp_path / "modes.toml"
+        modes_file.write_text('[modes.authoring]\ngoal = "From the TOML."\n')
+        registry = load_registry(
+            FICTION, str(modes_file),
+            in_space=[_mode_payload(name="Authoring", goal="From the space.",
+                                    mutating=False)],
+        )
+        authoring = registry.get("authoring")
+        assert authoring is not None
+        assert authoring.goal == "From the space."  # in-space wins
+
+    def test_in_space_capture_fills_policy_defaults(self) -> None:
+        registry = load_registry(FICTION, in_space=[_mode_payload(
+            capture={"artifact_type": "note", "min_chars": 120.0},
+        )])
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.capture is not None
+        assert spec.capture.artifact_type == "note"
+        assert spec.capture.min_chars == 120  # coerced to int
+        assert spec.capture.references_label == "references"  # the default
+
+    def test_empty_goal_names_the_object_and_the_fix(self) -> None:
+        with pytest.raises(GraphContextError, match="page body"):
+            load_registry(FICTION, in_space=[_mode_payload(goal="  ")])
+
+    def test_unusable_name_fails_loudly(self) -> None:
+        with pytest.raises(GraphContextError, match="letters and digits"):
+            load_registry(FICTION, in_space=[_mode_payload(name="!!!")])
+
+    def test_duplicate_slugs_name_both_objects(self) -> None:
+        first = _mode_payload(origin="'Faithful Scribe' (obj-1)")
+        second = _mode_payload(name="faithful   SCRIBE",
+                               origin="'faithful   SCRIBE' (obj-2)")
+        with pytest.raises(GraphContextError) as excinfo:
+            load_registry(FICTION, in_space=[first, second])
+        assert "obj-1" in str(excinfo.value) and "obj-2" in str(excinfo.value)
+
+    def test_bad_min_chars_is_rejected(self) -> None:
+        with pytest.raises(GraphContextError, match="min_chars"):
+            load_registry(FICTION, in_space=[_mode_payload(
+                capture={"artifact_type": "note", "min_chars": -3},
+            )])
+
+
 @pytest.fixture
 def services() -> Services:
     return build_services(
@@ -178,6 +246,89 @@ class TestPipeline:
         assert goals[0] == WORLD_MODELING.goal
         assert goals[1] == AUTHORING.goal
 
+    async def test_mode_command_refreshes_the_registry(
+        self, services: Services
+    ) -> None:
+        """ADR 015 amendment: edit the Activity Mode object in Anytype,
+        send /mode, and the new spec is live -- no restart."""
+        payloads: list[dict] = []
+
+        async def reload():
+            return load_registry(FICTION, in_space=payloads)
+
+        orchestrator = Orchestrator(
+            services=services, driver=ScriptedDriver([]), profile=FICTION,
+            registry=load_registry(FICTION), reload_registry=reload,
+        )
+        payloads.append(_mode_payload())  # the human creates the object
+        events = await orchestrator.handle_message("s1", "u1", "/mode")
+        assert "faithful_scribe" in events[-1].text
+        switched = await orchestrator.handle_message(
+            "s1", "u1", "/mode faithful_scribe"
+        )
+        assert switched[-1].kind == "notice"
+        assert orchestrator.mode_of("s1") == "faithful_scribe"
+
+    async def test_failed_refresh_keeps_the_last_good_registry(
+        self, services: Services
+    ) -> None:
+        async def reload():
+            raise GraphContextError("Activity Mode 'Broken' (obj-9): the "
+                                    "goal is empty")
+
+        orchestrator = Orchestrator(
+            services=services, driver=ScriptedDriver([]), profile=FICTION,
+            registry=load_registry(FICTION), reload_registry=reload,
+        )
+        events = await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        errors = [e for e in events if e.kind == "error"]
+        assert errors and "obj-9" in errors[0].text  # actionable, names it
+        # the switch still worked against the previously loaded registry
+        assert orchestrator.mode_of("s1") == "authoring"
+
+    async def test_vanished_mode_falls_back_to_the_default(
+        self, services: Services
+    ) -> None:
+        payloads = [_mode_payload()]
+
+        async def reload():
+            return load_registry(FICTION, in_space=payloads)
+
+        orchestrator = Orchestrator(
+            services=services, driver=ScriptedDriver([LLMTurn(reply="ok")]),
+            profile=FICTION, registry=load_registry(FICTION),
+            reload_registry=reload,
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode faithful_scribe")
+        payloads.clear()  # the human archives the object
+        events = await orchestrator.handle_message("s1", "u1", "/mode")
+        assert any(
+            e.kind == "notice" and "no longer loaded" in e.text for e in events
+        )
+        assert orchestrator.mode_of("s1") == "world_modeling"
+
+    async def test_vanished_mode_mid_turn_degrades_without_dying(
+        self, services: Services
+    ) -> None:
+        """A refresh from one session may drop another session's mode; the
+        next turn in that session must degrade to the default, not crash."""
+        payloads = [_mode_payload()]
+
+        async def reload():
+            return load_registry(FICTION, in_space=payloads)
+
+        orchestrator = Orchestrator(
+            services=services, driver=ScriptedDriver([LLMTurn(reply="ok")]),
+            profile=FICTION, registry=load_registry(FICTION),
+            reload_registry=reload,
+        )
+        await orchestrator.handle_message("a", "u1", "/mode faithful_scribe")
+        payloads.clear()
+        await orchestrator.handle_message("b", "u2", "/mode")  # b refreshes
+        events = await orchestrator.handle_message("a", "u1", "hello")
+        assert events[-1].kind == "reply"
+        assert orchestrator.mode_of("a") == "world_modeling"
+
     async def test_tool_budget_cuts_a_runaway_turn(self, services: Services) -> None:
         probe = ToolCall("context", {"action": "get"})
         orchestrator = Orchestrator(
@@ -235,6 +386,7 @@ class TestProvenanceTurns:
         (intent,) = _intent_nodes(services)
         assert intent.name.startswith("Intent: Add Mira.")
         assert intent.fields["user_id"] == "cli:nick"
+        assert intent.fields["mode"] == "world_modeling"  # the active binding
         mira = services.repository.graph.resolve("Mira")
         assert {e.target for e in services.repository.graph.edges(intent.id)} == {
             mira.id

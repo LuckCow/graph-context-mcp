@@ -1,0 +1,126 @@
+"""Size-capped JSONL record of everything that crosses the turn seam.
+
+Every message the orchestrator handles is logged as it flows: the user's
+input, each driver decision (tool calls or the final reply), every
+executed tool call with its FULL rendered result, and the turn's final
+reply events. One JSON object per line so the file tails and greps
+cleanly; every entry carries an ISO-8601 UTC timestamp.
+
+The file is bounded, not rotated: once an append pushes it past
+``max_bytes``, the OLDEST entries are dropped until the newest fit in
+half the budget (halving amortizes the rewrite instead of trimming on
+every subsequent append). A diagnostic must never take a turn down with
+it, so write failures degrade to a logged warning -- the reply still
+reaches the user. The missing-directory case, by contrast, fails loudly
+at construction time, i.e. at startup.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from graph_context.orchestrator.drivers import LLMTurn, ToolCall
+
+if TYPE_CHECKING:
+    from graph_context.orchestrator.pipeline import ReplyEvent
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_BYTES = 10_000_000  # ~10 MB of JSONL before old entries drop
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+class TurnLog:
+    """Append-only turn diary with a byte budget (see module docstring)."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        now: Callable[[], str] = _utc_now,
+    ) -> None:
+        self._path = Path(path)
+        self._max_bytes = max_bytes
+        self._now = now
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Every entry names the active mode so a single grepped line is
+    # self-describing -- no walking back to the turn's opening entry.
+
+    def user_message(
+        self, session_id: str, mode: str, user_id: str, text: str
+    ) -> None:
+        self._append({
+            "event": "user", "session": session_id, "mode": mode,
+            "user": user_id, "text": text,
+        })
+
+    def llm_turn(self, session_id: str, mode: str, turn: LLMTurn) -> None:
+        entry: dict[str, Any] = {
+            "event": "llm_turn", "session": session_id, "mode": mode,
+        }
+        if turn.tool_calls:
+            entry["tool_calls"] = [
+                {"name": call.name, "arguments": dict(call.arguments)}
+                for call in turn.tool_calls
+            ]
+        else:
+            entry["reply"] = turn.reply
+        self._append(entry)
+
+    def tool_result(
+        self, session_id: str, mode: str, call: ToolCall, result: str
+    ) -> None:
+        self._append({
+            "event": "tool_result", "session": session_id, "mode": mode,
+            "tool": call.name, "arguments": dict(call.arguments),
+            "result": result,
+        })
+
+    def turn_end(
+        self, session_id: str, mode: str, events: Iterable[ReplyEvent]
+    ) -> None:
+        self._append({
+            "event": "turn_end", "session": session_id, "mode": mode,
+            "replies": [{"kind": e.kind, "text": e.text} for e in events],
+        })
+
+    def _append(self, entry: Mapping[str, Any]) -> None:
+        # default=str: tool arguments come from the model and may hold
+        # shapes json.dumps does not know; a lossy string beats a lost turn.
+        line = json.dumps(
+            {"ts": self._now(), **entry}, ensure_ascii=False, default=str
+        )
+        try:
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            if self._path.stat().st_size > self._max_bytes:
+                self._trim()
+        except OSError as err:
+            logger.warning("turn log write to %s failed: %s", self._path, err)
+
+    def _trim(self) -> None:
+        """Keep the newest entries that fit in half the budget.
+
+        The newest entry survives unconditionally -- a single oversized
+        record must not empty the log.
+        """
+        budget = self._max_bytes // 2
+        lines = self._path.read_text(encoding="utf-8").splitlines(keepends=True)
+        kept = lines[-1:]
+        total = sum(len(line.encode("utf-8")) for line in kept)
+        for line in reversed(lines[:-1]):
+            size = len(line.encode("utf-8"))
+            if total + size > budget:
+                break
+            kept.append(line)
+            total += size
+        self._path.write_text("".join(reversed(kept)), encoding="utf-8")

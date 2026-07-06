@@ -24,8 +24,19 @@ if os.environ.get("GC_CLAUDE_E2E") != "1":
     )
 pytest.importorskip("claude_agent_sdk")
 
+from claude_agent_sdk import (  # noqa: E402
+    ClaudeSDKClient,
+    PermissionResultDeny,
+    SystemMessage,
+    create_sdk_mcp_server,
+)
+
 from graph_context.interface.profiles import get_profile  # noqa: E402
-from graph_context.orchestrator.claude_driver import ClaudeAgentDriver  # noqa: E402
+from graph_context.orchestrator.claude_driver import (  # noqa: E402
+    ClaudeAgentDriver,
+    sdk_tools,
+    session_options,
+)
 from graph_context.orchestrator.drivers import TranscriptEvent  # noqa: E402
 
 GOAL = "You assist with a story-world knowledge graph. Use tools to look things up."
@@ -64,3 +75,30 @@ async def test_a_transcript_with_the_result_becomes_a_reply(tools):
     )
     assert turn.reply and not turn.tool_calls
     assert "mira" in turn.reply.lower()
+
+
+async def test_the_live_session_exposes_only_the_bound_gc_tools(tools):
+    """The capability boundary, checked against the CLI's own init report:
+    no Read/Write/Bash/... -- the binding's mcp__gc__* tools are the whole
+    surface."""
+
+    async def deny(name, tool_input, context):
+        return PermissionResultDeny(
+            message="the harness executes tool calls", interrupt=True
+        )
+
+    server = create_sdk_mcp_server(
+        name="gc", version="1.0.0", tools=sdk_tools(tools, {})
+    )
+    options = session_options(
+        server, GOAL, model=None, effort=None, can_use_tool=deny, cli_path=None
+    )
+    exposed: list[str] = []
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query("Reply with the single word: ok")
+        async for message in client.receive_response():
+            if isinstance(message, SystemMessage) and message.subtype == "init":
+                exposed = list(message.data.get("tools", []))
+    assert exposed, "the CLI init message never arrived"
+    offenders = [name for name in exposed if not name.startswith("mcp__gc__")]
+    assert not offenders, f"non-gc tools exposed to the model: {offenders}"

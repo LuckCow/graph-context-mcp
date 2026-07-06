@@ -1,7 +1,9 @@
 # ADR 015: Activity modes are data; capture is configurable
 
 **Status:** Accepted (2026-07-04) — WP12; extends ADR 007's modes and
-ADR 008's capture beyond fiction; builds on WP5's profiles
+ADR 008's capture beyond fiction; builds on WP5's profiles. Amended
+2026-07-06 — decision 3's stated direction landed: in-space mode
+configuration via `gc_activity_mode` objects (see Amendment below).
 
 ## Context
 
@@ -101,3 +103,47 @@ its current shape.
 - The timeline change touches the domain's one typed timeline value;
   ordering semantics ("comparable, ascending = later") become the
   contract instead of "float".
+
+## Amendment (2026-07-06): in-space mode objects
+
+Decision 3's stated direction is now implemented. A mode is an **Activity
+Mode object** (`gc_activity_mode`) the human creates and edits in Anytype
+like everything else:
+
+- **Name** → the `/mode` name (slugified: "Faithful Scribe" →
+  `faithful_scribe`). An object named after a loaded mode overrides it.
+- **Page body** → the `goal` (the established long-form editing surface,
+  ADR 010). The built-in `description` stays a human-facing one-liner.
+- **`gc_mode_mutating`** (checkbox) → the binding; unticked = read-only.
+- **`gc_capture_type`** (text) → enables capture with that artifact type
+  (presence is the switch); `gc_capture_references` /
+  `gc_capture_min_chars` fill the rest of the `CapturePolicy`.
+- **Archiving** an object disables its mode.
+
+The type carries a new infra role (`Role.MODE`, in `INFRA_ROLES`): hidden
+from the LLM's traversal/search, fully visible to the human — the object
+IS the config UI. `ensure_schema` mints the type with its fields attached
+(the API accepts an inline `properties` list on `POST /types`,
+live-confirmed) and seeds a one-time **Example Mode** template whose body
+documents the feature in-space, including that edits apply only when
+`/mode` is next used.
+
+**Precedence:** profile defaults < `GC_MODES_FILE` < in-space. Anytype is
+the human editing surface (ADR 001); an edit made there must never be
+silently shadowed by a file. One validation seam
+(`modes._spec_from_mapping`) serves both config sources; errors name the
+source — `GC_MODES_FILE [modes.x]` vs `Activity Mode 'Name' (id)`.
+
+**Load/refresh:** startup loads once through the `ModeStore` port
+(shaped like `SessionStore`: payload dicts, quirks quarantined in the
+adapter) and fails loudly on bad specs, as before. Every `/mode` command
+— on any transport, Discord included — re-reads all sources before
+acting, so an Anytype edit applies without a restart. A *runtime* refresh
+failure degrades: the last good registry stays, the turn survives, and
+the error names the object to fix; a session whose mode vanished falls
+back to the registry default with a notice.
+
+**Still deferred:** per-space *profile* selection (WP5's question). The
+profile drives `ensure_schema` and role overrides before the repository
+exists, a bootstrapping problem this feature doesn't need; when it lands,
+it should ride the same config-object seam.

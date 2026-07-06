@@ -39,6 +39,7 @@ async def test_mutating_turn_yields_one_intent_node_with_edges_to_every_touch():
         trace=[ToolTrace("create_node", 'type="Character" name="Mira"')],
         user_id="cli:local",
         model="scripted",
+        mode="world_modeling",
     )
     assert node is not None
     assert node.role is Role.INTENT
@@ -46,6 +47,7 @@ async def test_mutating_turn_yields_one_intent_node_with_edges_to_every_touch():
     assert node.name.endswith("2026-07-04T00:00:00Z")
     assert node.fields["user_id"] == "cli:local"
     assert node.fields["model"] == "scripted"
+    assert node.fields["mode"] == "world_modeling"
     targets = {e.target for e in repository.graph.edges(node.id)}
     assert targets == {mira, keep}
     assert {e.type for e in repository.graph.edges(node.id)} == {"intent"}

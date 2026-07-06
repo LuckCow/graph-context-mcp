@@ -672,12 +672,17 @@ class AnytypeGraphRepository:
                 if restore_markdown is not None:
                     payload["markdown"] = restore_markdown  # un-render the footer
                 await self._client.update_object(source_id, payload)
-            except Exception:  # noqa: BLE001 -- best-effort compensation
-                logger.error("rollback: could not restore %s.%s", source_id, property_key)
+            except Exception:
+                # Best-effort compensation: the in-flight create error must
+                # win, so a failed restore is logged (with traceback), never
+                # raised over it.
+                logger.exception(
+                    "rollback: could not restore %s.%s", source_id, property_key
+                )
         try:
             await self._client.archive_object(node_id)
-        except Exception:  # noqa: BLE001
-            logger.error("rollback: could not archive orphan node %s", node_id)
+        except Exception:
+            logger.exception("rollback: could not archive orphan node %s", node_id)
 
     def _track_watermark(self, obj: Mapping[str, Any]) -> None:
         modified = mapping.effective_modified(obj)

@@ -7,8 +7,8 @@ the enforcement mechanism is unchanged from ADR 007: a spec that isn't
 mutating simply never has the mutation tools in its table. Unavailable, not
 refused.
 
-Specs come from the active profile's defaults, optionally extended or
-overridden by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
+Specs come from the active profile's defaults, overlaid (in precedence
+order) by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
 
     [modes.record_procedure]
     goal = "Notate each step the user takes so it can be repeated later..."
@@ -18,15 +18,22 @@ overridden by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
     artifact_type = "procedure"
     min_chars = 120
 
+and by the space's own ``Activity Mode`` objects (ADR 015 amendment) --
+``in_space`` payloads read through the ModeStore port, where the object
+name slugifies to the mode name and the page body is the goal. In-space
+wins: Anytype is the human editing surface, and an edit made there must
+never be shadowed by a file.
+
 Bad specs fail LOUDLY at load time (specs are prompts; a broken one should
-stop startup, not surface mid-turn). In-space mode objects are the stated
-direction (ADR 015) -- this loader is the seam they will feed.
+stop startup, not surface mid-turn); a RUNTIME reload (the ``/mode``
+refresh) catches the same errors and degrades instead -- see the pipeline.
 """
 
 from __future__ import annotations
 
+import re
 import tomllib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -105,18 +112,23 @@ class ModeRegistry:
 
 
 def load_registry(
-    profile: DomainProfile, modes_file: str | None = None
+    profile: DomainProfile,
+    modes_file: str | None = None,
+    in_space: Sequence[Mapping[str, Any]] = (),
 ) -> ModeRegistry:
-    """Profile defaults, overlaid by the optional GC_MODES_FILE TOML.
+    """Profile defaults < GC_MODES_FILE TOML < in-space mode objects.
 
-    File entries override same-named profile specs and may add new ones.
-    Every problem raises :class:`GraphContextError` naming the mode and
+    Later sources override same-named specs and may add new ones;
+    ``in_space`` payloads come from the ModeStore port. Every problem
+    raises :class:`GraphContextError` naming the config source, mode, and
     field -- load-time is the only acceptable place for a spec to fail.
     """
     specs = {spec.name: spec for spec in profile.mode_specs}
     if modes_file:
         for spec in _parse_modes_file(Path(modes_file)):
             specs[spec.name] = spec
+    for spec in _parse_in_space(in_space):
+        specs[spec.name] = spec
     if not specs:
         raise GraphContextError(
             f"profile {profile.name!r} defines no activity modes and no "
@@ -128,6 +140,71 @@ def load_registry(
 
 _SPEC_KEYS = {"goal", "mutating", "capture"}
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
+
+
+def _spec_from_mapping(
+    name: str, body: Mapping[str, Any], origin: str
+) -> ModeSpec:
+    """One validated ModeSpec from config data; errors name ``origin``.
+
+    The single validation seam for every config source (TOML file,
+    in-space objects) -- the sources differ only in how ``name``, the
+    field mapping, and the ``origin`` label are derived.
+    """
+    unknown = set(body) - _SPEC_KEYS
+    if unknown:
+        raise GraphContextError(
+            f"{origin} has unknown keys {sorted(unknown)}; "
+            f"allowed: {sorted(_SPEC_KEYS)}"
+        )
+    capture = None
+    if body.get("capture") is not None:
+        raw = body["capture"]
+        if not isinstance(raw, Mapping):
+            raise GraphContextError(f"{origin}: capture must be a table")
+        unknown = set(raw) - _CAPTURE_KEYS
+        if unknown:
+            raise GraphContextError(
+                f"{origin}: capture has unknown keys {sorted(unknown)}; "
+                f"allowed: {sorted(_CAPTURE_KEYS)}"
+            )
+        kwargs = dict(raw)
+        if "min_chars" in kwargs:
+            kwargs["min_chars"] = _positive_int(
+                kwargs["min_chars"], f"{origin}: min_chars"
+            )
+        capture = CapturePolicy(**kwargs)
+    try:
+        return ModeSpec(
+            name=name,
+            goal=str(body.get("goal", "")),
+            mutating=bool(body.get("mutating", False)),
+            capture=capture,
+        )
+    except ValueError as err:
+        raise GraphContextError(f"{origin}: {err}") from None
+
+
+def _positive_int(value: Any, origin: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or value != int(value)
+        or value <= 0
+    ):
+        raise GraphContextError(
+            f"{origin} must be a positive whole number, got {value!r}"
+        )
+    return int(value)
+
+
+def _slugify(name: str) -> str:
+    """An object's display name -> the ``/mode`` name.
+
+    ``"Faithful Scribe"`` -> ``faithful_scribe``; empty when nothing
+    alphanumeric survives.
+    """
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 def _parse_modes_file(path: Path) -> list[ModeSpec]:
@@ -144,33 +221,46 @@ def _parse_modes_file(path: Path) -> list[ModeSpec]:
         )
     specs: list[ModeSpec] = []
     for name, body in modes.items():
+        origin = f"GC_MODES_FILE [modes.{name}]"
         if not isinstance(body, dict):
-            raise GraphContextError(f"[modes.{name}] must be a table")
-        unknown = set(body) - _SPEC_KEYS
-        if unknown:
+            raise GraphContextError(f"{origin} must be a table")
+        specs.append(_spec_from_mapping(name, body, origin))
+    return specs
+
+
+def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
+    """ModeStore payloads (the space's Activity Mode objects) -> specs.
+
+    The object name slugifies to the mode name and the page body is the
+    goal; errors name the Anytype object so the human knows what to fix
+    or archive.
+    """
+    specs: list[ModeSpec] = []
+    origins: dict[str, str] = {}
+    for payload in payloads:
+        label = str(payload.get("origin") or "(unknown object)")
+        origin = f"Activity Mode {label}"
+        name = _slugify(str(payload.get("name") or ""))
+        if not name:
             raise GraphContextError(
-                f"[modes.{name}] has unknown keys {sorted(unknown)}; "
-                f"allowed: {sorted(_SPEC_KEYS)}"
+                f"{origin}: the object name {payload.get('name')!r} does not "
+                "reduce to a usable mode name -- use letters and digits"
             )
-        capture = None
-        if "capture" in body:
-            raw = body["capture"]
-            if not isinstance(raw, dict):
-                raise GraphContextError(f"[modes.{name}.capture] must be a table")
-            unknown = set(raw) - _CAPTURE_KEYS
-            if unknown:
-                raise GraphContextError(
-                    f"[modes.{name}.capture] has unknown keys {sorted(unknown)}; "
-                    f"allowed: {sorted(_CAPTURE_KEYS)}"
-                )
-            capture = CapturePolicy(**raw)
-        try:
-            specs.append(ModeSpec(
-                name=name,
-                goal=str(body.get("goal", "")),
-                mutating=bool(body.get("mutating", False)),
-                capture=capture,
-            ))
-        except ValueError as err:
-            raise GraphContextError(f"GC_MODES_FILE [modes.{name}]: {err}") from None
+        if name in origins:
+            raise GraphContextError(
+                f"{origin} and Activity Mode {origins[name]} both resolve to "
+                f"mode name {name!r}; rename or archive one"
+            )
+        origins[name] = label
+        if not str(payload.get("goal") or "").strip():
+            raise GraphContextError(
+                f"{origin}: the goal is empty -- write the mode's "
+                "instructions in the object's page body"
+            )
+        body = {
+            key: payload[key]
+            for key in ("goal", "mutating", "capture")
+            if key in payload
+        }
+        specs.append(_spec_from_mapping(name, body, origin))
     return specs

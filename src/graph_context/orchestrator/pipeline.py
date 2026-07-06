@@ -9,9 +9,13 @@ today).
 
 Mode switching is an EXPLICIT user command (settled in WP6): ``/mode
 <name>`` over whatever specs the deployment loaded (ADR 015), handled here
-so every transport gets it for free. Mode is per-session; the underlying
-focus-stack session is still the process-wide one (per-session
-``SessionState`` is WP8).
+so every transport gets it for free. Every ``/mode`` first refreshes the
+registry through the injected ``reload_registry`` hook (ADR 015 amendment:
+in-space Activity Mode objects), so an edit made in Anytype applies
+without a restart; a failed refresh degrades to the last good registry
+with an actionable error. Mode is per-session; the underlying focus-stack
+session is still the process-wide one (per-session ``SessionState`` is
+WP8).
 
 Turn-local transcripts: the driver sees the current turn's events only.
 Cross-turn conversation memory is deliberately the DRIVER's concern (the
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
@@ -31,10 +36,11 @@ from graph_context.interface.tools import Services
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
 from graph_context.orchestrator.modes import ModeRegistry
+from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_TOOL_CALLS = 8  # per turn; a loop guard, not a feature
+DEFAULT_MAX_TOOL_CALLS = 16  # per turn; a loop guard, not a feature
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +71,11 @@ class Orchestrator:
     replies that mention known nodes are auto-captured as Prose (the
     capture is journalled too, so the intent links the artifact). ``None``
     switches the whole subsystem off.
+
+    ``turn_log`` is the same shape of toggle for the full-fidelity turn
+    diary: when wired, every message logs its input, each driver
+    decision, each tool call with its complete output, and the final
+    reply events (see ``turn_log.py``). ``None`` logs nothing.
     """
 
     services: Services
@@ -72,6 +83,11 @@ class Orchestrator:
     profile: DomainProfile
     registry: ModeRegistry
     provenance: IntentRecorder | None = None
+    turn_log: TurnLog | None = None
+    # ADR 015 amendment: re-reads every config source (profile defaults,
+    # GC_MODES_FILE, in-space Activity Mode objects). None (tests, no
+    # config store) keeps the loaded registry for the process lifetime.
+    reload_registry: Callable[[], Awaitable[ModeRegistry]] | None = None
     model_name: str = ""  # attribution for intent nodes (gc_model)
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
@@ -81,7 +97,16 @@ class Orchestrator:
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
-        assert spec is not None  # sessions only ever hold loaded names
+        if spec is None:
+            # The mode vanished in a registry refresh (possibly another
+            # session's /mode). Degrade to the default rather than dying.
+            logger.warning(
+                "mode %r no longer loaded; falling back to %r",
+                state.mode, self.registry.default,
+            )
+            state.mode = self.registry.default
+            spec = self.registry.get(state.mode)
+            assert spec is not None  # the default is always loaded
         return spec
 
     async def handle_message(
@@ -89,8 +114,14 @@ class Orchestrator:
     ) -> list[ReplyEvent]:
         state = self._session(session_id)
         stripped = text.strip()
+        if self.turn_log:
+            self.turn_log.user_message(session_id, state.mode, user_id, stripped)
         if stripped.startswith("/mode"):
-            return [self._switch_mode(state, stripped)]
+            mode_events = await self._switch_mode(state, stripped)
+            if self.turn_log:
+                # state.mode is post-switch: the mode the session is IN now.
+                self.turn_log.turn_end(session_id, state.mode, mode_events)
+            return mode_events
 
         spec = self._spec(state)
         logger.info(
@@ -103,6 +134,8 @@ class Orchestrator:
         reply_text = ""
         for _ in range(self.max_tool_calls):
             turn = await self.driver.decide(transcript, tools, spec.goal)
+            if self.turn_log:
+                self.turn_log.llm_turn(session_id, spec.name, turn)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -123,6 +156,8 @@ class Orchestrator:
                         f"{', '.join(sorted(tools))}"
                     )
                     events.append(ReplyEvent(result, kind="error"))
+                if self.turn_log:
+                    self.turn_log.tool_result(session_id, spec.name, call, result)
                 transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
         else:
             events.append(ReplyEvent(
@@ -131,6 +166,8 @@ class Orchestrator:
                 kind="notice",
             ))
         await self._finish_turn(spec, user_id, stripped, reply_text, trace)
+        if self.turn_log:
+            self.turn_log.turn_end(session_id, spec.name, events)
         return events
 
     async def _finish_turn(
@@ -169,6 +206,7 @@ class Orchestrator:
             trace=trace,
             user_id=user_id,
             model=self.model_name,
+            mode=spec.name,
         )
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
@@ -179,24 +217,58 @@ class Orchestrator:
             session_id, _SessionState(mode=self.registry.default)
         )
 
-    def _switch_mode(self, state: _SessionState, command: str) -> ReplyEvent:
+    async def _switch_mode(
+        self, state: _SessionState, command: str
+    ) -> list[ReplyEvent]:
+        events = await self._refresh_registry()
+        if self.registry.get(state.mode) is None:
+            events.append(ReplyEvent(
+                f"mode {state.mode!r} is no longer loaded; back to "
+                f"{self.registry.default!r}",
+                kind="notice",
+            ))
+            state.mode = self.registry.default
         argument = command.removeprefix("/mode").strip().lower()
         if not argument:
-            return ReplyEvent(
+            events.append(ReplyEvent(
                 f"mode: {state.mode}; switch with /mode "
                 f"{{{' | '.join(self.registry.names())}}}",
                 kind="notice",
-            )
+            ))
+            return events
         spec = self.registry.get(argument)
         if spec is None:
-            return ReplyEvent(
+            events.append(ReplyEvent(
                 f"unknown mode {argument!r}; allowed: "
                 f"{', '.join(self.registry.names())}",
                 kind="error",
-            )
+            ))
+            return events
         state.mode = spec.name
         bound = ", ".join(sorted(modes.binding_for(spec)))
-        return ReplyEvent(
+        events.append(ReplyEvent(
             f"mode switched to {spec.name}; bound tools: {bound}",
             kind="notice",
-        )
+        ))
+        return events
+
+    async def _refresh_registry(self) -> list[ReplyEvent]:
+        """Re-read mode config; on failure keep the last good registry.
+
+        Startup already validated the sources once (loudly); here a human
+        may have broken an Activity Mode object in the Anytype UI while
+        the server runs, so the turn loop must survive it -- the error
+        names the object and field, and the next /mode retries.
+        """
+        if self.reload_registry is None:
+            return []
+        try:
+            self.registry = await self.reload_registry()
+        except Exception as err:  # noqa: BLE001  -- any refresh failure degrades
+            logger.warning("mode registry refresh failed: %s", err, exc_info=True)
+            return [ReplyEvent(
+                f"mode reload failed, keeping the previously loaded modes: "
+                f"{err}",
+                kind="error",
+            )]
+        return []
