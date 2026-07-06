@@ -288,8 +288,15 @@ and the acceptance demo (`scripts/demo_wp6_orchestrator.py`: a scripted
 model TRIES to mutate in authoring mode and cannot). **Remaining after the
 container rebuild:** the LangGraph/Anthropic driver behind the existing
 `LLMDriver` protocol (cross-turn memory = the framework's thread state,
-deliberately left to it), and running `lint-imports` locally. Original
-spec follows.
+deliberately left to it), and running `lint-imports` locally.
+
+**Rebuild addendum (2026-07-06):** the rebuild landed langgraph +
+import-linter; `lint-imports` runs locally and keeps all 7 contracts.
+The driver itself is **still blocked**: the image carries langgraph but
+not the `anthropic` SDK. The firewall already allowlists
+`api.anthropic.com`, so adding `anthropic` to the container build (the
+`[orchestrator]` extra + rebuild) is the one remaining prerequisite.
+Original spec follows.
 
 **Goal:** a runnable agentic pipeline in this repo with two modes and
 harness-owned tool binding, reusing the existing tool layer. No provenance
@@ -848,8 +855,21 @@ embedder). Demo: `scripts/demo_wp11_search.py`. **Deferred:** passage
 stage 2 + the reserved `search` tool (dogfooding gate), reranker
 adapters + real embedders (container rebuild), live-E2E cache-restart
 run (wants a real embedder), and orchestrator RAG prefetch (the
-Ranker's `session_seeds` parameter is ready for it). Original spec
-follows.
+Ranker's `session_seeds` parameter is ready for it).
+
+**Rebuild addendum (2026-07-06):** the real local embedder shipped —
+`GC_EMBEDDER=local` selects `SentenceTransformerEmbedder` over the
+image-baked `BAAI/bge-small-en-v1.5` (`GC_EMBEDDER_MODEL` overrides;
+`HF_HUB_OFFLINE=1` keeps loads off the network). The ranking eval
+golden now runs under both embedders — all six cases pass under the
+real model (the relation-query case still honestly at k=5) — and the
+deferred live-E2E run happened: cache survives restart with zero
+re-embeds, a human rename re-embeds exactly one node (19/19 live).
+**Still deferred:** passage stage 2 + the `search` tool (dogfooding
+gate), reranker adapters (gated WITH stage 2; no cross-encoder is baked
+in the image), the Voyage embedder (firewall allowlist + key), the
+`off`→`local` default flip (a dogfooding call — model load adds startup
+seconds), and orchestrator RAG prefetch. Original spec follows.
 
 **Goal:** "find the node I'm describing" and, later, "find the passage
 that answers this" — as a **derived projection** with a persistent
