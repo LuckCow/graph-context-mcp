@@ -224,6 +224,92 @@ class AnytypeClient:
         )
         return _unwrap(payload, "tag")
 
+    # -- chat (WP14; payload shapes live in chat.py, spike S10) ------------
+
+    def list_chats(self) -> AsyncIterator[dict[str, Any]]:
+        """Chat objects in the space (ordinary paginated ``data`` envelope)."""
+        return self.paginate(f"{self._space}/chats")
+
+    async def create_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+        payload = await self.request("POST", f"{self._space}/chats", json=body)
+        return _unwrap(payload, "object")
+
+    async def list_chat_messages(
+        self, chat_id: str, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """The chat's most recent messages, oldest-first within the window.
+
+        S10: this endpoint is NOT paginated -- the response is a bare
+        ``{"messages": [...]}`` with no pagination block and ``offset`` is
+        ignored, so it returns a limit-bounded recency window, not a page.
+        """
+        payload = await self.request(
+            "GET", f"{self._space}/chats/{chat_id}/messages",
+            params={"limit": limit},
+        )
+        messages: list[dict[str, Any]] = payload.get("messages", [])
+        return messages
+
+    async def create_chat_message(
+        self, chat_id: str, body: dict[str, Any]
+    ) -> str:
+        """Post a message; returns the new message id (S10: the 201 body is
+        a flat ``{"message_id": ...}``, unlike every other write envelope)."""
+        payload = await self.request(
+            "POST", f"{self._space}/chats/{chat_id}/messages", json=body
+        )
+        message_id: str = payload["message_id"]
+        return message_id
+
+    async def edit_chat_message(
+        self, chat_id: str, message_id: str, body: dict[str, Any]
+    ) -> None:
+        await self.request(
+            "PATCH", f"{self._space}/chats/{chat_id}/messages/{message_id}",
+            json=body,
+        )
+
+    async def delete_chat_message(self, chat_id: str, message_id: str) -> None:
+        await self.request(
+            "DELETE", f"{self._space}/chats/{chat_id}/messages/{message_id}"
+        )
+
+    async def stream_lines(
+        self, path: str, *, heartbeat_seconds: int = 30
+    ) -> AsyncIterator[str]:
+        """Yield raw SSE lines from a ``text/event-stream`` endpoint.
+
+        Auth/version headers ride the shared client. The read timeout is
+        tied to the requested heartbeat (2x + margin), so a half-dead
+        stream raises instead of hanging forever -- the caller's reconnect
+        loop is the recovery path. Framing is parsed in ``chat.py``.
+        """
+        timeout = httpx.Timeout(
+            self._config.timeout_seconds, read=heartbeat_seconds * 2 + 5
+        )
+        try:
+            async with self._http.stream(
+                "GET",
+                path,
+                headers={"Anytype-Heartbeat-Seconds": str(heartbeat_seconds)},
+                timeout=timeout,
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    raise self._to_error(response, path)
+                async for line in response.aiter_lines():
+                    yield line
+        except httpx.HTTPError as err:
+            raise AnytypeApiError(0, "transport", str(err), path) from err
+
+    def stream_chat_messages(
+        self, chat_id: str, *, heartbeat_seconds: int = 30
+    ) -> AsyncIterator[str]:
+        return self.stream_lines(
+            f"{self._space}/chats/{chat_id}/messages/stream",
+            heartbeat_seconds=heartbeat_seconds,
+        )
+
     @staticmethod
     def _to_error(response: httpx.Response, endpoint: str) -> AnytypeApiError:
         code, message = "unknown", response.text[:200]

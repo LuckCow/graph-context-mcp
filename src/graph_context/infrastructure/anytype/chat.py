@@ -1,0 +1,160 @@
+"""Chat payload shapes and the chat client -- the chat quirk quarantine.
+
+The chat analogue of ``mapping.py``: every representation assumption about
+the Chat API (heart v0.50.7+, still under the pinned ``2025-11-08``
+version header) lives here, pinned by spike S10 and mirrored by
+``mock_server.py``:
+
+    C1. ``POST .../messages`` returns a flat ``{"message_id": ...}`` --
+        no envelope key, unlike every other write endpoint.
+    C2. ``GET .../messages`` returns ``{"messages": [...]}`` with NO
+        pagination block; ``offset`` is ignored (a recency window).
+    C3. A message's text lives at ``content.text`` (markdown stored
+        verbatim); ``order_id`` is a short lexicographically-increasing
+        string (e.g. ``"!!%>"``) -- string comparison IS stream order.
+    C4. ``creator`` is the member id ``_participant_<space>_<identity>``.
+    C5. SSE framing: ``event: <kind>`` + ``data: {"type": ..., "payload":
+        {"message": {...}}}`` + blank line; keepalives are COMMENT lines
+        ``: heartbeat``. On connect the stream replays recent history as
+        ordinary ``message_added`` frames -- consumers must fast-forward.
+    C6. There is no "who am I" endpoint; members carry no self marker
+        (S10d). Bot-identity discovery is deferred to the sidecar's bot
+        account; until then echo suppression rides on recording our own
+        posted message ids.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
+
+from graph_context.errors import GraphContextError
+from graph_context.infrastructure.anytype.client import AnytypeClient
+
+logger = logging.getLogger(__name__)
+
+MESSAGE_EVENT_KINDS = frozenset(
+    {"message_added", "message_updated", "message_deleted", "reactions_updated"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    """One chat message, reduced to what the transport needs (C3/C4)."""
+
+    id: str
+    creator: str
+    text: str
+    order_id: str
+    created_at: int = 0
+    creator_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ChatEvent:
+    """One SSE frame: a message event, or a keepalive heartbeat."""
+
+    kind: str  # one of MESSAGE_EVENT_KINDS, or "heartbeat"
+    message: ChatMessage | None = None
+
+
+def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
+    content = raw.get("content") or {}
+    return ChatMessage(
+        id=str(raw.get("id", "")),
+        creator=str(raw.get("creator", "")),
+        text=str(content.get("text", "")),
+        order_id=str(raw.get("order_id", "")),
+        created_at=int(raw.get("created_at") or 0),
+        creator_name=str(raw.get("creator_name", "")),
+    )
+
+
+async def parse_sse(lines: AsyncIterator[str]) -> AsyncIterator[ChatEvent]:
+    """Translate raw SSE lines into :class:`ChatEvent`s (framing rule C5).
+
+    Comment lines surface immediately as heartbeats (they are the
+    liveness signal); ``event:``/``data:`` pairs accumulate until the
+    blank frame terminator. Unparseable frames are logged and dropped --
+    a malformed event must not kill the stream.
+    """
+    event_kind = ""
+    data_parts: list[str] = []
+    async for line in lines:
+        if line.startswith(":"):
+            yield ChatEvent(kind="heartbeat")
+            continue
+        if line.startswith("event:"):
+            event_kind = line[len("event:"):].strip()
+            continue
+        if line.startswith("data:"):
+            data_parts.append(line[len("data:"):].strip())
+            continue
+        if line == "" and (event_kind or data_parts):
+            kind, message = event_kind, None
+            try:
+                payload = json.loads("".join(data_parts)) if data_parts else {}
+                kind = payload.get("type", event_kind) or event_kind
+                raw = (payload.get("payload") or {}).get("message")
+                if raw is not None:
+                    message = to_chat_message(raw)
+            except (ValueError, TypeError):
+                logger.warning("dropping malformed SSE frame (event=%r)", event_kind)
+                event_kind, data_parts = "", []
+                continue
+            event_kind, data_parts = "", []
+            if kind in MESSAGE_EVENT_KINDS:
+                yield ChatEvent(kind=kind, message=message)
+            # unknown kinds are dropped silently: forward-compatible
+
+
+class AnytypeChatClient:
+    """Chat operations for the client's bound space."""
+
+    def __init__(self, client: AnytypeClient) -> None:
+        self._client = client
+
+    @property
+    def space_id(self) -> str:
+        return self._client.space_id
+
+    async def resolve_chat_id(self, declared: str | None) -> str:
+        """A declared chat id passes through; otherwise the space must have
+        exactly one chat (the error names the space and every candidate so
+        the operator can pin ``chat_id`` in spaces.toml)."""
+        if declared:
+            return declared
+        chats = [c async for c in self._client.list_chats()]
+        if len(chats) == 1:
+            return str(chats[0]["id"])
+        if not chats:
+            raise GraphContextError(
+                f"space {self.space_id} has no chat; create one in Anytype "
+                "(or let the bot create it) and/or set chat_id in spaces.toml"
+            )
+        listing = "; ".join(f"{c.get('name', '?')} (id={c['id']})" for c in chats)
+        raise GraphContextError(
+            f"space {self.space_id} has {len(chats)} chats -- set chat_id in "
+            f"spaces.toml to one of: {listing}"
+        )
+
+    async def bot_member_id(self) -> str:
+        """The bot's own member id -- UNKNOWN until the sidecar bot account
+        exists (quirk C6: no self marker on members). Returns "" meaning
+        "rely on posted-message-id echo suppression alone"."""
+        return ""
+
+    async def send(self, chat_id: str, text: str) -> str:
+        return await self._client.create_chat_message(chat_id, {"text": text})
+
+    async def stream(
+        self, chat_id: str, *, heartbeat_seconds: int = 30
+    ) -> AsyncIterator[ChatEvent]:
+        lines = self._client.stream_chat_messages(
+            chat_id, heartbeat_seconds=heartbeat_seconds
+        )
+        async for event in parse_sse(lines):
+            yield event
