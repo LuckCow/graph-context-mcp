@@ -30,3 +30,13 @@ corruption.
 - Deletion is archival; human deletions are invisible to incremental resync
   and require full-set reconciliation on hydrate (spike S4).
 - Concurrency with human edits is last-write-wins for v1 (WORK_PACKAGES Q2).
+
+## Amendment (2026-07-07, ADR 019)
+
+The premise widens rather than changes: Anytype is now also the CHAT
+surface (WP14 — the bot converses inside the space via the chat API, and
+its replies deep-link the objects it created), and the bot's own Anytype
+node is becoming headless (anytype-cli sidecar with a bot account).
+Humans keep the desktop app as their editing surface; "storage + human
+surface" now reads "storage + human surface + conversation surface", all
+one store.

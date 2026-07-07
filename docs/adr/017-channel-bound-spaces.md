@@ -90,3 +90,12 @@ env-configured runtime. Setting both is ambiguous and fails loudly.
 - The semantic cache was already keyed per space
   (`semantic-<space_id>.sqlite`), so multiple runtimes coexist without
   collisions.
+
+## Amendment (2026-07-07, ADR 019)
+
+The Anytype in-space chat transport binds SPACES directly
+(`spaces.toml`, table key = space id) rather than channels — see ADR 019.
+The one-runtime-per-space invariant now spans both files: a space bound
+in `channels.toml` must not also appear in `spaces.toml` (operator
+invariant, stated in both file headers; not machine-checkable across
+processes).

@@ -27,6 +27,7 @@ Definition of Done = all four green; CI (`.github/workflows/ci.yml`) runs exactl
 ```bash
 PYTHONPATH=src python scripts/demo_wp2_tools.py                              # drive the full tool loop in-process (mock-backed)
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server    # run the stdio server, nothing persists
+python -m graph_context.orchestrator.anytype_chat_bot                        # chat inside Anytype spaces (spaces.toml, ADR 019)
 ```
 
 ### Live E2E (real Anytype server)
@@ -35,7 +36,7 @@ GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server    # r
 ANYTYPE_E2E=1 python -m pytest tests/e2e -q
 ```
 
-Requires the Anytype desktop app on the host; from the devcontainer the API is `http://host.docker.internal:31009` (compose sets `ANYTYPE_API_BASE_URL` and `ANYTYPE_API_KEY_FILE=.devcontainer/secrets/anytype_api_key` already — `localhost` does *not* work from inside the container). The suite reuses one space named exactly `GC-E2E` and resets it before and after each run (the local API cannot delete spaces). It is intentionally slow: the live server throttles writes to ~1 req/s.
+Requires the Anytype desktop app on the host; from the devcontainer the API is `http://host.docker.internal:31009` (compose sets `ANYTYPE_API_BASE_URL` and `ANYTYPE_API_KEY_FILE=.devcontainer/secrets/anytype_api_key` already — `localhost` does *not* work from inside the container). The suite reuses one space named exactly `GC-E2E` and **resets it before and after each run** (the local API cannot delete spaces) — spike artifacts (S9/S10 sets, chats, todos) do not survive a run; the spike scripts reseed themselves. It is intentionally slow: the live server throttles writes to ~1 req/s. After the WP14 sidecar cutover (ADR 019, `docker compose --profile sidecar`, deferred) the endpoint becomes `http://anytype:31012` — a headless bot-account node with the rate limit disabled — and the desktop app is no longer needed for E2E.
 
 ## Architecture
 

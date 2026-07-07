@@ -2,7 +2,7 @@
 
 An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the original and default surface), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes). See `docs/` (proposal) for the full design.
 
-This repository contains, from the storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the seven tools, body-backed node descriptions ([ADR 010](docs/adr/010-descriptions-in-the-body.md)), write-once-by-policy capture bodies, and debounced `SessionContext` persistence behind a `SessionStore` port. Above it: an **orchestrator harness** (WP6 — mode-bound tools, a real Claude driver on your subscription), **automatic provenance** (WP7 — one intent node per mutating turn, auto-capture in authoring modes), a **Discord transport** (WP8, first slice), **semantic search with graph-aware ranking** ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md), WP11), and **configurable activity modes** ([ADR 015](docs/adr/015-configurable-activity-modes.md), WP12).
+This repository contains, from the storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the eight tools, body-backed node descriptions ([ADR 010](docs/adr/010-descriptions-in-the-body.md)), write-once-by-policy capture bodies, and debounced `SessionContext` persistence behind a `SessionStore` port. Above it: an **orchestrator harness** (WP6 — mode-bound tools, a real Claude driver on your subscription), **automatic provenance** (WP7 — one intent node per mutating turn, auto-capture in authoring modes), **Discord and Anytype in-space chat transports** (WP8/WP14 — the bot chats inside your Anytype spaces and deep-links the objects it creates, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)), **semantic search with graph-aware ranking** ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md), WP11), and **configurable activity modes** ([ADR 015](docs/adr/015-configurable-activity-modes.md), WP12).
 
 **Space-reflecting (v2, [ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation (yours or bootstrapped) is a labelled edge. There is no closed `gc_` vocabulary anymore; `gc_` keys survive only for infrastructure (Prose, SessionContext, and the stale-flag/story-time/fields scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), and long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)). Architecture decisions live in [`docs/adr/`](docs/adr/).
 
@@ -52,14 +52,17 @@ The server speaks **stdio** (one process per client; no network port). Run it di
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
 ```
 
-## Running the orchestrator (CLI / Discord)
+## Running the orchestrator (CLI / Discord / Anytype chat)
 
-The orchestrator is the agentic harness over the same tool surface (WP6): a driver decides, activity modes bind tools, provenance records each mutating turn. Both transports share one runtime (`orchestrator/bootstrap.py`) and differ only in their message loop.
+The orchestrator is the agentic harness over the same tool surface (WP6): a driver decides, activity modes bind tools, provenance records each mutating turn. Every transport shares one runtime assembly (`orchestrator/bootstrap.py`) and differs only in its message loop.
 
 ```
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # keyboard loop; dev backend
 python -m graph_context.orchestrator.discord_bot                           # Discord bot (WP8), live backend by default
+python -m graph_context.orchestrator.anytype_chat_bot                      # Anytype in-space chat bot (WP14/ADR 019)
 ```
+
+**Anytype chat (the all-in path, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)):** the bot chats *inside* your Anytype spaces — the same store that holds the graph — and rewrites object references in its replies into clickable `anytype://` deep links. Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by the space id, with optional `profile` / `project` / `modes_file` / `chat_id` (unset = the space's only chat is discovered; several chats = pick one, loudly). Identity follows the `<transport>:<id>` convention (`anytype:<chat_id>` sessions, `anytype:<member_id>` users) and each intent node's `origin` field points at the exact chat message that caused it. The chat cursor persists (`GC_CHAT_CURSOR`, default `logs/chat_cursor.json`), so **messages sent while the bot was down are answered on the next startup** (up to the API's ~100-message window); a chat bound for the first time skips its history instead. Never bind one space in both `spaces.toml` and `channels.toml`. Today the bot talks to the desktop app's API and posts as your own account; the prepared headless sidecar (bot account, own sync, no rate limit — `docker compose --profile sidecar`) takes over at cutover with just an `ANYTYPE_API_BASE_URL` flip (see WORK_PACKAGES WP14).
 
 The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels you configure — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; no channel config = serve nowhere, loudly). Two configuration shapes ([ADR 017](docs/adr/017-channel-bound-spaces.md)):
 
@@ -107,7 +110,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the seven tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
+**3. Restart Claude Desktop.** It spawns `docker exec -i … python -m graph_context.interface.server`, which it speaks JSON-RPC to over stdio. You should see the eight tools (the 🔌 / tools menu). The first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists — so it isolates the transport from storage. `docker` must be on Claude Desktop's `PATH` (Docker Desktop puts it there; if not, use the full path to the `docker` binary as `command`).
 
 ### Graduating to the live Anytype backend
 
@@ -131,7 +134,7 @@ Because all three are container defaults inherited by `docker exec` — and `PYT
 
 To point at a different space, add `-e ANYTYPE_SPACE_ID=…` to the `args`. (`config.py` reads the key from `ANYTYPE_API_KEY_FILE`, falling back to an inline `ANYTYPE_API_KEY`, and accepts either `ANYTYPE_API_BASE_URL` or `ANYTYPE_BASE_URL`.) Set `GC_STORE_LLM_INPUT=0` to withhold prompt text from the orchestrator's provenance (intent) nodes — the tool-call trace is kept either way.
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`. (Prose/artifact capture is the orchestrator harness's job — WP7 auto-capture; there is no capture tool.) Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Validation errors echo the allowed values (they are written for an LLM to self-correct). (Responses used to be prefixed with a `[project | focus | recent]` context header; it was removed 2026-07-06 as token waste — the session still tracks focus and recent nodes.) Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`. (Prose/artifact capture is the orchestrator harness's job — WP7 auto-capture; there is no capture tool.) Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); `find_node` covers browsing and disambiguation. Validation errors echo the allowed values (they are written for an LLM to self-correct). (Responses used to be prefixed with a `[project | focus | recent]` context header; it was removed 2026-07-06 as token waste — the session still tracks focus and recent nodes.) Tool docstrings are prompts — see `interface/server.py`. **Cold start:** a fresh session has an empty focus stack, so traversal has nothing to default to; `context action="overview"` (alias `map`) returns a *derived* entry-point map — per-type counts plus the highest-degree "hub" nodes with their ids — to seed the first `explore`/`get_node`/`focus`. It is rebuilt from the graph each call (no maintained root node).
 
 ## Semantic search (GC_EMBEDDER)
 
@@ -154,7 +157,7 @@ interface  ──▶  application  ──▶  domain
                                                      Anytype adapter)
 ```
 
-**The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition roots — `interface/server.py` and the orchestrator's (`cli.py`, `bootstrap.py`, `discord_bot.py`), both delegating to the shared service builder `composition.py` — and tests. The orchestrator is a **second interface adapter** ([ADR 007](docs/adr/007-orchestrator-second-interface-adapter.md)): it reuses `interface/tools.py` but never the MCP module, and agent/transport frameworks (claude-agent-sdk, langgraph, discord.py) never leak outside it. All of this is machine-enforced: eight import-linter contracts in `pyproject.toml` fail CI on violation.
+**The rule:** imports only point left-to-right along the arrows. Domain imports nothing but itself and `errors`. Application imports domain + ports. Infrastructure implements ports. Nothing imports infrastructure except the composition roots — `interface/server.py` and the orchestrator's (`cli.py`, `bootstrap.py`, `discord_bot.py`, `anytype_chat_bot.py`), both delegating to the shared service builder `composition.py` — and tests. The orchestrator is a **second interface adapter** ([ADR 007](docs/adr/007-orchestrator-second-interface-adapter.md)): it reuses `interface/tools.py` but never the MCP module, and agent/transport frameworks (claude-agent-sdk, langgraph, discord.py) never leak outside it. All of this is machine-enforced: eight import-linter contracts in `pyproject.toml` fail CI on violation.
 
 ## Layout
 
@@ -191,9 +194,10 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/repository.py` | `AnytypeGraphRepository` | Persist-first write-through; composite rollback; self-write suppression |
 | `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
 | `infrastructure/anytype/mode_store.py` | `AnytypeModeStore` | One mode per `gc_activity_mode` object: name → `/mode` slug, page body → goal, archive = disable |
-| `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps) |
+| `infrastructure/anytype/chat.py` | Chat quirk quarantine + `AnytypeChatClient` | Chat payload/SSE assumptions (C1–C6, spike S10); the chat analogue of `mapping.py` |
+| `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
 | `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The seven tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
+| `interface/tools.py` | The eight tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
 | `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
 | `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
 | `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; drains the journal into an intent node at turn end |
@@ -202,9 +206,12 @@ interface  ──▶  application  ──▶  domain
 | `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |
 | `orchestrator/capture.py` | Authoring auto-capture | Exact-name entity linking; the harness records what tools used to ask for |
 | `orchestrator/turn_log.py` | Full-fidelity turn diary (JSONL) | Input, every driver decision, every tool call + complete output, final replies; byte-capped — oldest entries drop |
-| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by CLI and Discord; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution; builds one runtime per channel binding (ADR 017) |
+| `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by every transport; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution; one runtime per channel (ADR 017) or space (ADR 019) binding |
 | `orchestrator/channels.py` | Channel→space bindings (`GC_CHANNELS_FILE`, ADR 017) | Plain parsing/validation; one channel per space, enforced at startup |
 | `orchestrator/discord_transport.py` + `discord_bot.py` | Discord adapter (WP8) | Per-message policy is plain logic; only the composition-root shim imports discord.py |
+| `orchestrator/spaces.py` | Space→chat bindings (`GC_SPACES_FILE`, ADR 019) | Table key IS the space id; `chat_id` optional (single-chat discovery) |
+| `orchestrator/rendering.py` | Shared reply rendering | `render` prefixes + `chunk`ing, extracted from the Discord module |
+| `orchestrator/anytype_chat_transport.py` + `anytype_chat_bot.py` | Anytype in-space chat adapter (WP14) | Echo suppression, persisted chat cursor (offline catch-up), `anytype://` deep links; only the composition root touches infrastructure |
 
 ## Conventions to carry forward
 

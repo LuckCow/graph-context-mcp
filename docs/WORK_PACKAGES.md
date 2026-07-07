@@ -1244,16 +1244,30 @@ built speculatively).
 
 ## WP14 — Anytype-first: in-space chat transport + headless CLI sidecar (ADR 019)
 
-**Status:** in progress (started 2026-07-07). Goal: the bot chats *inside*
-Anytype spaces (replies deep-link created objects via
-`anytype://object?...`), the desktop app becomes a human-only surface, and
-the bot eventually runs on its own headless anytype-cli node (bot account,
-own sync, rate limit disabled). Discord stays a supported transport.
-**Interim constraint:** the sidecar cannot run yet — everything is built
-and tested against the desktop endpoint (`host.docker.internal:31009`);
-the sidecar cutover is an env swap (`ANYTYPE_API_BASE_URL` →
-`http://anytype:31012`) plus the deferred runbook below. Sidecar compose
-files exist behind `--profile sidecar` (opt-in, inert).
+**Status: transport SHIPPED 2026-07-07 (ADR 019); sidecar prepared,
+cutover deferred.** The bot chats *inside* Anytype spaces (replies
+deep-link created objects via `anytype://object?...`); the desktop app
+becomes a human-only surface; the bot eventually runs on its own headless
+anytype-cli node (bot account, own sync, rate limit disabled). Discord
+stays a supported transport. **Interim constraint:** the sidecar cannot
+run yet — everything is built and tested against the desktop endpoint
+(`host.docker.internal:31009`); the sidecar cutover is an env swap
+(`ANYTYPE_API_BASE_URL` → `http://anytype:31012`) plus the deferred
+runbook below. Sidecar compose files exist behind `--profile sidecar`
+(opt-in, inert).
+
+Shipped: `infrastructure/anytype/chat.py` (quirks C1–C6) + client chat/
+SSE methods + MockAnytype chat routes; `orchestrator/spaces.py`
+(spaces.toml, table key IS the space id) + `bootstrap.build_space_runtimes`;
+`orchestrator/rendering.py` (chunk/render extracted from Discord);
+`orchestrator/anytype_chat_transport.py` + `anytype_chat_bot.py`. Two
+decisions upgraded mid-build at user request: the **chat cursor persists**
+(`GC_CHAT_CURSOR`, default `logs/chat_cursor.json`) so messages sent while
+the bot was down are answered at startup (bounded by the ~100-message
+recency window; only a never-seen chat fast-forwards past history), and
+**intent nodes carry `origin`** (`anytype:<chat_id>:<message_id>`) pointing
+at the triggering chat message (`handle_message`/`IntentRecorder` gained
+the parameter; empty for transports without addressable messages).
 
 ### Spike S10 results (2026-07-07, live DESKTOP server, API `2025-11-08`)
 

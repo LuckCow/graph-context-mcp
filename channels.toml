@@ -2,6 +2,10 @@
 # Anytype space, profile, and (optionally) project label / modes file.
 # Read at bot startup via GC_CHANNELS_FILE (set in docker-compose.yml);
 # mutually exclusive with the legacy GC_DISCORD_CHANNELS allowlist.
+#
+# NEVER bind a space here AND in spaces.toml (Anytype chat, ADR 019) at
+# the same time: a space holds one SessionContext node, and two runtimes
+# would clobber each other's session snapshot.
 
 # The original pairing: the story-world channel over the TestWorld space.
 [channels.1523551542123298896]

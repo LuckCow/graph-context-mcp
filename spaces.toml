@@ -1,0 +1,21 @@
+# Space-bound chats (ADR 019): each served Anytype space gets a runtime,
+# and the bot listens on the space's own chat. Read at startup via
+# GC_SPACES_FILE (set in docker-compose.yml). The table key IS the space
+# id, so one-binding-per-space holds by construction.
+#
+# Keys (all optional): profile (defaults to GC_PROFILE), project
+# (cosmetic label), modes_file (overrides GC_MODES_FILE), chat_id
+# (unset = discover; fails loudly unless the space has exactly one chat).
+#
+# NEVER bind a space here AND in channels.toml (Discord) at the same
+# time: a space holds one SessionContext node, and two runtimes would
+# clobber each other's session snapshot.
+
+# The story world (same space channels.toml served over Discord --
+# remove it THERE before enabling it here).
+#[spaces."bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"] # TestWorld
+#profile = "fiction"
+
+# Task tracking over the Todolist space.
+#[spaces."bafyreigkpfhl472fqwfg2f2bh4zdhixvlo2by24pc5xo7v34p6izub33tm.2lc7dwb79z2g4"] # Todolist
+#profile = "assistant"
