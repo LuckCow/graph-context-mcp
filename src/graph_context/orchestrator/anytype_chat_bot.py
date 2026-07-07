@@ -33,6 +33,7 @@ import asyncio
 import logging
 import os
 import random
+from pathlib import Path
 
 from graph_context import composition
 from graph_context.errors import GraphContextError
@@ -44,6 +45,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
     ChatCursor,
     InboundChatMessage,
+    SentMessages,
 )
 from graph_context.orchestrator.spaces import SpaceBinding
 
@@ -59,6 +61,14 @@ def _cursor_path() -> str | None:
     if raw.lower() in {"", "0", "false", "no", "off"}:
         return None
     return raw
+
+
+def _sent_path(cursor_path: str | None) -> str | None:
+    """The sent-message ledger rides next to the cursor (one knob)."""
+    if cursor_path is None:
+        return None
+    path = Path(cursor_path)
+    return str(path.with_name(f"{path.stem}-sent{path.suffix}"))
 
 
 async def _maybe_turn(
@@ -168,12 +178,14 @@ async def main() -> None:
     teardown = list(runtimes.teardown)
     teardown.extend(client.aclose for client in transport_clients)
 
+    cursor_path = _cursor_path()
     handler = AnytypeChatTurnHandler(
         routes=runtimes.routes,
         spaces=runtimes.spaces,
-        cursor=ChatCursor(_cursor_path()),
+        cursor=ChatCursor(cursor_path),
+        sent=SentMessages(path=_sent_path(cursor_path)),
         # bot_member_id stays "" until the sidecar's bot account exists
-        # (quirk C6); posted-id echo suppression carries it alone.
+        # (quirk C6); the persisted posted-id ledger carries suppression.
     )
     try:
         served = "; ".join(

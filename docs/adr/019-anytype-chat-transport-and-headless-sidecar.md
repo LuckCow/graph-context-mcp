@@ -48,9 +48,13 @@ Transport shape (mirrors the Discord quarantine):
 Behavioral contracts:
 
 * **Echo suppression is belt and suspenders.** Every id returned by the
-  bot's own message POSTs lands in a bounded `SentMessages` set; once
-  the sidecar's bot account exists, `creator == bot_member_id` is
-  dropped too (there is no "who am I" endpoint today — quirk C6).
+  bot's own message POSTs lands in a bounded `SentMessages` ledger,
+  **persisted next to the cursor** — live testing caught a restart
+  answering its own previous-life reply during catch-up, which nothing
+  else can prevent on the desktop endpoint where bot and human share one
+  account. Once the sidecar's bot account exists,
+  `creator == bot_member_id` is dropped too (there is no "who am I"
+  endpoint today — quirk C6).
 * **The chat cursor persists** (`GC_CHAT_CURSOR`, default
   `logs/chat_cursor.json`) so *messages sent while the bot was down are
   answered at the next startup* (bounded by the messages endpoint's

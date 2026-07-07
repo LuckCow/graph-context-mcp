@@ -165,6 +165,35 @@ class TestLinkify:
         assert linkify(text, SPACE) == text
 
 
+class TestSentLedger:
+    def test_posted_ids_survive_a_restart_via_the_persisted_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Live-caught bug: on the desktop endpoint the bot posts as the
+        user's own account, so after a restart only the persisted ledger
+        stops startup catch-up from answering the bot's own old reply."""
+        path = str(tmp_path / "sent.json")
+        first = SentMessages(path=path)
+        first.add("old-reply")
+        reborn = SentMessages(path=path)
+        assert "old-reply" in reborn
+        handler = _handler(sent=reborn)
+        assert not handler.accepts(_message(message_id="old-reply"))
+
+    def test_the_ledger_is_bounded(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "sent.json")
+        ledger = SentMessages(max_size=3, path=path)
+        for i in range(5):
+            ledger.add(f"m{i}")
+        reborn = SentMessages(path=path)
+        assert "m0" not in reborn and "m4" in reborn
+
+    def test_an_unreadable_ledger_degrades_to_empty(self, tmp_path: Path) -> None:
+        path = tmp_path / "sent.json"
+        path.write_text("{not json")
+        assert "anything" not in SentMessages(path=str(path))
+
+
 class TestCursor:
     def test_positions_survive_a_restart_via_the_persisted_file(
         self, tmp_path: Path

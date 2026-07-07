@@ -88,16 +88,47 @@ class InboundChatMessage:
 
 
 class SentMessages:
-    """Bounded set of message ids this process posted (echo suppression)."""
+    """Bounded set of message ids the bot posted (echo suppression).
 
-    def __init__(self, max_size: int = 1024) -> None:
+    PERSISTED (like the cursor) because it must survive restarts: on the
+    desktop endpoint the bot posts as the user's own account, so
+    ``creator`` cannot distinguish an old bot reply from a human message
+    during startup catch-up -- only this set can. (Live-caught: a restart
+    once answered its own previous-life reply.) Same degrade posture as
+    the cursor: unreadable file -> empty set + warning, failed write ->
+    in-memory only.
+    """
+
+    def __init__(self, max_size: int = 1024, path: str | None = None) -> None:
         self._max_size = max_size
+        self._path = path
         self._ids: OrderedDict[str, None] = OrderedDict()
+        if path and os.path.exists(path):
+            try:
+                for message_id in json.loads(Path(path).read_text()):
+                    self._ids[str(message_id)] = None
+            except (OSError, ValueError, TypeError):
+                logger.warning(
+                    "unreadable sent-message ledger at %s; starting empty "
+                    "(old bot replies may be answered once)", path,
+                )
 
     def add(self, message_id: str) -> None:
         self._ids[message_id] = None
         while len(self._ids) > self._max_size:
             self._ids.popitem(last=False)
+        if self._path:
+            try:
+                target = Path(self._path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                scratch = target.with_suffix(target.suffix + ".tmp")
+                scratch.write_text(json.dumps(list(self._ids)))
+                scratch.replace(target)
+            except OSError:
+                logger.warning(
+                    "cannot persist sent-message ledger to %s; in-memory "
+                    "for this process", self._path,
+                )
 
     def __contains__(self, message_id: str) -> bool:
         return message_id in self._ids
