@@ -44,9 +44,18 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+    # The headless bot node must be serving before dev's tooling dials it.
+    depends_on:
+      anytype:
+        condition: service_healthy
+
     environment:
-      # Anytype desktop's local API (use 31012 if you run anytype-cli instead).
-      ANYTYPE_API_BASE_URL: "http://host.docker.internal:31009"
+      # The headless sidecar's API (ADR 019 cutover, 2026-07-07). The
+      # desktop app remains the HUMAN surface; to point tooling back at
+      # it temporarily use http://host.docker.internal:31009 -- and note
+      # the mounted key belongs to the BOT account, so the desktop needs
+      # its own key.
+      ANYTYPE_API_BASE_URL: "http://anytype:31012"
       # Path to the mounted secret. App code reads the key from this file,
       # NOT from an env var (env vars leak via docker inspect / /proc / child procs).
       ANYTYPE_API_KEY_FILE: "/run/secrets/anytype_api_key"

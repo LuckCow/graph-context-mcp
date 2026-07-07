@@ -37,7 +37,11 @@ from pathlib import Path
 
 from graph_context import composition
 from graph_context.errors import GraphContextError
-from graph_context.infrastructure.anytype.chat import AnytypeChatClient, ChatMessage
+from graph_context.infrastructure.anytype.chat import (
+    AnytypeChatClient,
+    ChatMessage,
+    discover_bot_identity,
+)
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.orchestrator import bootstrap
@@ -184,8 +188,12 @@ async def main() -> None:
         spaces=runtimes.spaces,
         cursor=ChatCursor(cursor_path),
         sent=SentMessages(path=_sent_path(cursor_path)),
-        # bot_member_id stays "" until the sidecar's bot account exists
-        # (quirk C6); the persisted posted-id ledger carries suppression.
+        # Quirk C6 side door: the bot's own default space names its
+        # identity. "" (e.g. desktop endpoint, shared account) degrades
+        # to posted-id suppression alone.
+        bot_identity=await discover_bot_identity(
+            transport_clients[0]
+        ) if transport_clients else "",
     )
     try:
         served = "; ".join(

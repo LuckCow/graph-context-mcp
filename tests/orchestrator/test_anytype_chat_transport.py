@@ -90,10 +90,21 @@ class TestGate:
         sent.add("m1")
         assert not _handler(sent=sent).accepts(_message(message_id="m1"))
 
-    def test_the_bot_member_id_is_ignored_even_for_unposted_messages(self) -> None:
-        handler = _handler(bot_member_id="member-bot")
-        assert not handler.accepts(_message(creator="member-bot"))
-        assert handler.accepts(_message(creator="member-a"))
+    def test_the_bots_identity_is_ignored_even_for_unposted_messages(self) -> None:
+        # Member ids are space-scoped but END with the account identity
+        # (quirk C6), so the self-check is a suffix match per space.
+        handler = _handler(bot_identity="A73WbotIdentity")
+        assert not handler.accepts(
+            _message(creator=f"_participant_{SPACE}_A73WbotIdentity")
+        )
+        assert handler.accepts(
+            _message(creator=f"_participant_{SPACE}_AA5KhumanIdentity")
+        )
+
+    def test_an_empty_bot_identity_never_suffix_matches_everything(self) -> None:
+        # str.endswith("") is True -- the guard must not fire when the
+        # identity is unknown (desktop endpoint, shared account).
+        assert _handler(bot_identity="").accepts(_message(creator="anyone"))
 
     def test_backlog_at_or_below_the_cursor_is_ignored(self) -> None:
         cursor = ChatCursor()

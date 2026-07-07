@@ -144,6 +144,34 @@ class TestSseParsing:
         assert [e.message.text for e in events if e.message] == ["survives"]
 
 
+class TestIdentityDiscovery:
+    async def test_a_solo_member_space_names_the_bot_identity(
+        self, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        from graph_context.infrastructure.anytype.chat import discover_bot_identity
+
+        mock.members = [{
+            "object": "member",
+            "id": f"_participant_{mock.space_id}_A73Wbot",
+            "identity": "A73Wbot", "name": "graph-context-bot",
+            "status": "active", "role": "owner",
+        }]
+        assert await discover_bot_identity(client) == "A73Wbot"
+
+    async def test_a_shared_space_yields_no_identity(
+        self, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        from graph_context.infrastructure.anytype.chat import discover_bot_identity
+
+        mock.members = [
+            {"object": "member", "id": "m1", "identity": "A73Wbot",
+             "status": "active", "role": "editor"},
+            {"object": "member", "id": "m2", "identity": "AA5Khuman",
+             "status": "active", "role": "owner"},
+        ]
+        assert await discover_bot_identity(client) == ""
+
+
 class TestChatDiscovery:
     async def test_a_declared_chat_id_passes_through(
         self, chat: AnytypeChatClient

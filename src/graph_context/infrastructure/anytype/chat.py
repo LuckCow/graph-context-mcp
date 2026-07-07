@@ -17,10 +17,15 @@ version header) lives here, pinned by spike S10 and mirrored by
         {"message": {...}}}`` + blank line; keepalives are COMMENT lines
         ``: heartbeat``. On connect the stream replays recent history as
         ordinary ``message_added`` frames -- consumers must fast-forward.
-    C6. There is no "who am I" endpoint; members carry no self marker
-        (S10d). Bot-identity discovery is deferred to the sidecar's bot
-        account; until then echo suppression rides on recording our own
-        posted message ids.
+    C6. There is no "who am I" endpoint and members carry no self marker
+        (S10d), but a member id embeds the account identity
+        (``_participant_<space-with-dots-as-underscores>_<identity>``)
+        and every account owns a private default space with exactly ONE
+        member -- itself. :func:`discover_bot_identity` exploits that:
+        list spaces, find one with a sole member, return its identity.
+        The transport then self-filters by identity SUFFIX match on
+        ``creator``. Posted-message-id suppression remains as the belt
+        to this suspender.
 """
 
 from __future__ import annotations
@@ -111,6 +116,34 @@ async def parse_sse(lines: AsyncIterator[str]) -> AsyncIterator[ChatEvent]:
             # unknown kinds are dropped silently: forward-compatible
 
 
+async def discover_bot_identity(client: AnytypeClient) -> str:
+    """The bot account's identity string, via quirk C6's side door.
+
+    Any space with exactly one active member is (in practice) the bot's
+    own default space, and that member is the bot. Returns ``""`` when no
+    such space exists -- callers degrade to posted-id echo suppression
+    alone, with a warning, rather than dying.
+    """
+    spaces = await client.request("GET", "/v1/spaces", params={"limit": 100})
+    for space in spaces.get("data", []):
+        members_payload = await client.request(
+            "GET", f"/v1/spaces/{space['id']}/members", params={"limit": 2}
+        )
+        members = members_payload.get("data", [])
+        if len(members) == 1 and members[0].get("identity"):
+            identity = str(members[0]["identity"])
+            logger.info(
+                "bot identity %s (from solo-member space %s)",
+                identity, space["id"],
+            )
+            return identity
+    logger.warning(
+        "no solo-member space found; bot identity unknown -- echo "
+        "suppression rides on the posted-id ledger alone"
+    )
+    return ""
+
+
 class AnytypeChatClient:
     """Chat operations for the client's bound space."""
 
@@ -140,12 +173,6 @@ class AnytypeChatClient:
             f"space {self.space_id} has {len(chats)} chats -- set chat_id in "
             f"spaces.toml to one of: {listing}"
         )
-
-    async def bot_member_id(self) -> str:
-        """The bot's own member id -- UNKNOWN until the sidecar bot account
-        exists (quirk C6: no self marker on members). Returns "" meaning
-        "rely on posted-message-id echo suppression alone"."""
-        return ""
 
     async def recent_messages(
         self, chat_id: str, *, limit: int = 100

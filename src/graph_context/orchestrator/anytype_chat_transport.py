@@ -11,8 +11,9 @@ Two chat-specific hazards this module owns (ADR 019):
 
 * **Echo loops.** The bot's own posts come back as ``message_added``
   events. Suppression is belt and suspenders: every id returned by our
-  own send lands in :class:`SentMessages`, and (once the sidecar's bot
-  account exists) ``creator == bot_member_id`` is dropped too.
+  own send lands in :class:`SentMessages` (persisted), and any creator
+  whose member id ends with the bot's account identity is dropped too
+  (identity discovered at startup; ``""`` on the desktop endpoint).
 * **Backlog replay.** The SSE stream replays recent history on every
   connect. :class:`ChatCursor` orders messages by ``order_id`` (quirk
   C3: string comparison IS stream order) and PERSISTS its position (a
@@ -199,16 +200,18 @@ class AnytypeChatTurnHandler:
     ``routes`` maps each served CHAT id to its runtime; ``spaces`` maps it
     back to the space id (deep links need it). ``send`` is injected per
     message and must return the posted message's id, which feeds the echo
-    suppressor. ``bot_member_id`` is ``""`` until the sidecar's bot
-    account exists (quirk C6) -- the posted-id set carries suppression
-    alone until then.
+    suppressor. ``bot_identity`` is the ACCOUNT identity (quirk C6:
+    member ids are space-scoped but end with it, so the self-check is a
+    suffix match); ``""`` -- e.g. on the desktop endpoint, where bot and
+    human share an account -- leaves the posted-id set carrying
+    suppression alone.
     """
 
     routes: Mapping[str, ChannelRoute]
     spaces: Mapping[str, str]
     sent: SentMessages = field(default_factory=SentMessages)
     cursor: ChatCursor = field(default_factory=ChatCursor)
-    bot_member_id: str = ""
+    bot_identity: str = ""
 
     def accepts(self, message: InboundChatMessage) -> bool:
         """The gate, separate from the turn (mirrors DiscordTurnHandler)."""
@@ -216,7 +219,7 @@ class AnytypeChatTurnHandler:
             return False
         if message.message_id in self.sent:  # our own post, echoed back
             return False
-        if self.bot_member_id and message.creator == self.bot_member_id:
+        if self.bot_identity and message.creator.endswith(self.bot_identity):
             return False  # ours even if the send's id was never recorded
         if not self.cursor.is_new(message):  # backlog replay / reconnect
             return False

@@ -63,7 +63,9 @@ from typing import Any
 
 import httpx
 
+_SPACES = re.compile(r"^/v1/spaces$")
 _SPACE = re.compile(r"^/v1/spaces/(?P<space>[^/]+)$")
+_MEMBERS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/members$")
 _OBJECTS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects$")
 _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
 _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
@@ -142,6 +144,9 @@ class MockAnytype:
         # own member id -- the live server attributes API posts to the
         # authenticated account's participant id.
         self.api_member_id = "mock-self"
+        # Space membership (WP14 identity discovery, quirk C6): tests set
+        # this to model solo-member (bot's own) vs shared spaces.
+        self.members: list[dict[str, Any]] = []
         self._chats: dict[str, dict[str, Any]] = {}
         self._chat_messages: dict[str, list[dict[str, Any]]] = {}
         self._chat_listeners: dict[str, list[asyncio.Queue[dict[str, Any] | None]]] = {}
@@ -174,11 +179,14 @@ class MockAnytype:
             status, body = self._fail_queue.pop(0)
             return httpx.Response(status, json=body)
         path = request.url.path
+        if _SPACES.match(path):  # global, not space-scoped
+            return self._handle_spaces(request)
         for pattern, handler in (
             (_CHAT_STREAM, self._handle_chat_stream),  # before _CHAT_MESSAGE
             (_CHAT_MESSAGE, self._handle_chat_message),
             (_CHAT_MESSAGES, self._handle_chat_messages),
             (_CHATS, self._handle_chats),
+            (_MEMBERS, self._handle_members),
             (_OBJECT, self._handle_object),
             (_OBJECTS, self._handle_objects),
             (_SEARCH, self._handle_search),
@@ -407,6 +415,20 @@ class MockAnytype:
         return httpx.Response(
             200, json={"space": {"id": self.space_id, "name": self.space_name}}
         )
+
+    def _handle_spaces(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        return self._paginated(
+            [{"object": "anytype.space", "id": self.space_id,
+              "name": self.space_name}],
+            request.url.params,
+        )
+
+    def _handle_members(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        return self._paginated(list(self.members), request.url.params)
 
     # -- chat routes (WP14; quirks C1-C5 in chat.py, pinned by spike S10) ----
 

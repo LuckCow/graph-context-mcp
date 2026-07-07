@@ -1312,7 +1312,7 @@ owner-approval flow, bot member-id discovery, and the cutover runbook
 invite it to each space, flip `ANYTYPE_API_BASE_URL`, add
 `depends_on: service_healthy`.
 
-Cutover findings so far (2026-07-07):
+Cutover findings (2026-07-07):
 * The CLI install script requires **bash** (dash chokes) and installs to
   `~/.local/bin/anytype` — the sidecar Dockerfile pipes to `bash` and
   moves the binary to `/usr/local/bin`.
@@ -1322,7 +1322,27 @@ Cutover findings so far (2026-07-07):
   `~/.config/anytype` (identity, `config.json`, the API-key store) and
   `~/.anytype`. Only the latter was a volume at first, so a container
   rebuild wiped the bot's API keys; both are volumes now
-  (`anytype-data`, `anytype-config`).
+  (`anytype-data`, `anytype-config`) — verified key-survives-rebuild.
+* **Rate limit disable CONFIRMED:** 70 writes in 0.3s (240/s), zero
+  429s, with `ANYTYPE_API_DISABLE_RATE_LIMIT=1`.
+* **Bot identity discovery (closes quirk C6):** no who-am-I endpoint,
+  but the bot's own default space has exactly one member — itself —
+  and member ids end with the account identity.
+  `chat.discover_bot_identity` finds it at startup; the transport gate
+  drops any creator whose member id ends with it (suffix match,
+  guarded against the empty string).
+* **Bot account:** `graph-context-bot`, identity `A73WDhbNNdW3q2mQsus…`;
+  account key backed up in `.devcontainer/secrets/anytype_account_key`.
+* **Cutover applied:** `ANYTYPE_API_BASE_URL=http://anytype:31012` +
+  `depends_on: service_healthy` in compose. **Live E2E green against
+  the sidecar in ~10s** (was minutes on the throttled desktop),
+  including the chat round-trip — the desktop app is no longer an E2E
+  or bot dependency. (The first live run of the WP13 query contract
+  test also caught its exact-equality assertion being unsafe in a
+  shared live space; now membership-based.)
+* Remaining: invite the bot to TestWorld/Todolist (desktop invite links
+  + `anytype space join`), fill `spaces.toml`, run the chat bot on the
+  bot's own identity in a shared space.
 
 ---
 
