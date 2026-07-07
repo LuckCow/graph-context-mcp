@@ -1174,6 +1174,45 @@ Suggested sizing: **L** (modes+capture M, time axis M, vocabulary S).
 
 ---
 
+## WP13 — Dynamic/filterable queries (ADR 018) — **ad-hoc engine shipped 2026-07-07**
+
+**Status:** the `query` tool is live. A pure engine (`domain/query.py`
+`run_query`) filters, orders, and caps nodes over the `GraphIndex`
+(ADR 018 extends ADR 002: one query engine for traversal *and* attribute
+scans). Surface: `query(type, linked_to, edge_types, where, order_by,
+limit, detail)` — `where` is ANDed `{field, op, value}` predicates (ops
+eq/neq/lt/lte/gt/gte/contains/exists/missing), `order_by` multi-key with
+missing-sorts-last, `linked_to` anchors to one node's direct neighbors
+(character timeline = `type="Event", linked_to=X, order_by=["story_time"]`).
+Load-bearing semantics pinned by tests: **`neq` matches absent fields**
+(unticked checkbox = absence, so `done neq true` finds open todos),
+numeric-when-both-parse else casefolded-string comparison (ISO dates order
+correctly), unknown fields error with the observed-field listing, infra
+roles hidden unless the type filter names one. Sort-key values are echoed
+per line; the header reports "N of M". Docs per profile with worked
+examples; orchestrator read surface includes the tool.
+
+### Remaining (gated on spike S9)
+
+**Spike S9 — lists/views endpoints** (`scripts/spike_s9_lists.py`, live
+server): does `list_id` accept a query-layout (Set) id (S9a)? do views
+expose machine-readable filter/sort definitions (S9b)? does the
+view-objects endpoint apply filter AND sort server-side (S9c)? page cap +
+inline properties (S9d)? Sets discoverable via search (S9e)? staleness
+after edits (S9f)? Record results here per the S1–S8 convention.
+
+**Fast-follow — run the user's real Sets:** a `view: str` parameter on
+the same tool, mutually exclusive with `type`/`where`/`order_by`/
+`linked_to`. If S9b holds, compile view definitions → `NodeQuery` and run
+client-side (keeps ADR 018); else if only S9c, execute server-side mapped
+through `to_node` (mock gains lists routes; ADR 018 amended). Port shape:
+a small `ports/view_catalog.py` (`SavedView` + `ViewCatalog` Protocol,
+mode-store precedent) — not more GraphRepository methods. If both fail: a
+`gc_saved_query` config node on the `gc_activity_mode` template (not
+built speculatively).
+
+---
+
 ## Sequencing
 
 ```

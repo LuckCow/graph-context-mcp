@@ -59,6 +59,18 @@ async def main() -> None:
     show("stale sweep", await tools.explore_tool(
         svc, start=mira, only_stale=True, detail="names"))
 
+    show("create a second event", await tools.create_node_tool(
+        svc, type="Event", name="Fall of Brakk", summary="Brakk is razed.",
+        story_time=99,
+        links=[{"edge_type": "participated_in", "other": mira, "outgoing": False}]))
+
+    show("query: mira's timeline (WP13)", await tools.query_tool(
+        svc, type="Event", linked_to=mira, order_by=["story_time"]))
+
+    show("query: stale summaries, most recent first", await tools.query_tool(
+        svc, where=[{"field": "summary_stale", "op": "eq", "value": True}],
+        order_by=["modified_at desc"], detail="names"))
+
     mock.edit_object_directly(mira, name="Mira of Brakk")
     show("resync after human edit", await tools.context_tool(svc, action="resync"))
 
