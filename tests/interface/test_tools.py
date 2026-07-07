@@ -213,3 +213,112 @@ async def test_without_ranker_behavior_is_unchanged(
     assert "no match" in body             # the tier degrades away (off)
     out = await tools.get_node_tool(services, node_id="nobody here")
     assert "ERROR:" in out and "Closest by meaning" not in out
+
+
+# -- query: the Set-style attribute scan (filter, order, cap) ---------------
+
+
+class TestQueryTool:
+    async def _seed_todos(self, services: tools.Services) -> None:
+        for name, fields, description in (
+            ("Pay taxes", {"done": "true", "due_date": "2026-07-01"}, ""),
+            ("Buy milk", {"due_date": "2026-07-10", "priority": "2"}, "Oat milk."),
+            ("Write report", {"due_date": "2026-07-09", "priority": "1"}, ""),
+        ):
+            out = await tools.create_node_tool(
+                services, type="Todo", name=name, summary=f"{name}.",
+                description=description, fields=fields,
+            )
+            assert out.startswith("created:")
+
+    async def test_filter_order_and_annotation_end_to_end(
+        self, services: tools.Services
+    ) -> None:
+        await self._seed_todos(services)
+        out = await tools.query_tool(
+            services,
+            type="Todo",
+            where=[{"field": "done", "op": "neq", "value": "true"}],
+            order_by=["due_date", "priority desc"],
+        )
+        assert out.startswith("query: 2 of 2 match(es).")
+        lines = out.splitlines()
+        assert "Write report" in lines[1] and "[due_date=2026-07-09" in lines[1]
+        assert "Buy milk" in lines[2] and "[due_date=2026-07-10" in lines[2]
+        assert "Pay taxes" not in out
+
+    async def test_boolean_json_value_is_lowercased_to_match_checkbox_fields(
+        self, services: tools.Services
+    ) -> None:
+        await self._seed_todos(services)
+        out = await tools.query_tool(
+            services, type="Todo",
+            where=[{"field": "done", "op": "eq", "value": True}],
+        )
+        assert "Pay taxes" in out and "Buy milk" not in out
+
+    async def test_unknown_type_error_lists_known_types(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.query_tool(services, type="Todoo")
+        assert out.startswith("ERROR:") and "'Todoo'" in out
+        assert "Known types:" in out
+
+    async def test_unknown_op_error_lists_the_ops(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.query_tool(
+            services, where=[{"field": "done", "op": "equals", "value": "x"}]
+        )
+        assert out.startswith("ERROR:") and "'equals'" in out
+        assert "eq, neq, lt, lte, gt, gte, contains, exists, missing" in out
+
+    async def test_bad_order_by_entry_errors_with_the_grammar(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.query_tool(services, order_by=["due_date descending"])
+        assert out.startswith("ERROR:") and "'field desc'" in out
+
+    async def test_unknown_field_error_lists_real_fields(
+        self, services: tools.Services
+    ) -> None:
+        await self._seed_todos(services)
+        out = await tools.query_tool(
+            services, type="Todo",
+            where=[{"field": "deu_date", "op": "exists"}],
+        )
+        assert out.startswith("ERROR:") and "due_date" in out
+
+    async def test_infra_roles_hidden_unless_type_names_them(
+        self, services: tools.Services
+    ) -> None:
+        from graph_context.domain.models import NodeDraft
+
+        await self._seed_todos(services)
+        await services.repository.create_node(
+            NodeDraft("gc_prose", name="Scene 1", summary="Captured text.")
+        )
+        everything = await tools.query_tool(services, order_by=["modified_at"])
+        assert "Scene 1" not in everything
+        explicit = await tools.query_tool(services, type="Capture")
+        assert "Scene 1" in explicit
+
+    async def test_character_timeline_via_linked_to_name(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.query_tool(
+            services, type="Event", linked_to="Mira", order_by=["story_time"]
+        )
+        assert out.startswith("query: 2 of 2 match(es).")
+        assert out.index("Siege of Brakk") < out.index("Fall of Brakk")
+
+    async def test_detail_full_attaches_bodies(
+        self, services: tools.Services
+    ) -> None:
+        await self._seed_todos(services)
+        out = await tools.query_tool(
+            services, type="Todo",
+            where=[{"field": "name", "op": "eq", "value": "Buy milk"}],
+            detail="full",
+        )
+        assert "Oat milk." in out

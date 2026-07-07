@@ -50,16 +50,18 @@ from graph_context.application.explorer import Explorer
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
+from graph_context.application.querier import Querier
 from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
 from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
+from graph_context.domain.query import NodeQuery, Op, Predicate, SortKey
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
-from graph_context.domain.traversal import ExploreQuery
-from graph_context.errors import GraphContextError, NodeNotFound
+from graph_context.domain.traversal import ExploreQuery, node_identifiers
+from graph_context.errors import GraphContextError, NodeNotFound, UnknownNodeType
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
 from graph_context.ports.graph_repository import GraphRepository
@@ -83,6 +85,7 @@ class Services:
     writer: NodeWriter
     reader: NodeReader
     explorer: Explorer
+    querier: Querier
     capture: CaptureRecorder
     persister: SessionPersister | None = None  # wired in server lifespan
     # WP7: the orchestrator passes a real MutationJournal and drains it per
@@ -110,6 +113,7 @@ def build_services(
         writer=NodeWriter(repository, session, journal),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
+        querier=Querier(repository),
         capture=CaptureRecorder(repository, journal=journal),
         persister=persister,
         journal=journal,
@@ -236,6 +240,88 @@ async def _parse_links(
             )
         )
     return links
+
+
+_OPS_LISTING = ", ".join(op.value for op in Op)
+
+
+def _normalize_predicate_value(value: object) -> str:
+    """MCP clients send JSON-typed values; the index stores strings.
+
+    ``str(True)`` is ``"True"`` but a ticked checkbox stores ``"true"``,
+    and mapping's ``field_value`` strips integral floats' ``.0`` -- match
+    both so an LLM passing natural JSON hits the stored representation.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _parse_predicates(raw: Sequence[dict[str, Any]] | None) -> tuple[Predicate, ...]:
+    predicates = []
+    for item in raw or []:
+        field_name = str(item.get("field", "")).strip()
+        if not field_name or "op" not in item:
+            raise GraphContextError(
+                "each where item needs 'field' and 'op' (plus 'value' unless "
+                f"op is exists/missing); ops: {_OPS_LISTING}"
+            )
+        try:
+            op = Op(str(item["op"]).strip().casefold())
+        except ValueError:
+            raise GraphContextError(
+                f"unknown op {item['op']!r}; allowed: {_OPS_LISTING}"
+            ) from None
+        predicates.append(
+            Predicate(
+                field=field_name,
+                op=op,
+                value=_normalize_predicate_value(item.get("value", "")),
+            )
+        )
+    return tuple(predicates)
+
+
+def _parse_order_by(raw: Sequence[str] | None) -> tuple[SortKey, ...]:
+    keys = []
+    for item in raw or []:
+        parts = str(item).split()
+        directions = {"asc": False, "desc": True}
+        if len(parts) == 1:
+            keys.append(SortKey(field=parts[0]))
+        elif len(parts) == 2 and parts[1].casefold() in directions:
+            keys.append(
+                SortKey(field=parts[0], descending=directions[parts[1].casefold()])
+            )
+        else:
+            raise GraphContextError(
+                f"bad order_by entry {item!r}; each entry is 'field', "
+                "'field asc', or 'field desc'"
+            )
+    return tuple(keys)
+
+
+def _validate_query_type(services: Services, requested: str) -> Role | None:
+    """Typo-check a query's type filter and resolve its role.
+
+    The vocabulary is open, so accept anything the space registry knows,
+    any role name, or any identifier a node in the graph actually carries;
+    reject the rest with the known-types listing (errors are prompts). A
+    known type with zero instances proceeds and honestly matches nothing.
+    """
+    wanted = requested.casefold()
+    role = services.repository.role_for(requested)
+    if role is None:
+        role = next((r for r in Role if r.value.casefold() == wanted), None)
+    known = {t.casefold() for t in services.repository.known_node_types()}
+    if wanted in known or role is not None:
+        return role
+    for node in services.repository.graph.nodes():
+        if any(i.casefold() == wanted for i in node_identifiers(node)):
+            return node.role
+    raise UnknownNodeType(requested, tuple(services.repository.known_node_types()))
 
 
 def _node_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
@@ -462,6 +548,50 @@ async def explore_tool(
             [hit.node.id for hit in result.hits]
         )
     return presenters.render_explore_result(result, detail_level, bodies)
+
+
+@guarded
+async def query_tool(
+    services: Services,
+    type: str = "",
+    linked_to: str = "",
+    edge_types: list[str] | None = None,
+    where: list[dict[str, Any]] | None = None,
+    order_by: list[str] | None = None,
+    limit: int = 25,
+    detail: str = "summaries",
+) -> str:
+    detail_level = _parse_detail(detail)  # fail fast, before any scanning
+    predicates = _parse_predicates(where)
+    sort_keys = _parse_order_by(order_by)
+    node_type = type.strip() or None
+    # Corpus scans reach everything, so hide ALL bookkeeping roles (not
+    # just explore's default set -- mode config objects included) unless
+    # the type filter explicitly names an infra type (same escape hatch
+    # as explore's include_types).
+    exclude_roles: frozenset[Role] = schema.INFRA_ROLES
+    if node_type is not None:
+        role = _validate_query_type(services, node_type)
+        if role in schema.INFRA_ROLES:
+            exclude_roles = frozenset()
+    anchor = await _resolve(services, linked_to) if linked_to else None
+    result = await services.querier.query(
+        NodeQuery(
+            node_type=node_type,
+            linked_to=anchor,
+            edge_types=_edge_type_set(edge_types),
+            predicates=predicates,
+            order_by=sort_keys,
+            limit=limit,
+            exclude_roles=exclude_roles,
+        )
+    )
+    bodies = None
+    if detail_level is Detail.FULL:
+        bodies = await services.explorer.bodies_for(
+            [node.id for node in result.hits]
+        )
+    return presenters.render_query_result(result, detail_level, sort_keys, bodies)
 
 
 @guarded

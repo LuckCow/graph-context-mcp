@@ -33,6 +33,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "explore",
     "find_path",
     "find_node",
+    "query",
 )
 
 
@@ -161,6 +162,43 @@ to create a brand-new relation label rather than reuse an existing one).
 remove_links: list of {"source", "edge_type", "target"} exactly as shown
 by get_node.
 """
+
+def _query_doc(examples: str) -> str:
+    """Assemble the ``query`` doc: shared grammar + profile-specific
+    worked examples. The grammar/semantics text lives here exactly once;
+    only the examples diverge (same rule as the shared doc constants)."""
+    return f"""\
+List nodes by ATTRIBUTE VALUES -- filter, order, and cap, like an
+Anytype Set view. Scans the whole graph, or one node's direct
+neighborhood when `linked_to` is set. Use `explore` to walk outward
+from a node, `find_node` to look up a name; use query to answer
+"which nodes have these property values, in this order?"
+
+type: optional type filter (an unknown type errors with the known list).
+linked_to: node id OR name (resolved for you); restricts candidates to
+  that node's DIRECT neighbors, either edge direction. Combine with
+  `type` and `order_by` for per-entity listings and timelines.
+  edge_types optionally restricts which relations count.
+where: list of {{"field", "op", "value"}} conditions, ALL must hold.
+  Ops: eq, neq, lt, lte, gt, gte, contains, exists, missing
+  (exists/missing take no value). Values compare numerically when both
+  sides are numbers, otherwise as text -- ISO dates order correctly.
+  ABSENT FIELDS: a node may lack a field entirely (an unticked checkbox
+  is stored as absence). `neq` MATCHES absent ("not known to be
+  value"); eq/lt/lte/gt/gte/contains never match absent; exists/missing
+  test presence itself. An unknown field name errors with the fields
+  that DO exist -- read that list and retry.
+order_by: e.g. ["due_date", "priority desc"] -- each entry is "field",
+  "field asc", or "field desc". Nodes missing the field sort last.
+  Sort-key values are echoed on each result line.
+  Queryable fields: the node's own properties (get_node shows them)
+  plus name, type, summary, story_time, modified_at, summary_stale.
+limit: max results (default 25, cap 100). The header reports "N of M
+  match(es)" -- tighten `where` or raise `limit` when truncated.
+detail: names | summaries (default) | full.
+
+{examples}"""
+
 
 _FIND_NODE_DOC = """\
 Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
@@ -308,7 +346,16 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only social edges: ["knows", "member_of"]).
 """,
     "find_node": _FIND_NODE_DOC,
-
+    "query": _query_doc("""\
+EXAMPLES -- the census tool (explore walks outward; query scans the world):
+  every Character whose status property is "missing":
+    query(type="Character",
+          where=[{"field": "status", "op": "eq", "value": "missing"}])
+  a character's TIMELINE (all their Events, in story order):
+    query(type="Event", linked_to="Mira", order_by=["story_time"])
+  the most recently edited nodes, any type:
+    query(order_by=["modified_at desc"], limit=10)
+"""),
 }
 
 _FICTION_MODES = (
@@ -474,7 +521,16 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["member_of", "works_on"]).
 """,
     "find_node": _FIND_NODE_DOC,
-
+    "query": _query_doc("""\
+EXAMPLES:
+  open Tasks, most urgent first:
+    query(type="Task",
+          where=[{"field": "status", "op": "neq", "value": "done"}],
+          order_by=["priority desc", "due_date"], limit=10)
+  everything decided around a project (Decisions linked to it, by date):
+    query(type="Decision", linked_to="Q3 Replatform",
+          order_by=["story_time"])
+"""),
 }
 
 _WORKSPACE_MODES = (
@@ -640,6 +696,17 @@ reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["part_of", "assigned_to"]).
 """,
     "find_node": _FIND_NODE_DOC,
+    "query": _query_doc("""\
+EXAMPLES:
+  10 open todos, due first, ties by priority:
+    query(type="Task",
+          where=[{"field": "done", "op": "neq", "value": "true"}],
+          order_by=["due_date", "priority desc"], limit=10)
+  (an unticked checkbox is stored as ABSENCE and neq matches absent, so
+  done-neq-true finds every not-done item.)
+  a person's meeting history, most recent first:
+    query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
+"""),
 }
 
 _ASSISTANT_MODES = (

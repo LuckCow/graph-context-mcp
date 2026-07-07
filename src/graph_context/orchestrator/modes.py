@@ -53,6 +53,7 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     "explore": tools.explore_tool,
     "find_path": tools.find_path_tool,
     "find_node": tools.find_node_tool,
+    "query": tools.query_tool,
 }
 
 MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})

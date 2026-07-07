@@ -19,6 +19,7 @@ from graph_context.application.ranker import RankedHit
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
+from graph_context.domain.query import QueryResult, SortKey, field_value
 from graph_context.domain.traversal import ExploreResult
 
 EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
@@ -111,15 +112,63 @@ def render_explore_result(
     return "\n".join(lines)
 
 
-def _render_hit_line(node: Node, depth: int, detail: Detail, body: str = "") -> str:
+def _render_hit_line(
+    node: Node, depth: int, detail: Detail, body: str = "", annotation: str = ""
+) -> str:
     indent = "  " * depth
-    base = f"{indent}- {node.name} ({node.type}, id={node.id})"
+    base = f"{indent}- {node.name} ({node.type}, id={node.id}){annotation}"
     if detail is Detail.NAMES:
         return base
     stale = " [summary stale]" if node.summary_stale else ""
     if detail is Detail.SUMMARIES or not body:
         return f"{base}{stale}: {node.summary}"
     return f"{base}{stale}: {node.summary}\n{indent}    {body}"
+
+
+def render_query_result(
+    result: QueryResult,
+    detail: Detail,
+    order_by: Sequence[SortKey] = (),
+    bodies: Mapping[str, str] | None = None,
+) -> str:
+    """Render ``query`` hits with their sort-key values echoed inline.
+
+    The annotation (``[due_date=2026-07-10, priority=High]``) makes the
+    ordering legible to the LLM -- without it a sorted list is just a
+    list. ``N of M`` in the header is the tighten-or-raise signal.
+    """
+    if result.matched == 0:
+        return (
+            "query: 0 matches. Loosen `where`, drop `type`, or get_node a "
+            "sample node to see the fields it actually carries."
+        )
+    lines = [f"query: {len(result.hits)} of {result.matched} match(es)."]
+    for node in result.hits:
+        lines.append(
+            _render_hit_line(
+                node,
+                0,
+                detail,
+                (bodies or {}).get(node.id, ""),
+                _order_annotation(node, order_by),
+            )
+        )
+    if result.truncated:
+        lines.append(
+            f"... showing {len(result.hits)} of {result.matched}; tighten "
+            "`where` or raise `limit` to see more."
+        )
+    return "\n".join(lines)
+
+
+def _order_annotation(node: Node, order_by: Sequence[SortKey]) -> str:
+    if not order_by:
+        return ""
+    parts = []
+    for key in order_by:
+        value = field_value(node, key.field)
+        parts.append(f"{key.field}={'(none)' if value is None else value}")
+    return " [" + ", ".join(parts) + "]"
 
 
 def render_node_view(view: NodeView) -> str:

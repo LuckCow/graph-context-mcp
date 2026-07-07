@@ -157,3 +157,43 @@ update_node and link `other` targets all accept a name directly in place
 of an id and resolve it for you. Reach for find_node to browse, to
 disambiguate when a name is ambiguous, or to confirm a node exists.
 For a cold start with no name in mind, use context action='overview'.
+
+### query
+List nodes by ATTRIBUTE VALUES -- filter, order, and cap, like an
+Anytype Set view. Scans the whole graph, or one node's direct
+neighborhood when `linked_to` is set. Use `explore` to walk outward
+from a node, `find_node` to look up a name; use query to answer
+"which nodes have these property values, in this order?"
+
+type: optional type filter (an unknown type errors with the known list).
+linked_to: node id OR name (resolved for you); restricts candidates to
+  that node's DIRECT neighbors, either edge direction. Combine with
+  `type` and `order_by` for per-entity listings and timelines.
+  edge_types optionally restricts which relations count.
+where: list of {"field", "op", "value"} conditions, ALL must hold.
+  Ops: eq, neq, lt, lte, gt, gte, contains, exists, missing
+  (exists/missing take no value). Values compare numerically when both
+  sides are numbers, otherwise as text -- ISO dates order correctly.
+  ABSENT FIELDS: a node may lack a field entirely (an unticked checkbox
+  is stored as absence). `neq` MATCHES absent ("not known to be
+  value"); eq/lt/lte/gt/gte/contains never match absent; exists/missing
+  test presence itself. An unknown field name errors with the fields
+  that DO exist -- read that list and retry.
+order_by: e.g. ["due_date", "priority desc"] -- each entry is "field",
+  "field asc", or "field desc". Nodes missing the field sort last.
+  Sort-key values are echoed on each result line.
+  Queryable fields: the node's own properties (get_node shows them)
+  plus name, type, summary, story_time, modified_at, summary_stale.
+limit: max results (default 25, cap 100). The header reports "N of M
+  match(es)" -- tighten `where` or raise `limit` when truncated.
+detail: names | summaries (default) | full.
+
+EXAMPLES:
+  10 open todos, due first, ties by priority:
+    query(type="Task",
+          where=[{"field": "done", "op": "neq", "value": "true"}],
+          order_by=["due_date", "priority desc"], limit=10)
+  (an unticked checkbox is stored as ABSENCE and neq matches absent, so
+  done-neq-true finds every not-done item.)
+  a person's meeting history, most recent first:
+    query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])

@@ -13,6 +13,7 @@ import asyncio
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
 from graph_context.errors import NodeNotFound
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -116,6 +117,27 @@ class GraphRepositoryContract:
                       fields={"fuel": "bonemeal"})
         )
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
+
+    async def test_query_neq_true_on_absent_field_matches_unticked_objects(
+        self, repo
+    ):
+        """The open-todos idiom end-to-end: a done-ness field is only
+        present when set (an unticked Anytype checkbox is dropped as
+        absence), and the query engine's ``neq`` matches that absence --
+        whichever repository populated the index."""
+        await repo.create_node(
+            NodeDraft("Item", name="Ticked", summary="s.",
+                      fields={"done": "true"})
+        )
+        await repo.create_node(NodeDraft("Item", name="Unticked", summary="s."))
+        result = run_query(
+            repo.graph,
+            NodeQuery(
+                node_type="Item",
+                predicates=(Predicate("done", Op.NEQ, "true"),),
+            ),
+        )
+        assert [node.name for node in result.hits] == ["Unticked"]
 
     async def test_concurrent_link_mutations_on_one_node_all_take_effect(self, repo):
         """Port guarantee (ADR 009): overlapping link writes against one
