@@ -114,7 +114,10 @@ source_modules = [
     "graph_context.orchestrator.pipeline",
     "graph_context.orchestrator.turn_log",
     "graph_context.orchestrator.channels",
+    "graph_context.orchestrator.spaces",
     "graph_context.orchestrator.discord_transport",
+    "graph_context.orchestrator.rendering",
+    "graph_context.orchestrator.anytype_chat_transport",
 ]
 forbidden_modules = ["graph_context.infrastructure"]
 
@@ -133,7 +136,11 @@ source_modules = [
     "graph_context.orchestrator.claude_driver",
     "graph_context.orchestrator.bootstrap",
     "graph_context.orchestrator.channels",
+    "graph_context.orchestrator.spaces",
     "graph_context.orchestrator.discord_transport",
+    "graph_context.orchestrator.rendering",
+    "graph_context.orchestrator.anytype_chat_transport",
+    "graph_context.orchestrator.anytype_chat_bot",
     "graph_context.orchestrator.cli",
 ]
 forbidden_modules = ["discord"]

@@ -147,6 +147,14 @@ class AnytypeChatClient:
         "rely on posted-message-id echo suppression alone"."""
         return ""
 
+    async def recent_messages(
+        self, chat_id: str, *, limit: int = 100
+    ) -> list[ChatMessage]:
+        """The chat's recency window (C2), oldest-first -- the startup
+        catch-up source for answering messages sent while the bot was down."""
+        raw = await self._client.list_chat_messages(chat_id, limit=limit)
+        return [to_chat_message(item) for item in raw]
+
     async def send(self, chat_id: str, text: str) -> str:
         return await self._client.create_chat_message(chat_id, {"text": text})
 

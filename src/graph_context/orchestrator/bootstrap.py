@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from graph_context import composition
@@ -44,6 +44,7 @@ from graph_context.orchestrator.drivers import (
     TranscriptEvent,
 )
 from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.spaces import SpaceBinding, load_space_bindings
 from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,21 @@ class ChannelRuntimes:
 
     routes: Mapping[int, ChannelRoute]
     descriptions: Mapping[int, str]  # channel id -> "space=..., profile=..."
+    help_line: str
+    teardown: list[TeardownHook]
+
+
+@dataclass(frozen=True, slots=True)
+class SpaceRuntimes:
+    """The Anytype chat bot's routing table: every served chat, wired.
+
+    Keys are CHAT ids (the inbound message's address); ``spaces`` maps
+    each chat back to its space id for stream targets and deep links.
+    """
+
+    routes: Mapping[str, ChannelRoute]
+    spaces: Mapping[str, str]  # chat id -> space id
+    descriptions: Mapping[str, str]  # chat id -> "space=..., profile=..."
     help_line: str
     teardown: list[TeardownHook]
 
@@ -318,5 +334,60 @@ async def build_channel_runtimes() -> ChannelRuntimes:
         )
     return ChannelRuntimes(
         routes=routes, descriptions=descriptions,
+        help_line=help_line, teardown=teardown,
+    )
+
+
+async def build_space_runtimes(
+    resolve_chat_id: Callable[[SpaceBinding], Awaitable[str]],
+) -> SpaceRuntimes:
+    """The Anytype chat composition: space bindings -> per-space runtimes.
+
+    Same posture as :func:`build_channel_runtimes`: SEQUENTIAL assembly
+    (concurrent ``ensure_schema`` bursts would trip a throttled server),
+    failing the whole bot if any space fails. ``resolve_chat_id`` is
+    injected by the composition root -- it owns the chat client -- so this
+    module stays free of infrastructure. ``GC_SPACES_FILE`` unset fails
+    loudly: a chat bot serving nowhere is a misconfiguration, not a
+    default.
+    """
+    spaces_file = os.environ.get("GC_SPACES_FILE", "").strip()
+    if not spaces_file:
+        raise GraphContextError(
+            "GC_SPACES_FILE is not set; the Anytype chat transport needs "
+            '[spaces."<space-id>"] bindings (see spaces.toml at the repo root)'
+        )
+    bindings = load_space_bindings(spaces_file, os.environ.get("GC_PROFILE"))
+    driver, model_name, help_line = build_driver()
+    turn_log = build_turn_log()
+    routes: dict[str, ChannelRoute] = {}
+    spaces: dict[str, str] = {}
+    descriptions: dict[str, str] = {}
+    teardown: list[TeardownHook] = []
+    for binding in bindings:
+        try:
+            chat_id = await resolve_chat_id(binding)
+            runtime = await _assemble_runtime(
+                binding.profile, driver, model_name, help_line, turn_log,
+                space_id=binding.space_id, project=binding.project,
+                modes_file=binding.modes_file,
+            )
+        except GraphContextError as err:
+            await composition.run_teardown(teardown)  # close what already built
+            raise GraphContextError(
+                f"space {binding.space_id} failed to start: {err}"
+            ) from err
+        routes[chat_id] = ChannelRoute(orchestrator=runtime.orchestrator)
+        spaces[chat_id] = binding.space_id
+        descriptions[chat_id] = (
+            f"space={binding.space_id}, profile={binding.profile.name}"
+        )
+        teardown.extend(runtime.teardown)
+        logger.info(
+            "chat %s -> space %s (profile=%s)",
+            chat_id, binding.space_id, binding.profile.name,
+        )
+    return SpaceRuntimes(
+        routes=routes, spaces=spaces, descriptions=descriptions,
         help_line=help_line, teardown=teardown,
     )

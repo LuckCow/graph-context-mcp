@@ -23,13 +23,24 @@ from dataclasses import dataclass
 
 from graph_context.errors import GraphContextError
 from graph_context.orchestrator.channels import ChannelRoute
-from graph_context.orchestrator.pipeline import ReplyEvent
+
+# Shared rendering (WP14 extraction): re-exported here so the Discord
+# surface is unchanged -- render/chunk are dialect shims every chat
+# transport needs, not Discord policy.
+from graph_context.orchestrator.rendering import chunk, render
+
+__all__ = [
+    "DISCORD_MESSAGE_LIMIT",
+    "DiscordTurnHandler",
+    "InboundMessage",
+    "chunk",
+    "parse_channel_allowlist",
+    "render",
+]
 
 logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000  # hard per-message cap, enforced by Discord
-
-_PREFIXES = {"reply": "", "notice": "[notice] ", "error": "[error] "}
 
 
 def parse_channel_allowlist(raw: str | None) -> frozenset[int]:
@@ -51,29 +62,6 @@ def parse_channel_allowlist(raw: str | None) -> frozenset[int]:
         raise GraphContextError(
             f"GC_DISCORD_CHANNELS must be numeric channel ids, got: {raw!r}"
         ) from None
-
-
-def render(event: ReplyEvent) -> str:
-    """Transport-neutral event -> Discord text (plain prefixes, like the CLI)."""
-    return f"{_PREFIXES[event.kind]}{event.text}"
-
-
-def chunk(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
-    """Split into sendable pieces, preferring line then word boundaries."""
-    text = text.strip()
-    pieces: list[str] = []
-    while len(text) > limit:
-        window = text[: limit + 1]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = window.rfind(" ")
-        if cut <= 0:
-            cut = limit
-        pieces.append(text[:cut].rstrip())
-        text = text[cut:].strip()
-    if text:
-        pieces.append(text)
-    return pieces
 
 
 @dataclass(frozen=True, slots=True)

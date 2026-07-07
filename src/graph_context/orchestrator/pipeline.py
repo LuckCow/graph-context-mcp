@@ -120,7 +120,7 @@ class Orchestrator:
         return spec
 
     async def handle_message(
-        self, session_id: str, user_id: str, text: str
+        self, session_id: str, user_id: str, text: str, origin: str = ""
     ) -> list[ReplyEvent]:
         state = self._session(session_id)
         stripped = text.strip()
@@ -185,7 +185,7 @@ class Orchestrator:
                 "text despite the warning; the turn was cut short.",
                 kind="notice",
             ))
-        await self._finish_turn(spec, user_id, stripped, reply_text, trace)
+        await self._finish_turn(spec, user_id, stripped, reply_text, trace, origin)
         if self.turn_log:
             self.turn_log.turn_end(session_id, spec.name, events)
         return events
@@ -197,6 +197,7 @@ class Orchestrator:
         prompt: str,
         reply_text: str,
         trace: list[ToolTrace],
+        origin: str = "",
     ) -> None:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
         drain -> intent node."""
@@ -227,6 +228,7 @@ class Orchestrator:
             user_id=user_id,
             model=self.model_name,
             mode=spec.name,
+            origin=origin,
         )
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
