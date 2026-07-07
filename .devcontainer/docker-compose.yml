@@ -60,13 +60,48 @@ services:
       # setting both fails loudly at startup.)
       DISCORD_BOT_TOKEN_FILE: "/run/secrets/discord_bot_token"
       GC_CHANNELS_FILE: "/workspaces/graph-context-mcp/channels.toml"
+      # Anytype in-space chat transport (WP14): binds served spaces (and
+      # their chats) to profiles, the ADR 017 analogue for the Anytype
+      # transport. Endpoint-agnostic -- works against the desktop today
+      # and the sidecar after cutover.
+      GC_SPACES_FILE: "/workspaces/graph-context-mcp/spaces.toml"
 
     secrets:
       - anytype_api_key
       - discord_bot_token
 
+  # Headless Anytype node (bot account) -- WP14. OPT-IN for now: the
+  # `sidecar` profile keeps it out of `docker compose up` until cutover
+  # (see docs/WORK_PACKAGES.md WP14 runbook). Start it with:
+  #   docker compose -f .devcontainer/docker-compose.yml --profile sidecar up -d --build anytype
+  # At cutover: flip dev's ANYTYPE_API_BASE_URL to http://anytype:31012,
+  # add a depends_on with condition: service_healthy, drop this profile.
+  anytype:
+    build:
+      context: ./anytype
+    container_name: graph-context-mcp-anytype
+    profiles: ["sidecar"]
+    environment:
+      # Local bot node: the server-side write throttle (~1 req/s, spike
+      # S7) protects nothing here -- disable it.
+      ANYTYPE_API_DISABLE_RATE_LIMIT: "1"
+    volumes:
+      # Account + object store survive rebuilds; identity itself is also
+      # backed up to .devcontainer/secrets/anytype_account_key (see
+      # secrets/README.md).
+      - anytype-data:/root/.anytype
+    # No published ports: compose-network only. The dev container's
+    # egress firewall already allows the container subnet.
+    healthcheck:
+      # 200 (key baked later) or 401 (no auth) both mean "API is up".
+      test: ["CMD-SHELL", "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:31012/v1/spaces); echo $$code | grep -qE '200|401'"]
+      interval: 5s
+      retries: 24
+      start_period: 30s
+
 volumes:
   claude-config:
+  anytype-data:
 
 # The secret's value lives in a host file that is git-ignored and never
 # baked into the image. Create it once (see README), then it's mounted

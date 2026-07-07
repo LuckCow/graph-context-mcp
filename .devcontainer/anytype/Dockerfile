@@ -1,0 +1,34 @@
+# Headless Anytype node (bot account) -- the "anytype" compose sidecar.
+#
+# NOT part of the default stack yet: the service carries
+# `profiles: ["sidecar"]` in docker-compose.yml, so it only starts with
+#   docker compose -f .devcontainer/docker-compose.yml --profile sidecar up -d --build anytype
+# Cutover steps (bot account creation, space joins, flipping the dev
+# container's ANYTYPE_API_BASE_URL to http://anytype:31012) live in
+# docs/WORK_PACKAGES.md WP14.
+#
+# The CLI is installed at BUILD time (builds have network; this container
+# is intentionally NOT behind init-firewall.sh -- its whole job is the
+# outbound sync connection to Anytype's network that the dev container
+# is firewalled against).
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# anytype-cli's official installer (github.com/anyproto/anytype-cli).
+# TODO(cutover): pin a release tag/checksum once we adopt the sidecar for
+# real -- HEAD is fine while the service is opt-in and unused.
+RUN curl -fsSL https://raw.githubusercontent.com/anyproto/anytype-cli/HEAD/install.sh | sh
+
+# Account/store data lives under the CLI's data dir. The compose volume
+# mounts /root/.anytype; if spike S10's deferred items find a different
+# path, adjust the volume target (data loss here only costs a re-join,
+# the account key backup in .devcontainer/secrets restores identity).
+VOLUME ["/root/.anytype"]
+
+# gRPC 31010 / gRPC-Web 31011 / HTTP API 31012. Bind beyond loopback so
+# the dev container can reach it across the compose network.
+EXPOSE 31012
+ENTRYPOINT ["anytype", "serve", "--listen-address", "0.0.0.0:31012"]

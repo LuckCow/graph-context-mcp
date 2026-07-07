@@ -132,6 +132,10 @@ if [ -n "$HOST_IPV6" ] && command -v ip6tables >/dev/null; then
 fi
 
 # --- Container subnet (lets Docker forward published ports from the host) ----
+# This rule also lets the dev container reach compose siblings -- deliberately
+# including the WP14 `anytype` sidecar at http://anytype:31012 (the sidecar
+# runs OUTSIDE this firewall; its outbound sync to the Anytype network is its
+# whole job).
 HOST_NETWORK="$(ip route 2>/dev/null | grep -E '^[0-9]+\.' | awk '{print $1; exit}' || true)"
 if [ -z "$HOST_NETWORK" ] && [ -n "$HOST_IPV4" ]; then
     # Fallback if iproute2 is unavailable: assume a /24 around the gateway.
@@ -191,3 +195,10 @@ if ! curl --connect-timeout 5 -s https://api.github.com/zen >/dev/null 2>&1; the
     exit 1
 fi
 echo "[firewall] OK: default-deny active, GitHub reachable."
+# WP14 sidecar reachability (warn-only: the opt-in `anytype` compose service
+# may be absent or still booting; the container-subnet rule above covers it).
+if curl --connect-timeout 3 -s -o /dev/null http://anytype:31012/v1/spaces 2>/dev/null; then
+    echo "[firewall] anytype sidecar reachable at anytype:31012"
+else
+    echo "[firewall] note: anytype sidecar not reachable (fine unless cutover is done)"
+fi
