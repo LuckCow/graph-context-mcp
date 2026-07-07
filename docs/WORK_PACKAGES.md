@@ -1242,6 +1242,65 @@ built speculatively).
 
 ---
 
+## WP14 — Anytype-first: in-space chat transport + headless CLI sidecar (ADR 019)
+
+**Status:** in progress (started 2026-07-07). Goal: the bot chats *inside*
+Anytype spaces (replies deep-link created objects via
+`anytype://object?...`), the desktop app becomes a human-only surface, and
+the bot eventually runs on its own headless anytype-cli node (bot account,
+own sync, rate limit disabled). Discord stays a supported transport.
+**Interim constraint:** the sidecar cannot run yet — everything is built
+and tested against the desktop endpoint (`host.docker.internal:31009`);
+the sidecar cutover is an env swap (`ANYTYPE_API_BASE_URL` →
+`http://anytype:31012`) plus the deferred runbook below. Sidecar compose
+files exist behind `--profile sidecar` (opt-in, inert).
+
+### Spike S10 results (2026-07-07, live DESKTOP server, API `2025-11-08`)
+
+* **S10a: chat endpoints EXIST on the desktop's heart** — `GET
+  /v1/spaces/:sid/chats` → 200 (the v0.50.7 chat API is not sidecar-only).
+* **S10e:** a space may have ZERO chats (GC-E2E did). `POST /chats
+  {"name": ...}` → 201 with a full object envelope (`object.id`; layout
+  `chat`, type key `chat_derived`). The API can create chats.
+* **S10b — message schema:** `POST .../messages {"text": ...}` → 201
+  `{"message_id": "..."}` (flat, not enveloped). `GET .../messages` →
+  `{"messages": [...]}` — **no `data` key, NO pagination block, `offset`
+  is IGNORED** (limit-only window; messages oldest→newest within it).
+  Message: `id`, `order_id` (short lexicographically-increasing string,
+  e.g. `"!!%>"` → `"!!&G"` → `"!!'P"`), `creator` (member id
+  `_participant_<space>_<identity>`), `creator_name`, `created_at`
+  (unix seconds int), `modified_at` (int, 0 until edited), `content:
+  {text, style: "paragraph"}`, `attachments: []`, `reactions: {}`,
+  `pinned`. Markdown is stored verbatim in `content.text`.
+  `PATCH .../messages/:id {"text": ...}` → 200; `DELETE` → 200.
+* **S10c — SSE:** `GET .../messages/stream` → 200 `text/event-stream`.
+  Frames: `event: message_added` + `data: {"type":"message_added",
+  "payload":{"message":{<same schema as above>}}}` + blank line.
+  Heartbeats are comment lines `: heartbeat` (honors
+  `Anytype-Heartbeat-Seconds`). On connect the stream replays the chat's
+  recent history as `message_added` frames (a 5-message chat replayed all
+  5) — the transport MUST fast-forward past the backlog before serving.
+* **S10d — identity:** no `auth/me`-style endpoint (404s). `GET
+  /v1/spaces/:sid/members` → members with `id`, `identity`, `role`,
+  `status`; nothing marks "self". On the desktop the caller is the sole
+  human member. Bot-identity discovery is DEFERRED to the sidecar (the
+  member `id` embeds the account identity, so matching the bot's own
+  identity string is the likely mechanism); until then echo-suppression
+  rides on recording our own POSTed `message_id`s.
+* **S10f:** a 5000-char message posts fine (201) — no small server cap
+  observed; the transport chunks at a readability limit, not a server one.
+
+### Deferred to sidecar availability
+
+`ANYTYPE_API_DISABLE_RATE_LIMIT` confirmation, CLI data-dir path (compose
+volume target), `anytype space join` + owner-approval flow, bot member-id
+discovery, and the cutover runbook (see ADR 019 / README once written):
+create bot account + API key in the sidecar, invite it to each space,
+flip `ANYTYPE_API_BASE_URL`, add `depends_on: service_healthy`, drop the
+`sidecar` compose profile.
+
+---
+
 ## Sequencing
 
 ```
