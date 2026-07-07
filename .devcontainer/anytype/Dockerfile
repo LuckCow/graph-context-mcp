@@ -18,13 +18,16 @@ RUN apt-get update \
 # anytype-cli's official installer (github.com/anyproto/anytype-cli).
 # TODO(cutover): pin a release tag/checksum once we adopt the sidecar for
 # real -- HEAD is fine while the service is opt-in and unused.
-RUN curl -fsSL https://raw.githubusercontent.com/anyproto/anytype-cli/HEAD/install.sh | sh
+# NOTE: the anytype CLI needs to run in bash, not dash!
+RUN curl -fsSL https://raw.githubusercontent.com/anyproto/anytype-cli/HEAD/install.sh | bash \
+    && mv /root/.local/bin/anytype /usr/local/bin/anytype
 
-# Account/store data lives under the CLI's data dir. The compose volume
-# mounts /root/.anytype; if spike S10's deferred items find a different
-# path, adjust the volume target (data loss here only costs a re-join,
-# the account key backup in .devcontainer/secrets restores identity).
-VOLUME ["/root/.anytype"]
+# The CLI splits its state (live-confirmed): ~/.config/anytype holds the
+# identity/config/API-key store, ~/.anytype the rest. BOTH are volumes in
+# docker-compose.yml -- a rebuild once wiped the API keys when only
+# ~/.anytype was mounted. The account key backup in .devcontainer/secrets
+# restores identity if the volumes are ever lost.
+VOLUME ["/root/.anytype", "/root/.config/anytype"]
 
 # gRPC 31010 / gRPC-Web 31011 / HTTP API 31012. Bind beyond loopback so
 # the dev container can reach it across the compose network.

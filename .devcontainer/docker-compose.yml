@@ -86,10 +86,13 @@ services:
       # S7) protects nothing here -- disable it.
       ANYTYPE_API_DISABLE_RATE_LIMIT: "1"
     volumes:
-      # Account + object store survive rebuilds; identity itself is also
-      # backed up to .devcontainer/secrets/anytype_account_key (see
-      # secrets/README.md).
+      # The CLI splits its state (live-confirmed at cutover): identity,
+      # config.json, and the API-key store live under ~/.config/anytype;
+      # ~/.anytype holds the rest. BOTH must be volumes or a rebuild
+      # wipes the bot's keys (it did, once). Identity is also backed up
+      # to .devcontainer/secrets/anytype_account_key (see secrets/README.md).
       - anytype-data:/root/.anytype
+      - anytype-config:/root/.config/anytype
     # No published ports: compose-network only. The dev container's
     # egress firewall already allows the container subnet.
     healthcheck:
@@ -102,6 +105,7 @@ services:
 volumes:
   claude-config:
   anytype-data:
+  anytype-config:
 
 # The secret's value lives in a host file that is git-ignored and never
 # baked into the image. Create it once (see README), then it's mounted

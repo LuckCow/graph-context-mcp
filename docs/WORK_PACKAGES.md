@@ -1306,12 +1306,23 @@ the parameter; empty for transports without addressable messages).
 
 ### Deferred to sidecar availability
 
-`ANYTYPE_API_DISABLE_RATE_LIMIT` confirmation, CLI data-dir path (compose
-volume target), `anytype space join` + owner-approval flow, bot member-id
-discovery, and the cutover runbook (see ADR 019 / README once written):
-create bot account + API key in the sidecar, invite it to each space,
-flip `ANYTYPE_API_BASE_URL`, add `depends_on: service_healthy`, drop the
-`sidecar` compose profile.
+`ANYTYPE_API_DISABLE_RATE_LIMIT` confirmation, `anytype space join` +
+owner-approval flow, bot member-id discovery, and the cutover runbook
+(see ADR 019 / README): create bot account + API key in the sidecar,
+invite it to each space, flip `ANYTYPE_API_BASE_URL`, add
+`depends_on: service_healthy`.
+
+Cutover findings so far (2026-07-07):
+* The CLI install script requires **bash** (dash chokes) and installs to
+  `~/.local/bin/anytype` — the sidecar Dockerfile pipes to `bash` and
+  moves the binary to `/usr/local/bin`.
+* `--listen-address 0.0.0.0:31012` is the correct serve flag (default
+  binds 127.0.0.1).
+* **CLI data-dir (answered the hard way):** state is split between
+  `~/.config/anytype` (identity, `config.json`, the API-key store) and
+  `~/.anytype`. Only the latter was a volume at first, so a container
+  rebuild wiped the bot's API keys; both are volumes now
+  (`anytype-data`, `anytype-config`).
 
 ---
 
