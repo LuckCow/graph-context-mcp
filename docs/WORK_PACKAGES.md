@@ -1199,7 +1199,36 @@ server): does `list_id` accept a query-layout (Set) id (S9a)? do views
 expose machine-readable filter/sort definitions (S9b)? does the
 view-objects endpoint apply filter AND sort server-side (S9c)? page cap +
 inline properties (S9d)? Sets discoverable via search (S9e)? staleness
-after edits (S9f)? Record results here per the S1–S8 convention.
+after edits (S9f)?
+
+### Spike S9 partial results (2026-07-07, live server, API `2025-11-08`)
+
+* **S9e: YES** — Sets are ordinary searchable objects: `POST /search`
+  finds them by name, and type-scoping works with `types=["set"]` or
+  `["ot-set"]` (`types=["query"]`/`["collection"]` return nothing for a
+  Set). The type record: key `set`, display name "Query", layout `set`.
+* **Sets can be CREATED via API** (`POST /objects` `type_key="set"` →
+  201) — but the type exposes **no property for the query source**
+  (only backlinks/tag/created_date/creator/links), so an API-created Set
+  is a sourceless shell: its views list fine but view-objects 500s.
+  Configuring source/filter/sorts is desktop-only.
+* **S9a (partial): YES** — `GET /lists/{set_id}/views` accepts a
+  query-layout object id (200) even for the sourceless shell.
+* **S9b (shape confirmed): YES** — views carry machine-readable
+  definitions: `{id, name, layout, filters, sorts:[{id, property_key,
+  format, sort_type}]}` (default view: `filters: null`, sort
+  `lastModifiedDate desc`; note the camelCase `property_key` value).
+  The filter leaf shape still needs a manually-configured Set.
+* **Route shape**: `GET /lists/{list_id}/views/{view_id}/objects` is the
+  live path (500 on a sourceless set — route exists);
+  `/lists/{id}/objects`, `/lists/{id}/views/objects`, and
+  `/lists/{id}/{view_id}/objects` all 404 on `2025-11-08`.
+* **Blocked on a manual step (rerun the script after):** in the desktop
+  app open `S9 Spike Set` in GC-E2E, set its query source to
+  `Spike Todo`, add filter "Done is unchecked" + sorts (Due date asc,
+  Priority), then rerun to answer S9b-filter-shape, S9c, S9d, S9f.
+  (Do it before any live E2E run — the E2E reset archives the space's
+  objects.)
 
 **Fast-follow — run the user's real Sets:** a `view: str` parameter on
 the same tool, mutually exclusive with `type`/`where`/`order_by`/
