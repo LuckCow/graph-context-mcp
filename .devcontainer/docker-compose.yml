@@ -70,17 +70,17 @@ services:
       - anytype_api_key
       - discord_bot_token
 
-  # Headless Anytype node (bot account) -- WP14. OPT-IN for now: the
-  # `sidecar` profile keeps it out of `docker compose up` until cutover
-  # (see docs/WORK_PACKAGES.md WP14 runbook). Start it with:
-  #   docker compose -f .devcontainer/docker-compose.yml --profile sidecar up -d --build anytype
-  # At cutover: flip dev's ANYTYPE_API_BASE_URL to http://anytype:31012,
-  # add a depends_on with condition: service_healthy, drop this profile.
+  # Headless Anytype node (bot account) -- WP14 / ADR 019. Starts with
+  # every `up`/rebuild (VS Code included). First-time bootstrap (see
+  # docs/WORK_PACKAGES.md WP14 runbook): anytype auth create + apikey
+  # create inside this container, invite the bot to your spaces, THEN
+  # flip dev's ANYTYPE_API_BASE_URL to http://anytype:31012 and add
+  # `depends_on: anytype: condition: service_healthy` on dev. Until the
+  # account exists dev deliberately does NOT depend on this service.
   anytype:
     build:
       context: ./anytype
     container_name: graph-context-mcp-anytype
-    profiles: ["sidecar"]
     environment:
       # Local bot node: the server-side write throttle (~1 req/s, spike
       # S7) protects nothing here -- disable it.

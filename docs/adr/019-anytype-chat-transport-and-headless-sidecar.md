@@ -71,8 +71,9 @@ Behavioral contracts:
   and bare object ids into `anytype://object?objectId=…&spaceId=…`
   links; markdown survives in `content.text` verbatim (S10).
 
-Sidecar topology (prepared, opt-in via `docker compose --profile
-sidecar`): a second compose service builds `anytype-cli` and serves the
+Sidecar topology (initially behind an opt-in compose profile; the gate
+was dropped 2026-07-07 when cutover began, so the service now starts
+with every up/rebuild): a second compose service builds `anytype-cli` and serves the
 HTTP API on `0.0.0.0:31012` with `ANYTYPE_API_DISABLE_RATE_LIMIT=1`. It
 lives *outside* the devcontainer's egress firewall — its outbound sync to
 the Anytype network is its whole purpose — while the dev container

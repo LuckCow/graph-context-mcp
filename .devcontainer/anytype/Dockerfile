@@ -1,10 +1,8 @@
 # Headless Anytype node (bot account) -- the "anytype" compose sidecar.
 #
-# NOT part of the default stack yet: the service carries
-# `profiles: ["sidecar"]` in docker-compose.yml, so it only starts with
-#   docker compose -f .devcontainer/docker-compose.yml --profile sidecar up -d --build anytype
-# Cutover steps (bot account creation, space joins, flipping the dev
-# container's ANYTYPE_API_BASE_URL to http://anytype:31012) live in
+# Starts with every compose up/rebuild. First-time bootstrap (bot
+# account creation, space joins, flipping the dev container's
+# ANYTYPE_API_BASE_URL to http://anytype:31012) lives in
 # docs/WORK_PACKAGES.md WP14.
 #
 # The CLI is installed at BUILD time (builds have network; this container
