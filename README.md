@@ -62,7 +62,7 @@ python -m graph_context.orchestrator.discord_bot                           # Dis
 python -m graph_context.orchestrator.anytype_chat_bot                      # Anytype in-space chat bot (WP14/ADR 019)
 ```
 
-**Anytype chat (the all-in path, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)):** the bot chats *inside* your Anytype spaces — the same store that holds the graph — and rewrites object references in its replies into clickable `anytype://` deep links. Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by the space id, with optional `profile` / `project` / `modes_file` / `chat_id` (unset = the space's only chat is discovered; several chats = pick one, loudly). Identity follows the `<transport>:<id>` convention (`anytype:<chat_id>` sessions, `anytype:<member_id>` users) and each intent node's `origin` field points at the exact chat message that caused it. The chat cursor persists (`GC_CHAT_CURSOR`, default `logs/chat_cursor.json`), so **messages sent while the bot was down are answered on the next startup** (up to the API's ~100-message window); a chat bound for the first time skips its history instead. Never bind one space in both `spaces.toml` and `channels.toml`. Today the bot talks to the desktop app's API and posts as your own account; the headless sidecar (compose service `anytype` — bot account, own sync, no rate limit — starts with every up/rebuild) takes over at cutover with just an `ANYTYPE_API_BASE_URL` flip after its one-time bootstrap (see WORK_PACKAGES WP14).
+**Anytype chat (the all-in path, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)):** the bot chats *inside* your Anytype spaces — the same store that holds the graph — and rewrites object references in its replies into clickable `anytype://` deep links. Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by the space id, with optional `profile` / `project` / `modes_file` / `chat_id` (unset = the space's only chat is discovered; several chats = pick one, loudly). Identity follows the `<transport>:<id>` convention (`anytype:<chat_id>` sessions, `anytype:<member_id>` users) and each intent node's `origin` field points at the exact chat message that caused it. The chat cursor persists (`GC_CHAT_CURSOR`, default `logs/chat_cursor.json`), so **messages sent while the bot was down are answered on the next startup** (up to the API's ~100-message window); a chat bound for the first time skips its history instead. Never bind one space in both `spaces.toml` and `channels.toml`. The bot runs on its own headless node (the `anytype` compose sidecar — bot account, own sync, no rate limit) and posts under its own identity, `graph-context-bot`; echo suppression is identity-based plus a persisted posted-id ledger. Setup: see "Graduating to the live Anytype backend" below.
 
 The Discord bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the channels you configure — both are wired in `.devcontainer/docker-compose.yml` (token secret at `/run/secrets/discord_bot_token`; no channel config = serve nowhere, loudly). Two configuration shapes ([ADR 017](docs/adr/017-channel-bound-spaces.md)):
 
@@ -114,7 +114,35 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 
 ### Graduating to the live Anytype backend
 
-`GC_BACKEND=anytype` (the default) talks to the Anytype desktop app on your host via `host.docker.internal:31009`. The container already wires everything it needs in `docker-compose.yml`: the base URL (`ANYTYPE_API_BASE_URL`), the file-mounted key (`ANYTYPE_API_KEY_FILE`), and the default space (`ANYTYPE_SPACE_ID`, pointing at the **TestWorld** space). The only thing you must create is the key file — `.devcontainer/secrets/anytype_api_key` (see [`.devcontainer/secrets/README.md`](.devcontainer/secrets/README.md)).
+`GC_BACKEND=anytype` (the default) talks to the **headless Anytype sidecar** — the `anytype` compose service running a bot account ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)). The container already wires everything in `docker-compose.yml`: the base URL (`ANYTYPE_API_BASE_URL=http://anytype:31012`), the file-mounted key (`ANYTYPE_API_KEY_FILE`), and the default space (`ANYTYPE_SPACE_ID`). Your desktop app is the *human* surface: it shares spaces with the bot over Anytype's sync network and never talks to this stack directly.
+
+#### One-time sidecar bootstrap (bot account)
+
+The sidecar builds `anytype-cli` and runs `anytype serve` with the API on port 31012 and the write rate limit disabled. Its identity/config (`~/.config/anytype` — this is where API keys live) and object store (`~/.anytype`) are named volumes, so they survive rebuilds; both mounts are required (with only one, a rebuild wipes the bot's keys — ask us how we know). Setup, all from the host:
+
+```bash
+# 1. Build + start the stack (the sidecar is part of it)
+docker compose -f .devcontainer/docker-compose.yml up -d --build
+
+# 2. Create the bot account (once) and an API key
+docker exec -it graph-context-mcp-anytype anytype auth create graph-context-bot
+docker exec -it graph-context-mcp-anytype anytype auth apikey create "graph-context"
+```
+
+Back up the **account key** printed by `auth create` to `.devcontainer/secrets/anytype_account_key` (disaster recovery: it is the bot's identity), and paste the **API key** into `.devcontainer/secrets/anytype_api_key`. Then `docker compose -f .devcontainer/docker-compose.yml up -d` once more so `dev` remounts the key (secret mounts go stale when the file's inode changes).
+
+#### Sharing spaces with the bot
+
+For every space the bot should serve: create an invite link in the desktop app, then
+
+```bash
+docker exec -it graph-context-mcp-anytype anytype space join "<invite-link>"
+docker exec -it graph-context-mcp-anytype anytype space list   # wait until synced
+```
+
+approve the join request in the desktop app and grant **Editor**. Space ids are identical for every member, so copy them straight into `spaces.toml` (chat transport) or `channels.toml` (Discord) — never both for one space. Sanity check from the dev container: `curl -s http://anytype:31012/v1/spaces -H "Anytype-Version: 2025-11-08" -H "Authorization: Bearer $(cat /run/secrets/anytype_api_key)"` lists what the bot can see.
+
+Gotchas we hit so far: the CLI's install script needs **bash** (dash chokes); `anytype serve` binds loopback unless given `--listen-address 0.0.0.0:31012`; and the desktop app pairing flow is NOT involved anywhere — keys are minted headlessly by `anytype auth apikey create`.
 
 Because all three are container defaults inherited by `docker exec` — and `PYTHONPATH` is baked into the image (`ENV` in the Dockerfile) so the package imports in every `docker exec` session — the live backend needs **no `-e` flags at all** — `anytype` is the default backend. Drop the `memory` override and the entry becomes:
 

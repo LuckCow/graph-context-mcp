@@ -11,11 +11,12 @@
 # time: a space holds one SessionContext node, and two runtimes would
 # clobber each other's session snapshot.
 
-# The story world (same space channels.toml served over Discord --
-# remove it THERE before enabling it here).
-#[spaces."bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"] # TestWorld
-#profile = "fiction"
+# The story world (moved here from channels.toml at the WP14 cutover).
+[spaces."bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"] # TestWorld
+profile = "fiction"
+chat_id = "bafyreih5l5fmqlbhqc7og3r5v7kixxrcuxhxj3uedxkfmwzamrz7j5qmci" # "Chat"
 
 # Task tracking over the Todolist space.
-#[spaces."bafyreigkpfhl472fqwfg2f2bh4zdhixvlo2by24pc5xo7v34p6izub33tm.2lc7dwb79z2g4"] # Todolist
-#profile = "assistant"
+[spaces."bafyreigkpfhl472fqwfg2f2bh4zdhixvlo2by24pc5xo7v34p6izub33tm.2lc7dwb79z2g4"] # Todolist
+profile = "assistant"
+chat_id = "bafyreic7htbmfv7elegk4teddpqqoeeasv2xlfldrva2mrszbarwmhidcq" # "Chat"
