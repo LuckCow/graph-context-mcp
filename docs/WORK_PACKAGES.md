@@ -1229,6 +1229,16 @@ after edits (S9f)?
   Priority), then rerun to answer S9b-filter-shape, S9c, S9d, S9f.
   (Do it before any live E2E run — the E2E reset archives the space's
   objects.)
+* **S9 addendum (2026-07-08, post-cutover):** GC-E2E now lives on the
+  BOT account, so the manual step needs the human invited into that
+  space (or the spike moved to a shared one). Also found — the reason
+  "Done" was missing from the desktop's filter picker: a property
+  written on OBJECTS is not thereby attached to their TYPE, and the
+  Set-filter picker only offers type-attached properties. Fixed by
+  widening the type's `properties` list via `PATCH /types/:id` (the
+  2025-11-08 type-update endpoint; 200, verified — the reseeded
+  `spike_todo` type in the bot's GC-E2E now carries
+  done/due_date/priority).
 
 **Fast-follow — run the user's real Sets:** a `view: str` parameter on
 the same tool, mutually exclusive with `type`/`where`/`order_by`/
