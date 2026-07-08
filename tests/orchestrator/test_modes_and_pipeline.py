@@ -17,6 +17,7 @@ from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
+from graph_context.infrastructure.memory.fake_session_store import InMemorySessionStore
 from graph_context.interface.profiles import (
     TOOL_NAMES,
     CapturePolicy,
@@ -361,7 +362,7 @@ class TestPipeline:
             services=services, driver=driver, profile=FICTION,
             registry=load_registry(FICTION),
         )
-        orchestrator.seed_memory(
+        await orchestrator.seed_memory(
             "s1", [("user", "earlier question"), ("assistant", "earlier answer")]
         )
         await orchestrator.handle_message("s1", "u1", "follow-up")
@@ -574,6 +575,87 @@ def _provenance_orchestrator(
 
 def _intent_nodes(services: Services) -> list:
     return [n for n in services.repository.graph.nodes() if n.role is Role.INTENT]
+
+
+def _keyed_orchestrator(
+    turns: list[LLMTurn],
+    *,
+    store: InMemorySessionStore | None = None,
+    driver=None,
+):
+    """An orchestrator with a real per-session-key Services factory (WP8):
+    one shared repository, a keyed session store, independent SessionState
+    per session id -- the multi-chat shape."""
+    from graph_context.application.session_registry import SessionRegistry
+    from graph_context.interface.tools import derive_services
+
+    store = store or InMemorySessionStore()
+    repository = InMemoryGraphRepository(role_overrides=FICTION.role_overrides)
+    base = build_services(repository, SessionState(project="Ashfall"))
+    registry = SessionRegistry(store)
+
+    async def services_for(key: str) -> Services:
+        session, persister = await registry.get(key)
+        return derive_services(base, session, persister)
+
+    orchestrator = Orchestrator(
+        services=base, driver=driver or ScriptedDriver(turns), profile=FICTION,
+        registry=load_registry(FICTION), services_for=services_for,
+    )
+    return orchestrator, store
+
+
+class TestKeyedSessions:
+    """WP8: each session id gets its own SessionState + persisted mode."""
+
+    async def test_two_chats_have_independent_working_sets(self) -> None:
+        note_a = ToolCall("context", {"action": "note", "text": "arc: the siege"})
+        note_b = ToolCall("context", {"action": "note", "text": "arc: the exile"})
+        orchestrator, _ = _keyed_orchestrator([])
+        orchestrator.driver = ScriptedDriver([  # per-turn scripts
+            LLMTurn(tool_calls=(note_a,)), LLMTurn(reply="a noted"),
+            LLMTurn(tool_calls=(note_b,)), LLMTurn(reply="b noted"),
+        ])
+        await orchestrator.handle_message("anytype:a", "u1", "note the siege")
+        await orchestrator.handle_message("anytype:b", "u1", "note the exile")
+        state_a = orchestrator._sessions["anytype:a"]
+        state_b = orchestrator._sessions["anytype:b"]
+        assert state_a.services.session.scratchpad == "arc: the siege"
+        assert state_b.services.session.scratchpad == "arc: the exile"
+        assert state_a.services.session is not state_b.services.session
+
+    async def test_mode_switch_persists_per_chat_and_survives_restart(self) -> None:
+        store = InMemorySessionStore()
+        orchestrator, _ = _keyed_orchestrator([], store=store)
+        await orchestrator.handle_message("anytype:a", "u1", "/mode authoring")
+        await orchestrator.handle_message("anytype:b", "u1", "hi")  # stays default
+        # A fresh orchestrator over the same store == a restart.
+        restarted, _ = _keyed_orchestrator([LLMTurn(reply="ok")], store=store)
+        assert restarted.mode_of("anytype:a") == "world_modeling"  # not yet seen
+        await restarted.handle_message("anytype:a", "u1", "resume")
+        assert restarted.mode_of("anytype:a") == "authoring"  # restored on first turn
+        await restarted.handle_message("anytype:b", "u1", "resume")
+        assert restarted.mode_of("anytype:b") == "world_modeling"
+
+    async def test_persisted_but_vanished_mode_degrades_to_default(self) -> None:
+        store = InMemorySessionStore()
+        # Seed a snapshot naming a mode this profile does not load.
+        seed = SessionState(mode="ghost_mode")
+        await store.save(seed.to_snapshot(), "anytype:a")
+        orchestrator, _ = _keyed_orchestrator([LLMTurn(reply="ok")], store=store)
+        await orchestrator.handle_message("anytype:a", "u1", "hi")
+        assert orchestrator.mode_of("anytype:a") == "world_modeling"
+
+    async def test_mode_switch_flush_failure_degrades_to_a_notice(self) -> None:
+        class Flaky(InMemorySessionStore):
+            async def save(self, snapshot, key):
+                raise GraphContextError("store on fire")
+
+        orchestrator, _ = _keyed_orchestrator([], store=Flaky())
+        events = await orchestrator.handle_message("anytype:a", "u1", "/mode authoring")
+        # The switch still happened in memory; a notice explains it won't persist.
+        assert orchestrator.mode_of("anytype:a") == "authoring"
+        assert any("could not be saved" in e.text for e in events)
 
 
 class TestProvenanceTurns:

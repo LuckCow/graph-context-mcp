@@ -14,10 +14,13 @@ Like ``modes.py`` this stays plain logic over primitives -- no discord.py,
 no infrastructure -- so bindings parse and validate without either. Bad
 config fails LOUDLY at startup, naming the file, channel, and field.
 
-One channel per space is an invariant, not a limitation we forgot: a
-space holds exactly one SessionContext meta-node, so two runtimes on the
-same space would clobber each other's session snapshot (LWW). A
-keyed multi-session store is the WP8 slice that lifts this.
+One channel per space is an invariant, not a limitation we forgot. It is
+no longer about the session node -- WP8/ADR 021 made sessions keyed, so
+one space holds many session nodes. The remaining reason is that a
+runtime owns a repository/GraphIndex and a journal: two runtimes on one
+space would keep divergent graph projections and cross-attribute each
+other's mutations. Multiple chats in one space share ONE runtime (the
+Anytype transport); binding a space to two *channels* would not.
 """
 
 from __future__ import annotations

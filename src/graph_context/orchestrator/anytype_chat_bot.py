@@ -52,13 +52,14 @@ from graph_context.orchestrator.anytype_chat_transport import (
     InboundChatMessage,
     SentMessages,
 )
-from graph_context.orchestrator.spaces import SpaceBinding
+from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CURSOR_PATH = "logs/chat_cursor.json"
 CATCHUP_WINDOW = 100  # the messages endpoint's recency window (C2)
 _RECONNECT_CAP_SECONDS = 60.0
+CHAT_RESCAN_SECONDS = 60  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
 
 
 def _cursor_path() -> str | None:
@@ -66,6 +67,22 @@ def _cursor_path() -> str | None:
     if raw.lower() in {"", "0", "false", "no", "off"}:
         return None
     return raw
+
+
+def _rescan_seconds() -> float | None:
+    """Live-discovery interval; ``0``/``off`` disables discovery."""
+    raw = os.environ.get("GC_CHAT_RESCAN_SECONDS", str(CHAT_RESCAN_SECONDS)).strip()
+    if raw.lower() in {"0", "false", "no", "off"}:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        raise GraphContextError(
+            f"GC_CHAT_RESCAN_SECONDS must be a number or off, got {raw!r}"
+        ) from None
+    if seconds <= 0:
+        raise GraphContextError("GC_CHAT_RESCAN_SECONDS must be positive or off")
+    return seconds
 
 
 def _sent_path(cursor_path: str | None) -> str | None:
@@ -145,7 +162,7 @@ async def _catch_up(
     ])
     if seed:
         route = handler.routes[chat_id]
-        route.orchestrator.seed_memory(f"anytype:{chat_id}", seed)
+        await route.orchestrator.seed_memory(f"anytype:{chat_id}", seed)
         logger.info(
             "chat %s: seeded conversation memory with %d message(s)",
             chat_id, len(seed),
@@ -188,6 +205,40 @@ async def _serve_chat(
         delay = min(delay * 2, _RECONNECT_CAP_SECONDS)
 
 
+async def _watch_chats(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    binding: SpaceBinding,
+    runtimes: bootstrap.SpaceRuntimes,
+    task_group: asyncio.TaskGroup,
+    interval: float,
+) -> None:
+    """Live discovery (WP8): re-list a space's chats and serve new ones.
+
+    Reads are unthrottled, so a periodic re-list is cheap. A newly created
+    chat is registered (visible to the handler at once, aliased maps) and
+    gets its own serve task with no restart. Never raises -- a failed
+    re-list logs and retries -- so it is safe inside the bot's TaskGroup.
+    """
+    space_id = binding.space_id
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            listed = await chat_client.list_chats()
+        except GraphContextError as err:
+            logger.warning("chat rescan for space %s failed: %s", space_id, err)
+            continue
+        names = dict(listed)
+        for chat_id in served_chat_ids(binding, [cid for cid, _ in listed]):
+            if chat_id in runtimes.routes:
+                continue
+            bootstrap.register_chat(runtimes, space_id, chat_id, names.get(chat_id, ""))
+            logger.info("discovered chat %s in space %s; serving it", chat_id, space_id)
+            task_group.create_task(
+                _serve_chat(handler, chat_client, chat_id, handler.cursor)
+            )
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -203,10 +254,14 @@ async def main() -> None:
             chat_clients[space_id] = AnytypeChatClient(client)
         return chat_clients[space_id]
 
-    async def resolve_chat_id(binding: SpaceBinding) -> str:
-        return await client_for(binding.space_id).resolve_chat_id(binding.chat_id)
+    async def list_chats(binding: SpaceBinding) -> list[tuple[str, str]]:
+        # A pinned chat needs no enumeration -- served_chat_ids ignores the
+        # list for a pin; skip the API call and serve it by name-less id.
+        if binding.chat_id:
+            return [(binding.chat_id, "")]
+        return await client_for(binding.space_id).list_chats()
 
-    runtimes = await bootstrap.build_space_runtimes(resolve_chat_id)
+    runtimes = await bootstrap.build_space_runtimes(list_chats)
     teardown = list(runtimes.teardown)
     teardown.extend(client.aclose for client in transport_clients)
 
@@ -224,16 +279,31 @@ async def main() -> None:
             transport_clients[0]
         ) if transport_clients else "",
     )
+    rescan = _rescan_seconds()
     try:
         served = "; ".join(
             f"{chat_id}: {desc}"
             for chat_id, desc in sorted(runtimes.descriptions.items())
         )
         logger.info("anytype chat: serving %s. %s", served, runtimes.help_line)
-        await asyncio.gather(*(
-            _serve_chat(handler, client_for(space_id), chat_id, handler.cursor)
-            for chat_id, space_id in runtimes.spaces.items()
-        ))
+        # TaskGroup (not gather): the discovery watchers spawn serve tasks
+        # into the same lifecycle. A brand-new chat's serve task fast-
+        # forwards past its (empty) history via _catch_up's first-run path.
+        async with asyncio.TaskGroup() as task_group:
+            for chat_id, space_id in list(runtimes.spaces.items()):
+                task_group.create_task(
+                    _serve_chat(
+                        handler, client_for(space_id), chat_id, handler.cursor
+                    )
+                )
+            if rescan is not None:
+                for space_id, binding in runtimes.space_bindings.items():
+                    if binding.chat_id:
+                        continue  # pinned: no discovery
+                    task_group.create_task(_watch_chats(
+                        handler, client_for(space_id), binding,
+                        runtimes, task_group, rescan,
+                    ))
     finally:
         await composition.run_teardown(teardown)
 

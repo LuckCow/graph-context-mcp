@@ -540,16 +540,28 @@ carry `gc_user_id`/`gc_model`).
   gains the guarantee: concurrent link mutations on one node all take
   effect. The fake meets it via synchronous atomic ops; the Anytype
   adapter via the queue. ADR 009 lands with the implementation PR.
-- **Per-session state.** `SessionState` keyed by session id (transport
-  thread/channel ↔ LangGraph `thread_id`): focus stack, recent list,
-  project label per session. The `SessionStore` port extends to keyed
-  load/flush (one `gc_session_context` node per session; debounce
-  discipline unchanged); fake + contract tests move with it. The MCP
-  server keeps its single implicit session — behavior unchanged.
-  **Channel-scoped slice shipped 2026-07-06 (ADR 017):** channels bound
-  to different spaces get fully independent `SessionState` (persisted
-  per space) for free; per-user sessions *within* one space still need
-  the keyed store above.
+- **Per-session state. Shipped 2026-07-08 (ADR 021).** `SessionState`
+  (scratchpad / working set / recent / project / mode) is keyed by
+  session id (`anytype:<chat_id>`, `discord:<channel_id>`, `mcp`, `cli`).
+  The `SessionStore` port took a **required** key — no unkeyed/default
+  session, no `""` sentinel (the user vetoed it as a bug magnet; the two
+  dogfood spaces convert by hand) — and each key owns one
+  `gc_session_context` node discriminated by a new `gc_session_key`
+  property. A new `SessionRegistry` is the one source of live sessions
+  (lazy keyed load, `flush_all` at teardown); `composition` exposes
+  `services_for(key)` and the pipeline gives each session id its own
+  `Services` view over the shared repository. Mode is now persisted per
+  chat. Debounce discipline unchanged; MCP server unchanged (it is the
+  `"mcp"` session). **Threads within one space (WP8's goal):** the
+  Anytype bot serves EVERY chat in a bound space (minus `exclude_chats`,
+  or a pinned `chat_id`), each its own thread, with **live discovery**
+  (`GC_CHAT_RESCAN_SECONDS`) picking up chats created while it runs — all
+  sharing one runtime/route (turns serialize per space). The earlier
+  channel-scoped slice (ADR 017; different spaces → independent sessions)
+  was the per-space precursor; this is the per-chat store that lifts the
+  one-chat-per-space limit. Deferred WP8 items below (authz, privacy,
+  queue fairness) stay open — they are multi-*human* concerns, orthogonal
+  to thread mechanics.
 - **Authorization at the bot layer.** Channel and user allowlists;
   per-user *mode* availability (WP6's mode binding extends per-user — e.g.
   authoring for everyone, world-modeling for editors). Config-driven for

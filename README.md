@@ -2,7 +2,7 @@
 
 An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the original and default surface), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes). See `docs/` (proposal) for the full design.
 
-This repository contains, from the storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the eight tools, body-backed node descriptions ([ADR 010](docs/adr/010-descriptions-in-the-body.md)), write-once-by-policy capture bodies, and debounced `SessionContext` persistence behind a `SessionStore` port. Above it: an **orchestrator harness** (WP6 — mode-bound tools, a real Claude driver on your subscription), **automatic provenance** (WP7 — one intent node per mutating turn, auto-capture in authoring modes), **Discord and Anytype in-space chat transports** (WP8/WP14 — the bot chats inside your Anytype spaces and deep-links the objects it creates, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)), **semantic search with graph-aware ranking** ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md), WP11), and **configurable activity modes** ([ADR 015](docs/adr/015-configurable-activity-modes.md), WP12).
+This repository contains, from the storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`), a contract test suite that runs against both, a sync engine (hydrate + incremental resync with self-write suppression), `MockAnytype` (an in-process simulator of the documented local API), a running FastMCP stdio server exposing the eight tools, body-backed node descriptions ([ADR 010](docs/adr/010-descriptions-in-the-body.md)), write-once-by-policy capture bodies, and debounced per-chat `SessionContext` persistence behind a keyed `SessionStore` port (ADR 021). Above it: an **orchestrator harness** (WP6 — mode-bound tools, a real Claude driver on your subscription), **automatic provenance** (WP7 — one intent node per mutating turn, auto-capture in authoring modes), **Discord and Anytype in-space chat transports** (WP8/WP14 — the bot chats inside your Anytype spaces and deep-links the objects it creates, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)), **semantic search with graph-aware ranking** ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md), WP11), and **configurable activity modes** ([ADR 015](docs/adr/015-configurable-activity-modes.md), WP12).
 
 **Space-reflecting (v2, [ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation (yours or bootstrapped) is a labelled edge. There is no closed `gc_` vocabulary anymore; `gc_` keys survive only for infrastructure (Prose, SessionContext, and the stale-flag/story-time/fields scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), and long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)). Architecture decisions live in [`docs/adr/`](docs/adr/).
 
@@ -199,7 +199,7 @@ interface  ──▶  application  ──▶  domain
 | `domain/pathfinding.py` | Bounded shortest path (`find_path`) | Undirected walk, direction-preserving result |
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand descriptions/prose |
-| `ports/session_store.py` | Session-snapshot contract | Plain-dict snapshots; lenient load (corrupt → `None`) |
+| `ports/session_store.py` | Keyed session-snapshot contract | Plain-dict snapshots per required key (ADR 021); lenient load (corrupt → `None`) |
 | `ports/mode_store.py` | Activity-Mode config contract | Plain payload dicts; validation lives in the loader, not the store |
 | `ports/semantic.py` | `Embedder` + `SemanticIndex` contracts | Embeddings are a cache keyed by content hash + model, never truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
@@ -210,7 +210,8 @@ interface  ──▶  application  ──▶  domain
 | `application/intent_recorder.py` | One `gc_intent` node per mutating turn | Provenance is a harness responsibility ([ADR 008](docs/adr/008-provenance-as-harness-responsibility.md)) |
 | `application/semantic_projector.py` | The embedding cache tracks the graph | Full pass + prune after hydrate; incremental from resync; store touches never re-embed |
 | `application/ranker.py` | Graph-aware retrieval ([ADR 016](docs/adr/016-graph-aware-ranking.md)) | Recall seeds → graph recruits → activation scores; every hit carries evidence |
-| `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh` |
+| `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh`; keyed (WP8) |
+| `application/session_registry.py` | The one source of live sessions (ADR 021) | Lazy keyed `(SessionState, persister)` cache; `flush_all` at teardown |
 | `composition.py` | Shared service builder | One wiring; both composition roots delegate to it |
 | `infrastructure/memory/` | `InMemoryGraphRepository` + `InMemorySessionStore` + `InMemoryModeStore` | Reference impls; certified by `tests/contract` |
 | `infrastructure/semantic/` | Hash + sentence-transformers embedders; memory + SQLite index | `GC_EMBEDDER` selects; the SQLite cache file is disposable |
@@ -220,7 +221,7 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/schema_bootstrap.py` | Idempotent **infra-only** bootstrap | gc_ infra types (Prose, SessionContext, Activity Mode + its example object), scalar gc_ properties, starter `gc_edge_*` relations — story entities use the space's native types |
 | `infrastructure/anytype/sync.py` | Hydrate / resync engine | Lenient reads, strict writes; search-based modified-since |
 | `infrastructure/anytype/repository.py` | `AnytypeGraphRepository` | Persist-first write-through; composite rollback; self-write suppression |
-| `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a `SessionContext` meta-node's property |
+| `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a per-key `SessionContext` node (discriminated by `gc_session_key`, ADR 021) |
 | `infrastructure/anytype/mode_store.py` | `AnytypeModeStore` | One mode per `gc_activity_mode` object: name → `/mode` slug, page body → goal, archive = disable |
 | `infrastructure/anytype/chat.py` | Chat quirk quarantine + `AnytypeChatClient` | Chat payload/SSE assumptions (C1–C6, spike S10); the chat analogue of `mapping.py` |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
@@ -238,7 +239,7 @@ interface  ──▶  application  ──▶  domain
 | `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by every transport; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution; one runtime per channel (ADR 017) or space (ADR 019) binding |
 | `orchestrator/channels.py` | Channel→space bindings (`GC_CHANNELS_FILE`, ADR 017) | Plain parsing/validation; one channel per space, enforced at startup |
 | `orchestrator/discord_transport.py` + `discord_bot.py` | Discord adapter (WP8) | Per-message policy is plain logic; only the composition-root shim imports discord.py |
-| `orchestrator/spaces.py` | Space→chat bindings (`GC_SPACES_FILE`, ADR 019) | Table key IS the space id; `chat_id` optional (single-chat discovery) |
+| `orchestrator/spaces.py` | Space→chat bindings (`GC_SPACES_FILE`, ADR 019/021) | Table key IS the space id; serve-all-chats minus `exclude_chats`, or a `chat_id` pin; `served_chat_ids` policy |
 | `orchestrator/rendering.py` | Shared reply rendering | `render` prefixes + `chunk`ing, extracted from the Discord module |
 | `orchestrator/anytype_chat_transport.py` + `anytype_chat_bot.py` | Anytype in-space chat adapter (WP14) | Echo suppression, persisted chat cursor (offline catch-up), `anytype://` deep links; only the composition root touches infrastructure |
 

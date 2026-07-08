@@ -39,6 +39,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.tools import Services
@@ -135,7 +136,8 @@ class ConversationMemory:
 
 @dataclass(slots=True)
 class _SessionState:
-    mode: str  # a loaded ModeSpec name
+    mode: str  # a loaded ModeSpec name; authoritative in-memory (WP8)
+    services: Services  # this session's view: own SessionState, shared space
     memory: ConversationMemory = field(default_factory=ConversationMemory)
 
 
@@ -168,10 +170,16 @@ class Orchestrator:
     reload_registry: Callable[[], Awaitable[ModeRegistry]] | None = None
     model_name: str = ""  # attribution for intent nodes (gc_model)
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
+    # WP8 (ADR 021): the per-session-key Services seam wired by the
+    # composition root. None (tests, bare construction) degrades to the
+    # shared `services` bundle for every session -- pre-WP8 behavior.
+    services_for: Callable[[str], Awaitable[Services]] | None = None
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
 
     def mode_of(self, session_id: str) -> str:
-        return self._session(session_id).mode
+        """Non-creating peek: the mode a session IS in (default if unseen)."""
+        state = self._sessions.get(session_id)
+        return state.mode if state is not None else self.registry.default
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
@@ -183,6 +191,7 @@ class Orchestrator:
                 state.mode, self.registry.default,
             )
             state.mode = self.registry.default
+            state.services.session.mode = state.mode  # persisted mirror
             spec = self.registry.get(state.mode)
             assert spec is not None  # the default is always loaded
         return spec
@@ -190,7 +199,7 @@ class Orchestrator:
     async def handle_message(
         self, session_id: str, user_id: str, text: str, origin: str = ""
     ) -> list[ReplyEvent]:
-        state = self._session(session_id)
+        state = await self._session(session_id)
         stripped = text.strip()
         if self.turn_log:
             self.turn_log.user_message(session_id, state.mode, user_id, stripped)
@@ -220,7 +229,7 @@ class Orchestrator:
         # [prior conversation..., context block, the live message]: history
         # reads as conversation; the block stays adjacent to the message.
         transcript: list[TranscriptEvent] = list(state.memory.events())
-        context_block = await build_turn_context(self.services)
+        context_block = await build_turn_context(state.services)
         if context_block:
             transcript.append(TranscriptEvent("user", context_block))
         transcript.append(TranscriptEvent("user", stripped))
@@ -243,7 +252,7 @@ class Orchestrator:
                     call.name, json.dumps(dict(call.arguments), default=str)
                 ))
                 result = await modes.invoke(
-                    spec, call.name, self.services, call.arguments
+                    spec, call.name, state.services, call.arguments
                 )
                 if result is None:
                     # The binding boundary's runtime face: actionable for a
@@ -270,7 +279,9 @@ class Orchestrator:
                 "text despite the warning; the turn was cut short.",
                 kind="notice",
             ))
-        await self._finish_turn(spec, user_id, stripped, reply_text, trace, origin)
+        await self._finish_turn(
+            state.services, spec, user_id, stripped, reply_text, trace, origin
+        )
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
             state.memory.remember_turn(stripped, reply_text)
@@ -278,15 +289,16 @@ class Orchestrator:
             self.turn_log.turn_end(session_id, spec.name, events)
         return events
 
-    def seed_memory(
+    async def seed_memory(
         self, session_id: str, events: Sequence[tuple[str, str]]
     ) -> None:
         """Prime a session's conversation memory from reconstructed history
         (transports call this once at startup, after a restart)."""
-        self._session(session_id).memory.seed(events)
+        (await self._session(session_id)).memory.seed(events)
 
     async def _finish_turn(
         self,
+        services: Services,
         spec: ModeSpec,
         user_id: str,
         prompt: str,
@@ -295,27 +307,28 @@ class Orchestrator:
         origin: str = "",
     ) -> None:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
-        drain -> intent node."""
+        drain -> intent node. ``services`` is the session's view; its
+        repository/capture/journal are the runtime's shared instances."""
         if self.provenance is None:
             return
         policy = spec.capture
         if policy is not None and reply_text:
             references = capture.entity_links(
-                reply_text, self.services.repository.graph
+                reply_text, services.repository.graph
             )
             if capture.should_capture(reply_text, references, policy.min_chars):
                 # The captured artifact journals itself, so the intent node
                 # below links prompt -> intent -> artifact. Its type comes
                 # from the policy: gc_prose for fiction, a native type
                 # (procedure, note, ...) for other activities (ADR 015).
-                await self.services.capture.record(
+                await services.capture.record(
                     text=reply_text,
                     summary=reply_text.strip().splitlines()[0][:200],
                     references=references,
                     artifact_type=policy.artifact_type,
                     references_label=policy.references_label,
                 )
-        mutations = self.services.journal.drain()
+        mutations = services.journal.drain()
         intent = await self.provenance.record_turn(
             prompt=prompt,
             mutations=mutations,
@@ -329,10 +342,39 @@ class Orchestrator:
             logger.info("provenance: recorded %s (%d touches)",
                         intent.id, len(mutations))
 
-    def _session(self, session_id: str) -> _SessionState:
-        return self._sessions.setdefault(
-            session_id, _SessionState(mode=self.registry.default)
-        )
+    async def _session(self, session_id: str) -> _SessionState:
+        """The per-session state, created (with I/O) on first sight.
+
+        WP8: the session's Services come from the injected ``services_for``
+        factory (its own SessionState over the shared space); without a
+        factory (tests, bare construction) every session shares the
+        runtime bundle -- pre-WP8 behavior. The mode is restored from the
+        persisted SessionState when it names a loaded spec, else the
+        registry default; the in-memory ``_SessionState.mode`` stays
+        authoritative from there (a shared-runtime session must keep its
+        own mode even if the persisted mirror can't).
+        """
+        state = self._sessions.get(session_id)
+        if state is not None:
+            return state
+        if self.services_for is not None:
+            services = await self.services_for(session_id)
+        else:
+            services = self.services
+        persisted = services.session.mode
+        if persisted and self.registry.get(persisted) is not None:
+            mode = persisted
+        else:
+            if persisted:
+                logger.info(
+                    "session %s persisted mode %r is not loaded; using %r",
+                    session_id, persisted, self.registry.default,
+                )
+            mode = self.registry.default
+            services.session.mode = mode
+        state = _SessionState(mode=mode, services=services)
+        self._sessions[session_id] = state
+        return state
 
     async def _switch_mode(
         self, state: _SessionState, command: str
@@ -367,7 +409,28 @@ class Orchestrator:
             f"mode switched to {spec.name}; bound tools: {bound}",
             kind="notice",
         ))
+        events.extend(await self._persist_mode(state))
         return events
+
+    async def _persist_mode(self, state: _SessionState) -> list[ReplyEvent]:
+        """Mirror the switched mode into the session snapshot so it
+        survives a restart (WP8). A store outage must not un-switch the
+        mode or fail the turn -- it degrades to an in-memory-only switch
+        with a notice."""
+        state.services.session.mode = state.mode
+        persister = state.services.persister
+        if persister is None:
+            return []
+        try:
+            await persister.flush()
+        except GraphContextError as err:
+            logger.warning("could not persist mode switch: %s", err)
+            return [ReplyEvent(
+                "mode switched, but it could not be saved; it will reset to "
+                "the default on restart.",
+                kind="notice",
+            )]
+        return []
 
     async def _refresh_registry(self) -> list[ReplyEvent]:
         """Re-read mode config; on failure keep the last good registry.

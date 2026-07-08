@@ -121,6 +121,15 @@ MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_CAPTURE_MIN_CHARS: "number",
 }
 
+# Session discriminator (WP8, ADR 021): every gc_session_context node
+# carries the transport-scoped session key it belongs to (e.g.
+# "anytype:<chat_id>", "mcp"). Kept OUT of SCALAR_PROPERTIES -- it lives
+# only on session nodes, never on ordinary nodes.
+PROP_SESSION_KEY = "gc_session_key"
+SESSION_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
+    PROP_SESSION_KEY: "text",
+}
+
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``
 # body links are mirrored here, so reading it surfaces inline links as edges.
 GENERIC_LINK_KEY = "links"

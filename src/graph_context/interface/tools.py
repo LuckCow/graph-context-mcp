@@ -131,6 +131,31 @@ def build_services(
     )
 
 
+def derive_services(
+    base: Services, session: SessionState, persister: SessionPersister | None
+) -> Services:
+    """A per-session view of one runtime (WP8): rebind the three
+    session-bound services, share everything expensive by reference.
+
+    Repository (and its GraphIndex), querier, capture, journal, projector,
+    and ranker stay THE runtime's instances -- sessions are views over one
+    space, not runtimes of their own. Cheap: three thin wrappers, no I/O.
+    """
+    return Services(
+        repository=base.repository,
+        session=session,
+        writer=NodeWriter(base.repository, session, base.journal),
+        reader=NodeReader(base.repository, session),
+        explorer=Explorer(base.repository, session),
+        querier=base.querier,
+        capture=base.capture,
+        persister=persister,
+        journal=base.journal,
+        projector=base.projector,
+        ranker=base.ranker,
+    )
+
+
 # -- the one wrapper ------------------------------------------------------
 
 

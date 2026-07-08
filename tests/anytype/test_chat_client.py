@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import (
     AnytypeChatClient,
     ChatEvent,
@@ -185,23 +184,12 @@ class TestIdentityDiscovery:
 
 
 class TestChatDiscovery:
-    async def test_a_declared_chat_id_passes_through(
-        self, chat: AnytypeChatClient
-    ) -> None:
-        assert await chat.resolve_chat_id("chat-xyz") == "chat-xyz"
-
-    async def test_an_undeclared_chat_id_resolves_when_the_space_has_exactly_one_chat(
+    async def test_lists_every_chat_as_id_name_pairs(
         self, mock: MockAnytype, chat: AnytypeChatClient
     ) -> None:
-        chat_id = mock.seed_chat("General")
-        assert await chat.resolve_chat_id(None) == chat_id
+        a = mock.seed_chat("Plot")
+        b = mock.seed_chat("Characters")
+        assert set(await chat.list_chats()) == {(a, "Plot"), (b, "Characters")}
 
-    async def test_zero_or_many_chats_fail_loudly_naming_the_space(
-        self, mock: MockAnytype, chat: AnytypeChatClient
-    ) -> None:
-        with pytest.raises(GraphContextError, match="no chat"):
-            await chat.resolve_chat_id(None)
-        mock.seed_chat("A")
-        mock.seed_chat("B")
-        with pytest.raises(GraphContextError, match="chat_id"):
-            await chat.resolve_chat_id(None)
+    async def test_no_chats_lists_empty(self, chat: AnytypeChatClient) -> None:
+        assert await chat.list_chats() == []

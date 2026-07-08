@@ -44,7 +44,11 @@ from graph_context.orchestrator.drivers import (
     TranscriptEvent,
 )
 from graph_context.orchestrator.pipeline import Orchestrator
-from graph_context.orchestrator.spaces import SpaceBinding, load_space_bindings
+from graph_context.orchestrator.spaces import (
+    SpaceBinding,
+    load_space_bindings,
+    served_chat_ids,
+)
 from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
@@ -154,12 +158,18 @@ def build_turn_log() -> TurnLog | None:
 
 @dataclass(frozen=True, slots=True)
 class Runtime:
-    """Everything a transport loop needs, plus the shutdown hooks."""
+    """Everything a transport loop needs, plus the shutdown hooks.
+
+    ``session_labels`` is the runtime's shared mutable key->name map
+    (WP8): fill it before a session's first turn so its Anytype node
+    gets a legible title (e.g. the chat's display name).
+    """
 
     orchestrator: Orchestrator
     profile: DomainProfile
     help_line: str
     teardown: list[TeardownHook]
+    session_labels: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,13 +193,43 @@ class SpaceRuntimes:
 
     Keys are CHAT ids (the inbound message's address); ``spaces`` maps
     each chat back to its space id for stream targets and deep links.
+
+    WP8: all chats of one space share ONE route (one runtime, one turn
+    lock, one repository) and each gets its own keyed session. The maps
+    are MUTABLE and shared with the turn handler (aliased, not copied), so
+    the live-discovery watcher can register a new chat with
+    :func:`register_chat` and the handler sees it immediately.
+    ``space_routes``/``space_bindings``/``session_labels`` are what the
+    watcher needs to serve a newly-created chat against the right runtime.
     """
 
-    routes: Mapping[str, ChannelRoute]
-    spaces: Mapping[str, str]  # chat id -> space id
-    descriptions: Mapping[str, str]  # chat id -> "space=..., profile=..."
+    routes: dict[str, ChannelRoute]
+    spaces: dict[str, str]  # chat id -> space id
+    descriptions: dict[str, str]  # chat id -> "space=..., profile=..."
     help_line: str
     teardown: list[TeardownHook]
+    space_routes: Mapping[str, ChannelRoute]  # space id -> its shared route
+    space_bindings: Mapping[str, SpaceBinding]  # space id -> binding
+    session_labels: Mapping[str, dict[str, str]]  # space id -> label sink
+
+
+def register_chat(
+    runtimes: SpaceRuntimes, space_id: str, chat_id: str, name: str
+) -> None:
+    """Wire one chat to its space's shared runtime (startup + discovery).
+
+    The single place the routing maps grow: startup calls it per enumerated
+    chat, the watcher per newly-discovered one. Because the maps are the
+    same objects the handler holds, an addition here is live at once.
+    """
+    binding = runtimes.space_bindings[space_id]
+    runtimes.routes[chat_id] = runtimes.space_routes[space_id]
+    runtimes.spaces[chat_id] = space_id
+    label = name.strip() or chat_id
+    runtimes.descriptions[chat_id] = (
+        f"{label} (space={space_id}, profile={binding.profile.name})"
+    )
+    runtimes.session_labels[space_id][f"anytype:{chat_id}"] = label
 
 
 async def _assemble_runtime(
@@ -242,10 +282,12 @@ async def _assemble_runtime(
         services=services, driver=driver, profile=profile,
         registry=registry, provenance=recorder, model_name=model_name,
         reload_registry=reload_registry, turn_log=turn_log,
+        services_for=built.services_for,  # WP8: per-session-key Services
     )
     return Runtime(
         orchestrator=orchestrator, profile=profile,
         help_line=help_line, teardown=built.teardown,
+        session_labels=built.session_labels,
     )
 
 
@@ -339,17 +381,23 @@ async def build_channel_runtimes() -> ChannelRuntimes:
 
 
 async def build_space_runtimes(
-    resolve_chat_id: Callable[[SpaceBinding], Awaitable[str]],
+    list_chats: Callable[[SpaceBinding], Awaitable[Sequence[tuple[str, str]]]],
 ) -> SpaceRuntimes:
     """The Anytype chat composition: space bindings -> per-space runtimes.
 
     Same posture as :func:`build_channel_runtimes`: SEQUENTIAL assembly
     (concurrent ``ensure_schema`` bursts would trip a throttled server),
-    failing the whole bot if any space fails. ``resolve_chat_id`` is
-    injected by the composition root -- it owns the chat client -- so this
-    module stays free of infrastructure. ``GC_SPACES_FILE`` unset fails
-    loudly: a chat bot serving nowhere is a misconfiguration, not a
-    default.
+    failing the whole bot if any space fails. ``list_chats`` is injected by
+    the composition root -- it owns the chat client -- returning ``(id,
+    name)`` pairs, so this module stays free of infrastructure.
+
+    WP8: one runtime and one shared route per SPACE; every served chat
+    (``served_chat_ids``: all listed minus ``exclude_chats``, or a pinned
+    ``chat_id``) is wired to it via :func:`register_chat`, each with its
+    own keyed session. A space with zero served chats is a warning, not an
+    error -- the live-discovery watcher will pick chats up as they appear.
+    ``GC_SPACES_FILE`` unset still fails loudly: a chat bot serving nowhere
+    is a misconfiguration, not a default.
     """
     spaces_file = os.environ.get("GC_SPACES_FILE", "").strip()
     if not spaces_file:
@@ -360,13 +408,19 @@ async def build_space_runtimes(
     bindings = load_space_bindings(spaces_file, os.environ.get("GC_PROFILE"))
     driver, model_name, help_line = build_driver()
     turn_log = build_turn_log()
-    routes: dict[str, ChannelRoute] = {}
-    spaces: dict[str, str] = {}
-    descriptions: dict[str, str] = {}
     teardown: list[TeardownHook] = []
+    space_routes: dict[str, ChannelRoute] = {}
+    space_bindings: dict[str, SpaceBinding] = {}
+    session_labels: dict[str, dict[str, str]] = {}
+    runtimes = SpaceRuntimes(
+        routes={}, spaces={}, descriptions={},
+        help_line=help_line, teardown=teardown,
+        space_routes=space_routes, space_bindings=space_bindings,
+        session_labels=session_labels,
+    )
     for binding in bindings:
         try:
-            chat_id = await resolve_chat_id(binding)
+            listed = list(await list_chats(binding))
             runtime = await _assemble_runtime(
                 binding.profile, driver, model_name, help_line, turn_log,
                 space_id=binding.space_id, project=binding.project,
@@ -377,17 +431,24 @@ async def build_space_runtimes(
             raise GraphContextError(
                 f"space {binding.space_id} failed to start: {err}"
             ) from err
-        routes[chat_id] = ChannelRoute(orchestrator=runtime.orchestrator)
-        spaces[chat_id] = binding.space_id
-        descriptions[chat_id] = (
-            f"space={binding.space_id}, profile={binding.profile.name}"
+        space_routes[binding.space_id] = ChannelRoute(
+            orchestrator=runtime.orchestrator
         )
+        space_bindings[binding.space_id] = binding
+        session_labels[binding.space_id] = runtime.session_labels
         teardown.extend(runtime.teardown)
-        logger.info(
-            "chat %s -> space %s (profile=%s)",
-            chat_id, binding.space_id, binding.profile.name,
-        )
-    return SpaceRuntimes(
-        routes=routes, spaces=spaces, descriptions=descriptions,
-        help_line=help_line, teardown=teardown,
-    )
+        served = served_chat_ids(binding, [cid for cid, _ in listed])
+        names = dict(listed)
+        for chat_id in served:
+            register_chat(runtimes, binding.space_id, chat_id, names.get(chat_id, ""))
+            logger.info(
+                "chat %s -> space %s (profile=%s)",
+                chat_id, binding.space_id, binding.profile.name,
+            )
+        if not served:
+            logger.warning(
+                "space %s has no served chat yet (profile=%s); the watcher "
+                "will pick chats up as they are created",
+                binding.space_id, binding.profile.name,
+            )
+    return runtimes

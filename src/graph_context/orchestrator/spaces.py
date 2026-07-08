@@ -7,24 +7,29 @@ served space is declared once at startup in a ``GC_SPACES_FILE`` TOML
 file, keyed by the space id itself::
 
     [spaces."bafyre..."]
-    profile    = "fiction"      # optional; defaults to GC_PROFILE
-    project    = "Ashfall"      # optional cosmetic label
-    modes_file = "ashfall.toml" # optional; overrides GC_MODES_FILE
-    chat_id    = "bafyre..."    # optional; unset = discover at startup
-                                 # (fails loudly unless the space has
-                                 # exactly one chat)
+    profile       = "fiction"      # optional; defaults to GC_PROFILE
+    project       = "Ashfall"      # optional cosmetic label
+    modes_file    = "ashfall.toml" # optional; overrides GC_MODES_FILE
+    chat_id       = "bafyre..."    # optional PIN: serve ONLY this chat,
+                                    # no discovery (single-chat deployments)
+    exclude_chats = ["bafyre..."]  # optional; chat ids the bot ignores
 
-Because the chat lives INSIDE the space, the table key IS the space id --
-the one-binding-per-space invariant (one SessionContext node per space)
-is structural here: TOML rejects duplicate table names, so no cross-check
-is needed. Like ``channels.py`` this stays plain logic over primitives --
-no httpx, no infrastructure -- and bad config fails LOUDLY at startup,
-naming the file, space, and field.
+By default the bot serves EVERY chat in the space (WP8): each chat is a
+separate THREAD with its own session context (scratchpad / working set /
+mode), so creating a chat in Anytype creates a new thread with no config
+change. ``exclude_chats`` opts specific chats out; ``chat_id`` pins to a
+single chat and disables discovery (they are mutually exclusive). One
+binding per space is structural (the table key IS the space id, so TOML
+rejects duplicates); per-chat sessions are keyed nodes (WP8, ADR 021).
+Like ``channels.py`` this stays plain logic over primitives -- no httpx,
+no infrastructure -- and bad config fails LOUDLY at startup, naming the
+file, space, and field.
 """
 
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,18 +38,34 @@ from graph_context.errors import GraphContextError
 from graph_context.interface import profiles
 from graph_context.interface.profiles import DomainProfile
 
-_BINDING_KEYS = {"profile", "project", "modes_file", "chat_id"}
+_BINDING_KEYS = {"profile", "project", "modes_file", "chat_id", "exclude_chats"}
 
 
 @dataclass(frozen=True, slots=True)
 class SpaceBinding:
-    """One served space's declared runtime, plus which chat to listen on."""
+    """One served space's declared runtime and which chats to listen on."""
 
     space_id: str
     profile: DomainProfile
     project: str | None = None
     modes_file: str | None = None
-    chat_id: str | None = None
+    chat_id: str | None = None  # pin: serve only this chat (no discovery)
+    exclude_chats: tuple[str, ...] = ()
+
+
+def served_chat_ids(
+    binding: SpaceBinding, listed: Sequence[str]
+) -> tuple[str, ...]:
+    """Which of the space's chats this binding serves (WP8).
+
+    A pinned ``chat_id`` is served verbatim (its presence in the space is
+    the transport's concern, not this pure policy's). Otherwise every
+    listed chat except those in ``exclude_chats``, order preserved.
+    """
+    if binding.chat_id:
+        return (binding.chat_id,)
+    excluded = frozenset(binding.exclude_chats)
+    return tuple(cid for cid in listed if cid not in excluded)
 
 
 def load_space_bindings(
@@ -91,10 +112,16 @@ def _binding_from_mapping(
             f"{origin} has unknown keys {sorted(unknown)}; "
             f"allowed: {sorted(_BINDING_KEYS)}"
         )
-    for key in _BINDING_KEYS:
+    for key in _BINDING_KEYS - {"exclude_chats"}:
         value = body.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise GraphContextError(f"{origin}: {key} must be a non-empty string")
+    exclude_chats = _string_list(body.get("exclude_chats"), origin, "exclude_chats")
+    if body.get("chat_id") and exclude_chats:
+        raise GraphContextError(
+            f"{origin}: chat_id (a single-chat pin) and exclude_chats "
+            "(discover-all-but) are mutually exclusive -- set one, not both"
+        )
     try:
         profile = profiles.get_profile(body.get("profile") or default_profile)
     except GraphContextError as err:
@@ -105,4 +132,17 @@ def _binding_from_mapping(
         project=body.get("project"),
         modes_file=body.get("modes_file"),
         chat_id=body.get("chat_id"),
+        exclude_chats=exclude_chats,
     )
+
+
+def _string_list(value: Any, origin: str, key: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise GraphContextError(
+            f"{origin}: {key} must be a list of non-empty chat-id strings"
+        )
+    return tuple(value)

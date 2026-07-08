@@ -30,8 +30,8 @@ class TestLiveChat:
             created = await client.create_chat({"name": "E2E Chat"})
             chat_id = str(created["id"])
 
-            # An undeclared chat id resolves when it is the only chat.
-            assert await chat_client.resolve_chat_id(None) == chat_id
+            # The chat is enumerable by list_chats (WP8 serve-all).
+            assert chat_id in {cid for cid, _ in await chat_client.list_chats()}
 
             stream = chat_client.stream(chat_id, heartbeat_seconds=5)
             first = asyncio.ensure_future(anext(stream))

@@ -184,12 +184,18 @@ class RecentHistory:
 
 @dataclass(slots=True)
 class SessionState:
-    """The session's cross-turn context: working set, trail, scratchpad."""
+    """The session's cross-turn context: working set, trail, scratchpad.
+
+    ``mode`` is an opaque label (like ``project``): the orchestrator's
+    active-mode name, persisted here so each session resumes in the mode
+    it was left in (WP8). The domain never interprets it.
+    """
 
     project: str | None = None
     working_set: WorkingSet = field(default_factory=WorkingSet)
     recent: RecentHistory = field(default_factory=RecentHistory)
     scratchpad: str = ""
+    mode: str = ""
 
     def touch(self, node_id: NodeId) -> None:
         """Register that a read or write just involved ``node_id``."""
@@ -211,6 +217,7 @@ class SessionState:
             "version": 2,
             "project": self.project,
             "scratchpad": self.scratchpad,
+            "mode": self.mode,
             "working_set": [
                 {"node_id": e.node_id, "detail": e.detail.value}
                 for e in self.working_set.entries
@@ -235,11 +242,13 @@ class SessionState:
         ])
         recent = RecentHistory.restore([str(i) for i in data.get("recent", [])])
         scratchpad = data.get("scratchpad")
+        mode = data.get("mode")
         return cls(
             project=data.get("project"),
             working_set=working_set,
             recent=recent,
             scratchpad=scratchpad if isinstance(scratchpad, str) else "",
+            mode=mode if isinstance(mode, str) else "",
         )
 
 

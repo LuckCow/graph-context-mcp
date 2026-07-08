@@ -65,7 +65,8 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
     # (ADR 007): one wiring, two roots -- see graph_context/composition.py.
     # The runtime's mode store is unused here: activity modes are an
     # orchestrator concept; the MCP surface binds every tool (ADR 007).
-    built = await composition.build_runtime(_PROFILE)
+    # Sessions are keyed (WP8): the MCP client is the "mcp" session.
+    built = await composition.build_runtime(_PROFILE, session_key="mcp")
     try:
         yield AppContext(services=built.services, teardown=built.teardown)
     finally:

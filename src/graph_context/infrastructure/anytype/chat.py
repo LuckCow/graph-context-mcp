@@ -41,7 +41,6 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.client import AnytypeClient
 
 logger = logging.getLogger(__name__)
@@ -159,25 +158,16 @@ class AnytypeChatClient:
     def space_id(self) -> str:
         return self._client.space_id
 
-    async def resolve_chat_id(self, declared: str | None) -> str:
-        """A declared chat id passes through; otherwise the space must have
-        exactly one chat (the error names the space and every candidate so
-        the operator can pin ``chat_id`` in spaces.toml)."""
-        if declared:
-            return declared
-        chats = [c async for c in self._client.list_chats()]
-        if len(chats) == 1:
-            return str(chats[0]["id"])
-        if not chats:
-            raise GraphContextError(
-                f"space {self.space_id} has no chat; create one in Anytype "
-                "(or let the bot create it) and/or set chat_id in spaces.toml"
-            )
-        listing = "; ".join(f"{c.get('name', '?')} (id={c['id']})" for c in chats)
-        raise GraphContextError(
-            f"space {self.space_id} has {len(chats)} chats -- set chat_id in "
-            f"spaces.toml to one of: {listing}"
-        )
+    async def list_chats(self) -> list[tuple[str, str]]:
+        """Every chat in the space as ``(id, name)`` pairs (WP8).
+
+        The bot serves each as its own thread; discovery re-lists to catch
+        chats created while it runs. Reads are unthrottled (S7), so a
+        periodic re-list is cheap."""
+        return [
+            (str(c["id"]), str(c.get("name") or ""))
+            async for c in self._client.list_chats()
+        ]
 
     async def recent_messages(
         self, chat_id: str, *, limit: int = 100

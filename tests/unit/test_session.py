@@ -109,16 +109,23 @@ class TestSessionDefaults:
 
 
 class TestSnapshot:
-    def test_v2_round_trip_keeps_scratchpad_and_details(self) -> None:
-        session = SessionState(project="Ashfall", scratchpad="finish the siege arc")
+    def test_v2_round_trip_keeps_scratchpad_details_and_mode(self) -> None:
+        session = SessionState(
+            project="Ashfall", scratchpad="finish the siege arc", mode="authoring"
+        )
         session.working_set.hold("a", Detail.FULL)
         session.working_set.hold("b")
         session.touch("c")
         restored = SessionState.from_snapshot(session.to_snapshot())
         assert restored.project == "Ashfall"
         assert restored.scratchpad == "finish the siege arc"
+        assert restored.mode == "authoring"
         assert restored.working_set.entries == session.working_set.entries
         assert restored.recent.items == ("c",)
+
+    def test_missing_or_junk_mode_restores_empty(self) -> None:
+        assert SessionState.from_snapshot({"version": 2}).mode == ""
+        assert SessionState.from_snapshot({"mode": ["not", "a", "str"]}).mode == ""
 
     def test_v1_focus_entries_restore_as_summary_holds(self) -> None:
         v1 = {

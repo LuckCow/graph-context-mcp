@@ -44,9 +44,10 @@ from dataclasses import dataclass
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
+from graph_context.application.session_registry import SessionRegistry
 from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import DomainProfile
-from graph_context.interface.tools import Services, build_services
+from graph_context.interface.tools import Services, build_services, derive_services
 from graph_context.ports.graph_repository import GraphRepository
 from graph_context.ports.mode_store import ModeStore
 from graph_context.ports.semantic import Embedder, SemanticIndex
@@ -58,11 +59,23 @@ TeardownHook = Callable[[], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class BuiltRuntime:
-    """One process's wired backend: services, config stores, shutdown."""
+    """One process's wired backend: services, config stores, shutdown.
+
+    ``services_for`` is the WP8 session seam: every live session is
+    addressed by an explicit transport-scoped key and gets its own
+    Services view (per-key SessionState + persister over the shared
+    repository). ``services`` is either the ``session_key`` session's own
+    view (MCP server) or an inert donor bundle (orchestrator paths) --
+    see :func:`build_runtime`. ``session_labels`` is a shared mutable map
+    of session key -> human label; transports fill it so a session's
+    Anytype node gets a legible name.
+    """
 
     services: Services
     mode_store: ModeStore
     teardown: list[TeardownHook]
+    services_for: Callable[[str], Awaitable[Services]]
+    session_labels: dict[str, str]
 
 
 async def build_runtime(
@@ -71,11 +84,12 @@ async def build_runtime(
     journal: MutationJournal | None = None,
     space_id: str | None = None,
     project: str | None = None,
+    session_key: str | None = None,
 ) -> BuiltRuntime:
     """Build the full service bundle for one runtime.
 
     The returned teardown hooks run in reverse order on shutdown (session
-    flush before client close). The mode store reads the space's Activity
+    flushes before client close). The mode store reads the space's Activity
     Mode config objects (ADR 015 amendment); the memory backend's is empty,
     so profile defaults apply.
 
@@ -83,12 +97,21 @@ async def build_runtime(
     so one process can host several runtimes bound to different spaces
     (channel-bound spaces, ADR 017); left ``None``, the env applies and a
     process gets exactly one runtime, as before.
+
+    ``session_key`` decides what ``BuiltRuntime.services`` is bound to
+    (WP8): a key (the MCP server passes ``"mcp"``) binds the primary
+    bundle to that registry session -- loaded, persisted, flushed at
+    teardown. ``None`` (orchestrator paths) returns a DONOR bundle: a
+    fresh, never-persisted session that exists only as the shared-
+    component source for ``services_for`` derivations; everything real
+    flows through ``services_for(key)``.
     """
     from graph_context.domain.session import SessionState
 
     backend = os.environ.get("GC_BACKEND", "anytype")
-    session = SessionState(project=project or os.environ.get("GC_PROJECT_NAME"))
+    default_project = project or os.environ.get("GC_PROJECT_NAME")
     teardown: list[TeardownHook] = []
+    session_labels: dict[str, str] = {}
 
     logger.info("profile=%s (%s)", profile.name, profile.description)
     if backend == "memory":
@@ -98,25 +121,34 @@ async def build_runtime(
         from graph_context.infrastructure.memory.fake_repository import (
             InMemoryGraphRepository,
         )
+        from graph_context.infrastructure.memory.fake_session_store import (
+            InMemorySessionStore,
+        )
 
         logger.info("backend=memory (development mode; nothing persists)")
         memory_repo = InMemoryGraphRepository(role_overrides=profile.role_overrides)
         projector, ranker = await _build_semantic(
             memory_repo, profile, space_id=None
         )
+        registry = SessionRegistry(
+            InMemorySessionStore(), default_project=default_project
+        )
+        base = build_services(
+            memory_repo,
+            SessionState(project=default_project),  # donor unless keyed below
+            journal=journal,
+            projector=projector,
+            ranker=ranker,
+        )
+        base = await _bind_primary(base, registry, session_key)
         return BuiltRuntime(
-            services=build_services(
-                memory_repo,
-                session,
-                journal=journal,
-                projector=projector,
-                ranker=ranker,
-            ),
+            services=base,
             mode_store=InMemoryModeStore(),
             teardown=teardown,
+            services_for=_session_seam(base, registry),
+            session_labels=session_labels,
         )
 
-    from graph_context.application.session_persister import SessionPersister
     from graph_context.infrastructure.anytype.client import AnytypeClient
     from graph_context.infrastructure.anytype.config import AnytypeConfig
     from graph_context.infrastructure.anytype.mode_store import AnytypeModeStore
@@ -152,36 +184,68 @@ async def build_runtime(
         repository.graph.node_count(),
         repository.graph.edge_count(),
     )
-    # Restore the working session from the SessionContext meta-node, and
-    # arrange a debounced flush (note_mutation in tools) + a final flush on
-    # shutdown. A corrupt/missing snapshot degrades to the fresh session.
-    store = AnytypeSessionStore(client)
-    session = await SessionPersister.load_or_fresh(store, session)
-    if not session.project:
+    if not default_project:
         # Derived cosmetic default: the space's own name. Never blocks startup;
-        # GC_PROJECT_NAME and a persisted set_project both take precedence.
+        # GC_PROJECT_NAME and a session's persisted set_project take precedence.
         try:
-            session.project = (await client.get_space()).get("name") or None
+            default_project = (await client.get_space()).get("name") or None
         except GraphContextError:
             logger.warning(
                 "could not read space name for the project label", exc_info=True
             )
-    persister = SessionPersister(store, session)
-    teardown.append(persister.flush)  # flush on shutdown (LIFO: before aclose)
+    # Sessions are keyed (WP8, ADR 021): each key owns a SessionContext
+    # meta-node; the registry lazily restores each on first use and the
+    # teardown flush persists every session this process touched.
+    store = AnytypeSessionStore(client, labels=session_labels)
+    registry = SessionRegistry(store, default_project=default_project)
+    teardown.append(registry.flush_all)  # LIFO: flushes before client aclose
     projector, ranker = await _build_semantic(
         repository, profile, space_id=config.space_id
     )
+    base = build_services(
+        repository,
+        SessionState(project=default_project),  # donor unless keyed below
+        journal=journal,
+        projector=projector,
+        ranker=ranker,
+        # WP13 view param (ADR 018): saved Set views, compiled to
+        # NodeQuery per call so desktop edits apply immediately.
+        views=AnytypeViewCatalog(client),
+    )
+    base = await _bind_primary(base, registry, session_key)
     return BuiltRuntime(
-        services=build_services(
-            repository, session, persister, journal=journal,
-            projector=projector, ranker=ranker,
-            # WP13 view param (ADR 018): saved Set views, compiled to
-            # NodeQuery per call so desktop edits apply immediately.
-            views=AnytypeViewCatalog(client),
-        ),
+        services=base,
         mode_store=AnytypeModeStore(client),
         teardown=teardown,
+        services_for=_session_seam(base, registry),
+        session_labels=session_labels,
     )
+
+
+async def _bind_primary(
+    base: Services, registry: SessionRegistry, session_key: str | None
+) -> Services:
+    """Bind the primary bundle to its registry session, or leave the donor.
+
+    A key (MCP server: ``"mcp"``) makes ``BuiltRuntime.services`` a real,
+    persisted session view; ``None`` keeps the never-persisted donor whose
+    only jobs are sharing components with ``services_for`` derivations and
+    the orchestrator's no-factory test fallback.
+    """
+    if session_key is None:
+        return base
+    session, persister = await registry.get(session_key)
+    return derive_services(base, session, persister)
+
+
+def _session_seam(
+    base: Services, registry: SessionRegistry
+) -> Callable[[str], Awaitable[Services]]:
+    async def services_for(key: str) -> Services:
+        session, persister = await registry.get(key)
+        return derive_services(base, session, persister)
+
+    return services_for
 
 
 def _make_embedder(choice: str) -> Embedder | None:
