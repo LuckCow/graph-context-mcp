@@ -31,11 +31,14 @@ class TestCreateNode:
             )
         assert repository.graph.node_count() == before
 
-    async def test_created_node_lands_on_focus_top(self, writer, session, world: World):
+    async def test_created_node_is_the_most_recently_touched(
+        self, writer, session, world: World
+    ):
         node = await writer.create_node(
             NodeDraft("Location", name="Brakk Gate", summary="The city gate.")
         )
-        assert session.focus.top == node.id
+        assert session.recent.items[0] == node.id
+        assert session.working_set.entries == ()  # holds are explicit only
 
 
 class TestUpdateNode:

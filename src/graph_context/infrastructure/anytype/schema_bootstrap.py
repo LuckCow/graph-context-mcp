@@ -147,6 +147,11 @@ async def ensure_schema(
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
             await client.create_property({"key": key, "name": key, "format": fmt})
+    # Session discriminator (WP8/ADR 021): lives only on session nodes.
+    for key, fmt in mapping.SESSION_PROPERTIES.items():
+        if key not in existing_properties:
+            logger.info("bootstrap: creating property %s (%s)", key, fmt)
+            await client.create_property({"key": key, "name": key, "format": fmt})
     for key, name in DEFAULT_EDGE_RELATIONS:
         if key not in existing_properties:
             logger.info("bootstrap: creating relation property %s", key)

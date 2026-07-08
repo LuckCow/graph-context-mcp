@@ -1,6 +1,6 @@
 """Derived graph overview: the cold-start entry-point map.
 
-A fresh session has an empty focus stack, and every read path (``explore``,
+A fresh session has nothing held or touched, and every read path (``explore``,
 ``find_path``, ``get_node``) needs a node id to begin -- yet the only
 id-producing tool used to report just counts. This module derives a small
 "where do I start?" map straight from the :class:`GraphIndex`: per-type

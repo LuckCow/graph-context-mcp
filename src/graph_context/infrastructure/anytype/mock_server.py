@@ -63,13 +63,31 @@ from typing import Any
 
 import httpx
 
+_SPACES = re.compile(r"^/v1/spaces$")
 _SPACE = re.compile(r"^/v1/spaces/(?P<space>[^/]+)$")
+_MEMBERS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/members$")
 _OBJECTS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects$")
 _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
 _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
 _TYPES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types$")
 _PROPERTIES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties$")
 _TAGS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties/(?P<prop>[^/]+)/tags$")
+_LIST_VIEWS = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/lists/(?P<list>[^/]+)/views$"
+)
+_LIST_VIEW_OBJECTS = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/lists/(?P<list>[^/]+)/views/(?P<view>[^/]+)/objects$"
+)
+_CHATS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/chats$")
+_CHAT_MESSAGES = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages$"
+)
+_CHAT_MESSAGE = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages/(?P<msg>[^/]+)$"
+)
+_CHAT_STREAM = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages/stream$"
+)
 
 PROP_LAST_MODIFIED = "last_modified_date"
 PROP_CREATED = "created_date"
@@ -82,6 +100,12 @@ _CONDITIONS: dict[str, Callable[[str, str], bool]] = {
     "less": lambda a, b: a < b,
     "equal": lambda a, b: a == b,
 }
+
+
+def _sse_frame(kind: str, message: dict[str, Any]) -> bytes:
+    """One chat SSE frame exactly as the live server sends it (C5)."""
+    data = json.dumps({"type": kind, "payload": {"message": message}})
+    return f"event: {kind}\ndata: {data}\n\n".encode()
 
 
 def _without_markdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -122,6 +146,21 @@ class MockAnytype:
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
         self._properties: dict[str, dict[str, Any]] = {}
+        # Chat state (WP14, spike S10 quirks C1-C5 in chat.py). The caller's
+        # own member id -- the live server attributes API posts to the
+        # authenticated account's participant id.
+        self.api_member_id = "mock-self"
+        # Space membership (WP14 identity discovery, quirk C6): tests set
+        # this to model solo-member (bot's own) vs shared spaces.
+        self.members: list[dict[str, Any]] = []
+        # Set views (WP13, spike S9 shapes): set object id -> view dicts,
+        # and the set's source type (None = sourceless, execution 500s).
+        self._set_views: dict[str, list[dict[str, Any]]] = {}
+        self._set_sources: dict[str, str | None] = {}
+        self._chats: dict[str, dict[str, Any]] = {}
+        self._chat_messages: dict[str, list[dict[str, Any]]] = {}
+        self._chat_listeners: dict[str, list[asyncio.Queue[dict[str, Any] | None]]] = {}
+        self._chat_order = count(1)
         # Select/multi_select options ("tags", ADR 012), keyed by property ID
         # -- the live route rejects property keys ("invalid property id").
         self._tags: dict[str, list[dict[str, Any]]] = {}
@@ -150,7 +189,16 @@ class MockAnytype:
             status, body = self._fail_queue.pop(0)
             return httpx.Response(status, json=body)
         path = request.url.path
+        if _SPACES.match(path):  # global, not space-scoped
+            return self._handle_spaces(request)
         for pattern, handler in (
+            (_CHAT_STREAM, self._handle_chat_stream),  # before _CHAT_MESSAGE
+            (_CHAT_MESSAGE, self._handle_chat_message),
+            (_CHAT_MESSAGES, self._handle_chat_messages),
+            (_CHATS, self._handle_chats),
+            (_LIST_VIEW_OBJECTS, self._handle_list_view_objects),
+            (_LIST_VIEWS, self._handle_list_views),
+            (_MEMBERS, self._handle_members),
             (_OBJECT, self._handle_object),
             (_OBJECTS, self._handle_objects),
             (_SEARCH, self._handle_search),
@@ -220,6 +268,84 @@ class MockAnytype:
 
     def object(self, object_id: str) -> dict[str, Any]:
         return self._objects[object_id]
+
+    # -- set-view knobs (WP13) ----------------------------------------------
+
+    def seed_set(
+        self,
+        name: str,
+        *,
+        source_type_key: str | None,
+        views: list[dict[str, Any]],
+    ) -> str:
+        """Create a Set as a human would: source + configured views.
+
+        ``source_type_key=None`` models an API-created SOURCELESS set —
+        its views list fine but view execution 500s (spike S9).
+        """
+        set_id = self.seed_object("set", name)
+        self._set_views[set_id] = list(views)
+        self._set_sources[set_id] = source_type_key
+        return set_id
+
+    # -- chat knobs (WP14) --------------------------------------------------
+
+    def seed_chat(self, name: str = "Chat") -> str:
+        """Create a chat as if a human did it in the UI (no API call)."""
+        chat_id = self._new_id()
+        self._chats[chat_id] = {
+            "object": "object", "id": chat_id, "name": name, "layout": "chat",
+        }
+        self._chat_messages[chat_id] = []
+        return chat_id
+
+    def post_chat_message_directly(
+        self, chat_id: str, creator: str, text: str
+    ) -> str:
+        """A message from another member -- the 'human is typing' analogue
+        of ``edit_object_directly``. Live streams see ``message_added``."""
+        return str(self._new_chat_message(chat_id, creator, text)["id"])
+
+    def emit_chat_heartbeat(self, chat_id: str) -> None:
+        """Push a ``: heartbeat`` comment to every open stream (C5)."""
+        self._notify_chat(chat_id, {"kind": "heartbeat"})
+
+    def end_chat_streams(self, chat_id: str) -> None:
+        """Terminate every open stream for the chat (server drop)."""
+        self._notify_chat(chat_id, None)
+
+    def _new_chat_message(
+        self,
+        chat_id: str,
+        creator: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        # C7: attachments must be {"target", "type"} envelopes -- a bare
+        # id list 400s on the live server.
+        for entry in attachments or []:
+            if not isinstance(entry, dict) or "target" not in entry:
+                raise ValueError("attachments must be {'target', 'type'} dicts")
+        message = {
+            "id": self._new_id(),
+            # Short lexicographically-increasing string, like live (C3).
+            "order_id": f"o{next(self._chat_order):08d}",
+            "creator": creator,
+            "creator_name": creator,
+            "created_at": next(self._clock),
+            "modified_at": 0,
+            "content": {"text": text, "style": "paragraph"},
+            "attachments": list(attachments or []),
+            "reactions": {},
+            "pinned": False,
+        }
+        self._chat_messages[chat_id].append(message)
+        self._notify_chat(chat_id, {"kind": "message_added", "message": message})
+        return message
+
+    def _notify_chat(self, chat_id: str, item: dict[str, Any] | None) -> None:
+        for queue in list(self._chat_listeners.get(chat_id, [])):
+            queue.put_nowait(item)
 
     # -- route handlers -------------------------------------------------------
 
@@ -328,6 +454,146 @@ class MockAnytype:
             return self._error(405, "method_not_allowed")
         return httpx.Response(
             200, json={"space": {"id": self.space_id, "name": self.space_name}}
+        )
+
+    def _handle_spaces(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        return self._paginated(
+            [{"object": "anytype.space", "id": self.space_id,
+              "name": self.space_name}],
+            request.url.params,
+        )
+
+    def _handle_members(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        return self._paginated(list(self.members), request.url.params)
+
+    # -- list/view routes (WP13; quirks V1-V5 in view_catalog.py, spike S9) --
+
+    def _handle_list_views(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        list_id = match.group("list")
+        if list_id not in self._set_views:
+            return self._error(404, "list_not_found")
+        return self._paginated(list(self._set_views[list_id]), request.url.params)
+
+    def _handle_list_view_objects(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        list_id = match.group("list")
+        source = self._set_sources.get(list_id)
+        if source is None:
+            # S9: a sourceless set's execution endpoint 500s.
+            return self._error(500, "internal_error")
+        items = [
+            o for o in self._objects.values()
+            if not o["archived"] and o["type"]["key"] == source
+        ]
+        # NOTE: filters/sorts are NOT executed here — the compile path
+        # (ADR 018) only samples this endpoint for the source type.
+        return self._paginated(_without_markdown(items), request.url.params)
+
+    # -- chat routes (WP14; quirks C1-C5 in chat.py, pinned by spike S10) ----
+
+    def _handle_chats(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
+        if request.method == "GET":
+            return self._paginated(list(self._chats.values()), request.url.params)
+        if request.method == "POST":
+            body = json.loads(request.content)
+            chat_id = self.seed_chat(str(body.get("name", "")))
+            return httpx.Response(201, json={"object": self._chats[chat_id]})
+        return self._error(405, "method_not_allowed")
+
+    def _handle_chat_messages(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        chat_id = match.group("chat")
+        if chat_id not in self._chats:
+            return self._error(404, "chat_not_found")
+        if request.method == "GET":
+            # C2: a recency WINDOW, oldest-first -- bare `messages` key, no
+            # pagination block, offset ignored (live-confirmed, S10).
+            limit = int(request.url.params.get("limit", 100))
+            return httpx.Response(
+                200, json={"messages": self._chat_messages[chat_id][-limit:]}
+            )
+        if request.method == "POST":
+            body = json.loads(request.content)
+            raw_attachments = body.get("attachments")
+            if raw_attachments is not None and any(
+                not isinstance(e, dict) for e in raw_attachments
+            ):
+                return self._error(400, "bad_request")  # C7: envelopes only
+            message = self._new_chat_message(
+                chat_id, self.api_member_id, str(body.get("text", "")),
+                attachments=raw_attachments,
+            )
+            # C1: flat message_id, no envelope key.
+            return httpx.Response(201, json={"message_id": message["id"]})
+        return self._error(405, "method_not_allowed")
+
+    def _handle_chat_message(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        chat_id, message_id = match.group("chat"), match.group("msg")
+        if chat_id not in self._chats:
+            return self._error(404, "chat_not_found")
+        messages = self._chat_messages[chat_id]
+        message = next((m for m in messages if m["id"] == message_id), None)
+        if message is None:
+            return self._error(404, "message_not_found")
+        if request.method == "PATCH":
+            body = json.loads(request.content)
+            message["content"]["text"] = str(body.get("text", ""))
+            message["modified_at"] = next(self._clock)
+            self._notify_chat(
+                chat_id, {"kind": "message_updated", "message": message}
+            )
+            return httpx.Response(200, json={})
+        if request.method == "DELETE":
+            messages.remove(message)
+            self._notify_chat(
+                chat_id, {"kind": "message_deleted", "message": message}
+            )
+            return httpx.Response(200, json={})
+        return self._error(405, "method_not_allowed")
+
+    def _handle_chat_stream(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        chat_id = match.group("chat")
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        if chat_id not in self._chats:
+            return self._error(404, "chat_not_found")
+        backlog = list(self._chat_messages[chat_id])
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._chat_listeners.setdefault(chat_id, []).append(queue)
+
+        async def frames() -> Any:
+            try:
+                for message in backlog:  # C5: history replays as ordinary adds
+                    yield _sse_frame("message_added", message)
+                while True:
+                    item = await queue.get()
+                    if item is None:  # server-side drop (end_chat_streams)
+                        return
+                    if item["kind"] == "heartbeat":
+                        yield b": heartbeat\n\n"
+                    else:
+                        yield _sse_frame(item["kind"], item["message"])
+            finally:
+                self._chat_listeners[chat_id].remove(queue)
+
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=frames()
         )
 
     def _handle_types(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:

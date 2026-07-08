@@ -9,8 +9,9 @@ structure, and this service decides policy:
     * the summary-staleness rule: any update without a fresh summary
       flags ``summary_stale = True`` (relationship-only changes count --
       the one-liner may no longer reflect who the node is connected to);
-    * every touched node is pushed onto the session focus stack, which is
-      what makes focus-stack defaults work downstream.
+    * every touched node is recorded into the session's recent history,
+      which is what makes session-default starts work downstream (the
+      curated working set is only ever changed by explicit ``hold`` calls).
 
 Services receive their dependencies through the constructor (constructor
 injection); nothing here knows whether the repository is the in-memory
@@ -71,10 +72,9 @@ class NodeWriter:
             # the new node's own links landed with the create.
             if not link.outgoing:
                 self._journal.modified(link.other)
-        self._session.touch(node.id)
         for link in links:
-            if self._session.focus.top != link.other:  # keep new node on top
-                self._session.recent.record(link.other)
+            self._session.recent.record(link.other)
+        self._session.touch(node.id)  # last, so the new node is most recent
         return node
 
     async def update_node(

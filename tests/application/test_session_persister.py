@@ -7,96 +7,135 @@ from typing import Any
 import pytest
 
 from graph_context.application.session_persister import SessionPersister
-from graph_context.domain.session import FocusEntry, FocusStack, SessionState
+from graph_context.domain.models import Detail
+from graph_context.domain.session import SessionState, WorkingSet, WorkingSetEntry
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_session_store import InMemorySessionStore
 
 
-def _focused(project: str, *node_ids: str) -> SessionState:
+def _holding(project: str, *node_ids: str) -> SessionState:
     state = SessionState(project=project)
     for node_id in node_ids:
-        state.focus.push(node_id)
+        state.working_set.hold(node_id)
     return state
 
 
 async def test_flush_is_debounced_to_every_n_mutations() -> None:
     store = InMemorySessionStore()
-    session = _focused("Ashfall", "a")
-    persister = SessionPersister(store, session, flush_every=3)
+    session = _holding("Ashfall", "a")
+    persister = SessionPersister(store, session, "anytype:chat-1", flush_every=3)
 
     await persister.note_mutation()
     await persister.note_mutation()
-    assert await store.load() is None  # not yet -- below the threshold
+    assert await store.load("anytype:chat-1") is None  # below the threshold
 
     await persister.note_mutation()  # third mutation crosses the threshold
-    assert await store.load() is not None
+    assert await store.load("anytype:chat-1") is not None
 
 
 async def test_explicit_flush_always_saves() -> None:
     store = InMemorySessionStore()
-    persister = SessionPersister(store, _focused("Ashfall", "a"), flush_every=100)
+    persister = SessionPersister(
+        store, _holding("Ashfall", "a"), "mcp", flush_every=100
+    )
     await persister.flush()
-    assert await store.load() is not None
+    assert await store.load("mcp") is not None
+
+
+async def test_keys_are_independent_snapshots() -> None:
+    store = InMemorySessionStore()
+    for key, project in (("anytype:a", "Arc One"), ("anytype:b", "Arc Two")):
+        await SessionPersister(store, _holding(project, "n"), key).flush()
+    restored_a = await SessionPersister.load_or_fresh(
+        store, SessionState(), "anytype:a"
+    )
+    restored_b = await SessionPersister.load_or_fresh(
+        store, SessionState(), "anytype:b"
+    )
+    assert (restored_a.project, restored_b.project) == ("Arc One", "Arc Two")
+
+
+async def test_an_empty_key_is_a_programming_error() -> None:
+    store = InMemorySessionStore()
+    with pytest.raises(ValueError):
+        SessionPersister(store, SessionState(), "")
+    with pytest.raises(ValueError):
+        await store.load("  ")
 
 
 async def test_round_trip_through_store() -> None:
     store = InMemorySessionStore()
-    session = _focused("Ashfall", "a", "b")
-    session.focus.pin("a")
-    await SessionPersister(store, session).flush()
+    session = _holding("Ashfall", "a", "b")
+    session.working_set.hold("a", Detail.FULL)
+    session.scratchpad = "next: the siege aftermath"
+    await SessionPersister(store, session, "mcp").flush()
 
-    restored = await SessionPersister.load_or_fresh(store, SessionState())
+    restored = await SessionPersister.load_or_fresh(store, SessionState(), "mcp")
     assert restored.project == "Ashfall"
-    assert [(e.node_id, e.pinned) for e in restored.focus.entries] == [
-        (e.node_id, e.pinned) for e in session.focus.entries
-    ]
+    assert restored.working_set.entries == session.working_set.entries
+    assert restored.scratchpad == session.scratchpad
     assert restored.recent.items == session.recent.items
 
 
 async def test_load_or_fresh_returns_fresh_when_empty() -> None:
     fresh = SessionState(project="Fresh")
-    restored = await SessionPersister.load_or_fresh(InMemorySessionStore(), fresh)
+    restored = await SessionPersister.load_or_fresh(
+        InMemorySessionStore(), fresh, "mcp"
+    )
     assert restored is fresh
 
 
 async def test_load_or_fresh_degrades_on_unreadable_store() -> None:
     # The port contract: I/O failures surface as GraphContextError.
     class Boom:
-        async def load(self) -> dict[str, Any] | None:
+        async def load(self, key: str) -> dict[str, Any] | None:
             raise GraphContextError("store on fire")
 
-        async def save(self, snapshot: dict[str, Any]) -> None:  # pragma: no cover
+        async def save(
+            self, snapshot: dict[str, Any], key: str
+        ) -> None:  # pragma: no cover
             ...
 
     fresh = SessionState(project="Fresh")
-    restored = await SessionPersister.load_or_fresh(Boom(), fresh)
+    restored = await SessionPersister.load_or_fresh(Boom(), fresh, "mcp")
     assert restored is fresh  # never crashes startup
 
 
 async def test_load_or_fresh_propagates_programming_errors() -> None:
     # A bug in a store must crash loudly, not silently discard the session.
     class Buggy:
-        async def load(self) -> dict[str, Any] | None:
+        async def load(self, key: str) -> dict[str, Any] | None:
             raise RuntimeError("a bug, not an I/O failure")
 
-        async def save(self, snapshot: dict[str, Any]) -> None:  # pragma: no cover
+        async def save(
+            self, snapshot: dict[str, Any], key: str
+        ) -> None:  # pragma: no cover
             ...
 
     with pytest.raises(RuntimeError):
-        await SessionPersister.load_or_fresh(Buggy(), SessionState())
+        await SessionPersister.load_or_fresh(Buggy(), SessionState(), "mcp")
 
 
 async def test_from_snapshot_is_lenient_about_partial_data() -> None:
-    # A snapshot missing fields / with junk focus entries degrades field by
-    # field rather than raising.
-    snapshot = {"project": "P", "focus": [{"pinned": True}], "recent": ["r1", "r2"]}
+    # A snapshot missing fields / with junk working-set entries degrades
+    # field by field rather than raising.
+    snapshot = {
+        "project": "P",
+        "working_set": [{"detail": "full"}],
+        "recent": ["r1", "r2"],
+    }
     state = SessionState.from_snapshot(snapshot)
     assert state.project == "P"
-    assert state.focus.entries == ()           # the id-less focus entry is dropped
+    assert state.working_set.entries == ()     # the id-less entry is dropped
     assert state.recent.items == ("r1", "r2")
 
 
-def test_focus_restore_round_trips() -> None:
-    stack = FocusStack.restore([FocusEntry("x", pinned=True), FocusEntry("y")])
-    assert stack.top == "x"
-    assert [(e.node_id, e.pinned) for e in stack.entries] == [("x", True), ("y", False)]
+def test_working_set_restore_round_trips() -> None:
+    restored = WorkingSet.restore(
+        [WorkingSetEntry("x", Detail.FULL), WorkingSetEntry("y")]
+    )
+    assert restored.top == "x"
+    assert restored.entries == (
+        WorkingSetEntry("x", Detail.FULL),
+        WorkingSetEntry("y", Detail.SUMMARIES),
+    )

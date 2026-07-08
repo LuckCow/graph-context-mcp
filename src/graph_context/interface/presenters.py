@@ -1,71 +1,38 @@
 """Presenters: turning domain results into the strings tools return.
 
-The proposal's "context echo" lives here: every tool response begins with
-a compact header rendered from :class:`SessionState`, e.g.::
-
-    [project: Ashfall | focus: Mira (Character), The Undercroft (Location) | recent: Siege of Brakk]
-
 Detail levels (``names`` / ``summaries`` / ``full``) are an interface
 concern -- the traversal always returns full nodes; how much of each node
 reaches the LLM's context window is decided at the edge. Keeping this out
 of the domain means response-budget tuning never touches tested logic.
 
-Nodes referenced by the session but missing from the graph (deleted, or
-removed by an out-of-band human edit before a resync) are skipped
-silently: the header must never crash a tool response.
+(The ``[project | focus | recent]`` context-header echo that used to open
+every response was removed 2026-07-06 as token waste.)
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from enum import StrEnum
 
 from graph_context.application.node_reader import NodeView
 from graph_context.application.ranker import RankedHit
-from graph_context.domain.graph import GraphIndex
+from graph_context.domain.models import Detail as Detail  # re-export (WP15)
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
-from graph_context.domain.session import SessionState
+from graph_context.domain.query import QueryResult, SortKey, field_value
 from graph_context.domain.traversal import ExploreResult
 
-_RECENT_SHOWN = 3
-_FOCUS_SHOWN = 3  # header shows the top of the stack, not the whole working set
-_HEADER_NAME_CHARS = 32  # ellipsize pathological titles; the header is an echo
+# Detail moved to domain.models (WP15) -- the working set persists it; it
+# stays importable from here for rendering call sites.
+
 EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
-
-
-class Detail(StrEnum):
-    NAMES = "names"
-    SUMMARIES = "summaries"
-    FULL = "full"
-
-
-def render_context_header(session: SessionState, graph: GraphIndex) -> str:
-    project = session.project or "-"
-    focus_entries = [
-        entry for entry in session.focus.entries if graph.has_node(entry.node_id)
-    ]
-    focus_parts = [
-        _name_with_type(graph, entry.node_id, pinned=entry.pinned)
-        for entry in focus_entries[:_FOCUS_SHOWN]
-    ]
-    if len(focus_entries) > _FOCUS_SHOWN:
-        focus_parts.append(f"(+{len(focus_entries) - _FOCUS_SHOWN} more)")
-    focus = ", ".join(focus_parts)
-    recent = ", ".join(
-        _truncate(graph.node(node_id).name)
-        for node_id in session.recent.items[:_RECENT_SHOWN]
-        if graph.has_node(node_id)
-    )
-    return f"[project: {project} | focus: {focus or '-'} | recent: {recent or '-'}]"
 
 
 def render_overview(overview: GraphOverview) -> str:
     """Render the cold-start entry-point map (``context action='overview'``).
 
     Ids are the last token before the colon on every hub line, so the LLM
-    can copy one straight into ``explore`` / ``get_node`` / ``focus``.
+    can copy one straight into ``explore`` / ``get_node`` / ``hold``.
     """
     if overview.total_story_nodes == 0:
         return "overview: no nodes yet -- use create_node to add the first one."
@@ -75,7 +42,7 @@ def render_overview(overview: GraphOverview) -> str:
         f"{len(overview.type_counts)} types (derived entry-point map).",
         f"types: {types}",
         "entry points (highest-degree nodes; pass an id to explore, "
-        "get_node, or context action='focus'):",
+        "get_node, or context action='hold'):",
     ]
     for hub in overview.hubs:
         node = hub.node
@@ -142,9 +109,11 @@ def render_explore_result(
     return "\n".join(lines)
 
 
-def _render_hit_line(node: Node, depth: int, detail: Detail, body: str = "") -> str:
+def _render_hit_line(
+    node: Node, depth: int, detail: Detail, body: str = "", annotation: str = ""
+) -> str:
     indent = "  " * depth
-    base = f"{indent}- {node.name} ({node.type}, id={node.id})"
+    base = f"{indent}- {node.name} ({node.type}, id={node.id}){annotation}"
     if detail is Detail.NAMES:
         return base
     stale = " [summary stale]" if node.summary_stale else ""
@@ -153,14 +122,50 @@ def _render_hit_line(node: Node, depth: int, detail: Detail, body: str = "") -> 
     return f"{base}{stale}: {node.summary}\n{indent}    {body}"
 
 
-def _name_with_type(graph: GraphIndex, node_id: str, *, pinned: bool) -> str:
-    node = graph.node(node_id)
-    pin_mark = "*" if pinned else ""
-    return f"{_truncate(node.name)}{pin_mark} ({node.type})"
+def render_query_result(
+    result: QueryResult,
+    detail: Detail,
+    order_by: Sequence[SortKey] = (),
+    bodies: Mapping[str, str] | None = None,
+) -> str:
+    """Render ``query`` hits with their sort-key values echoed inline.
+
+    The annotation (``[due_date=2026-07-10, priority=High]``) makes the
+    ordering legible to the LLM -- without it a sorted list is just a
+    list. ``N of M`` in the header is the tighten-or-raise signal.
+    """
+    if result.matched == 0:
+        return (
+            "query: 0 matches. Loosen `where`, drop `type`, or get_node a "
+            "sample node to see the fields it actually carries."
+        )
+    lines = [f"query: {len(result.hits)} of {result.matched} match(es)."]
+    for node in result.hits:
+        lines.append(
+            _render_hit_line(
+                node,
+                0,
+                detail,
+                (bodies or {}).get(node.id, ""),
+                _order_annotation(node, order_by),
+            )
+        )
+    if result.truncated:
+        lines.append(
+            f"... showing {len(result.hits)} of {result.matched}; tighten "
+            "`where` or raise `limit` to see more."
+        )
+    return "\n".join(lines)
 
 
-def _truncate(name: str, limit: int = _HEADER_NAME_CHARS) -> str:
-    return name if len(name) <= limit else name[: limit - 1] + "…"
+def _order_annotation(node: Node, order_by: Sequence[SortKey]) -> str:
+    if not order_by:
+        return ""
+    parts = []
+    for key in order_by:
+        value = field_value(node, key.field)
+        parts.append(f"{key.field}={'(none)' if value is None else value}")
+    return " [" + ", ".join(parts) + "]"
 
 
 def render_node_view(view: NodeView) -> str:

@@ -1,24 +1,33 @@
 ### context
-Inspect or adjust the working session: graph stats, focus stack, resync.
+Inspect or curate your cross-turn context: scratchpad, working set, resync.
+
+Your scratchpad and working set are echoed to you at the start of every
+turn -- they are how you remember across turns. Curate them deliberately.
 
 Actions:
-  get          -- graph statistics (node/edge counts, stale summaries).
+  get          -- session snapshot: graph statistics plus your current
+                  scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
                   counts plus the highest-degree "hub" nodes with name,
                   type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / focus. (alias: map)
+                  obtain node ids for explore / get_node / hold. (alias: map)
   resync       -- pull in edits made directly in Anytype; reports which
                   nodes changed. Use at the start of a work session.
-  focus        -- push node_id onto the focus stack (queries default to
-                  the top of this stack when no start is given).
-  pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
-  remove       -- drop node_id from the focus stack.
-  clear        -- empty the focus stack (pinned entries survive).
-  set_project  -- relabel the project shown in the header (cosmetic; one
-                  server is bound to one Anytype space).
-
-Every tool response begins with `[project | focus | recent]` -- this tool
-is how you manage what appears there.
+  note         -- REPLACE your scratchpad with `text` (empty text clears
+                  it; max 2000 chars). Keep cross-turn intentions and open
+                  threads here -- durable facts belong in the graph as
+                  nodes, not in the scratchpad.
+  hold         -- keep node_id in your working set at `detail`:
+                  "summaries" (default; one-liner each turn) or "full"
+                  (body + connections each turn -- for the 1-2 items you
+                  are actively working from). 2 full slots, 6 summary
+                  slots; overflow demotes/releases the oldest, and the
+                  response says so. explore/find_path default to the most
+                  recently held node when no start is given.
+  release      -- drop node_id from the working set.
+  clear        -- empty the working set (the scratchpad is kept).
+  set_project  -- relabel the session's project (cosmetic; one server is
+                  bound to one Anytype space).
 
 ### create_node
 Create a node in the user's workspace and its initial links in ONE call.
@@ -102,11 +111,12 @@ include_provenance: how many intent records that touched this node to
 ### explore
 Walk the graph outward from a node. THE general retrieval primitive.
 
-In a fresh session the focus stack is empty; call context
+In a fresh session nothing is held or recently touched; call context
 action="overview" first to get a starting node id (or pass a node name
 as `start` -- it is resolved for you).
 
-start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
+start: node id OR name; empty = the most recently held node (falling
+back to the most recently touched). depth: 1-3 (default 1).
 detail: names | summaries (default) | full.
 as_of: an ISO date cutoff -- Event-role nodes (meetings, milestones)
 after it are hidden (the state of things as of that date);
@@ -136,7 +146,7 @@ named in include_types (e.g. include_types=["Capture"]).
 Find the shortest meaningful connection between two nodes -- "how does
 this task relate to that decision?" Surfaces non-obvious links.
 `target` and `start` each accept a node id OR name (resolved for you).
-start: empty = focus-stack top. Edge direction is ignored for
+start: empty = the most recently held (or touched) node. Edge direction is ignored for
 reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["part_of", "assigned_to"]).
 
@@ -160,3 +170,51 @@ update_node and link `other` targets all accept a name directly in place
 of an id and resolve it for you. Reach for find_node to browse, to
 disambiguate when a name is ambiguous, or to confirm a node exists.
 For a cold start with no name in mind, use context action='overview'.
+
+### query
+List nodes by ATTRIBUTE VALUES -- filter, order, and cap, like an
+Anytype Set view. Scans the whole graph, or one node's direct
+neighborhood when `linked_to` is set. Use `explore` to walk outward
+from a node, `find_node` to look up a name; use query to answer
+"which nodes have these property values, in this order?"
+
+type: optional type filter (an unknown type errors with the known list).
+linked_to: node id OR name (resolved for you); restricts candidates to
+  that node's DIRECT neighbors, either edge direction. Combine with
+  `type` and `order_by` for per-entity listings and timelines.
+  edge_types optionally restricts which relations count.
+where: list of {"field", "op", "value"} conditions, ALL must hold.
+  Ops: eq, neq, lt, lte, gt, gte, contains, exists, missing
+  (exists/missing take no value). Values compare numerically when both
+  sides are numbers, otherwise as text -- ISO dates order correctly.
+  ABSENT FIELDS: a node may lack a field entirely (an unticked checkbox
+  is stored as absence). `neq` MATCHES absent ("not known to be
+  value"); eq/lt/lte/gt/gte/contains never match absent; exists/missing
+  test presence itself. An unknown field name errors with the fields
+  that DO exist -- read that list and retry.
+order_by: e.g. ["due_date", "priority desc"] -- each entry is "field",
+  "field asc", or "field desc". Nodes missing the field sort last.
+  Sort-key values are echoed on each result line.
+  Queryable fields: the node's own properties (get_node shows them)
+  plus name, type, summary, story_time, modified_at, summary_stale.
+view: run one of the user's SAVED Anytype Set views by name instead
+  (e.g. view="Open Tasks") -- its filters and sorts are read fresh from
+  the space, so whatever the user configured in Anytype applies as-is.
+  Cannot be combined with type/linked_to/edge_types/where/order_by.
+  An unknown name errors with the runnable views; a set only appears
+  once its source is configured in Anytype and it holds an object.
+limit: max results (default 25, cap 100). The header reports "N of M
+  match(es)" -- tighten `where` or raise `limit` when truncated.
+detail: names | summaries (default) | full.
+
+EXAMPLES:
+  10 open todos, due first, ties by priority:
+    query(type="Task",
+          where=[{"field": "done", "op": "neq", "value": "true"}],
+          order_by=["due_date", "priority desc"], limit=10)
+  (an unticked checkbox is stored as ABSENCE and neq matches absent, so
+  done-neq-true finds every not-done item.)
+  the user's own saved list, exactly as they configured it in Anytype:
+    query(view="Open Tasks")
+  a person's meeting history, most recent first:
+    query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])

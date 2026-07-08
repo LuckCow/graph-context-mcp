@@ -272,9 +272,10 @@ class ClaudeAgentDriver:
                         calls.append(
                             ToolCall(local_tool_name(block.name), dict(block.input))
                         )
-        if calls:
-            # Any text alongside tool calls is preamble ("I'll look that
-            # up"), not the reply; the decision is the calls.
-            return LLMTurn(tool_calls=tuple(calls))
+        # Text alongside tool calls is usually preamble ("I'll look that
+        # up"), but it travels with the calls anyway: on a turn's FINAL
+        # decision the pipeline treats it as the bundled reply (see
+        # pipeline.LAST_TURN_WARNING). Which text counts is the
+        # pipeline's rule, not this adapter's.
         reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
-        return LLMTurn(reply=reply)
+        return LLMTurn(reply=reply, tool_calls=tuple(calls))

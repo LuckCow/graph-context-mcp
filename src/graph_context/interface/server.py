@@ -65,7 +65,8 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
     # (ADR 007): one wiring, two roots -- see graph_context/composition.py.
     # The runtime's mode store is unused here: activity modes are an
     # orchestrator concept; the MCP surface binds every tool (ADR 007).
-    built = await composition.build_runtime(_PROFILE)
+    # Sessions are keyed (WP8): the MCP client is the "mcp" session.
+    built = await composition.build_runtime(_PROFILE, session_key="mcp")
     try:
         yield AppContext(services=built.services, teardown=built.teardown)
     finally:
@@ -87,10 +88,18 @@ def _services(ctx: Context[Any, Any, Any]) -> Services:
 
 @mcp.tool(description=_PROFILE.tool_docs["context"])
 async def context(
-    ctx: Context[Any, Any, Any], action: str = "get", node_id: str = "", project: str = ""
+    ctx: Context[Any, Any, Any],
+    action: str = "get",
+    node_id: str = "",
+    project: str = "",
+    text: str = "",
+    detail: str = "",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
-    return await tools.context_tool(_services(ctx), action=action, node_id=node_id, project=project)
+    return await tools.context_tool(
+        _services(ctx), action=action, node_id=node_id, project=project,
+        text=text, detail=detail,
+    )
 
 
 @mcp.tool(description=_PROFILE.tool_docs["create_node"])
@@ -171,6 +180,25 @@ async def explore(
         exclude_types=exclude_types, edge_types=edge_types, as_of=as_of,
         include_future=include_future, limit=limit, detail=detail,
         only_stale=only_stale,
+    )
+
+
+@mcp.tool(description=_PROFILE.tool_docs["query"])
+async def query(
+    ctx: Context[Any, Any, Any],
+    type: str = "",
+    linked_to: str = "",
+    edge_types: list[str] | None = None,
+    where: list[dict[str, Any]] | None = None,
+    order_by: list[str] | None = None,
+    view: str = "",
+    limit: int = 25,
+    detail: str = "summaries",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.query_tool(
+        _services(ctx), type=type, linked_to=linked_to, edge_types=edge_types,
+        where=where, order_by=order_by, view=view, limit=limit, detail=detail,
     )
 
 

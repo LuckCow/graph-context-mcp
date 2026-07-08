@@ -13,24 +13,34 @@ so every transport gets it for free. Every ``/mode`` first refreshes the
 registry through the injected ``reload_registry`` hook (ADR 015 amendment:
 in-space Activity Mode objects), so an edit made in Anytype applies
 without a restart; a failed refresh degrades to the last good registry
-with an actionable error. Mode is per-session; the underlying focus-stack
+with an actionable error. Mode is per-session; the underlying graph-session
 session is still the process-wide one (per-session ``SessionState`` is
 WP8).
 
-Turn-local transcripts: the driver sees the current turn's events only.
-Cross-turn conversation memory is deliberately the DRIVER's concern (the
-LangGraph thread arrives with the framework) -- the seam's contract stays
-"message in, reply events out".
+Cross-turn context (WP15, ADR 020): each turn opens with the session's
+context block -- scratchpad, curated working set, recent trail -- built
+ONCE per turn by ``interface.context_block`` and prepended to the
+turn-local transcript (every ``decide`` re-renders the transcript into a
+fresh CLI session, so the block rides each decision without being
+re-assembled). An empty session injects nothing. The block is state the
+model curates via the ``context`` tool; :class:`ConversationMemory` is
+the other half -- a bounded per-session ring of prior user/assistant
+messages replayed ahead of the block, cleared by the ``/clear`` command
+(handled here, like ``/mode``, so every transport gets it). Transports
+can prime the ring after a restart via :meth:`Orchestrator.seed_memory`.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections import deque
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.errors import GraphContextError
+from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.tools import Services
 from graph_context.orchestrator import capture, modes
@@ -41,6 +51,16 @@ from graph_context.orchestrator.turn_log import TurnLog
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOOL_CALLS = 16  # per turn; a loop guard, not a feature
+
+# Injected before the budget's final decide so the driver lands the turn
+# instead of being cut off mid-plan; its consumer is an LLM.
+LAST_TURN_WARNING = (
+    "[harness] Tool budget: this is your FINAL decision for this turn. "
+    "You may include one last batch of tool calls -- they WILL be "
+    "executed, but no results will come back to you. Put your final "
+    "answer to the user in this same message as text: whatever text you "
+    "send now IS your reply."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +76,69 @@ class ReplyEvent:
     kind: str = "reply"
 
 
+DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
+DEFAULT_MEMORY_CHARS = 6000  # evict oldest beyond this total
+
+
+class ConversationMemory:
+    """Bounded ring of prior user/assistant messages (WP15).
+
+    The pipeline replays it at the head of each turn's transcript so the
+    driver sees the conversation so far; ``/clear`` empties it. Bounded
+    twice -- event count and total characters -- because either alone
+    lets one pathological turn crowd out everything else. Eviction is
+    oldest-first and event-granular; a turn's user half may outlive its
+    reply half, which reads fine in transcript form.
+    """
+
+    def __init__(
+        self,
+        max_events: int = DEFAULT_MEMORY_EVENTS,
+        max_chars: int = DEFAULT_MEMORY_CHARS,
+    ) -> None:
+        self._max_chars = max_chars
+        self._events: deque[tuple[str, str]] = deque(maxlen=max_events)
+
+    def remember_turn(self, user_text: str, reply_text: str) -> None:
+        self._events.append(("user", user_text))
+        self._events.append(("assistant", reply_text))
+        self._shrink()
+
+    def seed(self, events: Sequence[tuple[str, str]]) -> None:
+        """Replace the ring with reconstructed history (startup catch-up).
+
+        ``events`` is (kind, text) oldest-first, kinds ``user`` /
+        ``assistant``; the same bounds apply, so an oversized history
+        keeps only its tail.
+        """
+        self._events.clear()
+        for kind, text in events:
+            self._events.append((kind, text))
+        self._shrink()
+
+    def clear(self) -> None:
+        self._events.clear()
+
+    def events(self) -> tuple[TranscriptEvent, ...]:
+        return tuple(
+            TranscriptEvent(kind, text) for kind, text in self._events
+        )
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def _shrink(self) -> None:
+        while self._events and sum(
+            len(text) for _, text in self._events
+        ) > self._max_chars:
+            self._events.popleft()
+
+
 @dataclass(slots=True)
 class _SessionState:
-    mode: str  # a loaded ModeSpec name
+    mode: str  # a loaded ModeSpec name; authoritative in-memory (WP8)
+    services: Services  # this session's view: own SessionState, shared space
+    memory: ConversationMemory = field(default_factory=ConversationMemory)
 
 
 @dataclass(slots=True)
@@ -90,10 +170,16 @@ class Orchestrator:
     reload_registry: Callable[[], Awaitable[ModeRegistry]] | None = None
     model_name: str = ""  # attribution for intent nodes (gc_model)
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
+    # WP8 (ADR 021): the per-session-key Services seam wired by the
+    # composition root. None (tests, bare construction) degrades to the
+    # shared `services` bundle for every session -- pre-WP8 behavior.
+    services_for: Callable[[str], Awaitable[Services]] | None = None
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
 
     def mode_of(self, session_id: str) -> str:
-        return self._session(session_id).mode
+        """Non-creating peek: the mode a session IS in (default if unseen)."""
+        state = self._sessions.get(session_id)
+        return state.mode if state is not None else self.registry.default
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
@@ -105,14 +191,15 @@ class Orchestrator:
                 state.mode, self.registry.default,
             )
             state.mode = self.registry.default
+            state.services.session.mode = state.mode  # persisted mirror
             spec = self.registry.get(state.mode)
             assert spec is not None  # the default is always loaded
         return spec
 
     async def handle_message(
-        self, session_id: str, user_id: str, text: str
+        self, session_id: str, user_id: str, text: str, origin: str = ""
     ) -> list[ReplyEvent]:
-        state = self._session(session_id)
+        state = await self._session(session_id)
         stripped = text.strip()
         if self.turn_log:
             self.turn_log.user_message(session_id, state.mode, user_id, stripped)
@@ -122,17 +209,37 @@ class Orchestrator:
                 # state.mode is post-switch: the mode the session is IN now.
                 self.turn_log.turn_end(session_id, state.mode, mode_events)
             return mode_events
+        if stripped == "/clear":
+            state.memory.clear()
+            clear_events = [ReplyEvent(
+                "conversation memory cleared. The scratchpad and working "
+                "set are kept -- reset those with the context tool "
+                "(action='note' with empty text / action='clear').",
+                kind="notice",
+            )]
+            if self.turn_log:
+                self.turn_log.turn_end(session_id, state.mode, clear_events)
+            return clear_events
 
         spec = self._spec(state)
         logger.info(
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
         tools = modes.tool_docs(spec, self.profile)
-        transcript: list[TranscriptEvent] = [TranscriptEvent("user", stripped)]
+        # [prior conversation..., context block, the live message]: history
+        # reads as conversation; the block stays adjacent to the message.
+        transcript: list[TranscriptEvent] = list(state.memory.events())
+        context_block = await build_turn_context(state.services)
+        if context_block:
+            transcript.append(TranscriptEvent("user", context_block))
+        transcript.append(TranscriptEvent("user", stripped))
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
         reply_text = ""
-        for _ in range(self.max_tool_calls):
+        for decisions_left in range(self.max_tool_calls, 0, -1):
+            final_decision = decisions_left == 1
+            if final_decision:
+                transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(transcript, tools, spec.goal)
             if self.turn_log:
                 self.turn_log.llm_turn(session_id, spec.name, turn)
@@ -145,7 +252,7 @@ class Orchestrator:
                     call.name, json.dumps(dict(call.arguments), default=str)
                 ))
                 result = await modes.invoke(
-                    spec, call.name, self.services, call.arguments
+                    spec, call.name, state.services, call.arguments
                 )
                 if result is None:
                     # The binding boundary's runtime face: actionable for a
@@ -159,47 +266,69 @@ class Orchestrator:
                 if self.turn_log:
                     self.turn_log.tool_result(session_id, spec.name, call, result)
                 transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
+            if final_decision and turn.reply.strip():
+                # The warned driver bundled its answer with a last update:
+                # the calls just ran, the text is the reply.
+                reply_text = turn.reply
+                events.append(ReplyEvent(reply_text))
+                break
         else:
             events.append(ReplyEvent(
-                f"tool budget exhausted ({self.max_tool_calls} calls) before "
-                "the driver replied; the turn was cut short.",
+                f"tool budget exhausted ({self.max_tool_calls} decisions): "
+                "the final tool calls ran, but the driver bundled no reply "
+                "text despite the warning; the turn was cut short.",
                 kind="notice",
             ))
-        await self._finish_turn(spec, user_id, stripped, reply_text, trace)
+        await self._finish_turn(
+            state.services, spec, user_id, stripped, reply_text, trace, origin
+        )
+        if reply_text:
+            # Error-only / budget-exhausted turns leave no useful memory.
+            state.memory.remember_turn(stripped, reply_text)
         if self.turn_log:
             self.turn_log.turn_end(session_id, spec.name, events)
         return events
 
+    async def seed_memory(
+        self, session_id: str, events: Sequence[tuple[str, str]]
+    ) -> None:
+        """Prime a session's conversation memory from reconstructed history
+        (transports call this once at startup, after a restart)."""
+        (await self._session(session_id)).memory.seed(events)
+
     async def _finish_turn(
         self,
+        services: Services,
         spec: ModeSpec,
         user_id: str,
         prompt: str,
         reply_text: str,
         trace: list[ToolTrace],
+        origin: str = "",
     ) -> None:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
-        drain -> intent node."""
+        drain -> intent node. ``services`` is the session's view; its
+        repository/capture/journal are the runtime's shared instances."""
         if self.provenance is None:
             return
         policy = spec.capture
         if policy is not None and reply_text:
             references = capture.entity_links(
-                reply_text, self.services.repository.graph
+                reply_text, services.repository.graph
             )
             if capture.should_capture(reply_text, references, policy.min_chars):
                 # The captured artifact journals itself, so the intent node
                 # below links prompt -> intent -> artifact. Its type comes
                 # from the policy: gc_prose for fiction, a native type
                 # (procedure, note, ...) for other activities (ADR 015).
-                await self.services.capture.record(
+                await services.capture.record(
                     text=reply_text,
                     summary=reply_text.strip().splitlines()[0][:200],
                     references=references,
                     artifact_type=policy.artifact_type,
                     references_label=policy.references_label,
                 )
-        mutations = self.services.journal.drain()
+        mutations = services.journal.drain()
         intent = await self.provenance.record_turn(
             prompt=prompt,
             mutations=mutations,
@@ -207,15 +336,45 @@ class Orchestrator:
             user_id=user_id,
             model=self.model_name,
             mode=spec.name,
+            origin=origin,
         )
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
                         intent.id, len(mutations))
 
-    def _session(self, session_id: str) -> _SessionState:
-        return self._sessions.setdefault(
-            session_id, _SessionState(mode=self.registry.default)
-        )
+    async def _session(self, session_id: str) -> _SessionState:
+        """The per-session state, created (with I/O) on first sight.
+
+        WP8: the session's Services come from the injected ``services_for``
+        factory (its own SessionState over the shared space); without a
+        factory (tests, bare construction) every session shares the
+        runtime bundle -- pre-WP8 behavior. The mode is restored from the
+        persisted SessionState when it names a loaded spec, else the
+        registry default; the in-memory ``_SessionState.mode`` stays
+        authoritative from there (a shared-runtime session must keep its
+        own mode even if the persisted mirror can't).
+        """
+        state = self._sessions.get(session_id)
+        if state is not None:
+            return state
+        if self.services_for is not None:
+            services = await self.services_for(session_id)
+        else:
+            services = self.services
+        persisted = services.session.mode
+        if persisted and self.registry.get(persisted) is not None:
+            mode = persisted
+        else:
+            if persisted:
+                logger.info(
+                    "session %s persisted mode %r is not loaded; using %r",
+                    session_id, persisted, self.registry.default,
+                )
+            mode = self.registry.default
+            services.session.mode = mode
+        state = _SessionState(mode=mode, services=services)
+        self._sessions[session_id] = state
+        return state
 
     async def _switch_mode(
         self, state: _SessionState, command: str
@@ -250,7 +409,28 @@ class Orchestrator:
             f"mode switched to {spec.name}; bound tools: {bound}",
             kind="notice",
         ))
+        events.extend(await self._persist_mode(state))
         return events
+
+    async def _persist_mode(self, state: _SessionState) -> list[ReplyEvent]:
+        """Mirror the switched mode into the session snapshot so it
+        survives a restart (WP8). A store outage must not un-switch the
+        mode or fail the turn -- it degrades to an in-memory-only switch
+        with a notice."""
+        state.services.session.mode = state.mode
+        persister = state.services.persister
+        if persister is None:
+            return []
+        try:
+            await persister.flush()
+        except GraphContextError as err:
+            logger.warning("could not persist mode switch: %s", err)
+            return [ReplyEvent(
+                "mode switched, but it could not be saved; it will reset to "
+                "the default on restart.",
+                kind="notice",
+            )]
+        return []
 
     async def _refresh_registry(self) -> list[ReplyEvent]:
         """Re-read mode config; on failure keep the last good registry.

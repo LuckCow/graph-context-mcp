@@ -1,47 +1,16 @@
-"""Presenters: context header and detail shaping."""
+"""Presenters: detail shaping and derived views."""
 
-from graph_context.domain.models import Node, NodeDraft
+from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview, HubNode, TypeCount
+from graph_context.domain.query import QueryResult, SortKey
 from graph_context.domain.traversal import ExploreQuery, explore
 from graph_context.interface.presenters import (
     Detail,
-    render_context_header,
     render_explore_result,
     render_overview,
+    render_query_result,
 )
 from tests.conftest import World
-
-
-class TestContextHeader:
-    async def test_header_shows_project_focus_and_recent(self, repository, session, world: World):
-        header = render_context_header(session, repository.graph)
-        assert header.startswith("[project: Ashfall | focus: Ashbrand (Item)")
-        assert "| recent:" in header and header.endswith("]")
-
-    async def test_header_skips_nodes_missing_from_graph(self, repository, session, world: World):
-        repository.graph.remove_node(world.ashbrand.id)
-        header = render_context_header(session, repository.graph)
-        assert "Ashbrand" not in header  # no crash, entry skipped
-
-    async def test_header_caps_focus_at_three_with_overflow_count(
-        self, repository, session, world: World
-    ):
-        # The world fixture pushed five nodes onto the focus stack.
-        header = render_context_header(session, repository.graph)
-        focus_section = header.split("| focus: ")[1].split(" | recent:")[0]
-        assert focus_section.count("(") == 4  # 3 "(Type)" markers + the overflow
-        assert "(+2 more)" in focus_section
-
-    async def test_header_truncates_long_names_with_ellipsis(
-        self, repository, session, writer, world: World
-    ):
-        long_name = "The Vesta Briefing — Joseph's First Recommendation to Delay"
-        await writer.create_node(
-            NodeDraft("Event", name=long_name, summary="s", story_time=1)
-        )
-        header = render_context_header(session, repository.graph)
-        assert long_name not in header
-        assert f"{long_name[:31]}…" in header
 
 
 class TestDetailLevels:
@@ -59,6 +28,46 @@ class TestDetailLevels:
         result = explore(repository.graph, ExploreQuery(start=world.mira.id, limit=1))
         text = render_explore_result(result, Detail.NAMES)
         assert "limit reached" in text
+
+
+class TestQueryResult:
+    def _todo(self, node_id: str, name: str, **fields: str) -> Node:
+        return Node(id=node_id, type="Todo", name=name, summary="s.", fields=fields)
+
+    def test_sort_key_values_are_echoed_on_each_line(self) -> None:
+        result = QueryResult(
+            hits=(self._todo("n1", "Buy milk", due_date="2026-07-10"),),
+            matched=1,
+            truncated=False,
+        )
+        text = render_query_result(
+            result, Detail.SUMMARIES, order_by=(SortKey("due_date"),)
+        )
+        assert "query: 1 of 1 match(es)." in text
+        assert "[due_date=2026-07-10]" in text
+
+    def test_absent_sort_key_renders_as_none(self) -> None:
+        result = QueryResult(
+            hits=(self._todo("n1", "Buy milk"),), matched=1, truncated=False
+        )
+        text = render_query_result(
+            result, Detail.NAMES, order_by=(SortKey("due_date"),)
+        )
+        assert "[due_date=(none)]" in text
+
+    def test_truncation_footer_reports_shown_of_matched(self) -> None:
+        result = QueryResult(
+            hits=(self._todo("n1", "Buy milk"),), matched=7, truncated=True
+        )
+        text = render_query_result(result, Detail.NAMES)
+        assert "query: 1 of 7 match(es)." in text
+        assert "showing 1 of 7" in text and "`limit`" in text
+
+    def test_zero_matches_returns_guidance_not_emptiness(self) -> None:
+        text = render_query_result(
+            QueryResult(hits=(), matched=0, truncated=False), Detail.SUMMARIES
+        )
+        assert "0 matches" in text and "`where`" in text
 
 
 class TestOverview:

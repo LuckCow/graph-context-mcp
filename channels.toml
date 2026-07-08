@@ -1,0 +1,20 @@
+# Channel-bound spaces (ADR 017): each Discord channel gets its own
+# Anytype space, profile, and (optionally) project label / modes file.
+# Read at bot startup via GC_CHANNELS_FILE (set in docker-compose.yml);
+# mutually exclusive with the legacy GC_DISCORD_CHANNELS allowlist.
+#
+# NEVER bind a space here AND in spaces.toml (Anytype chat, ADR 019) at
+# the same time: a space holds one SessionContext node, and two runtimes
+# would clobber each other's session snapshot.
+#
+# WP14 cutover (2026-07-07): TestWorld and Todolist moved to spaces.toml
+# (the Anytype in-space chat bot serves them now). Their old bindings
+# stay below, commented, in case a channel needs reviving on a NEW space.
+
+# [channels.1523551542123298896]
+# space_id = "bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4" # TestWorld -> spaces.toml
+# profile = "fiction"
+
+# [channels.1523806942248833045]
+# space_id = "bafyreigkpfhl472fqwfg2f2bh4zdhixvlo2by24pc5xo7v34p6izub33tm.2lc7dwb79z2g4" # Todolist -> spaces.toml
+# profile = "assistant"

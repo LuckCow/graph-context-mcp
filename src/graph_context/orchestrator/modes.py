@@ -2,7 +2,7 @@
 
 A :class:`~graph_context.interface.profiles.ModeSpec` picks one of two tool
 bindings -- ``mutating`` gets the full surface, otherwise the read surface
-(retrieval + ``context``: focus management is part of every activity) -- and
+(retrieval + ``context``: context curation is part of every activity) -- and
 the enforcement mechanism is unchanged from ADR 007: a spec that isn't
 mutating simply never has the mutation tools in its table. Unavailable, not
 refused.
@@ -53,6 +53,7 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     "explore": tools.explore_tool,
     "find_path": tools.find_path_tool,
     "find_node": tools.find_node_tool,
+    "query": tools.query_tool,
 }
 
 MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})

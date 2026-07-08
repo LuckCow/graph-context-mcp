@@ -33,6 +33,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "explore",
     "find_path",
     "find_node",
+    "query",
 )
 
 
@@ -162,6 +163,49 @@ remove_links: list of {"source", "edge_type", "target"} exactly as shown
 by get_node.
 """
 
+def _query_doc(examples: str) -> str:
+    """Assemble the ``query`` doc: shared grammar + profile-specific
+    worked examples. The grammar/semantics text lives here exactly once;
+    only the examples diverge (same rule as the shared doc constants)."""
+    return f"""\
+List nodes by ATTRIBUTE VALUES -- filter, order, and cap, like an
+Anytype Set view. Scans the whole graph, or one node's direct
+neighborhood when `linked_to` is set. Use `explore` to walk outward
+from a node, `find_node` to look up a name; use query to answer
+"which nodes have these property values, in this order?"
+
+type: optional type filter (an unknown type errors with the known list).
+linked_to: node id OR name (resolved for you); restricts candidates to
+  that node's DIRECT neighbors, either edge direction. Combine with
+  `type` and `order_by` for per-entity listings and timelines.
+  edge_types optionally restricts which relations count.
+where: list of {{"field", "op", "value"}} conditions, ALL must hold.
+  Ops: eq, neq, lt, lte, gt, gte, contains, exists, missing
+  (exists/missing take no value). Values compare numerically when both
+  sides are numbers, otherwise as text -- ISO dates order correctly.
+  ABSENT FIELDS: a node may lack a field entirely (an unticked checkbox
+  is stored as absence). `neq` MATCHES absent ("not known to be
+  value"); eq/lt/lte/gt/gte/contains never match absent; exists/missing
+  test presence itself. An unknown field name errors with the fields
+  that DO exist -- read that list and retry.
+order_by: e.g. ["due_date", "priority desc"] -- each entry is "field",
+  "field asc", or "field desc". Nodes missing the field sort last.
+  Sort-key values are echoed on each result line.
+  Queryable fields: the node's own properties (get_node shows them)
+  plus name, type, summary, story_time, modified_at, summary_stale.
+view: run one of the user's SAVED Anytype Set views by name instead
+  (e.g. view="Open Tasks") -- its filters and sorts are read fresh from
+  the space, so whatever the user configured in Anytype applies as-is.
+  Cannot be combined with type/linked_to/edge_types/where/order_by.
+  An unknown name errors with the runnable views; a set only appears
+  once its source is configured in Anytype and it holds an object.
+limit: max results (default 25, cap 100). The header reports "N of M
+  match(es)" -- tighten `where` or raise `limit` when truncated.
+detail: names | summaries (default) | full.
+
+{examples}"""
+
+
 _FIND_NODE_DOC = """\
 Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
@@ -191,28 +235,37 @@ For a cold start with no name in mind, use context action='overview'.
 
 _FICTION_DOCS: dict[str, str] = {
     "context": """\
-Inspect or adjust the working session: graph stats, focus stack, resync.
+Inspect or curate your cross-turn context: scratchpad, working set, resync.
+
+Your scratchpad and working set are echoed to you at the start of every
+turn -- they are how you remember across turns. Curate them deliberately.
 
 Actions:
-  get          -- graph statistics (node/edge counts, stale summaries).
+  get          -- session snapshot: graph statistics plus your current
+                  scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
                   counts plus the highest-degree "hub" nodes with name,
                   type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / focus. The map
+                  obtain node ids for explore / get_node / hold. The map
                   is rebuilt from the graph each call -- nothing to
                   maintain. (alias: map)
   resync       -- pull in edits a human made directly in Anytype; reports
                   which nodes changed. Use before a long writing session.
-  focus        -- push node_id onto the focus stack (queries default to
-                  the top of this stack when no start is given).
-  pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
-  remove       -- drop node_id from the focus stack.
-  clear        -- empty the focus stack (pinned entries survive).
-  set_project  -- relabel the project shown in the header (cosmetic; one
-                  server is bound to one story world).
-
-Every tool response begins with `[project | focus | recent]` -- this tool
-is how you manage what appears there.
+  note         -- REPLACE your scratchpad with `text` (empty text clears
+                  it; max 2000 chars). Keep cross-turn intentions and open
+                  threads here -- durable facts belong in the graph as
+                  nodes, not in the scratchpad.
+  hold         -- keep node_id in your working set at `detail`:
+                  "summaries" (default; one-liner each turn) or "full"
+                  (body + connections each turn -- for the 1-2 nodes you
+                  are actively working from). 2 full slots, 6 summary
+                  slots; overflow demotes/releases the oldest, and the
+                  response says so. explore/find_path default to the most
+                  recently held node when no start is given.
+  release      -- drop node_id from the working set.
+  clear        -- empty the working set (the scratchpad is kept).
+  set_project  -- relabel the session's project (cosmetic; one server is
+                  bound to one story world).
 """,
     "create_node": """\
 Create a story-world node and its initial links in ONE call.
@@ -272,11 +325,12 @@ include_provenance: how many intent records that touched this node to
     "explore": """\
 Walk the graph outward from a node. THE general retrieval primitive.
 
-In a fresh session the focus stack is empty; call context
+In a fresh session nothing is held or recently touched; call context
 action="overview" first to get a starting node id (or pass a node name
 as `start` -- it is resolved for you).
 
-start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
+start: node id OR name; empty = the most recently held node (falling
+back to the most recently touched). depth: 1-3 (default 1).
 detail: names | summaries (default) | full.
 as_of: story-time cutoff -- Events after it are hidden (a character's
 view of the world at that moment); include_future=true restores them
@@ -306,12 +360,21 @@ named in include_types (e.g. include_types=["Capture"]).
 Find the shortest meaningful connection between two nodes -- "how is
 Mira related to the Fall of Brakk?" Surfaces non-obvious links for plot
 work. `target` and `start` each accept a node id OR name (resolved for
-you). start: empty = focus-stack top. Edge direction is ignored for
+you). start: empty = the most recently held (or touched) node. Edge direction is ignored for
 reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only social edges: ["knows", "member_of"]).
 """,
     "find_node": _FIND_NODE_DOC,
-
+    "query": _query_doc("""\
+EXAMPLES -- the census tool (explore walks outward; query scans the world):
+  every Character whose status property is "missing":
+    query(type="Character",
+          where=[{"field": "status", "op": "eq", "value": "missing"}])
+  a character's TIMELINE (all their Events, in story order):
+    query(type="Event", linked_to="Mira", order_by=["story_time"])
+  the most recently edited nodes, any type:
+    query(order_by=["modified_at desc"], limit=10)
+"""),
 }
 
 _FICTION_MODES = (
@@ -357,28 +420,37 @@ FICTION = DomainProfile(
 
 _WORKSPACE_DOCS: dict[str, str] = {
     "context": """\
-Inspect or adjust the working session: graph stats, focus stack, resync.
+Inspect or curate your cross-turn context: scratchpad, working set, resync.
+
+Your scratchpad and working set are echoed to you at the start of every
+turn -- they are how you remember across turns. Curate them deliberately.
 
 Actions:
-  get          -- graph statistics (node/edge counts, stale summaries).
+  get          -- session snapshot: graph statistics plus your current
+                  scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
                   counts plus the highest-degree "hub" nodes with name,
                   type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / focus. The map
+                  obtain node ids for explore / get_node / hold. The map
                   is rebuilt from the graph each call -- nothing to
                   maintain. (alias: map)
   resync       -- pull in edits a human made directly in Anytype; reports
                   which nodes changed. Use before a long working session.
-  focus        -- push node_id onto the focus stack (queries default to
-                  the top of this stack when no start is given).
-  pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
-  remove       -- drop node_id from the focus stack.
-  clear        -- empty the focus stack (pinned entries survive).
-  set_project  -- relabel the project shown in the header (cosmetic; one
-                  server is bound to one Anytype space).
-
-Every tool response begins with `[project | focus | recent]` -- this tool
-is how you manage what appears there.
+  note         -- REPLACE your scratchpad with `text` (empty text clears
+                  it; max 2000 chars). Keep cross-turn intentions and open
+                  threads here -- durable facts belong in the graph as
+                  nodes, not in the scratchpad.
+  hold         -- keep node_id in your working set at `detail`:
+                  "summaries" (default; one-liner each turn) or "full"
+                  (body + connections each turn -- for the 1-2 nodes you
+                  are actively working from). 2 full slots, 6 summary
+                  slots; overflow demotes/releases the oldest, and the
+                  response says so. explore/find_path default to the most
+                  recently held node when no start is given.
+  release      -- drop node_id from the working set.
+  clear        -- empty the working set (the scratchpad is kept).
+  set_project  -- relabel the session's project (cosmetic; one server is
+                  bound to one Anytype space).
 """,
     "create_node": """\
 Create a knowledge-base node and its initial links in ONE call.
@@ -440,11 +512,12 @@ include_provenance: how many intent records that touched this node to
     "explore": """\
 Walk the graph outward from a node. THE general retrieval primitive.
 
-In a fresh session the focus stack is empty; call context
+In a fresh session nothing is held or recently touched; call context
 action="overview" first to get a starting node id (or pass a node name
 as `start` -- it is resolved for you).
 
-start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
+start: node id OR name; empty = the most recently held node (falling
+back to the most recently touched). depth: 1-3 (default 1).
 detail: names | summaries (default) | full.
 as_of: time cutoff -- Event-role nodes (meetings, decisions, milestones)
 after it are hidden (the state of the world as of that moment);
@@ -475,12 +548,21 @@ named in include_types (e.g. include_types=["Capture"]).
 Find the shortest meaningful connection between two nodes -- "how is
 Alice related to the Q3 replatform decision?" Surfaces non-obvious
 links. `target` and `start` each accept a node id OR name (resolved for
-you). start: empty = focus-stack top. Edge direction is ignored for
+you). start: empty = the most recently held (or touched) node. Edge direction is ignored for
 reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["member_of", "works_on"]).
 """,
     "find_node": _FIND_NODE_DOC,
-
+    "query": _query_doc("""\
+EXAMPLES:
+  open Tasks, most urgent first:
+    query(type="Task",
+          where=[{"field": "status", "op": "neq", "value": "done"}],
+          order_by=["priority desc", "due_date"], limit=10)
+  everything decided around a project (Decisions linked to it, by date):
+    query(type="Decision", linked_to="Q3 Replatform",
+          order_by=["story_time"])
+"""),
 }
 
 _WORKSPACE_MODES = (
@@ -536,26 +618,35 @@ WORKSPACE = DomainProfile(
 
 _ASSISTANT_DOCS: dict[str, str] = {
     "context": """\
-Inspect or adjust the working session: graph stats, focus stack, resync.
+Inspect or curate your cross-turn context: scratchpad, working set, resync.
+
+Your scratchpad and working set are echoed to you at the start of every
+turn -- they are how you remember across turns. Curate them deliberately.
 
 Actions:
-  get          -- graph statistics (node/edge counts, stale summaries).
+  get          -- session snapshot: graph statistics plus your current
+                  scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
                   counts plus the highest-degree "hub" nodes with name,
                   type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / focus. (alias: map)
+                  obtain node ids for explore / get_node / hold. (alias: map)
   resync       -- pull in edits made directly in Anytype; reports which
                   nodes changed. Use at the start of a work session.
-  focus        -- push node_id onto the focus stack (queries default to
-                  the top of this stack when no start is given).
-  pin / unpin  -- protect / unprotect node_id from focus-stack eviction.
-  remove       -- drop node_id from the focus stack.
-  clear        -- empty the focus stack (pinned entries survive).
-  set_project  -- relabel the project shown in the header (cosmetic; one
-                  server is bound to one Anytype space).
-
-Every tool response begins with `[project | focus | recent]` -- this tool
-is how you manage what appears there.
+  note         -- REPLACE your scratchpad with `text` (empty text clears
+                  it; max 2000 chars). Keep cross-turn intentions and open
+                  threads here -- durable facts belong in the graph as
+                  nodes, not in the scratchpad.
+  hold         -- keep node_id in your working set at `detail`:
+                  "summaries" (default; one-liner each turn) or "full"
+                  (body + connections each turn -- for the 1-2 items you
+                  are actively working from). 2 full slots, 6 summary
+                  slots; overflow demotes/releases the oldest, and the
+                  response says so. explore/find_path default to the most
+                  recently held node when no start is given.
+  release      -- drop node_id from the working set.
+  clear        -- empty the working set (the scratchpad is kept).
+  set_project  -- relabel the session's project (cosmetic; one server is
+                  bound to one Anytype space).
 """,
     "create_node": """\
 Create a node in the user's workspace and its initial links in ONE call.
@@ -610,11 +701,12 @@ include_provenance: how many intent records that touched this node to
     "explore": """\
 Walk the graph outward from a node. THE general retrieval primitive.
 
-In a fresh session the focus stack is empty; call context
+In a fresh session nothing is held or recently touched; call context
 action="overview" first to get a starting node id (or pass a node name
 as `start` -- it is resolved for you).
 
-start: node id OR name; empty = top of the focus stack. depth: 1-3 (default 1).
+start: node id OR name; empty = the most recently held node (falling
+back to the most recently touched). depth: 1-3 (default 1).
 detail: names | summaries (default) | full.
 as_of: an ISO date cutoff -- Event-role nodes (meetings, milestones)
 after it are hidden (the state of things as of that date);
@@ -644,11 +736,24 @@ named in include_types (e.g. include_types=["Capture"]).
 Find the shortest meaningful connection between two nodes -- "how does
 this task relate to that decision?" Surfaces non-obvious links.
 `target` and `start` each accept a node id OR name (resolved for you).
-start: empty = focus-stack top. Edge direction is ignored for
+start: empty = the most recently held (or touched) node. Edge direction is ignored for
 reachability but shown in the result. Restrict edge_types to make the
 path more meaningful (e.g. only org edges: ["part_of", "assigned_to"]).
 """,
     "find_node": _FIND_NODE_DOC,
+    "query": _query_doc("""\
+EXAMPLES:
+  10 open todos, due first, ties by priority:
+    query(type="Task",
+          where=[{"field": "done", "op": "neq", "value": "true"}],
+          order_by=["due_date", "priority desc"], limit=10)
+  (an unticked checkbox is stored as ABSENCE and neq matches absent, so
+  done-neq-true finds every not-done item.)
+  the user's own saved list, exactly as they configured it in Anytype:
+    query(view="Open Tasks")
+  a person's meeting history, most recent first:
+    query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
+"""),
 }
 
 _ASSISTANT_MODES = (

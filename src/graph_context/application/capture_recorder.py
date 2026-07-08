@@ -9,7 +9,7 @@ says), with:
 * ``summary``  -- one-liner, required like every node.
 * ``fields``   -- generation metadata (generated_at).
 * references edges to every source node that shaped it. Explicit only
-  (settled in WP3): no auto-referencing of the focus stack.
+  (settled in WP3): no auto-referencing of the session working set.
 
 ADR 015 made the artifact type configurable: ``gc_prose`` is the fiction
 default and keeps the infra-role hiding; a native type (``procedure``,
@@ -82,7 +82,7 @@ class CaptureRecorder:
             LinkSpec(references_label, other=node_id) for node_id in references
         ]
         # Deliberately no session.touch: captures record what a turn produced;
-        # the sources are already in focus from the reads that preceded it.
+        # the sources are already in recent history from the preceding reads.
         # (gc_prose is additionally infra-hidden; native artifact types are
         # first-class and appear in traversal like any node.)
         node = await self._repository.create_node(

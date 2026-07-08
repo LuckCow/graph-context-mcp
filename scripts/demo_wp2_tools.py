@@ -41,12 +41,12 @@ async def main() -> None:
 
     show("create mira", await tools.create_node_tool(
         svc, type="Character", name="Mira", summary="Exiled siege engineer."))
-    mira = svc.session.focus.top
+    mira = svc.session.recent.items[0]
     show("create siege (linked in one call)", await tools.create_node_tool(
         svc, type="Event", name="Siege of Brakk", summary="The city falls.",
         story_time=10,
         links=[{"edge_type": "participated_in", "other": mira, "outgoing": False}]))
-    siege = svc.session.focus.top
+    siege = svc.session.recent.items[0]
 
     show("scene assembly via explore", await tools.explore_tool(
         svc, start=siege, depth=2, include_types=["Character", "Location", "Item"],
@@ -58,6 +58,18 @@ async def main() -> None:
         svc, node_id=mira, description="Now leads the survivors."))
     show("stale sweep", await tools.explore_tool(
         svc, start=mira, only_stale=True, detail="names"))
+
+    show("create a second event", await tools.create_node_tool(
+        svc, type="Event", name="Fall of Brakk", summary="Brakk is razed.",
+        story_time=99,
+        links=[{"edge_type": "participated_in", "other": mira, "outgoing": False}]))
+
+    show("query: mira's timeline (WP13)", await tools.query_tool(
+        svc, type="Event", linked_to=mira, order_by=["story_time"]))
+
+    show("query: stale summaries, most recent first", await tools.query_tool(
+        svc, where=[{"field": "summary_stale", "op": "eq", "value": True}],
+        order_by=["modified_at desc"], detail="names"))
 
     mock.edit_object_directly(mira, name="Mira of Brakk")
     show("resync after human edit", await tools.context_tool(svc, action="resync"))

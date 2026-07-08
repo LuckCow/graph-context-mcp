@@ -22,7 +22,7 @@ Read-only turns write nothing -- the caller simply has nothing to drain.
 Writes go through the repository directly, NOT the journalled NodeWriter:
 recording provenance must never journal itself, and intent nodes are
 exempt from the summary-staleness lifecycle. Like Prose, intent nodes
-never touch the focus stack (infra role, hidden from traversal).
+never touch the session working set (infra role, hidden from traversal).
 """
 
 from __future__ import annotations
@@ -73,24 +73,35 @@ class IntentRecorder:
         user_id: str = "",
         model: str = "",
         mode: str = "",
+        origin: str = "",
     ) -> Node | None:
-        """Persist the turn's provenance; ``None`` for a read-only turn."""
+        """Persist the turn's provenance; ``None`` for a read-only turn.
+
+        ``origin`` is the transport's pointer to the triggering message
+        (e.g. ``anytype:<chat_id>:<message_id>``) -- the "which
+        conversation moment caused this?" half of attribution, alongside
+        ``user_id``'s "who". Empty when a transport has no addressable
+        messages (the CLI).
+        """
         if not mutations:
             return None
         stamp = self._now()
         # The privacy knob must scrub EVERY prompt surface: names render in
         # list views and summaries in Set rows, not just the body.
         shown = prompt if self._store_prompt else PROMPT_WITHHELD
+        fields = {
+            "user_id": user_id,
+            "model": model,
+            "mode": mode,
+            "generated_at": stamp,
+        }
+        if origin:
+            fields["origin"] = origin
         draft = NodeDraft(
             type=INTENT_TYPE,
             name=f"Intent: {_condense(shown, _NAME_PROMPT_CHARS)} — {stamp}",
             summary=_condense(shown, 200) or "(empty prompt)",
-            fields={
-                "user_id": user_id,
-                "model": model,
-                "mode": mode,
-                "generated_at": stamp,
-            },
+            fields=fields,
             body=_assemble_body(shown, trace, mutations),
             icon="🧾",
         )

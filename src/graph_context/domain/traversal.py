@@ -1,7 +1,7 @@
 """Bounded breadth-first traversal: the engine behind the ``explore`` tool.
 
 Everything here is a pure function over a :class:`GraphIndex`; the
-application layer is responsible for resolving defaults (focus-stack start
+application layer is responsible for resolving defaults (session-default start
 node) and the interface layer for shaping detail levels. This separation is
 what makes the trickiest logic in the system exhaustively unit-testable.
 
@@ -94,10 +94,11 @@ def explore(graph: GraphIndex, query: ExploreQuery) -> ExploreResult:
     return ExploreResult(hits=tuple(hits), truncated=truncated)
 
 
-def _node_identifiers(node: Node) -> set[str]:
+def node_identifiers(node: Node) -> set[str]:
     """The strings a type filter may match a node by: display name, raw type
     key, and role name. Lets ``include_types=["Prose"]`` work whether the
-    caller names the display type, the type key, or the role."""
+    caller names the display type, the type key, or the role. Shared with
+    :mod:`graph_context.domain.query`, which matches the same three ways."""
     identifiers = {node.type, node.type_key}
     if node.role is not None:
         identifiers.add(node.role.value)
@@ -106,7 +107,7 @@ def _node_identifiers(node: Node) -> set[str]:
 
 def _admits(node: Node, query: ExploreQuery) -> bool:
     """Apply role, node-type, and story-time filters to a candidate hit."""
-    identifiers = _node_identifiers(node)
+    identifiers = node_identifiers(node)
     if node.role in query.exclude_roles:
         return False
     if identifiers & query.exclude_node_types:

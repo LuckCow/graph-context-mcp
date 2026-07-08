@@ -1,21 +1,30 @@
-"""Session state: the focus stack and recent-history breadcrumbs.
+"""Session state: the curated working set, recent history, and scratchpad.
 
-The proposal's "context echo" depends on this module: every tool response
-renders a header from :class:`SessionState`, and queries that omit a start
-node default to ``focus.top``. Scene work touches several entities at
-once, so the working set is a small *stack* (default 6) rather than a
-single current-node pointer.
+Three tiers of cross-turn context, from deliberate to automatic (WP15):
+
+    * The **working set** is LLM-curated: a node is in it because the
+      model *held* it there, at a granularity bucket -- ``full`` (body +
+      connections echoed every turn) or ``summaries`` (one-liner). Tool
+      activity never pushes into it.
+    * **Recent history** is automatic: a most-recently-used ring of the
+      last N *distinct* ids any read or write touched.
+    * The **scratchpad** is free text the model replaces wholesale
+      between turns -- intentions and open threads, not durable facts
+      (those belong in the graph).
+
+Queries that omit a start node default to the working-set top, falling
+back to the most recently touched node.
 
 Rules:
-    * ``push`` moves an already-present id to the top instead of
-      duplicating it (most-recently-touched ordering).
-    * Pinned entries are never evicted by overflow; if everything is
-      pinned the stack may temporarily exceed ``max_size`` (the user asked
-      for exactly that working set -- honour it).
-    * Recent history is a most-recently-used ring of the last N *distinct*
-      visited ids: re-recording an id already present moves it to the front
-      rather than duplicating it (so a composite create that re-touches a
-      link target can't leave "A, B, A" in the trail).
+    * ``hold`` moves an already-present id to the top (re-holding
+      re-levels it) instead of duplicating.
+    * Bucket caps live HERE and only here: holding beyond the full slots
+      demotes the oldest full entry to ``summaries``; overflowing the
+      summary slots evicts the oldest summary entry (still reachable via
+      recent history). The outcome reports both so tools can say so.
+    * Recent history de-dupes: re-recording an id moves it to the front
+      (so a composite create that re-touches a link target can't leave
+      "A, B, A" in the trail).
 
 Persistence (mirroring to the ``SessionContext`` meta-node) is an
 infrastructure concern behind ``ports.SessionStore``; this module is pure.
@@ -28,61 +37,90 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from graph_context.domain.models import NodeId
+from graph_context.domain.models import Detail, NodeId
 
-DEFAULT_FOCUS_SIZE = 6
+DEFAULT_FULL_SLOTS = 2
+DEFAULT_SUMMARY_SLOTS = 6
 DEFAULT_RECENT_SIZE = 12
+
+_HOLD_LEVELS = (Detail.SUMMARIES, Detail.FULL)
 
 
 @dataclass(frozen=True, slots=True)
-class FocusEntry:
+class WorkingSetEntry:
     node_id: NodeId
-    pinned: bool = False
+    detail: Detail = Detail.SUMMARIES
 
 
-class FocusStack:
-    """Ordered working set of recently touched / explicitly focused nodes."""
+@dataclass(frozen=True, slots=True)
+class HoldOutcome:
+    """What a ``hold`` displaced, so the tool response can report it."""
 
-    def __init__(self, max_size: int = DEFAULT_FOCUS_SIZE) -> None:
-        if max_size < 1:
-            raise ValueError("focus stack max_size must be >= 1")
-        self._max_size = max_size
-        self._entries: list[FocusEntry] = []  # index 0 == top of stack
+    demoted: tuple[NodeId, ...] = ()  # full -> summaries (full slots overflowed)
+    evicted: tuple[NodeId, ...] = ()  # dropped from the set (summary slots overflowed)
+
+
+class WorkingSet:
+    """LLM-curated nodes, each held at a granularity bucket.
+
+    Ordered most-recently-held first; index 0 is the query-default top.
+    """
+
+    def __init__(
+        self,
+        full_slots: int = DEFAULT_FULL_SLOTS,
+        summary_slots: int = DEFAULT_SUMMARY_SLOTS,
+    ) -> None:
+        if full_slots < 1 or summary_slots < 1:
+            raise ValueError("working-set bucket sizes must be >= 1")
+        self._full_slots = full_slots
+        self._summary_slots = summary_slots
+        self._entries: list[WorkingSetEntry] = []  # index 0 == most recent
 
     @property
     def top(self) -> NodeId | None:
         return self._entries[0].node_id if self._entries else None
 
     @property
-    def entries(self) -> tuple[FocusEntry, ...]:
+    def entries(self) -> tuple[WorkingSetEntry, ...]:
         return tuple(self._entries)
 
-    def push(self, node_id: NodeId) -> None:
-        """Put ``node_id`` on top, preserving its pinned state if present."""
-        existing = self._take(node_id)
-        self._entries.insert(0, existing or FocusEntry(node_id=node_id))
-        self._evict_overflow()
+    @property
+    def full_slots(self) -> int:
+        return self._full_slots
 
-    def pin(self, node_id: NodeId) -> None:
-        self._set_pinned(node_id, True)
+    @property
+    def summary_slots(self) -> int:
+        return self._summary_slots
 
-    def unpin(self, node_id: NodeId) -> None:
-        self._set_pinned(node_id, False)
-
-    def remove(self, node_id: NodeId) -> None:
+    def hold(self, node_id: NodeId, detail: Detail = Detail.SUMMARIES) -> HoldOutcome:
+        """Keep ``node_id`` at ``detail``, on top; re-holding re-levels."""
+        if detail not in _HOLD_LEVELS:
+            raise ValueError(
+                "working-set entries are held at 'summaries' or 'full'"
+            )
         self._take(node_id)
+        self._entries.insert(0, WorkingSetEntry(node_id=node_id, detail=detail))
+        return self._enforce_caps()
 
-    def clear(self, *, keep_pinned: bool = True) -> None:
-        self._entries = [e for e in self._entries if keep_pinned and e.pinned]
+    def release(self, node_id: NodeId) -> bool:
+        return self._take(node_id) is not None
+
+    def clear(self) -> None:
+        self._entries = []
 
     @classmethod
     def restore(
-        cls, entries: list[FocusEntry], max_size: int = DEFAULT_FOCUS_SIZE
-    ) -> FocusStack:
-        """Rebuild a stack from a persisted snapshot (WP3), top-first."""
-        stack = cls(max_size)
-        stack._entries = list(entries)
-        return stack
+        cls,
+        entries: list[WorkingSetEntry],
+        full_slots: int = DEFAULT_FULL_SLOTS,
+        summary_slots: int = DEFAULT_SUMMARY_SLOTS,
+    ) -> WorkingSet:
+        """Rebuild from a persisted snapshot (top-first), re-capping leniently."""
+        working_set = cls(full_slots, summary_slots)
+        working_set._entries = list(entries)
+        working_set._enforce_caps()
+        return working_set
 
     def __contains__(self, node_id: NodeId) -> bool:
         return any(e.node_id == node_id for e in self._entries)
@@ -92,32 +130,33 @@ class FocusStack:
 
     # -- internals -------------------------------------------------------
 
-    def _take(self, node_id: NodeId) -> FocusEntry | None:
+    def _take(self, node_id: NodeId) -> WorkingSetEntry | None:
         for i, entry in enumerate(self._entries):
             if entry.node_id == node_id:
                 return self._entries.pop(i)
         return None
 
-    def _set_pinned(self, node_id: NodeId, pinned: bool) -> None:
-        for i, entry in enumerate(self._entries):
-            if entry.node_id == node_id:
-                self._entries[i] = FocusEntry(node_id=node_id, pinned=pinned)
-                return
-
-    def _evict_overflow(self) -> None:
-        while len(self._entries) > self._max_size:
-            # Never evict the just-pushed top entry; that would turn the
-            # push into a silent no-op. Search victims bottom-up below it.
-            victim = next(
-                (e for e in reversed(self._entries[1:]) if not e.pinned), None
+    def _enforce_caps(self) -> HoldOutcome:
+        demoted: list[NodeId] = []
+        evicted: list[NodeId] = []
+        full = [e for e in self._entries if e.detail is Detail.FULL]
+        while len(full) > self._full_slots:
+            victim = full.pop()  # oldest full entry (furthest from the top)
+            index = self._entries.index(victim)
+            self._entries[index] = WorkingSetEntry(
+                node_id=victim.node_id, detail=Detail.SUMMARIES
             )
-            if victim is None:
-                return  # everything else pinned: allow temporary overflow
+            demoted.append(victim.node_id)
+        summaries = [e for e in self._entries if e.detail is not Detail.FULL]
+        while len(summaries) > self._summary_slots:
+            victim = summaries.pop()
             self._entries.remove(victim)
+            evicted.append(victim.node_id)
+        return HoldOutcome(demoted=tuple(demoted), evicted=tuple(evicted))
 
 
 class RecentHistory:
-    """Breadcrumb trail of recently visited nodes (beyond the focus stack)."""
+    """Breadcrumb trail of recently visited nodes (the automatic tier)."""
 
     def __init__(self, max_size: int = DEFAULT_RECENT_SIZE) -> None:
         self._items: deque[NodeId] = deque(maxlen=max_size)
@@ -145,16 +184,29 @@ class RecentHistory:
 
 @dataclass(slots=True)
 class SessionState:
-    """Everything the context header renders and query defaults read."""
+    """The session's cross-turn context: working set, trail, scratchpad.
+
+    ``mode`` is an opaque label (like ``project``): the orchestrator's
+    active-mode name, persisted here so each session resumes in the mode
+    it was left in (WP8). The domain never interprets it.
+    """
 
     project: str | None = None
-    focus: FocusStack = field(default_factory=FocusStack)
+    working_set: WorkingSet = field(default_factory=WorkingSet)
     recent: RecentHistory = field(default_factory=RecentHistory)
+    scratchpad: str = ""
+    mode: str = ""
 
     def touch(self, node_id: NodeId) -> None:
         """Register that a read or write just involved ``node_id``."""
-        self.focus.push(node_id)
         self.recent.record(node_id)
+
+    def default_start(self) -> NodeId | None:
+        """The node queries default to: held first, else most recently touched."""
+        if self.working_set.top is not None:
+            return self.working_set.top
+        items = self.recent.items
+        return items[0] if items else None
 
     # -- persistence snapshot (WP3): plain-dict round-trip ----------------
     # The SessionStore port deals in these dicts; keeping (de)serialization
@@ -162,11 +214,13 @@ class SessionState:
 
     def to_snapshot(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "project": self.project,
-            "focus": [
-                {"node_id": e.node_id, "pinned": e.pinned}
-                for e in self.focus.entries
+            "scratchpad": self.scratchpad,
+            "mode": self.mode,
+            "working_set": [
+                {"node_id": e.node_id, "detail": e.detail.value}
+                for e in self.working_set.entries
             ],
             "recent": list(self.recent.items),
         }
@@ -174,10 +228,34 @@ class SessionState:
     @classmethod
     def from_snapshot(cls, data: dict[str, Any]) -> SessionState:
         """Lenient restore: a corrupt snapshot degrades to a fresh session
-        field-by-field rather than crashing startup (WP3 contract)."""
-        focus = FocusStack.restore([
-            FocusEntry(node_id=str(e.get("node_id", "")), pinned=bool(e.get("pinned")))
-            for e in data.get("focus", []) if e.get("node_id")
+        field-by-field rather than crashing startup (WP3 contract). A v1
+        snapshot's focus entries become summary-bucket holds."""
+        raw_entries = data.get("working_set")
+        if raw_entries is None:
+            raw_entries = data.get("focus", [])  # v1: FocusEntry dicts
+        working_set = WorkingSet.restore([
+            WorkingSetEntry(
+                node_id=str(e.get("node_id", "")),
+                detail=_restore_detail(e.get("detail")),
+            )
+            for e in raw_entries if e.get("node_id")
         ])
         recent = RecentHistory.restore([str(i) for i in data.get("recent", [])])
-        return cls(project=data.get("project"), focus=focus, recent=recent)
+        scratchpad = data.get("scratchpad")
+        mode = data.get("mode")
+        return cls(
+            project=data.get("project"),
+            working_set=working_set,
+            recent=recent,
+            scratchpad=scratchpad if isinstance(scratchpad, str) else "",
+            mode=mode if isinstance(mode, str) else "",
+        )
+
+
+def _restore_detail(value: Any) -> Detail:
+    """Snapshot leniency: unknown or unholdable levels degrade to summaries."""
+    try:
+        detail = Detail(value)
+    except ValueError:
+        return Detail.SUMMARIES
+    return detail if detail in _HOLD_LEVELS else Detail.SUMMARIES

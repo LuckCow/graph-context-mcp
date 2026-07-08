@@ -181,7 +181,7 @@ In-process tool invocation against the fake (FastMCP supports direct call/test c
 
 ### Open questions
 
-- Surface the stale-summary count in the header itself (e.g., `| stale: 4`)? Cheap and useful; decide by trying it during dogfooding.
+- ~~Surface the stale-summary count in the header itself (e.g., `| stale: 4`)?~~ **Moot 2026-07-06:** the per-response context header was removed entirely as token waste (session focus/recent tracking is kept for query defaults and future features). Stale counts remain visible via `context action="get"` and per-node `[summary stale]` markers.
 - Whether `context` should support `focus pop` distinctly from `remove` (proposal mentions pop; the stack API has `remove`) — pick one verb set and align tool + `FocusStack` naming.
 - Parameter naming consistency pass before first external use: this is the public, hard-to-change surface. Schedule a 1-hour review with the team on names/defaults of all tool parameters.
 
@@ -499,17 +499,26 @@ carry `gc_user_id`/`gc_model`).
   one turn = at most one intent node. Transport egress joins the
   devcontainer firewall allowlist (or the bot runs outside the container).
   **Discord shipped 2026-07-06, verified live.** The per-message policy
-  (channel-allowlist gate, `discord:<id>` identity, 2k chunking, and a
-  process-wide turn lock until per-session state lands) is plain logic in
-  `orchestrator/discord_transport.py`; only the composition-root shim
-  `discord_bot.py` imports discord.py (import-linter-enforced, same
-  quarantine as the agent frameworks). Runtime wiring shared with the CLI
-  was extracted to `orchestrator/bootstrap.py`, so `GC_DRIVER=manual`
-  works over Discord too. Config: `GC_DISCORD_CHANNELS` allowlist (unset =
-  serve nowhere, loudly) + `DISCORD_BOT_TOKEN_FILE` secret; egress =
-  `discord.com`, `gateway.discord.gg`, and the `162.159.128.0/20` anycast
-  block that per-session resume gateways resolve into. Telegram/Slack
-  stay open, per-deployment.
+  (channel gate, `discord:<id>` identity, 2k chunking, a per-route turn
+  lock) is plain logic in `orchestrator/discord_transport.py`; only the
+  composition-root shim `discord_bot.py` imports discord.py
+  (import-linter-enforced, same quarantine as the agent frameworks).
+  Runtime wiring shared with the CLI was extracted to
+  `orchestrator/bootstrap.py`, so `GC_DRIVER=manual` works over Discord
+  too. Config: `GC_CHANNELS_FILE` channel→space bindings (ADR 017) or
+  the legacy `GC_DISCORD_CHANNELS` allowlist (unset = serve nowhere,
+  loudly) + `DISCORD_BOT_TOKEN_FILE` secret; egress = `discord.com`,
+  `gateway.discord.gg`, and the `162.159.128.0/20` anycast block that
+  per-session resume gateways resolve into. Telegram/Slack stay open,
+  per-deployment. **Channel-bound spaces shipped 2026-07-06 (ADR 017):**
+  each Discord channel can bind its own Anytype space, profile, project
+  label, and modes file, declared statically in `GC_CHANNELS_FILE`; the
+  bot builds one full runtime per binding (own repository/GraphIndex,
+  SessionState persisted to that space's SessionContext node, journal,
+  mode store), turns serialize per route instead of process-wide, and
+  startup is sequential + fail-fast. One channel per space (a space
+  holds one SessionContext node) until the keyed session store below
+  lands.
 - **Single-writer delta queue** (settled — see decisions). **Core shipped
   2026-07-02 (ADR 009):** FIFO single-writer seam in the adapter,
   store-truth PATCH materialization via fresh GET in the critical section,
@@ -531,12 +540,28 @@ carry `gc_user_id`/`gc_model`).
   gains the guarantee: concurrent link mutations on one node all take
   effect. The fake meets it via synchronous atomic ops; the Anytype
   adapter via the queue. ADR 009 lands with the implementation PR.
-- **Per-session state.** `SessionState` keyed by session id (transport
-  thread/channel ↔ LangGraph `thread_id`): focus stack, recent list,
-  project label per session. The `SessionStore` port extends to keyed
-  load/flush (one `gc_session_context` node per session; debounce
-  discipline unchanged); fake + contract tests move with it. The MCP
-  server keeps its single implicit session — behavior unchanged.
+- **Per-session state. Shipped 2026-07-08 (ADR 021).** `SessionState`
+  (scratchpad / working set / recent / project / mode) is keyed by
+  session id (`anytype:<chat_id>`, `discord:<channel_id>`, `mcp`, `cli`).
+  The `SessionStore` port took a **required** key — no unkeyed/default
+  session, no `""` sentinel (the user vetoed it as a bug magnet; the two
+  dogfood spaces convert by hand) — and each key owns one
+  `gc_session_context` node discriminated by a new `gc_session_key`
+  property. A new `SessionRegistry` is the one source of live sessions
+  (lazy keyed load, `flush_all` at teardown); `composition` exposes
+  `services_for(key)` and the pipeline gives each session id its own
+  `Services` view over the shared repository. Mode is now persisted per
+  chat. Debounce discipline unchanged; MCP server unchanged (it is the
+  `"mcp"` session). **Threads within one space (WP8's goal):** the
+  Anytype bot serves EVERY chat in a bound space (minus `exclude_chats`,
+  or a pinned `chat_id`), each its own thread, with **live discovery**
+  (`GC_CHAT_RESCAN_SECONDS`) picking up chats created while it runs — all
+  sharing one runtime/route (turns serialize per space). The earlier
+  channel-scoped slice (ADR 017; different spaces → independent sessions)
+  was the per-space precursor; this is the per-chat store that lifts the
+  one-chat-per-space limit. Deferred WP8 items below (authz, privacy,
+  queue fairness) stay open — they are multi-*human* concerns, orthogonal
+  to thread mechanics.
 - **Authorization at the bot layer.** Channel and user allowlists;
   per-user *mode* availability (WP6's mode binding extends per-user — e.g.
   authoring for everyone, world-modeling for editors). Config-driven for
@@ -1158,6 +1183,295 @@ path unchanged. Time axis: `as_of` filters on the profile-named property
 in both backends. Vocabulary goldens per profile.
 
 Suggested sizing: **L** (modes+capture M, time axis M, vocabulary S).
+
+---
+
+## WP13 — Dynamic/filterable queries (ADR 018) — **ad-hoc engine shipped 2026-07-07**
+
+**Status:** the `query` tool is live. A pure engine (`domain/query.py`
+`run_query`) filters, orders, and caps nodes over the `GraphIndex`
+(ADR 018 extends ADR 002: one query engine for traversal *and* attribute
+scans). Surface: `query(type, linked_to, edge_types, where, order_by,
+limit, detail)` — `where` is ANDed `{field, op, value}` predicates (ops
+eq/neq/lt/lte/gt/gte/contains/exists/missing), `order_by` multi-key with
+missing-sorts-last, `linked_to` anchors to one node's direct neighbors
+(character timeline = `type="Event", linked_to=X, order_by=["story_time"]`).
+Load-bearing semantics pinned by tests: **`neq` matches absent fields**
+(unticked checkbox = absence, so `done neq true` finds open todos),
+numeric-when-both-parse else casefolded-string comparison (ISO dates order
+correctly), unknown fields error with the observed-field listing, infra
+roles hidden unless the type filter names one. Sort-key values are echoed
+per line; the header reports "N of M". Docs per profile with worked
+examples; orchestrator read surface includes the tool.
+
+### Remaining (gated on spike S9)
+
+**Spike S9 — lists/views endpoints** (`scripts/spike_s9_lists.py`, live
+server): does `list_id` accept a query-layout (Set) id (S9a)? do views
+expose machine-readable filter/sort definitions (S9b)? does the
+view-objects endpoint apply filter AND sort server-side (S9c)? page cap +
+inline properties (S9d)? Sets discoverable via search (S9e)? staleness
+after edits (S9f)?
+
+### Spike S9 partial results (2026-07-07, live server, API `2025-11-08`)
+
+* **S9e: YES** — Sets are ordinary searchable objects: `POST /search`
+  finds them by name, and type-scoping works with `types=["set"]` or
+  `["ot-set"]` (`types=["query"]`/`["collection"]` return nothing for a
+  Set). The type record: key `set`, display name "Query", layout `set`.
+* **Sets can be CREATED via API** (`POST /objects` `type_key="set"` →
+  201) — but the type exposes **no property for the query source**
+  (only backlinks/tag/created_date/creator/links), so an API-created Set
+  is a sourceless shell: its views list fine but view-objects 500s.
+  Configuring source/filter/sorts is desktop-only.
+* **S9a (partial): YES** — `GET /lists/{set_id}/views` accepts a
+  query-layout object id (200) even for the sourceless shell.
+* **S9b (shape confirmed): YES** — views carry machine-readable
+  definitions: `{id, name, layout, filters, sorts:[{id, property_key,
+  format, sort_type}]}` (default view: `filters: null`, sort
+  `lastModifiedDate desc`; note the camelCase `property_key` value).
+  The filter leaf shape still needs a manually-configured Set.
+* **Route shape**: `GET /lists/{list_id}/views/{view_id}/objects` is the
+  live path (500 on a sourceless set — route exists);
+  `/lists/{id}/objects`, `/lists/{id}/views/objects`, and
+  `/lists/{id}/{view_id}/objects` all 404 on `2025-11-08`.
+* **Blocked on a manual step (rerun the script after):** in the desktop
+  app open `S9 Spike Set` in GC-E2E, set its query source to
+  `Spike Todo`, add filter "Done is unchecked" + sorts (Due date asc,
+  Priority), then rerun to answer S9b-filter-shape, S9c, S9d, S9f.
+  (Do it before any live E2E run — the E2E reset archives the space's
+  objects.)
+* **S9 addendum (2026-07-08, post-cutover):** GC-E2E now lives on the
+  BOT account, so the manual step needs the human invited into that
+  space (or the spike moved to a shared one). Also found — the reason
+  "Done" was missing from the desktop's filter picker: a property
+  written on OBJECTS is not thereby attached to their TYPE, and the
+  Set-filter picker only offers type-attached properties. Fixed by
+  widening the type's `properties` list via `PATCH /types/:id` (the
+  2025-11-08 type-update endpoint; 200, verified — the reseeded
+  `spike_todo` type in the bot's GC-E2E now carries
+  done/due_date/priority).
+
+### Spike S9 CLOSED (2026-07-08, live sidecar, "Open Tasks" Set in the Todolist space)
+
+The spike moved to the (shared, real) Todolist space: priority select
+(`1 - High/2 - Medium/3 - Low`, numbered so lexicographic order is
+semantic order) attached to the native `task` type, an `Open Tasks` Set
+created via API, source/filter/sorts configured by the human in the
+desktop (the API cannot do that part — sets are creatable but their
+query source and views are desktop-only; views have no write endpoints).
+
+* **S9b: YES — view definitions are fully machine-readable** once the
+  set has a source. Filters: `{property_key, format, condition, value}`
+  (observed: "Done is unchecked" = `condition "eq", value ""` — checkbox
+  absence, matching the ADR 018 neq-matches-absence semantics). Sorts:
+  `{property_key, format, sort_type}`. Quirks: `property_key` in views
+  is camelCase for built-ins (`dueDate`, `lastModifiedDate`) and the raw
+  internal property ID (hex) for user-created properties; `format` is
+  always `"text"`. Both translate via the SpaceRegistry (id -> key) plus
+  a camelCase->snake_case shim.
+* **S9c: YES — server-side execution works**: the done task was
+  excluded, ordering matched the view's sort defs, on
+  `GET /lists/{set}/views/{view_id}/objects`.
+* **S9d:** properties ride inline (same shape as search); a real
+  pagination block is returned and `limit` is honored (cap at >100 scale
+  untested; assume the /search 100 cap until observed otherwise).
+* **S9f: instantly fresh** — a `done` toggle left/rejoined the view with
+  0.0s lag.
+
+**Decision (per ADR 018): S9b holds, so the `view` parameter compiles
+view definitions -> `NodeQuery` and runs CLIENT-SIDE on the GraphIndex**
+— one query engine, works on the memory backend, no per-call I/O. The
+server-side execution path (S9c) remains the fallback documented in
+ADR 018 but is not needed.
+
+**Fast-follow SHIPPED 2026-07-08 — WP13 complete.** `query(view=...)`
+(mutually exclusive with the ad-hoc params) resolves saved views by
+set/view name via the `ViewCatalog` port: `AnytypeViewCatalog` reads
+definitions fresh per call (a desktop edit applies on the next query)
+and compiles them (quirks V1-V6 in `view_catalog.py`, incl. the
+live-caught V6: views leak internal 24-hex relation keys for
+API-created properties -- unresolvable sorts drop with a log,
+unresolvable filters skip the view). `InMemoryViewCatalog` holds real
+`NodeQuery` values (fakes-are-contracts); mock gains lists/views routes
+incl. the sourceless-set 500. Live-verified end-to-end against the
+human-configured `Open Tasks` Set in the Todolist space.
+
+**Fast-follow — run the user's real Sets:** a `view: str` parameter on
+the same tool, mutually exclusive with `type`/`where`/`order_by`/
+`linked_to`. If S9b holds, compile view definitions → `NodeQuery` and run
+client-side (keeps ADR 018); else if only S9c, execute server-side mapped
+through `to_node` (mock gains lists routes; ADR 018 amended). Port shape:
+a small `ports/view_catalog.py` (`SavedView` + `ViewCatalog` Protocol,
+mode-store precedent) — not more GraphRepository methods. If both fail: a
+`gc_saved_query` config node on the `gc_activity_mode` template (not
+built speculatively).
+
+---
+
+## WP14 — Anytype-first: in-space chat transport + headless CLI sidecar (ADR 019)
+
+**Status: transport SHIPPED 2026-07-07 (ADR 019); sidecar prepared,
+cutover deferred.** The bot chats *inside* Anytype spaces (replies
+deep-link created objects via `anytype://object?...`); the desktop app
+becomes a human-only surface; the bot eventually runs on its own headless
+anytype-cli node (bot account, own sync, rate limit disabled). Discord
+stays a supported transport. **Interim constraint:** the sidecar cannot
+run yet — everything is built and tested against the desktop endpoint
+(`host.docker.internal:31009`); the sidecar cutover is an env swap
+(`ANYTYPE_API_BASE_URL` → `http://anytype:31012`) plus the deferred
+runbook below. Sidecar compose files exist behind `--profile sidecar`
+(opt-in, inert).
+
+Shipped: `infrastructure/anytype/chat.py` (quirks C1–C6) + client chat/
+SSE methods + MockAnytype chat routes; `orchestrator/spaces.py`
+(spaces.toml, table key IS the space id) + `bootstrap.build_space_runtimes`;
+`orchestrator/rendering.py` (chunk/render extracted from Discord);
+`orchestrator/anytype_chat_transport.py` + `anytype_chat_bot.py`. Two
+decisions upgraded mid-build at user request: the **chat cursor persists**
+(`GC_CHAT_CURSOR`, default `logs/chat_cursor.json`) so messages sent while
+the bot was down are answered at startup (bounded by the ~100-message
+recency window; only a never-seen chat fast-forwards past history), and
+**intent nodes carry `origin`** (`anytype:<chat_id>:<message_id>`) pointing
+at the triggering chat message (`handle_message`/`IntentRecorder` gained
+the parameter; empty for transports without addressable messages).
+
+### Spike S10 results (2026-07-07, live DESKTOP server, API `2025-11-08`)
+
+* **S10a: chat endpoints EXIST on the desktop's heart** — `GET
+  /v1/spaces/:sid/chats` → 200 (the v0.50.7 chat API is not sidecar-only).
+* **S10e:** a space may have ZERO chats (GC-E2E did). `POST /chats
+  {"name": ...}` → 201 with a full object envelope (`object.id`; layout
+  `chat`, type key `chat_derived`). The API can create chats.
+* **S10b — message schema:** `POST .../messages {"text": ...}` → 201
+  `{"message_id": "..."}` (flat, not enveloped). `GET .../messages` →
+  `{"messages": [...]}` — **no `data` key, NO pagination block, `offset`
+  is IGNORED** (limit-only window; messages oldest→newest within it).
+  Message: `id`, `order_id` (short lexicographically-increasing string,
+  e.g. `"!!%>"` → `"!!&G"` → `"!!'P"`), `creator` (member id
+  `_participant_<space>_<identity>`), `creator_name`, `created_at`
+  (unix seconds int), `modified_at` (int, 0 until edited), `content:
+  {text, style: "paragraph"}`, `attachments: []`, `reactions: {}`,
+  `pinned`. Markdown is stored verbatim in `content.text`.
+  `PATCH .../messages/:id {"text": ...}` → 200; `DELETE` → 200.
+* **S10c — SSE:** `GET .../messages/stream` → 200 `text/event-stream`.
+  Frames: `event: message_added` + `data: {"type":"message_added",
+  "payload":{"message":{<same schema as above>}}}` + blank line.
+  Heartbeats are comment lines `: heartbeat` (honors
+  `Anytype-Heartbeat-Seconds`). On connect the stream replays the chat's
+  recent history as `message_added` frames (a 5-message chat replayed all
+  5) — the transport MUST fast-forward past the backlog before serving.
+* **S10d — identity:** no `auth/me`-style endpoint (404s). `GET
+  /v1/spaces/:sid/members` → members with `id`, `identity`, `role`,
+  `status`; nothing marks "self". On the desktop the caller is the sole
+  human member. Bot-identity discovery is DEFERRED to the sidecar (the
+  member `id` embeds the account identity, so matching the bot's own
+  identity string is the likely mechanism); until then echo-suppression
+  rides on recording our own POSTed `message_id`s.
+* **S10f:** a 5000-char message posts fine (201) — no small server cap
+  observed; the transport chunks at a readability limit, not a server one.
+
+### Deferred to sidecar availability
+
+`ANYTYPE_API_DISABLE_RATE_LIMIT` confirmation, `anytype space join` +
+owner-approval flow, bot member-id discovery, and the cutover runbook
+(see ADR 019 / README): create bot account + API key in the sidecar,
+invite it to each space, flip `ANYTYPE_API_BASE_URL`, add
+`depends_on: service_healthy`.
+
+Cutover findings (2026-07-07):
+* The CLI install script requires **bash** (dash chokes) and installs to
+  `~/.local/bin/anytype` — the sidecar Dockerfile pipes to `bash` and
+  moves the binary to `/usr/local/bin`.
+* `--listen-address 0.0.0.0:31012` is the correct serve flag (default
+  binds 127.0.0.1).
+* **CLI data-dir (answered the hard way):** state is split between
+  `~/.config/anytype` (identity, `config.json`, the API-key store) and
+  `~/.anytype`. Only the latter was a volume at first, so a container
+  rebuild wiped the bot's API keys; both are volumes now
+  (`anytype-data`, `anytype-config`) — verified key-survives-rebuild.
+* **Rate limit disable CONFIRMED:** 70 writes in 0.3s (240/s), zero
+  429s, with `ANYTYPE_API_DISABLE_RATE_LIMIT=1`.
+* **Bot identity discovery (closes quirk C6):** no who-am-I endpoint,
+  but the bot's own default space has exactly one member — itself —
+  and member ids end with the account identity.
+  `chat.discover_bot_identity` finds it at startup; the transport gate
+  drops any creator whose member id ends with it (suffix match,
+  guarded against the empty string).
+* **Bot account:** `graph-context-bot`, identity `A73WDhbNNdW3q2mQsus…`;
+  account key backed up in `.devcontainer/secrets/anytype_account_key`.
+* **Cutover applied:** `ANYTYPE_API_BASE_URL=http://anytype:31012` +
+  `depends_on: service_healthy` in compose. **Live E2E green against
+  the sidecar in ~10s** (was minutes on the throttled desktop),
+  including the chat round-trip — the desktop app is no longer an E2E
+  or bot dependency. (The first live run of the WP13 query contract
+  test also caught its exact-equality assertion being unsafe in a
+  shared live space; now membership-based.)
+* **Shared-space chat verified live (2026-07-08):** bot joined
+  TestWorld + Todolist, created a "Chat" per space (chat_ids pinned in
+  spaces.toml; the Discord bindings retired), and answered a human's
+  "Give me an overview" in TestWorld on the Claude driver under its own
+  identity. Dogfooding immediately found **quirk C7**: the chat UI
+  renders text as plain text (no markdown), so deep-link rewriting was
+  replaced by plainified text + object-card ATTACHMENTS
+  (`{"target","type":"link"}` envelopes; bare id lists 400).
+
+---
+
+## WP15 — Curated cross-turn context (ADR 020) — **shipped 2026-07-08**
+
+The context-management overhaul: the bot deliberately remembers across
+turns instead of re-orienting from scratch. Three slices, all landed:
+
+* **Session model + tool surface.** The focus stack is retired: its
+  intent (one node's full picture guiding exploration) is served by
+  granularity buckets. `WorkingSet` holds explicitly-`hold`-ed nodes at
+  ≤2 `full` / ≤6 `summaries` slots (caps are domain rules; overflow
+  demotes/evicts oldest, reported back); `touch()` records recent
+  history only; `SessionState.scratchpad` (≤2000 chars) is replaced
+  wholesale by `context action="note"` and flushes immediately.
+  Snapshot v2, v1 restored leniently (focus entries → summary holds).
+  `Detail` moved to `domain.models`. Context tool actions:
+  `note`/`hold`/`release`/`clear`; `get` echoes the session; docstrings
+  re-pinned across all three profiles. `explore`/`find_path` default to
+  working-set top, then most-recent-touched (`NoDefaultStart` teaches
+  `hold`).
+* **Turn-start context block** (`interface/context_block.py`). One
+  block opens every orchestrator turn: project, scratchpad, working set
+  (full bucket leads with body + one-hop edges; summary entries with
+  edges), recent names. Assembled once per turn (fixing the removed
+  per-response header's cost profile); empty session renders nothing;
+  budget ladder degrades bodies → summary edges → recent; vanished
+  nodes skipped. Orchestrator reaches it legally (it already holds
+  `Services`); import-linter list extended.
+* **Conversation memory + /clear.** `ConversationMemory` per pipeline
+  session (~8 turns / 6000 chars, both bounds) replays prior
+  user/assistant messages ahead of the block. `/clear` is a pipeline
+  command (all transports); on the Anytype transport it also records an
+  `order_id` watermark in a second persisted `ChatCursor`, and startup
+  catch-up seeds the ring from the answered window slice (after the
+  watermark, ≤ cursor, gate-signal bot classification, commands
+  dropped). Chat messages are never deleted — the chat stays the human
+  record.
+
+Deferred with seams left open: per-chat/thread keyed session store
+(WP8; memory/cursor/marks already keyed by chat id), ranker
+`session_seeds` wiring from the working set, one-way scratchpad mirror
+into the SessionContext body for desktop visibility.
+
+Verification fallout (2026-07-08), both live-caught:
+* **FastMCP wrappers silently drop undeclared arguments** — the
+  `context` wrapper in `server.py` missed the new `text`/`detail`
+  params, so `note` cleared instead of saving. Fixed, and
+  `tests/interface/test_server_wrappers.py` now pins every wrapper's
+  signature to its `tools.py` implementation (name/order/default/
+  annotation), making the drift unrepresentable.
+* **S9 sourceless-set 500s were retried as if transient** — one shell
+  set stalled catalog load (and the live E2E suite) for the full
+  8.5-minute backoff ladder. `sample_view_objects` now passes
+  `retry=False` (the 500 is a permanent semantic signal the catalog
+  already skips on); mock-pinned in `test_view_catalog.py`; suite back
+  to ~10s.
 
 ---
 

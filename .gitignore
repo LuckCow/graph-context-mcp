@@ -1,7 +1,10 @@
 # --- Secrets: never commit these ---
+# (a bare `secrets/` would ignore the .devcontainer/secrets DIRECTORY
+# itself, which defeats the README re-include below -- git cannot
+# re-include a file whose parent directory is excluded)
 .devcontainer/secrets/*
 !.devcontainer/secrets/README.md
-secrets/
+/secrets/
 *.key
 .env
 .env.*

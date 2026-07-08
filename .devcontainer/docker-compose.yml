@@ -44,9 +44,18 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+    # The headless bot node must be serving before dev's tooling dials it.
+    depends_on:
+      anytype:
+        condition: service_healthy
+
     environment:
-      # Anytype desktop's local API (use 31012 if you run anytype-cli instead).
-      ANYTYPE_API_BASE_URL: "http://host.docker.internal:31009"
+      # The headless sidecar's API (ADR 019 cutover, 2026-07-07). The
+      # desktop app remains the HUMAN surface; to point tooling back at
+      # it temporarily use http://host.docker.internal:31009 -- and note
+      # the mounted key belongs to the BOT account, so the desktop needs
+      # its own key.
+      ANYTYPE_API_BASE_URL: "http://anytype:31012"
       # Path to the mounted secret. App code reads the key from this file,
       # NOT from an env var (env vars leak via docker inspect / /proc / child procs).
       ANYTYPE_API_KEY_FILE: "/run/secrets/anytype_api_key"
@@ -54,17 +63,58 @@ services:
       # (just an identifier); override per-launch with -e ANYTYPE_SPACE_ID=… .
       ANYTYPE_SPACE_ID: "bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"
       # Discord bot transport (WP8). Same file-not-env-var discipline as the
-      # Anytype key above. GC_DISCORD_CHANNELS is the channel allowlist:
-      # the bot ignores every channel not listed (id, not name).
+      # Anytype key above. GC_CHANNELS_FILE binds each served channel to its
+      # own Anytype space/profile (ADR 017); the bot ignores every channel
+      # not listed. (Replaces the legacy GC_DISCORD_CHANNELS allowlist --
+      # setting both fails loudly at startup.)
       DISCORD_BOT_TOKEN_FILE: "/run/secrets/discord_bot_token"
-      GC_DISCORD_CHANNELS: "1523551542123298896"
+      GC_CHANNELS_FILE: "/workspaces/graph-context-mcp/channels.toml"
+      # Anytype in-space chat transport (WP14): binds served spaces (and
+      # their chats) to profiles, the ADR 017 analogue for the Anytype
+      # transport. Endpoint-agnostic -- works against the desktop today
+      # and the sidecar after cutover.
+      GC_SPACES_FILE: "/workspaces/graph-context-mcp/spaces.toml"
 
     secrets:
       - anytype_api_key
       - discord_bot_token
 
+  # Headless Anytype node (bot account) -- WP14 / ADR 019. Starts with
+  # every `up`/rebuild (VS Code included). First-time bootstrap (see
+  # docs/WORK_PACKAGES.md WP14 runbook): anytype auth create + apikey
+  # create inside this container, invite the bot to your spaces, THEN
+  # flip dev's ANYTYPE_API_BASE_URL to http://anytype:31012 and add
+  # `depends_on: anytype: condition: service_healthy` on dev. Until the
+  # account exists dev deliberately does NOT depend on this service.
+  anytype:
+    build:
+      context: ./anytype
+    container_name: graph-context-mcp-anytype
+    environment:
+      # Local bot node: the server-side write throttle (~1 req/s, spike
+      # S7) protects nothing here -- disable it.
+      ANYTYPE_API_DISABLE_RATE_LIMIT: "1"
+    volumes:
+      # The CLI splits its state (live-confirmed at cutover): identity,
+      # config.json, and the API-key store live under ~/.config/anytype;
+      # ~/.anytype holds the rest. BOTH must be volumes or a rebuild
+      # wipes the bot's keys (it did, once). Identity is also backed up
+      # to .devcontainer/secrets/anytype_account_key (see secrets/README.md).
+      - anytype-data:/root/.anytype
+      - anytype-config:/root/.config/anytype
+    # No published ports: compose-network only. The dev container's
+    # egress firewall already allows the container subnet.
+    healthcheck:
+      # 200 (key baked later) or 401 (no auth) both mean "API is up".
+      test: ["CMD-SHELL", "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:31012/v1/spaces); echo $$code | grep -qE '200|401'"]
+      interval: 5s
+      retries: 24
+      start_period: 30s
+
 volumes:
   claude-config:
+  anytype-data:
+  anytype-config:
 
 # The secret's value lives in a host file that is git-ignored and never
 # baked into the image. Create it once (see README), then it's mounted
