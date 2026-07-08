@@ -182,13 +182,14 @@ async def query(
     edge_types: list[str] | None = None,
     where: list[dict[str, Any]] | None = None,
     order_by: list[str] | None = None,
+    view: str = "",
     limit: int = 25,
     detail: str = "summaries",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.query_tool(
         _services(ctx), type=type, linked_to=linked_to, edge_types=edge_types,
-        where=where, order_by=order_by, limit=limit, detail=detail,
+        where=where, order_by=order_by, view=view, limit=limit, detail=detail,
     )
 
 

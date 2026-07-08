@@ -132,6 +132,21 @@ def run_query(graph: GraphIndex, query: NodeQuery) -> QueryResult:
     )
 
 
+def normalize_value(value: object) -> str:
+    """A JSON-typed comparison value -> the index's string representation.
+
+    ``str(True)`` is ``"True"`` but a ticked checkbox stores ``"true"``,
+    and reflection strips integral floats' ``.0`` -- predicate values
+    from ANY source (MCP tool arguments, compiled Set views) must be
+    normalized the same way, so the rule lives here, once.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def field_value(node: Node, field_name: str) -> str | None:
     """A node's value for ``field_name``, or ``None`` when absent.
 

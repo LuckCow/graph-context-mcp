@@ -1271,8 +1271,19 @@ query source and views are desktop-only; views have no write endpoints).
 view definitions -> `NodeQuery` and runs CLIENT-SIDE on the GraphIndex**
 — one query engine, works on the memory backend, no per-call I/O. The
 server-side execution path (S9c) remains the fallback documented in
-ADR 018 but is not needed. Next: the WP13 fast-follow build (`view:`
-param, `ViewCatalog` port, registry-backed key translation).
+ADR 018 but is not needed.
+
+**Fast-follow SHIPPED 2026-07-08 — WP13 complete.** `query(view=...)`
+(mutually exclusive with the ad-hoc params) resolves saved views by
+set/view name via the `ViewCatalog` port: `AnytypeViewCatalog` reads
+definitions fresh per call (a desktop edit applies on the next query)
+and compiles them (quirks V1-V6 in `view_catalog.py`, incl. the
+live-caught V6: views leak internal 24-hex relation keys for
+API-created properties -- unresolvable sorts drop with a log,
+unresolvable filters skip the view). `InMemoryViewCatalog` holds real
+`NodeQuery` values (fakes-are-contracts); mock gains lists/views routes
+incl. the sourceless-set 500. Live-verified end-to-end against the
+human-configured `Open Tasks` Set in the Todolist space.
 
 **Fast-follow — run the user's real Sets:** a `view: str` parameter on
 the same tool, mutually exclusive with `type`/`where`/`order_by`/

@@ -322,3 +322,68 @@ class TestQueryTool:
             detail="full",
         )
         assert "Oat milk." in out
+
+
+class TestQueryViewParam:
+    """WP13/ADR 018: saved Set views run through the same engine."""
+
+    def _services_with_view(self) -> tools.Services:
+        from graph_context.domain.query import NodeQuery, Op, Predicate, SortKey
+        from graph_context.domain.session import SessionState
+        from graph_context.infrastructure.memory.fake_repository import (
+            InMemoryGraphRepository,
+        )
+        from graph_context.infrastructure.memory.fake_view_catalog import (
+            InMemoryViewCatalog,
+        )
+        from graph_context.ports.view_catalog import SavedView
+
+        saved = SavedView(
+            set_name="Open Tasks", view_name="All",
+            query=NodeQuery(
+                node_type="Todo",
+                predicates=(Predicate("done", Op.NEQ, "true"),),
+                order_by=(SortKey("due_date"),),
+            ),
+        )
+        return tools.build_services(
+            InMemoryGraphRepository(), SessionState(project="x"),
+            views=InMemoryViewCatalog([saved]),
+        )
+
+    async def _seed(self, services: tools.Services) -> None:
+        for name, fields in (
+            ("Pay taxes", {"done": "true", "due_date": "2026-07-01"}),
+            ("Buy milk", {"due_date": "2026-07-10"}),
+            ("Write report", {"due_date": "2026-07-09"}),
+        ):
+            await tools.create_node_tool(
+                services, type="Todo", name=name, summary=f"{name}.",
+                fields=fields,
+            )
+
+    async def test_a_saved_view_runs_with_its_own_filters_and_order(self) -> None:
+        services = self._services_with_view()
+        await self._seed(services)
+        out = await tools.query_tool(services, view="Open Tasks")
+        assert out.startswith("view 'Open Tasks/All':")
+        assert "Pay taxes" not in out  # the view's done-filter applied
+        assert out.index("Write report") < out.index("Buy milk")  # its sort too
+        assert "[due_date=" in out  # sort keys echoed like ad-hoc queries
+
+    async def test_view_is_mutually_exclusive_with_adhoc_parameters(self) -> None:
+        services = self._services_with_view()
+        out = await tools.query_tool(services, view="Open Tasks", type="Todo")
+        assert out.startswith("ERROR:") and "cannot be combined" in out
+
+    async def test_an_unknown_view_lists_the_runnable_ones(self) -> None:
+        services = self._services_with_view()
+        out = await tools.query_tool(services, view="Closed Tasks")
+        assert out.startswith("ERROR:")
+        assert "Open Tasks/All" in out  # what IS runnable, for the retry
+
+    async def test_no_catalog_degrades_to_an_actionable_error(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.query_tool(services, view="Open Tasks")
+        assert out.startswith("ERROR:") and "(none)" in out

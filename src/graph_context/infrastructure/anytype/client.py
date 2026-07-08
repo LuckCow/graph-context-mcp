@@ -224,6 +224,33 @@ class AnytypeClient:
         )
         return _unwrap(payload, "tag")
 
+    # -- lists / set views (WP13 view param; spike S9) ---------------------
+
+    def list_views(self, list_id: str) -> AsyncIterator[dict[str, Any]]:
+        """A set/collection's views (ordinary paginated ``data`` envelope).
+
+        S9: each view carries machine-readable ``filters`` and ``sorts``
+        once a human has configured the set's source in the desktop; the
+        payload quirks are quarantined in ``view_catalog.py``.
+        """
+        return self.paginate(f"{self._space}/lists/{list_id}/views")
+
+    async def sample_view_objects(
+        self, list_id: str, view_id: str, *, limit: int = 1
+    ) -> list[dict[str, Any]]:
+        """A few objects from a view's server-side execution.
+
+        Used ONLY to infer a set's source type (the set object does not
+        expose it -- S9 addendum); the query itself runs client-side.
+        """
+        payload = await self.request(
+            "GET",
+            f"{self._space}/lists/{list_id}/views/{view_id}/objects",
+            params={"limit": limit},
+        )
+        data: list[dict[str, Any]] = payload.get("data", [])
+        return data
+
     # -- chat (WP14; payload shapes live in chat.py, spike S10) ------------
 
     def list_chats(self) -> AsyncIterator[dict[str, Any]]:

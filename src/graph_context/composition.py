@@ -125,6 +125,7 @@ async def build_runtime(
     from graph_context.infrastructure.anytype.session_repository import (
         AnytypeSessionStore,
     )
+    from graph_context.infrastructure.anytype.view_catalog import AnytypeViewCatalog
 
     config = AnytypeConfig.from_env(space_id)
     client = AnytypeClient(config)
@@ -174,6 +175,9 @@ async def build_runtime(
         services=build_services(
             repository, session, persister, journal=journal,
             projector=projector, ranker=ranker,
+            # WP13 view param (ADR 018): saved Set views, compiled to
+            # NodeQuery per call so desktop edits apply immediately.
+            views=AnytypeViewCatalog(client),
         ),
         mode_store=AnytypeModeStore(client),
         teardown=teardown,

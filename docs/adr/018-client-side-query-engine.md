@@ -72,3 +72,18 @@ and recorded here:
   view-objects endpoint applies them server-side) does execution fall back
   to the API, mapped through `mapping.to_node` — and that fallback would
   amend this ADR.
+
+## Amendment (2026-07-08): the `view` parameter shipped
+
+Spike S9 confirmed view definitions are machine-readable, so the gated
+fast-follow landed on the compile path: `query(view="Open Tasks")`
+resolves the user's Set views through the `ViewCatalog` port
+(`AnytypeViewCatalog` compiles S9-shaped filters/sorts into `NodeQuery`;
+quirks V1-V6 quarantined in `infrastructure/anytype/view_catalog.py`),
+and runs them on the GraphIndex like every other read. Live-verified
+against a real desktop-configured Set. One quirk found only in live
+verification (V6): views leak Anytype's internal 24-hex relation keys
+for API-created properties, which REST cannot resolve -- an unresolvable
+sort key is dropped (logged), an unresolvable filter skips the view. The
+server-side execution endpoint remains the documented fallback, still
+unused.

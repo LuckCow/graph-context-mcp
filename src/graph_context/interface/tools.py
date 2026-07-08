@@ -57,7 +57,13 @@ from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
 from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
-from graph_context.domain.query import NodeQuery, Op, Predicate, SortKey
+from graph_context.domain.query import (
+    NodeQuery,
+    Op,
+    Predicate,
+    SortKey,
+    normalize_value,
+)
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery, node_identifiers
@@ -65,6 +71,7 @@ from graph_context.errors import GraphContextError, NodeNotFound, UnknownNodeTyp
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
 from graph_context.ports.graph_repository import GraphRepository
+from graph_context.ports.view_catalog import ViewCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +112,7 @@ def build_services(
     journal: MutationJournal | None = None,
     projector: SemanticProjector | None = None,
     ranker: Ranker | None = None,
+    views: ViewCatalog | None = None,
 ) -> Services:
     journal = journal or NullJournal()
     return Services(
@@ -113,7 +121,7 @@ def build_services(
         writer=NodeWriter(repository, session, journal),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
-        querier=Querier(repository),
+        querier=Querier(repository, views),
         capture=CaptureRecorder(repository, journal=journal),
         persister=persister,
         journal=journal,
@@ -245,20 +253,6 @@ async def _parse_links(
 _OPS_LISTING = ", ".join(op.value for op in Op)
 
 
-def _normalize_predicate_value(value: object) -> str:
-    """MCP clients send JSON-typed values; the index stores strings.
-
-    ``str(True)`` is ``"True"`` but a ticked checkbox stores ``"true"``,
-    and mapping's ``field_value`` strips integral floats' ``.0`` -- match
-    both so an LLM passing natural JSON hits the stored representation.
-    """
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
-
-
 def _parse_predicates(raw: Sequence[dict[str, Any]] | None) -> tuple[Predicate, ...]:
     predicates = []
     for item in raw or []:
@@ -278,7 +272,7 @@ def _parse_predicates(raw: Sequence[dict[str, Any]] | None) -> tuple[Predicate, 
             Predicate(
                 field=field_name,
                 op=op,
-                value=_normalize_predicate_value(item.get("value", "")),
+                value=normalize_value(item.get("value", "")),
             )
         )
     return tuple(predicates)
@@ -558,10 +552,32 @@ async def query_tool(
     edge_types: list[str] | None = None,
     where: list[dict[str, Any]] | None = None,
     order_by: list[str] | None = None,
+    view: str = "",
     limit: int = 25,
     detail: str = "summaries",
 ) -> str:
     detail_level = _parse_detail(detail)  # fail fast, before any scanning
+    if view.strip():
+        # WP13/ADR 018: a saved Set view IS a server-defined type+where+
+        # order_by -- combining them is ambiguous, so it is an error.
+        if type or linked_to or edge_types or where or order_by:
+            raise GraphContextError(
+                "view cannot be combined with type/linked_to/edge_types/"
+                "where/order_by -- the view already defines those; drop "
+                "them or drop view"
+            )
+        saved, view_result = await services.querier.run_view(
+            view, limit=limit, exclude_roles=schema.INFRA_ROLES
+        )
+        view_bodies = None
+        if detail_level is Detail.FULL:
+            view_bodies = await services.explorer.bodies_for(
+                [node.id for node in view_result.hits]
+            )
+        rendered = presenters.render_query_result(
+            view_result, detail_level, saved.query.order_by, view_bodies
+        )
+        return f"view {saved.full_name!r}:\n{rendered}"
     predicates = _parse_predicates(where)
     sort_keys = _parse_order_by(order_by)
     node_type = type.strip() or None

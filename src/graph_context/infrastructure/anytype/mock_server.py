@@ -72,6 +72,12 @@ _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
 _TYPES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types$")
 _PROPERTIES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties$")
 _TAGS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties/(?P<prop>[^/]+)/tags$")
+_LIST_VIEWS = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/lists/(?P<list>[^/]+)/views$"
+)
+_LIST_VIEW_OBJECTS = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/lists/(?P<list>[^/]+)/views/(?P<view>[^/]+)/objects$"
+)
 _CHATS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/chats$")
 _CHAT_MESSAGES = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages$"
@@ -147,6 +153,10 @@ class MockAnytype:
         # Space membership (WP14 identity discovery, quirk C6): tests set
         # this to model solo-member (bot's own) vs shared spaces.
         self.members: list[dict[str, Any]] = []
+        # Set views (WP13, spike S9 shapes): set object id -> view dicts,
+        # and the set's source type (None = sourceless, execution 500s).
+        self._set_views: dict[str, list[dict[str, Any]]] = {}
+        self._set_sources: dict[str, str | None] = {}
         self._chats: dict[str, dict[str, Any]] = {}
         self._chat_messages: dict[str, list[dict[str, Any]]] = {}
         self._chat_listeners: dict[str, list[asyncio.Queue[dict[str, Any] | None]]] = {}
@@ -186,6 +196,8 @@ class MockAnytype:
             (_CHAT_MESSAGE, self._handle_chat_message),
             (_CHAT_MESSAGES, self._handle_chat_messages),
             (_CHATS, self._handle_chats),
+            (_LIST_VIEW_OBJECTS, self._handle_list_view_objects),
+            (_LIST_VIEWS, self._handle_list_views),
             (_MEMBERS, self._handle_members),
             (_OBJECT, self._handle_object),
             (_OBJECTS, self._handle_objects),
@@ -256,6 +268,25 @@ class MockAnytype:
 
     def object(self, object_id: str) -> dict[str, Any]:
         return self._objects[object_id]
+
+    # -- set-view knobs (WP13) ----------------------------------------------
+
+    def seed_set(
+        self,
+        name: str,
+        *,
+        source_type_key: str | None,
+        views: list[dict[str, Any]],
+    ) -> str:
+        """Create a Set as a human would: source + configured views.
+
+        ``source_type_key=None`` models an API-created SOURCELESS set —
+        its views list fine but view execution 500s (spike S9).
+        """
+        set_id = self.seed_object("set", name)
+        self._set_views[set_id] = list(views)
+        self._set_sources[set_id] = source_type_key
+        return set_id
 
     # -- chat knobs (WP14) --------------------------------------------------
 
@@ -438,6 +469,36 @@ class MockAnytype:
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
         return self._paginated(list(self.members), request.url.params)
+
+    # -- list/view routes (WP13; quirks V1-V5 in view_catalog.py, spike S9) --
+
+    def _handle_list_views(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        list_id = match.group("list")
+        if list_id not in self._set_views:
+            return self._error(404, "list_not_found")
+        return self._paginated(list(self._set_views[list_id]), request.url.params)
+
+    def _handle_list_view_objects(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        list_id = match.group("list")
+        source = self._set_sources.get(list_id)
+        if source is None:
+            # S9: a sourceless set's execution endpoint 500s.
+            return self._error(500, "internal_error")
+        items = [
+            o for o in self._objects.values()
+            if not o["archived"] and o["type"]["key"] == source
+        ]
+        # NOTE: filters/sorts are NOT executed here — the compile path
+        # (ADR 018) only samples this endpoint for the source type.
+        return self._paginated(_without_markdown(items), request.url.params)
 
     # -- chat routes (WP14; quirks C1-C5 in chat.py, pinned by spike S10) ----
 

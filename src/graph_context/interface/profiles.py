@@ -193,6 +193,12 @@ order_by: e.g. ["due_date", "priority desc"] -- each entry is "field",
   Sort-key values are echoed on each result line.
   Queryable fields: the node's own properties (get_node shows them)
   plus name, type, summary, story_time, modified_at, summary_stale.
+view: run one of the user's SAVED Anytype Set views by name instead
+  (e.g. view="Open Tasks") -- its filters and sorts are read fresh from
+  the space, so whatever the user configured in Anytype applies as-is.
+  Cannot be combined with type/linked_to/edge_types/where/order_by.
+  An unknown name errors with the runnable views; a set only appears
+  once its source is configured in Anytype and it holds an object.
 limit: max results (default 25, cap 100). The header reports "N of M
   match(es)" -- tighten `where` or raise `limit` when truncated.
 detail: names | summaries (default) | full.
@@ -704,6 +710,8 @@ EXAMPLES:
           order_by=["due_date", "priority desc"], limit=10)
   (an unticked checkbox is stored as ABSENCE and neq matches absent, so
   done-neq-true finds every not-done item.)
+  the user's own saved list, exactly as they configured it in Anytype:
+    query(view="Open Tasks")
   a person's meeting history, most recent first:
     query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
 """),
