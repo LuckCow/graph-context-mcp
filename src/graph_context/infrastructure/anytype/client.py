@@ -76,9 +76,15 @@ class AnytypeClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        retry: bool = True,
     ) -> dict[str, Any]:
+        """``retry=False`` is for endpoints whose 5xx is a known SEMANTIC
+        signal rather than transience (S9: a sourceless set's execution
+        500s permanently) -- retrying those just burns the whole backoff
+        ladder before the caller's skip-handling runs."""
         last_error: AnytypeApiError | None = None
-        for attempt in range(self._config.max_retries + 1):
+        max_retries = self._config.max_retries if retry else 0
+        for attempt in range(max_retries + 1):
             self.request_count += 1
             try:
                 response = await self._http.request(method, path, params=params, json=json)
@@ -93,7 +99,7 @@ class AnytypeClient:
             if response.status_code not in _RETRYABLE_STATUSES:
                 raise error
             last_error = error
-            if attempt < self._config.max_retries:
+            if attempt < max_retries:
                 delay = self._config.backoff_base_seconds * (2**attempt)
                 logger.warning(
                     "retryable %s from %s (attempt %d), backing off %.2fs",
@@ -242,11 +248,16 @@ class AnytypeClient:
 
         Used ONLY to infer a set's source type (the set object does not
         expose it -- S9 addendum); the query itself runs client-side.
+        No retry: a sourceless set 500s PERMANENTLY here (S9), and the
+        catalog treats that error as "skip this view" -- retrying it just
+        stalls catalog load for the whole backoff ladder (live-caught:
+        one shell set cost the E2E suite 8.5 minutes).
         """
         payload = await self.request(
             "GET",
             f"{self._space}/lists/{list_id}/views/{view_id}/objects",
             params={"limit": limit},
+            retry=False,
         )
         data: list[dict[str, Any]] = payload.get("data", [])
         return data

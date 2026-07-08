@@ -1447,6 +1447,19 @@ Deferred with seams left open: per-chat/thread keyed session store
 `session_seeds` wiring from the working set, one-way scratchpad mirror
 into the SessionContext body for desktop visibility.
 
+Verification fallout (2026-07-08), both live-caught:
+* **FastMCP wrappers silently drop undeclared arguments** — the
+  `context` wrapper in `server.py` missed the new `text`/`detail`
+  params, so `note` cleared instead of saving. Fixed, and
+  `tests/interface/test_server_wrappers.py` now pins every wrapper's
+  signature to its `tools.py` implementation (name/order/default/
+  annotation), making the drift unrepresentable.
+* **S9 sourceless-set 500s were retried as if transient** — one shell
+  set stalled catalog load (and the live E2E suite) for the full
+  8.5-minute backoff ladder. `sample_view_objects` now passes
+  `retry=False` (the 500 is a permanent semantic signal the catalog
+  already skips on); mock-pinned in `test_view_catalog.py`; suite back
+  to ~10s.
 
 ---
 

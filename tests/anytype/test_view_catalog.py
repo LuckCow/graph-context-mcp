@@ -7,8 +7,11 @@ skip-behaviors against a real server.
 
 from __future__ import annotations
 
+import pytest
+
 from graph_context.domain.query import NodeQuery, Op, Predicate, SortKey
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.config import AnytypeApiError
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.view_catalog import AnytypeViewCatalog
 
@@ -81,6 +84,24 @@ class TestViewCompilation:
             "id": "v1", "name": "All", "filters": [], "sorts": [],
         }])
         assert await AnytypeViewCatalog(client).load() == ()
+
+    async def test_a_sourceless_sample_is_not_retried(
+        self, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        """The S9 500 is permanent, not transient: sampling must fail on
+        the FIRST attempt instead of climbing the retry ladder (live-
+        caught: one shell set stalled catalog load for the full backoff
+        -- 8.5 minutes under the E2E config)."""
+        mock.seed_set("Shell", source_type_key=None, views=[{
+            "id": "v1", "name": "All", "filters": [], "sorts": [],
+        }])
+        (set_id,) = [
+            o["id"] async for o in client.search(types=["set"])
+        ]
+        before = client.request_count
+        with pytest.raises(AnytypeApiError):
+            await client.sample_view_objects(set_id, "v1")
+        assert client.request_count == before + 1  # one attempt, no retries
 
     async def test_an_empty_view_is_skipped_because_type_inference_fails(
         self, mock: MockAnytype, client: AnytypeClient
