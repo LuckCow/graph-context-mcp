@@ -284,8 +284,17 @@ class MockAnytype:
         self._notify_chat(chat_id, None)
 
     def _new_chat_message(
-        self, chat_id: str, creator: str, text: str
+        self,
+        chat_id: str,
+        creator: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        # C7: attachments must be {"target", "type"} envelopes -- a bare
+        # id list 400s on the live server.
+        for entry in attachments or []:
+            if not isinstance(entry, dict) or "target" not in entry:
+                raise ValueError("attachments must be {'target', 'type'} dicts")
         message = {
             "id": self._new_id(),
             # Short lexicographically-increasing string, like live (C3).
@@ -295,7 +304,7 @@ class MockAnytype:
             "created_at": next(self._clock),
             "modified_at": 0,
             "content": {"text": text, "style": "paragraph"},
-            "attachments": [],
+            "attachments": list(attachments or []),
             "reactions": {},
             "pinned": False,
         }
@@ -456,8 +465,14 @@ class MockAnytype:
             )
         if request.method == "POST":
             body = json.loads(request.content)
+            raw_attachments = body.get("attachments")
+            if raw_attachments is not None and any(
+                not isinstance(e, dict) for e in raw_attachments
+            ):
+                return self._error(400, "bad_request")  # C7: envelopes only
             message = self._new_chat_message(
-                chat_id, self.api_member_id, str(body.get("text", ""))
+                chat_id, self.api_member_id, str(body.get("text", "")),
+                attachments=raw_attachments,
             )
             # C1: flat message_id, no envelope key.
             return httpx.Response(201, json={"message_id": message["id"]})

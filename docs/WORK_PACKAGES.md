@@ -1340,9 +1340,14 @@ Cutover findings (2026-07-07):
   or bot dependency. (The first live run of the WP13 query contract
   test also caught its exact-equality assertion being unsafe in a
   shared live space; now membership-based.)
-* Remaining: invite the bot to TestWorld/Todolist (desktop invite links
-  + `anytype space join`), fill `spaces.toml`, run the chat bot on the
-  bot's own identity in a shared space.
+* **Shared-space chat verified live (2026-07-08):** bot joined
+  TestWorld + Todolist, created a "Chat" per space (chat_ids pinned in
+  spaces.toml; the Discord bindings retired), and answered a human's
+  "Give me an overview" in TestWorld on the Claude driver under its own
+  identity. Dogfooding immediately found **quirk C7**: the chat UI
+  renders text as plain text (no markdown), so deep-link rewriting was
+  replaced by plainified text + object-card ATTACHMENTS
+  (`{"target","type":"link"}` envelopes; bare id lists 400).
 
 ---
 

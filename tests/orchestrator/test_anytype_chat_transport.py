@@ -17,11 +17,13 @@ from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRep
 from graph_context.interface.profiles import get_profile
 from graph_context.interface.tools import build_services
 from graph_context.orchestrator.anytype_chat_transport import (
+    MAX_ATTACHMENTS,
     AnytypeChatTurnHandler,
     ChatCursor,
     InboundChatMessage,
     SentMessages,
-    linkify,
+    object_references,
+    plainify,
 )
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
@@ -69,9 +71,11 @@ class _SendRecorder:
 
     def __init__(self) -> None:
         self.pieces: list[str] = []
+        self.attachments: list[tuple[str, ...]] = []
 
-    async def __call__(self, piece: str) -> str:
+    async def __call__(self, piece: str, attachments: tuple[str, ...] = ()) -> str:
         self.pieces.append(piece)
+        self.attachments.append(attachments)
         return f"sent-{len(self.pieces)}"
 
 
@@ -134,6 +138,18 @@ class TestTurn:
         for i in range(len(send.pieces)):
             assert f"sent-{i + 1}" in handler.sent
 
+    async def test_referenced_objects_ride_the_first_chunk_as_attachments(
+        self,
+    ) -> None:
+        reply = f"made [Mira]({OBJECT_ID})\n" + "pad " * 700
+        handler = _handler([LLMTurn(reply=reply)])
+        send = _SendRecorder()
+        await handler.run_turn(_message(), send)
+        assert len(send.pieces) > 1  # chunked
+        assert send.attachments[0] == (OBJECT_ID,)
+        assert all(a == () for a in send.attachments[1:])
+        assert "[Mira](" not in send.pieces[0]  # plainified: name only
+
     async def test_a_processed_message_is_not_eligible_twice(self) -> None:
         handler = _handler([LLMTurn(reply="once")])
         send = _SendRecorder()
@@ -154,26 +170,36 @@ class TestTurn:
         assert sorted(send.pieces) == ["first", "second"]
 
 
-class TestLinkify:
-    def test_a_markdown_link_to_a_bare_object_id_becomes_a_deep_link(self) -> None:
-        text = f"created [Mira]({OBJECT_ID})"
-        assert linkify(text, SPACE) == (
-            f"created [Mira](anytype://object?objectId={OBJECT_ID}"
-            f"&spaceId={SPACE})"
+class TestReplyPreparation:
+    """Quirk C7: the chat UI is plain text; object references become
+    ATTACHMENTS (rendered as cards), not links."""
+
+    def test_referenced_object_ids_are_collected_in_order(self) -> None:
+        second = OBJECT_ID.replace("bafyreid", "bafyreie")
+        text = f"made [Mira]({OBJECT_ID}) near {second} and {OBJECT_ID} again"
+        assert object_references(text) == (OBJECT_ID, second)
+
+    def test_attachments_are_capped(self) -> None:
+        # Suffixes stay within base32's [a-z2-7] alphabet.
+        ids = [f"bafyreibcdefghijklmnopqrstu{c}" for c in "abcdefghijkl"]
+        assert len(object_references(" ".join(ids))) == MAX_ATTACHMENTS
+
+    def test_a_markdown_object_link_collapses_to_its_name(self) -> None:
+        assert plainify(f"created [Mira]({OBJECT_ID})") == "created Mira"
+
+    def test_ordinary_links_keep_their_url_in_plain_form(self) -> None:
+        assert (
+            plainify("see [the docs](https://example.com/x)")
+            == "see the docs (https://example.com/x)"
         )
 
-    def test_bare_object_ids_become_deep_links(self) -> None:
-        out = linkify(f"see {OBJECT_ID} for details", SPACE)
-        assert f"[{OBJECT_ID[:8]}…](anytype://object?objectId={OBJECT_ID}" in out
+    def test_headers_and_emphasis_are_stripped(self) -> None:
+        text = "## Scope\n**101 nodes** across *12* types with `code`"
+        assert plainify(text) == "Scope\n101 nodes across 12 types with code"
 
-    def test_existing_anytype_links_pass_through_untouched(self) -> None:
-        link = f"anytype://object?objectId={OBJECT_ID}&spaceId={SPACE}"
-        text = f"already linked: [Mira]({link})"
-        assert linkify(text, SPACE) == text
-
-    def test_ordinary_text_and_urls_are_untouched(self) -> None:
-        text = "plain words, a [web link](https://example.com), and basferry"
-        assert linkify(text, SPACE) == text
+    def test_bullets_and_plain_text_are_untouched(self) -> None:
+        text = "- first thing\n- second thing\n\nplain words"
+        assert plainify(text) == text
 
 
 class TestSentLedger:

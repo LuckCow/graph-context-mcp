@@ -3,7 +3,8 @@
 The bot chats INSIDE Anytype spaces: each ``spaces.toml`` binding gets a
 runtime (bootstrap.build_space_runtimes) and one SSE-driven serve task on
 its chat. Every per-message decision -- echo/backlog gate, ``anytype:<id>``
-identity, deep links, chunking -- is plain logic in
+identity, plain-text rendering + object-card attachments, chunking --
+is plain logic in
 ``anytype_chat_transport``; here we only read config, wire clients, and
 pump events. Only this module (a composition root, like ``discord_bot``)
 touches ``infrastructure`` on the chat path.
@@ -93,8 +94,8 @@ async def _maybe_turn(
     if not handler.accepts(inbound):
         return
 
-    async def send(text: str) -> str:
-        return await chat_client.send(chat_id, text)
+    async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
+        return await chat_client.send(chat_id, text, attachments)
 
     try:
         await handler.run_turn(inbound, send)

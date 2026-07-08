@@ -67,9 +67,16 @@ Behavioral contracts:
   and `IntentRecorder.record_turn` carry an `origin` field
   (`anytype:<chat_id>:<message_id>`) — the "which conversation moment
   caused this" half of attribution, next to `gc_user_id`'s "who".
-* **Replies deep-link the graph**: `linkify` rewrites `[Name](bafy…)`
-  and bare object ids into `anytype://object?objectId=…&spaceId=…`
-  links; markdown survives in `content.text` verbatim (S10).
+* **Replies attach the graph** (amended after live dogfooding): the
+  chat UI renders message text as PLAIN TEXT — markdown shows its
+  literal glyphs, so text links cannot be links (quirk C7). Replies are
+  therefore `plainify`d (markdown stripped, `[Name](bafy…)` collapses to
+  the name) and every referenced object id rides the first chunk as a
+  message **attachment** (`{"target", "type": "link"}` envelopes — a
+  bare id list 400s), which clients render as clickable object cards —
+  a better surface than inline links anyway. The original deep-link
+  rewriting (`linkify`) was replaced by `object_references` +
+  `plainify` the day after shipping.
 
 Sidecar topology (initially behind an opt-in compose profile; the gate
 was dropped 2026-07-07 when cutover began, so the service now starts

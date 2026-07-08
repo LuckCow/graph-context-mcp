@@ -17,6 +17,11 @@ version header) lives here, pinned by spike S10 and mirrored by
         {"message": {...}}}`` + blank line; keepalives are COMMENT lines
         ``: heartbeat``. On connect the stream replays recent history as
         ordinary ``message_added`` frames -- consumers must fast-forward.
+    C7. The chat UI renders message text as PLAIN TEXT (markdown shows
+        its literal glyphs -- live-observed), but a message accepts
+        ``attachments: [{"target": <object_id>, "type": "link"}]``
+        (a bare id list 400s), which the clients render as object cards.
+        Object references therefore travel as attachments, not links.
     C6. There is no "who am I" endpoint and members carry no self marker
         (S10d), but a member id embeds the account identity
         (``_participant_<space-with-dots-as-underscores>_<identity>``)
@@ -32,7 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -182,8 +187,17 @@ class AnytypeChatClient:
         raw = await self._client.list_chat_messages(chat_id, limit=limit)
         return [to_chat_message(item) for item in raw]
 
-    async def send(self, chat_id: str, text: str) -> str:
-        return await self._client.create_chat_message(chat_id, {"text": text})
+    async def send(
+        self, chat_id: str, text: str, attachments: Sequence[str] = ()
+    ) -> str:
+        """Post a message; ``attachments`` are object ids, sent in the
+        envelope quirk C7 requires so clients render them as cards."""
+        body: dict[str, Any] = {"text": text}
+        if attachments:
+            body["attachments"] = [
+                {"target": object_id, "type": "link"} for object_id in attachments
+            ]
+        return await self._client.create_chat_message(chat_id, body)
 
     async def stream(
         self, chat_id: str, *, heartbeat_seconds: int = 30

@@ -65,6 +65,18 @@ class TestChatRest:
         message_id = await chat.send(chat_id, "retried")
         assert message_id  # first attempt 429'd, retry landed
 
+    async def test_attachments_are_sent_as_target_link_envelopes(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        """Quirk C7: a bare id list 400s live; the envelope form lands."""
+        chat_id = mock.seed_chat()
+        await chat.send(chat_id, "see these", attachments=("obj-1", "obj-2"))
+        (stored,) = await chat._client.list_chat_messages(chat_id)
+        assert stored["attachments"] == [
+            {"target": "obj-1", "type": "link"},
+            {"target": "obj-2", "type": "link"},
+        ]
+
 
 class TestSseParsing:
     async def test_backlog_then_live_events_arrive_in_order(

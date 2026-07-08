@@ -2,7 +2,8 @@
 
 The Anytype sibling of ``discord_transport``: everything the bot decides
 per message -- the echo/backlog/creator gate, the ``anytype:<id>``
-identity mapping, deep-link rewriting, chunked sends -- is plain logic
+identity mapping, plain-text rendering + object attachments, chunked
+sends -- is plain logic
 over primitives, so the whole policy tests without httpx or a server.
 Only the composition root (``anytype_chat_bot``) touches infrastructure;
 import-linter holds that line.
@@ -48,32 +49,46 @@ ANYTYPE_MESSAGE_LIMIT = 2000
 _OBJECT_ID = r"bafy[a-z2-7]{20,}"
 _MARKDOWN_ID_LINK = re.compile(r"\[([^\]]+)\]\((" + _OBJECT_ID + r")\)")
 _BARE_ID = re.compile(r"(?<![\w/=?])(" + _OBJECT_ID + r")\b")
+_MARKDOWN_URL_LINK = re.compile(r"\[([^\]]+)\]\((\w+://[^)\s]+)\)")
+_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+_EMPHASIS = re.compile(r"(\*{1,3}|_{2,3}|`{1,3})(?=\S)(.+?)(?<=\S)\1")
+
+MAX_ATTACHMENTS = 8  # per message; the reader wants cards, not a wall
 
 
-def _deep_link(object_id: str, space_id: str) -> str:
-    return f"anytype://object?objectId={object_id}&spaceId={space_id}"
+def object_references(text: str) -> tuple[str, ...]:
+    """Object ids mentioned in a reply, in first-appearance order.
 
-
-def linkify(text: str, space_id: str) -> str:
-    """Rewrite object references into clickable ``anytype://`` deep links.
-
-    ``[Name](bafy...)`` becomes ``[Name](anytype://object?...)``; a bare
-    ``bafy...`` token becomes ``[bafy1234...](anytype://object?...)``.
-    Existing ``anytype://`` links (and ids already inside URLs) pass
-    through untouched -- the lookbehind refuses ids preceded by ``/``,
-    ``=`` or ``?``, which is where they sit inside a deep link.
+    These become message ATTACHMENTS (quirk C7): the chat UI is plain
+    text, so links cannot be links -- but attached objects render as
+    clickable cards, which is the better surface anyway. Capped at
+    ``MAX_ATTACHMENTS``.
     """
+    seen: list[str] = []
+    for match in re.finditer(_OBJECT_ID, text):
+        object_id = match.group(0)
+        if object_id not in seen:
+            seen.append(object_id)
+    return tuple(seen[:MAX_ATTACHMENTS])
 
-    def _rewrite_link(match: re.Match[str]) -> str:
-        return f"[{match.group(1)}]({_deep_link(match.group(2), space_id)})"
 
-    text = _MARKDOWN_ID_LINK.sub(_rewrite_link, text)
-
-    def _rewrite_bare(match: re.Match[str]) -> str:
-        object_id = match.group(1)
-        return f"[{object_id[:8]}…]({_deep_link(object_id, space_id)})"
-
-    return _BARE_ID.sub(_rewrite_bare, text)
+def plainify(text: str) -> str:
+    """Markdown -> chat plain text (quirk C7: the chat renders glyphs
+    literally). ``[Name](bafy...)`` collapses to ``Name`` (the object
+    rides along as an attachment); ordinary ``[label](url)`` keeps its
+    url as ``label (url)``; headers and emphasis marks are stripped.
+    Bullets and blank lines read fine as-is and are left alone.
+    """
+    text = _MARKDOWN_ID_LINK.sub(r"\1", text)
+    text = _MARKDOWN_URL_LINK.sub(r"\1 (\2)", text)
+    text = _HEADER.sub("", text)
+    # Repeat for nested emphasis (e.g. bold inside italics).
+    for _ in range(3):
+        stripped = _EMPHASIS.sub(r"\2", text)
+        if stripped == text:
+            break
+        text = stripped
+    return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,16 +210,16 @@ class ChatCursor:
 
 @dataclass
 class AnytypeChatTurnHandler:
-    """Gate -> turn -> linkified chunked sends: the whole message policy.
+    """Gate -> turn -> plain-text chunked sends: the whole message policy.
 
     ``routes`` maps each served CHAT id to its runtime; ``spaces`` maps it
-    back to the space id (deep links need it). ``send`` is injected per
-    message and must return the posted message's id, which feeds the echo
-    suppressor. ``bot_identity`` is the ACCOUNT identity (quirk C6:
-    member ids are space-scoped but end with it, so the self-check is a
-    suffix match); ``""`` -- e.g. on the desktop endpoint, where bot and
-    human share an account -- leaves the posted-id set carrying
-    suppression alone.
+    back to the space id. ``send`` is injected per message, takes
+    ``(text, attachment_object_ids)``, and must return the posted
+    message's id, which feeds the echo suppressor. ``bot_identity`` is
+    the ACCOUNT identity (quirk C6: member ids are space-scoped but end
+    with it, so the self-check is a suffix match); ``""`` -- e.g. on the
+    desktop endpoint, where bot and human share an account -- leaves the
+    posted-id set carrying suppression alone.
     """
 
     routes: Mapping[str, ChannelRoute]
@@ -230,12 +245,14 @@ class AnytypeChatTurnHandler:
     async def run_turn(
         self,
         message: InboundChatMessage,
-        send: Callable[[str], Awaitable[str]],
+        send: Callable[[str, tuple[str, ...]], Awaitable[str]],
     ) -> None:
         """One accepted message -> one orchestrator turn -> n sends.
 
         The cursor advances BEFORE the turn: a failing turn must not make
         the same message eligible again on the next stream event.
+        Replies go out as plain text (quirk C7) with every referenced
+        object attached to the first chunk as a card.
         """
         self.cursor.advance(message)
         route = self.routes[message.chat_id]
@@ -247,8 +264,9 @@ class AnytypeChatTurnHandler:
                 # Intent nodes point back at the triggering chat message.
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
             )
-        space_id = self.spaces.get(message.chat_id, message.space_id)
         for event in events:
-            text = linkify(render(event), space_id)
-            for piece in chunk(text, ANYTYPE_MESSAGE_LIMIT):
-                self.sent.add(await send(piece))
+            rendered = render(event)
+            attachments = object_references(rendered)
+            for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):
+                self.sent.add(await send(piece, attachments))
+                attachments = ()  # cards ride the first chunk only
