@@ -120,7 +120,7 @@ class TestTurn:
     async def test_concurrent_messages_in_one_channel_run_one_turn_at_a_time(
         self,
     ) -> None:
-        """A route's runtime holds one focus-stack session, so turns on
+        """A route's runtime holds one graph-session state, so turns on
         the same channel must not interleave tool calls."""
         active = 0
         overlaps: list[int] = []
@@ -172,7 +172,7 @@ class TestRouting:
 
     async def test_work_in_one_channel_never_leaks_into_another(self) -> None:
         """Each route owns its graph and session: a node created (and
-        focused) through channel A is invisible to channel B."""
+        touched) through channel A is invisible to channel B."""
         handler = self._two_channel_handler()
         first = handler.routes[ALLOWED_CHANNEL].orchestrator
         second = handler.routes[OTHER_CHANNEL].orchestrator
@@ -182,7 +182,7 @@ class TestRouting:
         assert "Mira" in reply
         assert first.services.repository.graph.node_count() == 1
         assert second.services.repository.graph.node_count() == 0
-        assert second.services.session.focus.entries == ()
+        assert second.services.session.working_set.entries == ()
 
     async def test_turns_in_different_channels_may_interleave(self) -> None:
         active = 0

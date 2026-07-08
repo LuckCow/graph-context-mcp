@@ -16,7 +16,7 @@ config fails LOUDLY at startup, naming the file, channel, and field.
 
 One channel per space is an invariant, not a limitation we forgot: a
 space holds exactly one SessionContext meta-node, so two runtimes on the
-same space would clobber each other's focus/recent snapshot (LWW). A
+same space would clobber each other's session snapshot (LWW). A
 keyed multi-session store is the WP8 slice that lifts this.
 """
 

@@ -226,9 +226,10 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
 | `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
 | `interface/tools.py` | The eight tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
+| `interface/context_block.py` | Turn-start context block (ADR 020) | Scratchpad + working-set buckets + recent trail, once per turn, budget-degraded |
 | `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
 | `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
-| `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; drains the journal into an intent node at turn end |
+| `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; opens with the context block + conversation memory (`/clear` resets it); drains the journal into an intent node at turn end |
 | `orchestrator/modes.py` | `ModeSpec` loader (profile < `GC_MODES_FILE` < in-space) | Unbound tools don't exist in the session — unavailable, not refused; `/mode` re-reads all sources |
 | `orchestrator/drivers.py` | `LLMDriver` seam + scripted/manual drivers | Transcript + tool docs + mode goal in; tool calls or a reply out |
 | `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |

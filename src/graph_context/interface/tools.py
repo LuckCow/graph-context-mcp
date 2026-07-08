@@ -17,9 +17,10 @@ wrapper everything goes through:
    default (WP2 decision) -- the domain traversal remains policy-free.
 
 (The per-response ``[project | focus | recent]`` context header was
-removed 2026-07-06 as token waste. Session state -- the focus stack and
-recent-history ring -- is still tracked for traversal defaults and
-future features; it just isn't echoed on every response.)
+removed 2026-07-06 as token waste. WP15 replaced the focus stack with
+the LLM-curated working set + scratchpad, echoed once per orchestrator
+turn instead of on every response; recent history still feeds traversal
+defaults.)
 
 Notes:
 * `context` actions `set_project` / `resync`: resync is wired; project
@@ -333,24 +334,88 @@ def _edge_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
 # -- tools ------------------------------------------------------------------
 
 
+SCRATCHPAD_MAX_CHARS = 2000  # over-cap is an error that teaches condensing
+
+
+def _parse_hold_detail(value: str) -> Detail:
+    normalized = value.strip().casefold()
+    levels = {
+        "": Detail.SUMMARIES,  # default bucket
+        "summary": Detail.SUMMARIES,
+        "summaries": Detail.SUMMARIES,
+        "full": Detail.FULL,
+    }
+    if normalized not in levels:
+        raise GraphContextError(
+            f"unknown hold detail {value!r}; allowed: summaries (default), full"
+        )
+    return levels[normalized]
+
+
+def _render_session_echo(services: Services) -> list[str]:
+    """The `get` action's session section (WP15): scratchpad + working set
+    + recent trail, names resolved against the live graph (vanished nodes
+    are skipped, never crash a response)."""
+    session = services.session
+    graph = services.repository.graph
+    working_set = session.working_set
+
+    def name_of(node_id: NodeId) -> str | None:
+        if not graph.has_node(node_id):
+            return None
+        node = graph.node(node_id)
+        return f"{node.name} ({node.type}, id={node.id})"
+
+    lines = [f"scratchpad: {session.scratchpad or '(empty)'}"]
+    held = [
+        f"- {label} [{entry.detail.value}]"
+        for entry in working_set.entries
+        if (label := name_of(entry.node_id))
+    ]
+    if held:
+        full_used = sum(
+            1 for e in working_set.entries if e.detail is Detail.FULL
+        )
+        lines.append(
+            f"working set ({full_used}/{working_set.full_slots} full, "
+            f"{len(working_set) - full_used}/{working_set.summary_slots} "
+            "summary slots):"
+        )
+        lines.extend(held)
+    else:
+        lines.append(
+            "working set: empty -- keep a node in every turn's context "
+            "with context action='hold'."
+        )
+    recent = [n for i in session.recent.items if (n := name_of(i))]
+    if recent:
+        lines.append(f"recent: {', '.join(r.split(' (')[0] for r in recent)}")
+    return lines
+
+
 @guarded
 async def context_tool(
     services: Services,
     action: str = "get",
     node_id: str = "",
     project: str = "",
+    text: str = "",
+    detail: str = "",
 ) -> str:
     graph = services.repository.graph
+    session = services.session
     if action == "get":
         # Count only story nodes -- the managed SessionContext node and Prose
         # passages are bookkeeping and would otherwise inflate an empty world.
         story = [n for n in graph.nodes() if n.role not in schema.INFRA_ROLES]
         stale = sum(1 for n in story if n.summary_stale)
-        return (
+        lines = [
             f"graph: {len(story)} nodes, {graph.edge_count()} edges, "
             f"{stale} stale summaries. "
-            "Call context action='overview' for entry-point node ids."
-        )
+            "Call context action='overview' for entry-point node ids.",
+            *_render_session_echo(services),
+        ]
+        return "\n".join(lines)
     if action in {"overview", "map"}:
         # Derived cold-start map: per-type counts + highest-degree hub nodes,
         # each with an id to start exploring from. Empty graph -> guidance,
@@ -380,18 +445,69 @@ async def context_tool(
             "Anytype space; switching spaces means restarting the server "
             "with a different ANYTYPE_SPACE_ID."
         )
-    if action in {"focus", "pin", "unpin", "remove", "clear"}:
-        if action == "clear":
-            services.session.focus.clear()
-            return "focus cleared (pinned entries kept)."
+    if action == "note":
+        if len(text) > SCRATCHPAD_MAX_CHARS:
+            raise GraphContextError(
+                f"scratchpad is limited to {SCRATCHPAD_MAX_CHARS} characters "
+                f"(got {len(text)}); condense it -- durable facts belong in "
+                "the graph, not the scratchpad"
+            )
+        session.scratchpad = text.strip()
+        # Flush immediately: the scratchpad is the model's cross-turn
+        # memory; losing it to the mutation debounce defeats the feature.
+        if services.persister is not None:
+            await services.persister.flush()
+        if not session.scratchpad:
+            return "scratchpad cleared."
+        return (
+            f"scratchpad replaced ({len(session.scratchpad)} chars); it is "
+            "echoed at the start of your next turn."
+        )
+    if action == "hold":
         if not node_id:
-            raise GraphContextError(f"action {action!r} requires node_id")
+            raise GraphContextError(
+                "action 'hold' requires node_id (a node id or name)"
+            )
+        level = _parse_hold_detail(detail)
         node_id = await _resolve(services, node_id)  # accept a name first
-        getattr(services.session.focus, "push" if action == "focus" else action)(node_id)
-        return f"focus {action}: {graph.node(node_id).name}"
+        outcome = session.working_set.hold(node_id, level)
+        parts = [f"holding {graph.node(node_id).name} [{level.value}]"]
+        parts.extend(
+            f"demoted to summaries ({session.working_set.full_slots} full "
+            f"slots): {graph.node(i).name}"
+            for i in outcome.demoted if graph.has_node(i)
+        )
+        parts.extend(
+            f"released ({session.working_set.summary_slots} summary slots): "
+            f"{graph.node(i).name}"
+            for i in outcome.evicted if graph.has_node(i)
+        )
+        return "; ".join(parts) + "."
+    if action == "release":
+        if not node_id:
+            raise GraphContextError(
+                "action 'release' requires node_id (a node id or name)"
+            )
+        try:
+            resolved = await _resolve(services, node_id)
+        except NodeNotFound:
+            # The node may have been deleted out from under the hold; a
+            # raw-id release must still work so the set can be tidied.
+            if session.working_set.release(node_id):
+                return f"released {node_id} (node no longer exists)."
+            raise
+        if session.working_set.release(resolved):
+            return f"released {graph.node(resolved).name}."
+        return f"{graph.node(resolved).name} was not held."
+    if action == "clear":
+        session.working_set.clear()
+        return (
+            "working set cleared. The scratchpad is kept; clear it with "
+            "action='note', text=''."
+        )
     raise GraphContextError(
         f"unknown action {action!r}; allowed: get, overview, resync, "
-        "set_project, focus, pin, unpin, remove, clear"
+        "set_project, note, hold, release, clear"
     )
 
 
@@ -510,7 +626,7 @@ async def explore_tool(
     if includes is None:
         # WP2 default: bookkeeping roles stay invisible unless included.
         exclude_roles = DEFAULT_EXPLORE_EXCLUDE_ROLES
-    # Empty start still defaults to the focus-stack top in the Explorer.
+    # Empty start still defaults to the session default in the Explorer.
     if start:
         start = await _resolve(services, start)
     result = await services.explorer.explore(

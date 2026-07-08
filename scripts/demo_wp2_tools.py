@@ -41,12 +41,12 @@ async def main() -> None:
 
     show("create mira", await tools.create_node_tool(
         svc, type="Character", name="Mira", summary="Exiled siege engineer."))
-    mira = svc.session.focus.top
+    mira = svc.session.recent.items[0]
     show("create siege (linked in one call)", await tools.create_node_tool(
         svc, type="Event", name="Siege of Brakk", summary="The city falls.",
         story_time=10,
         links=[{"edge_type": "participated_in", "other": mira, "outgoing": False}]))
-    siege = svc.session.focus.top
+    siege = svc.session.recent.items[0]
 
     show("scene assembly via explore", await tools.explore_tool(
         svc, start=siege, depth=2, include_types=["Character", "Location", "Item"],

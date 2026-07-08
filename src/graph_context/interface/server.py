@@ -87,10 +87,18 @@ def _services(ctx: Context[Any, Any, Any]) -> Services:
 
 @mcp.tool(description=_PROFILE.tool_docs["context"])
 async def context(
-    ctx: Context[Any, Any, Any], action: str = "get", node_id: str = "", project: str = ""
+    ctx: Context[Any, Any, Any],
+    action: str = "get",
+    node_id: str = "",
+    project: str = "",
+    text: str = "",
+    detail: str = "",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
-    return await tools.context_tool(_services(ctx), action=action, node_id=node_id, project=project)
+    return await tools.context_tool(
+        _services(ctx), action=action, node_id=node_id, project=project,
+        text=text, detail=detail,
+    )
 
 
 @mcp.tool(description=_PROFILE.tool_docs["create_node"])

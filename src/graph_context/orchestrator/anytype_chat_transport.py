@@ -32,7 +32,7 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -226,6 +226,12 @@ class AnytypeChatTurnHandler:
     spaces: Mapping[str, str]
     sent: SentMessages = field(default_factory=SentMessages)
     cursor: ChatCursor = field(default_factory=ChatCursor)
+    # WP15: where each chat's conversation memory begins. ``/clear`` never
+    # deletes chat messages (the chat is the human record; there is no
+    # bulk-delete endpoint anyway) -- it records a boundary, and startup
+    # seeding only reads history after it. A second ChatCursor because the
+    # need is identical: a persisted per-chat order_id watermark.
+    clear_marks: ChatCursor = field(default_factory=ChatCursor)
     bot_identity: str = ""
 
     def accepts(self, message: InboundChatMessage) -> bool:
@@ -242,6 +248,39 @@ class AnytypeChatTurnHandler:
             return False
         return True
 
+    def seed_events(
+        self, chat_id: str, messages: Sequence[InboundChatMessage]
+    ) -> list[tuple[str, str]]:
+        """Classify already-answered history into conversation-memory seed
+        events (WP15 startup catch-up).
+
+        ``messages`` is the fetched recency window, oldest-first. Kept:
+        messages after the chat's ``/clear`` watermark and at or below the
+        cursor (anything newer is about to be answered as a real turn and
+        remembered there). Bot messages are recognised by the same two
+        signals the gate uses -- the sent ledger and the identity suffix;
+        ``/``-commands are dropped (they were never conversation).
+        """
+        seed: list[tuple[str, str]] = []
+        for message in messages:
+            if message.chat_id != chat_id:
+                continue
+            if not self.clear_marks.is_new(message):
+                continue  # at or before the last /clear
+            if self.cursor.is_new(message):
+                continue  # unanswered backlog: the catch-up turn owns it
+            text = message.text.strip()
+            if not text:
+                continue
+            ours = message.message_id in self.sent or (
+                self.bot_identity != ""
+                and message.creator.endswith(self.bot_identity)
+            )
+            if not ours and text.startswith("/"):
+                continue
+            seed.append(("assistant" if ours else "user", text))
+        return seed
+
     async def run_turn(
         self,
         message: InboundChatMessage,
@@ -255,6 +294,10 @@ class AnytypeChatTurnHandler:
         object attached to the first chunk as a card.
         """
         self.cursor.advance(message)
+        if message.text.strip() == "/clear":
+            # The orchestrator empties the in-memory ring; the watermark
+            # makes the clear survive a restart (seeding stops here).
+            self.clear_marks.fast_forward(message.chat_id, message.order_id)
         route = self.routes[message.chat_id]
         async with route.lock:
             events = await route.orchestrator.handle_message(

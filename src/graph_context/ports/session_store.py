@@ -1,10 +1,10 @@
 """SessionStore port: persistence for the session's working state.
 
 The proposal persists session state as a ``SessionContext`` meta-node so a
-restarted server resumes with the same focus stack ("survives restarts,
+restarted server resumes with the same working set ("survives restarts,
 lays groundwork for multi-user"). The port deals in the plain-dict
 snapshots produced by ``SessionState.to_snapshot()``; implementations know
-nothing about focus-stack semantics.
+nothing about working-set semantics.
 
 Contract:
 * ``load`` returns ``None`` when no snapshot exists yet. Implementations

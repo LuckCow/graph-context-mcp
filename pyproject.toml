@@ -93,6 +93,7 @@ source_modules = [
     "graph_context.interface.tools",
     "graph_context.interface.presenters",
     "graph_context.interface.profiles",
+    "graph_context.interface.context_block",
 ]
 forbidden_modules = ["graph_context.infrastructure"]
 

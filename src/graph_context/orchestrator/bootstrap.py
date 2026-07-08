@@ -118,7 +118,7 @@ def build_driver() -> tuple[LLMDriver, str, str]:
         driver = ClaudeAgentDriver(model=model, effort=effort)  # type: ignore[arg-type]
         help_line = (
             "talking to the model on your Claude subscription; /mode [name] "
-            "inspects/switches mode."
+            "inspects/switches mode; /clear resets conversation memory."
         )
         return driver, model or "claude-code-default", help_line
     raise GraphContextError(

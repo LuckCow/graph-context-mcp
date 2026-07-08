@@ -45,7 +45,7 @@ async def main() -> None:
 
     show("create alice", await tools.create_node_tool(
         svc, type="Person", name="Alice Reyes", summary="Staff engineer, storage."))
-    alice = svc.session.focus.top
+    alice = svc.session.recent.items[0]
     show("create team (linked in one call)", await tools.create_node_tool(
         svc, type="Team", name="Storage Guild", summary="Owns the storage layer.",
         links=[{"edge_type": "member_of", "other": alice, "outgoing": False}],
@@ -64,14 +64,14 @@ async def main() -> None:
         story_time=20260630,
         links=[{"edge_type": "attended", "other": alice, "outgoing": False}],
         create_missing_relations=True))
-    meeting = svc.session.focus.top
+    meeting = svc.session.recent.items[0]
 
     show("decision recorded against the meeting", await tools.create_node_tool(
         svc, type="Decision", name="Adopt object storage",
         summary="Move blob data to object storage in Q3.", story_time=20260630,
         links=[{"edge_type": "decided_in", "other": meeting}],
         create_missing_relations=True))
-    decision = svc.session.focus.top
+    decision = svc.session.recent.items[0]
 
     show("meeting brief via explore", await tools.explore_tool(
         svc, start=meeting, depth=2, detail="summaries"))

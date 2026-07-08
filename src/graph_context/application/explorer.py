@@ -3,11 +3,12 @@
 The pure traversal engines live in the domain; this service adds the
 session-aware behaviour the tools promise:
 
-    * an omitted start node defaults to the top of the focus stack
-      (raising :class:`EmptyFocusStack` with an actionable message when
-      there is nothing to default to);
-    * the start node is pushed onto the focus stack, so successive
-      explorations naturally walk the working set forward.
+    * an omitted start node defaults to the session's working-set top,
+      falling back to the most recently touched node (raising
+      :class:`NoDefaultStart` with an actionable message when there is
+      nothing to default to);
+    * the start node is touched, so it lands in recent history -- the
+      working set itself is curated only by explicit ``hold`` calls (WP15).
 
 Scene assembly is not a separate tool: it is an ``ExploreQuery``
 configuration (start at an Event, depth 1-2, include Characters /
@@ -26,7 +27,7 @@ from graph_context.domain.models import NodeId
 from graph_context.domain.pathfinding import Path
 from graph_context.domain.session import SessionState
 from graph_context.domain.traversal import ExploreQuery, ExploreResult
-from graph_context.errors import EmptyFocusStack
+from graph_context.errors import NoDefaultStart
 from graph_context.ports.graph_repository import GraphRepository
 
 
@@ -38,7 +39,7 @@ class Explorer:
         self._session = session
 
     async def explore(self, query: ExploreQuery) -> ExploreResult:
-        """Run a bounded traversal; empty ``query.start`` uses the focus top."""
+        """Run a bounded traversal; empty ``query.start`` uses the session default."""
         query = replace(query, start=self._resolve_start(query.start))
         result = traversal.explore(self._repository.graph, query)
         self._session.touch(query.start)
@@ -66,7 +67,7 @@ class Explorer:
         edge_types: Iterable[str] | None = None,
         max_length: int = pathfinding.DEFAULT_MAX_LENGTH,
     ) -> Path | None:
-        """Shortest meaningful path; ``source=None`` uses the focus top."""
+        """Shortest meaningful path; ``source=None`` uses the session default."""
         resolved = self._resolve_start(source)
         path = pathfinding.find_path(
             self._repository.graph,
@@ -81,7 +82,7 @@ class Explorer:
     def _resolve_start(self, start: NodeId | None) -> NodeId:
         if start:
             return start
-        top = self._session.focus.top
-        if top is None:
-            raise EmptyFocusStack()
-        return top
+        default = self._session.default_start()
+        if default is None:
+            raise NoDefaultStart()
+        return default

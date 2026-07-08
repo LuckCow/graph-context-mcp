@@ -1406,6 +1406,50 @@ Cutover findings (2026-07-07):
 
 ---
 
+## WP15 — Curated cross-turn context (ADR 020) — **shipped 2026-07-08**
+
+The context-management overhaul: the bot deliberately remembers across
+turns instead of re-orienting from scratch. Three slices, all landed:
+
+* **Session model + tool surface.** The focus stack is retired: its
+  intent (one node's full picture guiding exploration) is served by
+  granularity buckets. `WorkingSet` holds explicitly-`hold`-ed nodes at
+  ≤2 `full` / ≤6 `summaries` slots (caps are domain rules; overflow
+  demotes/evicts oldest, reported back); `touch()` records recent
+  history only; `SessionState.scratchpad` (≤2000 chars) is replaced
+  wholesale by `context action="note"` and flushes immediately.
+  Snapshot v2, v1 restored leniently (focus entries → summary holds).
+  `Detail` moved to `domain.models`. Context tool actions:
+  `note`/`hold`/`release`/`clear`; `get` echoes the session; docstrings
+  re-pinned across all three profiles. `explore`/`find_path` default to
+  working-set top, then most-recent-touched (`NoDefaultStart` teaches
+  `hold`).
+* **Turn-start context block** (`interface/context_block.py`). One
+  block opens every orchestrator turn: project, scratchpad, working set
+  (full bucket leads with body + one-hop edges; summary entries with
+  edges), recent names. Assembled once per turn (fixing the removed
+  per-response header's cost profile); empty session renders nothing;
+  budget ladder degrades bodies → summary edges → recent; vanished
+  nodes skipped. Orchestrator reaches it legally (it already holds
+  `Services`); import-linter list extended.
+* **Conversation memory + /clear.** `ConversationMemory` per pipeline
+  session (~8 turns / 6000 chars, both bounds) replays prior
+  user/assistant messages ahead of the block. `/clear` is a pipeline
+  command (all transports); on the Anytype transport it also records an
+  `order_id` watermark in a second persisted `ChatCursor`, and startup
+  catch-up seeds the ring from the answered window slice (after the
+  watermark, ≤ cursor, gate-signal bot classification, commands
+  dropped). Chat messages are never deleted — the chat stays the human
+  record.
+
+Deferred with seams left open: per-chat/thread keyed session store
+(WP8; memory/cursor/marks already keyed by chat id), ranker
+`session_seeds` wiring from the working set, one-way scratchpad mirror
+into the SessionContext body for desktop visibility.
+
+
+---
+
 ## Sequencing
 
 ```

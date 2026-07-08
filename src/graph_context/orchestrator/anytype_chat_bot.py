@@ -76,14 +76,18 @@ def _sent_path(cursor_path: str | None) -> str | None:
     return str(path.with_name(f"{path.stem}-sent{path.suffix}"))
 
 
-async def _maybe_turn(
-    handler: AnytypeChatTurnHandler,
-    space_id: str,
-    chat_id: str,
-    message: ChatMessage,
-    chat_client: AnytypeChatClient,
-) -> None:
-    inbound = InboundChatMessage(
+def _cleared_path(cursor_path: str | None) -> str | None:
+    """The /clear watermark file rides next to the cursor too (WP15)."""
+    if cursor_path is None:
+        return None
+    path = Path(cursor_path)
+    return str(path.with_name(f"{path.stem}-cleared{path.suffix}"))
+
+
+def _inbound(
+    space_id: str, chat_id: str, message: ChatMessage
+) -> InboundChatMessage:
+    return InboundChatMessage(
         space_id=space_id,
         chat_id=chat_id,
         message_id=message.id,
@@ -91,6 +95,16 @@ async def _maybe_turn(
         text=message.text,
         order_id=message.order_id,
     )
+
+
+async def _maybe_turn(
+    handler: AnytypeChatTurnHandler,
+    space_id: str,
+    chat_id: str,
+    message: ChatMessage,
+    chat_client: AnytypeChatClient,
+) -> None:
+    inbound = _inbound(space_id, chat_id, message)
     if not handler.accepts(inbound):
         return
 
@@ -123,6 +137,19 @@ async def _catch_up(
                 chat_id, len(window),
             )
         return
+    # WP15: rebuild conversation memory from the already-answered slice of
+    # the window (bounded by the /clear watermark) before taking turns, so
+    # the first post-restart turn remembers the conversation.
+    seed = handler.seed_events(chat_id, [
+        _inbound(chat_client.space_id, chat_id, message) for message in window
+    ])
+    if seed:
+        route = handler.routes[chat_id]
+        route.orchestrator.seed_memory(f"anytype:{chat_id}", seed)
+        logger.info(
+            "chat %s: seeded conversation memory with %d message(s)",
+            chat_id, len(seed),
+        )
     for message in window:  # the gate drops everything <= the cursor
         await _maybe_turn(
             handler, chat_client.space_id, chat_id, message, chat_client
@@ -189,6 +216,7 @@ async def main() -> None:
         spaces=runtimes.spaces,
         cursor=ChatCursor(cursor_path),
         sent=SentMessages(path=_sent_path(cursor_path)),
+        clear_marks=ChatCursor(_cleared_path(cursor_path)),
         # Quirk C6 side door: the bot's own default space names its
         # identity. "" (e.g. desktop endpoint, shared account) degrades
         # to posted-id suppression alone.

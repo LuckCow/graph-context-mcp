@@ -22,7 +22,7 @@ Read-only turns write nothing -- the caller simply has nothing to drain.
 Writes go through the repository directly, NOT the journalled NodeWriter:
 recording provenance must never journal itself, and intent nodes are
 exempt from the summary-staleness lifecycle. Like Prose, intent nodes
-never touch the focus stack (infra role, hidden from traversal).
+never touch the session working set (infra role, hidden from traversal).
 """
 
 from __future__ import annotations

@@ -82,7 +82,7 @@ class TestChannelBindingsFile:
 
     def test_two_channels_on_one_space_are_rejected(self, tmp_path: Path) -> None:
         """One SessionContext node per space: two runtimes would clobber
-        each other's focus/recent snapshot."""
+        each other's session snapshot."""
         path = _write(
             tmp_path,
             f'[channels.{CHANNEL_A}]\nspace_id = "shared"\n'

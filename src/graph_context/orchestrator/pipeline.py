@@ -13,24 +13,33 @@ so every transport gets it for free. Every ``/mode`` first refreshes the
 registry through the injected ``reload_registry`` hook (ADR 015 amendment:
 in-space Activity Mode objects), so an edit made in Anytype applies
 without a restart; a failed refresh degrades to the last good registry
-with an actionable error. Mode is per-session; the underlying focus-stack
+with an actionable error. Mode is per-session; the underlying graph-session
 session is still the process-wide one (per-session ``SessionState`` is
 WP8).
 
-Turn-local transcripts: the driver sees the current turn's events only.
-Cross-turn conversation memory is deliberately the DRIVER's concern (the
-LangGraph thread arrives with the framework) -- the seam's contract stays
-"message in, reply events out".
+Cross-turn context (WP15, ADR 020): each turn opens with the session's
+context block -- scratchpad, curated working set, recent trail -- built
+ONCE per turn by ``interface.context_block`` and prepended to the
+turn-local transcript (every ``decide`` re-renders the transcript into a
+fresh CLI session, so the block rides each decision without being
+re-assembled). An empty session injects nothing. The block is state the
+model curates via the ``context`` tool; :class:`ConversationMemory` is
+the other half -- a bounded per-session ring of prior user/assistant
+messages replayed ahead of the block, cleared by the ``/clear`` command
+(handled here, like ``/mode``, so every transport gets it). Transports
+can prime the ring after a restart via :meth:`Orchestrator.seed_memory`.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections import deque
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.tools import Services
 from graph_context.orchestrator import capture, modes
@@ -66,9 +75,68 @@ class ReplyEvent:
     kind: str = "reply"
 
 
+DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
+DEFAULT_MEMORY_CHARS = 6000  # evict oldest beyond this total
+
+
+class ConversationMemory:
+    """Bounded ring of prior user/assistant messages (WP15).
+
+    The pipeline replays it at the head of each turn's transcript so the
+    driver sees the conversation so far; ``/clear`` empties it. Bounded
+    twice -- event count and total characters -- because either alone
+    lets one pathological turn crowd out everything else. Eviction is
+    oldest-first and event-granular; a turn's user half may outlive its
+    reply half, which reads fine in transcript form.
+    """
+
+    def __init__(
+        self,
+        max_events: int = DEFAULT_MEMORY_EVENTS,
+        max_chars: int = DEFAULT_MEMORY_CHARS,
+    ) -> None:
+        self._max_chars = max_chars
+        self._events: deque[tuple[str, str]] = deque(maxlen=max_events)
+
+    def remember_turn(self, user_text: str, reply_text: str) -> None:
+        self._events.append(("user", user_text))
+        self._events.append(("assistant", reply_text))
+        self._shrink()
+
+    def seed(self, events: Sequence[tuple[str, str]]) -> None:
+        """Replace the ring with reconstructed history (startup catch-up).
+
+        ``events`` is (kind, text) oldest-first, kinds ``user`` /
+        ``assistant``; the same bounds apply, so an oversized history
+        keeps only its tail.
+        """
+        self._events.clear()
+        for kind, text in events:
+            self._events.append((kind, text))
+        self._shrink()
+
+    def clear(self) -> None:
+        self._events.clear()
+
+    def events(self) -> tuple[TranscriptEvent, ...]:
+        return tuple(
+            TranscriptEvent(kind, text) for kind, text in self._events
+        )
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def _shrink(self) -> None:
+        while self._events and sum(
+            len(text) for _, text in self._events
+        ) > self._max_chars:
+            self._events.popleft()
+
+
 @dataclass(slots=True)
 class _SessionState:
     mode: str  # a loaded ModeSpec name
+    memory: ConversationMemory = field(default_factory=ConversationMemory)
 
 
 @dataclass(slots=True)
@@ -132,13 +200,30 @@ class Orchestrator:
                 # state.mode is post-switch: the mode the session is IN now.
                 self.turn_log.turn_end(session_id, state.mode, mode_events)
             return mode_events
+        if stripped == "/clear":
+            state.memory.clear()
+            clear_events = [ReplyEvent(
+                "conversation memory cleared. The scratchpad and working "
+                "set are kept -- reset those with the context tool "
+                "(action='note' with empty text / action='clear').",
+                kind="notice",
+            )]
+            if self.turn_log:
+                self.turn_log.turn_end(session_id, state.mode, clear_events)
+            return clear_events
 
         spec = self._spec(state)
         logger.info(
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
         tools = modes.tool_docs(spec, self.profile)
-        transcript: list[TranscriptEvent] = [TranscriptEvent("user", stripped)]
+        # [prior conversation..., context block, the live message]: history
+        # reads as conversation; the block stays adjacent to the message.
+        transcript: list[TranscriptEvent] = list(state.memory.events())
+        context_block = await build_turn_context(self.services)
+        if context_block:
+            transcript.append(TranscriptEvent("user", context_block))
+        transcript.append(TranscriptEvent("user", stripped))
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
         reply_text = ""
@@ -186,9 +271,19 @@ class Orchestrator:
                 kind="notice",
             ))
         await self._finish_turn(spec, user_id, stripped, reply_text, trace, origin)
+        if reply_text:
+            # Error-only / budget-exhausted turns leave no useful memory.
+            state.memory.remember_turn(stripped, reply_text)
         if self.turn_log:
             self.turn_log.turn_end(session_id, spec.name, events)
         return events
+
+    def seed_memory(
+        self, session_id: str, events: Sequence[tuple[str, str]]
+    ) -> None:
+        """Prime a session's conversation memory from reconstructed history
+        (transports call this once at startup, after a restart)."""
+        self._session(session_id).memory.seed(events)
 
     async def _finish_turn(
         self,

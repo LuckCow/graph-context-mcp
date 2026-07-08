@@ -1,9 +1,11 @@
 """Debounced session persistence (WP3).
 
-Policy (settled in WORK_PACKAGES): never flush per-touch -- the focus
-stack changes on every read. Flush on (a) every N mutations, (b) project
-switch, (c) server shutdown. The tool layer calls ``note_mutation()``
-after each write-ish operation and ``flush()`` from the lifespan teardown.
+Policy (settled in WORK_PACKAGES): never flush per-touch -- recent
+history changes on every read. Flush on (a) every N mutations, (b) project
+switch, (c) server shutdown, (d) scratchpad notes (the tool flushes
+directly: cross-turn memory must not be lost to the debounce). The tool
+layer calls ``note_mutation()`` after each write-ish operation and
+``flush()`` from the lifespan teardown.
 
 Loading is lenient by contract about *expected* trouble -- a store that
 cannot be reached (``GraphContextError``, the SessionStore error contract)

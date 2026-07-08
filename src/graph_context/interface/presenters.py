@@ -12,30 +12,27 @@ every response was removed 2026-07-06 as token waste.)
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from enum import StrEnum
 
 from graph_context.application.node_reader import NodeView
 from graph_context.application.ranker import RankedHit
+from graph_context.domain.models import Detail as Detail  # re-export (WP15)
 from graph_context.domain.models import Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
 from graph_context.domain.query import QueryResult, SortKey, field_value
 from graph_context.domain.traversal import ExploreResult
 
+# Detail moved to domain.models (WP15) -- the working set persists it; it
+# stays importable from here for rendering call sites.
+
 EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
-
-
-class Detail(StrEnum):
-    NAMES = "names"
-    SUMMARIES = "summaries"
-    FULL = "full"
 
 
 def render_overview(overview: GraphOverview) -> str:
     """Render the cold-start entry-point map (``context action='overview'``).
 
     Ids are the last token before the colon on every hub line, so the LLM
-    can copy one straight into ``explore`` / ``get_node`` / ``focus``.
+    can copy one straight into ``explore`` / ``get_node`` / ``hold``.
     """
     if overview.total_story_nodes == 0:
         return "overview: no nodes yet -- use create_node to add the first one."
@@ -45,7 +42,7 @@ def render_overview(overview: GraphOverview) -> str:
         f"{len(overview.type_counts)} types (derived entry-point map).",
         f"types: {types}",
         "entry points (highest-degree nodes; pass an id to explore, "
-        "get_node, or context action='focus'):",
+        "get_node, or context action='hold'):",
     ]
     for hub in overview.hubs:
         node = hub.node

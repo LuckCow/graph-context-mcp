@@ -1,7 +1,7 @@
 """Bounded breadth-first traversal: the engine behind the ``explore`` tool.
 
 Everything here is a pure function over a :class:`GraphIndex`; the
-application layer is responsible for resolving defaults (focus-stack start
+application layer is responsible for resolving defaults (session-default start
 node) and the interface layer for shaping detail levels. This separation is
 what makes the trickiest logic in the system exhaustively unit-testable.
 

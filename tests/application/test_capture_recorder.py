@@ -29,17 +29,17 @@ async def test_record_creates_prose_node_with_references(
     assert targets == {world.mira.id, world.undercroft.id}
 
 
-async def test_record_does_not_touch_the_focus_stack(
+async def test_record_does_not_touch_the_session(
     repository: InMemoryGraphRepository, session: SessionState, world: World
 ) -> None:
     # Prose is an infra role hidden from traversal; recording it must not
-    # push it onto the focus stack or into recent history.
+    # land in the working set or recent history.
     session.touch(world.mira.id)
-    focus_before = list(session.focus.entries)
+    held_before = list(session.working_set.entries)
     recent_before = list(session.recent.items)
     recorder = CaptureRecorder(repository, now=lambda: "t")
     await recorder.record(text="rendered", summary="s", references=[world.mira.id])
-    assert list(session.focus.entries) == focus_before
+    assert list(session.working_set.entries) == held_before
     assert list(session.recent.items) == recent_before
 
 

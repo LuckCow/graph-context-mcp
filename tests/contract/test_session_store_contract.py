@@ -28,9 +28,13 @@ from graph_context.infrastructure.anytype.session_repository import AnytypeSessi
 from graph_context.infrastructure.memory.fake_session_store import InMemorySessionStore
 
 SNAPSHOT: dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "project": "Ashfall",
-    "focus": [{"node_id": "n1", "pinned": True}, {"node_id": "n2", "pinned": False}],
+    "scratchpad": "next turn: resolve the gate standoff",
+    "working_set": [
+        {"node_id": "n1", "detail": "full"},
+        {"node_id": "n2", "detail": "summaries"},
+    ],
     "recent": ["n2", "n1"],
 }
 

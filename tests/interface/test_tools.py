@@ -35,6 +35,88 @@ async def test_no_context_header_on_error(services: tools.Services) -> None:
     assert out.startswith("ERROR:")
 
 
+# -- the context tool's curation surface (WP15) ------------------------------
+
+
+class TestScratchpad:
+    async def test_note_replaces_and_reports(self, services: tools.Services) -> None:
+        out = await tools.context_tool(
+            services, action="note", text="next: the gate standoff"
+        )
+        assert "scratchpad replaced" in out
+        assert services.session.scratchpad == "next: the gate standoff"
+        await tools.context_tool(services, action="note", text="new plan")
+        assert services.session.scratchpad == "new plan"  # replace, not append
+
+    async def test_empty_text_clears(self, services: tools.Services) -> None:
+        services.session.scratchpad = "old"
+        out = await tools.context_tool(services, action="note", text="")
+        assert out == "scratchpad cleared."
+        assert services.session.scratchpad == ""
+
+    async def test_over_cap_error_teaches_condensing(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.context_tool(services, action="note", text="x" * 2001)
+        assert "ERROR:" in out
+        assert "2000" in out and "graph" in out
+
+
+class TestWorkingSetActions:
+    async def test_hold_accepts_a_name_and_reports_the_level(
+        self, services: tools.Services, world: World
+    ) -> None:
+        out = await tools.context_tool(
+            services, action="hold", node_id="Mira", detail="full"
+        )
+        assert "holding Mira [full]" in out
+        assert world.mira.id in services.session.working_set
+
+    async def test_hold_overflow_reports_the_demotion(
+        self, services: tools.Services, world: World
+    ) -> None:
+        for node in (world.mira, world.siege, world.undercroft):
+            out = await tools.context_tool(
+                services, action="hold", node_id=node.id, detail="full"
+            )
+        assert "demoted to summaries" in out and "Mira" in out
+
+    async def test_bad_hold_detail_lists_allowed_levels(
+        self, services: tools.Services, world: World
+    ) -> None:
+        out = await tools.context_tool(
+            services, action="hold", node_id=world.mira.id, detail="everything"
+        )
+        assert "ERROR:" in out
+        assert "summaries" in out and "full" in out
+
+    async def test_release_and_clear_keep_the_scratchpad(
+        self, services: tools.Services, world: World
+    ) -> None:
+        services.session.scratchpad = "kept"
+        await tools.context_tool(services, action="hold", node_id=world.mira.id)
+        out = await tools.context_tool(
+            services, action="release", node_id=world.mira.id
+        )
+        assert "released Mira" in out
+        await tools.context_tool(services, action="hold", node_id=world.siege.id)
+        out = await tools.context_tool(services, action="clear")
+        assert "working set cleared" in out
+        assert services.session.working_set.entries == ()
+        assert services.session.scratchpad == "kept"
+
+    async def test_get_echoes_scratchpad_and_working_set(
+        self, services: tools.Services, world: World
+    ) -> None:
+        await tools.context_tool(services, action="note", text="open thread: gate")
+        await tools.context_tool(
+            services, action="hold", node_id=world.mira.id, detail="full"
+        )
+        out = await tools.context_tool(services, action="get")
+        assert "scratchpad: open thread: gate" in out
+        assert "Mira" in out and "[full]" in out
+
+
 # -- errors are prompts -- parse-level validation ----------------------------
 # (The type/relation vocabulary is OPEN; "does this type/relation exist in
 # the space?" is enforced by the Anytype repository and tested in

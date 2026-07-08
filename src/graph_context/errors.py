@@ -102,12 +102,13 @@ class AmbiguousNodeName(GraphContextError):
         )
 
 
-class EmptyFocusStack(GraphContextError):
-    """A query relied on the focus-stack default, but the stack is empty."""
+class NoDefaultStart(GraphContextError):
+    """A query relied on the session default, but nothing is held or recent."""
 
     def __init__(self) -> None:
         super().__init__(
-            "no start node given and the focus stack is empty; pass an "
-            "explicit start, focus a node first, or call context "
+            "no start node given, nothing held in the working set, and "
+            "nothing recently touched; pass an explicit start, hold a node "
+            "first (context action='hold'), or call context "
             "action='overview' to list entry-point node ids."
         )

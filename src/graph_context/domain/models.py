@@ -14,11 +14,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from graph_context.domain.schema import Role
 
 NodeId = str
 """Opaque node identifier, owned by the storage layer."""
+
+
+class Detail(StrEnum):
+    """How much of a node reaches the LLM: name line, +summary, +body.
+
+    Historically an interface-only rendering knob; since the working set
+    holds nodes *at* a detail level (WP15) it is a persisted domain value.
+    ``interface.presenters`` re-exports it for the rendering call sites.
+    """
+
+    NAMES = "names"
+    SUMMARIES = "summaries"
+    FULL = "full"
 
 TimelineValue = float | str
 """A node's position on the Event timeline (ADR 015): any ORDERED value.

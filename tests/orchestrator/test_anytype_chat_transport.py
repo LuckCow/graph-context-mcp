@@ -290,3 +290,63 @@ class TestIntentOrigin:
         intents = [n for n in repository.graph.nodes() if n.type_key == "gc_intent"]
         assert len(intents) == 1
         assert intents[0].fields["origin"] == f"anytype:{CHAT}:msg-42"
+
+
+class TestClearWatermarkAndSeeding:
+    """WP15: /clear is a persisted context boundary; startup seeding
+    rebuilds conversation memory from the answered slice of the window."""
+
+    async def test_clear_records_a_persisted_watermark(self, tmp_path: Path) -> None:
+        clear_marks = ChatCursor(str(tmp_path / "cleared.json"))
+        handler = _handler(clear_marks=clear_marks)
+        await handler.run_turn(
+            _message(text="/clear", order_id="o7"), _SendRecorder()
+        )
+        assert not clear_marks.is_new(_message(order_id="o7"))
+        assert clear_marks.is_new(_message(order_id="o8"))
+        # Persisted: a fresh cursor instance reads the same boundary.
+        reloaded = ChatCursor(str(tmp_path / "cleared.json"))
+        assert not reloaded.is_new(_message(order_id="o7"))
+
+    async def test_clear_reaches_the_orchestrator_as_a_notice(self) -> None:
+        handler = _handler()
+        send = _SendRecorder()
+        await handler.run_turn(_message(text="/clear"), send)
+        assert any("memory cleared" in piece for piece in send.pieces)
+
+    def test_seed_events_classifies_and_bounds_the_window(self) -> None:
+        sent = SentMessages()
+        sent.add("bot-1")
+        cursor = ChatCursor()
+        cursor.fast_forward(CHAT, "o6")  # everything <= o6 was answered
+        clear_marks = ChatCursor()
+        clear_marks.fast_forward(CHAT, "o2")  # a /clear happened at o2
+        handler = _handler(
+            sent=sent, cursor=cursor, clear_marks=clear_marks,
+            bot_identity="botIdent",
+        )
+        window = [
+            _message(message_id="h0", order_id="o1", text="before the clear"),
+            _message(message_id="h1", order_id="o3", text="hi bot"),
+            _message(message_id="bot-1", order_id="o4", text="hello human"),
+            _message(message_id="h2", order_id="o5", text="/mode authoring"),
+            _message(
+                message_id="b2", order_id="o5x", text="by identity",
+                creator=f"_participant_{SPACE}_botIdent",
+            ),
+            _message(message_id="h3", order_id="o7", text="unanswered backlog"),
+        ]
+        assert handler.seed_events(CHAT, window) == [
+            ("user", "hi bot"),            # after the clear, answered
+            ("assistant", "hello human"),  # ours via the sent ledger
+            ("assistant", "by identity"),  # ours via the identity suffix
+        ]
+
+    def test_seed_events_without_a_clear_takes_the_whole_answered_window(
+        self,
+    ) -> None:
+        cursor = ChatCursor()
+        cursor.fast_forward(CHAT, "o9")
+        handler = _handler(cursor=cursor)
+        window = [_message(message_id="h1", order_id="o3", text="hello")]
+        assert handler.seed_events(CHAT, window) == [("user", "hello")]

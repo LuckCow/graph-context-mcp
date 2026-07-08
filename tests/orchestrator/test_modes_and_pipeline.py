@@ -32,7 +32,11 @@ from graph_context.orchestrator.drivers import (
     TranscriptEvent,
 )
 from graph_context.orchestrator.modes import MUTATION_TOOLS, binding_for, load_registry
-from graph_context.orchestrator.pipeline import LAST_TURN_WARNING, Orchestrator
+from graph_context.orchestrator.pipeline import (
+    LAST_TURN_WARNING,
+    ConversationMemory,
+    Orchestrator,
+)
 
 FICTION = get_profile("fiction")
 AUTHORING = next(s for s in FICTION.mode_specs if s.name == "authoring")
@@ -200,6 +204,27 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         return await super().decide(transcript, tools, goal)
 
 
+class TestConversationMemoryBounds:
+    def test_event_cap_drops_the_oldest_turn(self) -> None:
+        memory = ConversationMemory(max_events=4)
+        for i in range(3):
+            memory.remember_turn(f"q{i}", f"a{i}")
+        texts = [e.text for e in memory.events()]
+        assert texts == ["q1", "a1", "q2", "a2"]
+
+    def test_char_cap_evicts_oldest_first(self) -> None:
+        memory = ConversationMemory(max_chars=20)
+        memory.remember_turn("x" * 15, "y" * 15)
+        memory.remember_turn("new q", "new a")
+        assert [e.text for e in memory.events()] == ["new q", "new a"]
+
+    def test_seed_replaces_and_applies_the_same_bounds(self) -> None:
+        memory = ConversationMemory(max_events=2)
+        memory.remember_turn("old", "old")
+        memory.seed([("user", "a"), ("assistant", "b"), ("user", "c")])
+        assert [e.text for e in memory.events()] == ["b", "c"]
+
+
 class TestPipeline:
     async def test_mutating_mode_turn_creates_and_replies(
         self, services: Services
@@ -243,6 +268,107 @@ class TestPipeline:
         assert "world_modeling" in current[0].text and "authoring" in current[0].text
         bad = await orchestrator.handle_message("s1", "u1", "/mode chaos")
         assert bad[0].kind == "error" and "authoring" in bad[0].text
+
+    async def test_turn_opens_with_the_context_block_exactly_once(
+        self, services: Services
+    ) -> None:
+        """WP15: the block is the transcript's first event and is assembled
+        once per turn -- later decisions in the same turn see the same
+        single block, never a second copy."""
+        services.session.scratchpad = "open thread: the gate"
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="done"),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        assert len(driver.transcripts) == 2  # two decisions in the turn
+        for transcript in driver.transcripts:
+            blocks = [
+                e for e in transcript if e.text.startswith("[session context")
+            ]
+            assert len(blocks) == 1
+            assert transcript[0] is blocks[0]
+        assert "open thread: the gate" in driver.transcripts[0][0].text
+
+    async def test_empty_session_injects_no_block(
+        self, services: Services
+    ) -> None:
+        driver = _TranscriptRecordingDriver([LLMTurn(reply="hi")])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "hello")
+        (transcript,) = driver.transcripts
+        assert [e.text for e in transcript] == ["hello"]
+
+    async def test_conversation_memory_replays_previous_turns(
+        self, services: Services
+    ) -> None:
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="Hi there."), LLMTurn(reply="Again."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "hello")
+        await orchestrator.handle_message("s1", "u1", "and again")
+        second = [(e.kind, e.text) for e in driver.transcripts[1]]
+        assert second[0] == ("user", "hello")
+        assert second[1] == ("assistant", "Hi there.")
+        assert second[-1] == ("user", "and again")
+
+    async def test_memory_is_per_session(self, services: Services) -> None:
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="a"), LLMTurn(reply="b"),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("chat-one", "u1", "first chat")
+        await orchestrator.handle_message("chat-two", "u1", "second chat")
+        assert "first chat" not in [e.text for e in driver.transcripts[1]]
+
+    async def test_clear_empties_memory_and_keeps_session_state(
+        self, services: Services
+    ) -> None:
+        services.session.scratchpad = "kept across /clear"
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="remembered"), LLMTurn(reply="fresh"),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "before the clear")
+        cleared = await orchestrator.handle_message("s1", "u1", "/clear")
+        assert cleared[0].kind == "notice"
+        assert "memory cleared" in cleared[0].text
+        await orchestrator.handle_message("s1", "u1", "after the clear")
+        last = [e.text for e in driver.transcripts[-1]]
+        assert not any("before the clear" in t for t in last)
+        assert any("kept across /clear" in t for t in last)  # block survives
+
+    async def test_seed_memory_primes_a_session(self, services: Services) -> None:
+        driver = _TranscriptRecordingDriver([LLMTurn(reply="ok")])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        orchestrator.seed_memory(
+            "s1", [("user", "earlier question"), ("assistant", "earlier answer")]
+        )
+        await orchestrator.handle_message("s1", "u1", "follow-up")
+        (transcript,) = driver.transcripts
+        assert [(e.kind, e.text) for e in transcript][:2] == [
+            ("user", "earlier question"), ("assistant", "earlier answer"),
+        ]
 
     async def test_driver_receives_the_active_goal(self, services: Services) -> None:
         """ADR 015: the spec's goal prompt reaches the driver each step."""

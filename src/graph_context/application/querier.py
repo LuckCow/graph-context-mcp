@@ -8,7 +8,7 @@ the same engine, so a view edited in the desktop applies on the next
 call with the store's own meaning.
 
 Unlike :class:`Explorer`, no session dependency: a corpus scan has no
-start node to default from the focus stack, and listing the world must
+start node to default from the session, and listing the world must
 not mutate the working set.
 """
 
