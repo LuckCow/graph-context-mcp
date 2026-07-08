@@ -1240,6 +1240,40 @@ after edits (S9f)?
   `spike_todo` type in the bot's GC-E2E now carries
   done/due_date/priority).
 
+### Spike S9 CLOSED (2026-07-08, live sidecar, "Open Tasks" Set in the Todolist space)
+
+The spike moved to the (shared, real) Todolist space: priority select
+(`1 - High/2 - Medium/3 - Low`, numbered so lexicographic order is
+semantic order) attached to the native `task` type, an `Open Tasks` Set
+created via API, source/filter/sorts configured by the human in the
+desktop (the API cannot do that part — sets are creatable but their
+query source and views are desktop-only; views have no write endpoints).
+
+* **S9b: YES — view definitions are fully machine-readable** once the
+  set has a source. Filters: `{property_key, format, condition, value}`
+  (observed: "Done is unchecked" = `condition "eq", value ""` — checkbox
+  absence, matching the ADR 018 neq-matches-absence semantics). Sorts:
+  `{property_key, format, sort_type}`. Quirks: `property_key` in views
+  is camelCase for built-ins (`dueDate`, `lastModifiedDate`) and the raw
+  internal property ID (hex) for user-created properties; `format` is
+  always `"text"`. Both translate via the SpaceRegistry (id -> key) plus
+  a camelCase->snake_case shim.
+* **S9c: YES — server-side execution works**: the done task was
+  excluded, ordering matched the view's sort defs, on
+  `GET /lists/{set}/views/{view_id}/objects`.
+* **S9d:** properties ride inline (same shape as search); a real
+  pagination block is returned and `limit` is honored (cap at >100 scale
+  untested; assume the /search 100 cap until observed otherwise).
+* **S9f: instantly fresh** — a `done` toggle left/rejoined the view with
+  0.0s lag.
+
+**Decision (per ADR 018): S9b holds, so the `view` parameter compiles
+view definitions -> `NodeQuery` and runs CLIENT-SIDE on the GraphIndex**
+— one query engine, works on the memory backend, no per-call I/O. The
+server-side execution path (S9c) remains the fallback documented in
+ADR 018 but is not needed. Next: the WP13 fast-follow build (`view:`
+param, `ViewCatalog` port, registry-backed key translation).
+
 **Fast-follow — run the user's real Sets:** a `view: str` parameter on
 the same tool, mutually exclusive with `type`/`where`/`order_by`/
 `linked_to`. If S9b holds, compile view definitions → `NodeQuery` and run
