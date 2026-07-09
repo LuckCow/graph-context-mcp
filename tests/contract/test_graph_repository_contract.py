@@ -21,8 +21,13 @@ from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
-from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
+from graph_context.infrastructure.memory.fake_repository import (
+    FakeTemplate,
+    InMemoryGraphRepository,
+)
 from tests.anytype.conftest import seed_native_types
+
+SCAFFOLD = "## Template header"
 
 CHAR = NodeDraft("Character", name="Mira", summary="Exiled siege engineer.")
 PLACE = NodeDraft("Location", name="The Undercroft", summary="Vaults beneath Brakk.")
@@ -209,6 +214,31 @@ class TestAnytypeRepository(GraphRepositoryContract):
         await client.aclose()
 
 
+class TemplateContract:
+    """A type template applied on create shapes every implementation the same:
+    its default property values land on the new node, caller-supplied fields
+    override those defaults, and the template body precedes the caller's body.
+    Seeded on ``Item`` with ``status`` defaulting to ``To Do``."""
+
+    async def test_template_default_property_lands_on_create(self, template_repo):
+        node = await template_repo.create_node(NodeDraft("Item", name="Relic", summary="s."))
+        assert node.fields.get("status") == "To Do"
+
+    async def test_explicit_field_overrides_template_default(self, template_repo):
+        node = await template_repo.create_node(
+            NodeDraft("Item", name="Relic", summary="s.", fields={"status": "In Progress"})
+        )
+        assert node.fields.get("status") == "In Progress"
+
+    async def test_template_body_precedes_caller_body(self, template_repo):
+        node = await template_repo.create_node(
+            NodeDraft("Item", name="Relic", summary="s.", body="Caller body.")
+        )
+        body = await template_repo.fetch_body(node.id)
+        assert "Template header" in body and "Caller body." in body
+        assert body.index("Template header") < body.index("Caller body.")
+
+
 class TestInMemoryRoleOverrides(RoleOverrideContract):
     @pytest.fixture
     def meeting_repo(self):
@@ -231,6 +261,39 @@ class TestAnytypeRoleOverrides(RoleOverrideContract):
         repository = AnytypeGraphRepository(
             client, role_overrides={"meeting": Role.EVENT}
         )
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class TestInMemoryTemplates(TemplateContract):
+    @pytest.fixture
+    def template_repo(self):
+        return InMemoryGraphRepository(
+            templates={"Item": FakeTemplate(default_fields={"status": "To Do"}, body=SCAFFOLD)}
+        )
+
+
+class TestAnytypeTemplates(TemplateContract):
+    @pytest.fixture
+    async def template_repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        # A human-authored select property + its options, and a template on the
+        # Item type defaulting status -> To Do (with a scaffold body).
+        status = await client.create_property(
+            {"key": "status", "name": "status", "format": "select"}
+        )
+        to_do = await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
+        await client.create_tag(status["id"], {"name": "In Progress", "color": "yellow"})
+        mock.seed_template(
+            "item", body=SCAFFOLD,
+            default_properties=[{"key": "status", "format": "select", "select": to_do}],
+        )
+        repository = AnytypeGraphRepository(client)
         await repository.hydrate()
         yield repository
         await client.aclose()

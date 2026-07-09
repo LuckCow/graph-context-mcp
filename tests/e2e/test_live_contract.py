@@ -8,7 +8,11 @@ space) is provided by ``tests/e2e/conftest.py``.
 
 from __future__ import annotations
 
+import pytest
+
+from graph_context.domain import schema
 from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from tests.contract.test_graph_repository_contract import GraphRepositoryContract
 
@@ -103,6 +107,48 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         assert "created_date" not in node.fields      # noise filter, live
         updated = await repo.update_node(node.id, fields={"E2E Mood": "wistful"})
         assert updated.fields[key] == "Wistful"       # option REUSED by name
+
+    async def test_template_applied_on_create_live(self, repo):
+        """Templates can't be minted via the API, so this exercises whatever
+        UI-authored template GC-E2E happens to own and skips otherwise. It
+        certifies the repository applies the type's first template on create:
+        the template's scaffold body appears, and any reflectable default
+        property value the template carries lands on the new node."""
+        client = repo._client  # E2E-only reach-in; the port has no templates API
+        target = None
+        for type_key in repo.registry.types_by_key:
+            type_id = repo.registry.type_id_for(type_key)
+            if not type_id or repo.role_for(type_key) in schema.INFRA_ROLES:
+                continue
+            templates = [t async for t in client.list_templates(type_id)]
+            if templates:
+                target = (type_key, templates[0]["id"])
+                break
+        if target is None:
+            pytest.skip("GC-E2E has no UI-authored template to exercise")
+        type_key, template_id = target
+        tpl = await client.get_object(template_id)
+        tpl_body = mapping.body_of(tpl).strip()
+
+        node = await repo.create_node(
+            NodeDraft(repo.registry.type_name(type_key), name="Template Pin", summary="s")
+        )
+        try:
+            if tpl_body:  # the repo applied the template's scaffold body
+                assert tpl_body[:24] in await repo.fetch_body(node.id)
+            # Every reflectable default the template carries must have landed.
+            for entry in tpl.get("properties", []):
+                key, fmt = entry.get("key", ""), entry.get("format", "")
+                if not repo.registry.reflects_field(key, fmt):
+                    continue
+                raw = entry.get(mapping._VALUE_FIELD.get(fmt, ""))
+                if fmt == "checkbox" and not raw:
+                    continue
+                expected = mapping.field_value(fmt, raw)
+                if expected:
+                    assert node.fields.get(key) == expected
+        finally:
+            await client.archive_object(node.id)
 
     async def test_create_with_brand_new_outgoing_relation_links_in_one_call(self, repo):
         """Regression (Mary Abbott incident): creating a node with an outgoing

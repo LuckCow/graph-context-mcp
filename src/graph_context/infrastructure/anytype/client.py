@@ -209,6 +209,12 @@ class AnytypeClient:
     def list_types(self) -> AsyncIterator[dict[str, Any]]:
         return self.paginate(f"{self._space}/types")
 
+    def list_templates(self, type_id: str) -> AsyncIterator[dict[str, Any]]:
+        """A type's templates (ordinary paginated ``data`` envelope). Type object
+        ID, not key. Templates are UI-authored: there is no create counterpart
+        (POST of a ``template``-typed object 500s -- see the templates spike)."""
+        return self.paginate(f"{self._space}/types/{type_id}/templates")
+
     async def create_type(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/types", json=body)
         return _unwrap(payload, "type")
