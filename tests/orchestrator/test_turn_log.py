@@ -37,15 +37,15 @@ class TestTurnLogFile:
     def test_entries_are_timestamped_jsonl_naming_the_mode(self, tmp_path) -> None:
         path = tmp_path / "logs" / "turns.jsonl"  # parent is created
         log = TurnLog(path, now=lambda: "T0")
-        log.user_message("s1", "world_modeling", "u1", "Add Mira.")
-        log.llm_turn("s1", "world_modeling", LLMTurn(reply="done"))
+        log.user_message("t0", "s1", "world_modeling", "u1", "Add Mira.")
+        log.llm_turn("t0", "s1", "world_modeling", LLMTurn(reply="done"))
         first, second = _entries(path)
         assert first == {
-            "ts": "T0", "event": "user", "session": "s1",
+            "ts": "T0", "event": "user", "turn": "t0", "session": "s1",
             "mode": "world_modeling", "user": "u1", "text": "Add Mira.",
         }
         assert second == {
-            "ts": "T0", "event": "llm_turn", "session": "s1",
+            "ts": "T0", "event": "llm_turn", "turn": "t0", "session": "s1",
             "mode": "world_modeling", "reply": "done",
         }
 
@@ -53,8 +53,8 @@ class TestTurnLogFile:
         path = tmp_path / "turns.jsonl"
         log = TurnLog(path, now=lambda: "T0")
         call = ToolCall("create_node", {"type": "Character", "name": "Mira"})
-        log.llm_turn("s1", "world_modeling", LLMTurn(tool_calls=(call,)))
-        log.tool_result("s1", "world_modeling", call, "created char-1 'Mira'")
+        log.llm_turn("t0", "s1", "world_modeling", LLMTurn(tool_calls=(call,)))
+        log.tool_result("t0", "s1", "world_modeling", call, "created char-1 'Mira'")
         decision, result = _entries(path)
         assert decision["tool_calls"] == [
             {"name": "create_node",
@@ -63,6 +63,7 @@ class TestTurnLogFile:
         assert result["tool"] == "create_node"
         assert result["arguments"] == {"type": "Character", "name": "Mira"}
         assert result["result"] == "created char-1 'Mira'"
+        assert decision["turn"] == result["turn"] == "t0"  # one request
 
     def test_oldest_entries_drop_once_the_budget_is_exceeded(
         self, tmp_path
@@ -70,7 +71,7 @@ class TestTurnLogFile:
         path = tmp_path / "turns.jsonl"
         log = TurnLog(path, max_bytes=600, now=lambda: "T0")
         for index in range(20):
-            log.user_message("s1", "m", "u1", f"message number {index:02d}")
+            log.user_message("t0", "s1", "m", "u1", f"message number {index:02d}")
         kept = _entries(path)
         assert kept  # never trimmed to nothing
         assert path.stat().st_size <= 600
@@ -80,8 +81,8 @@ class TestTurnLogFile:
     def test_an_oversized_newest_entry_survives_a_trim(self, tmp_path) -> None:
         path = tmp_path / "turns.jsonl"
         log = TurnLog(path, max_bytes=200, now=lambda: "T0")
-        log.user_message("s1", "m", "u1", "small")
-        log.user_message("s1", "m", "u1", "x" * 500)
+        log.user_message("t0", "s1", "m", "u1", "small")
+        log.user_message("t1", "s1", "m", "u1", "x" * 500)
         (only,) = _entries(path)
         assert only["text"] == "x" * 500
 
@@ -90,7 +91,7 @@ class TestTurnLogFile:
         path.mkdir()  # opening a directory for append raises OSError
         log = TurnLog(path, now=lambda: "T0")
         with caplog.at_level(logging.WARNING):
-            log.user_message("s1", "m", "u1", "hello")  # must not raise
+            log.user_message("t0", "s1", "m", "u1", "hello")  # must not raise
         assert any("turn log write" in r.message for r in caplog.records)
 
 
@@ -160,6 +161,10 @@ class TestPipelineTurnLogging:
         assert entries[4]["replies"] == [
             {"kind": "reply", "text": "Mira now exists."},
         ]
+        # Every record of one handle_message call shares one turn id, so a
+        # reader can group the whole story by request.
+        turn_ids = {e["turn"] for e in entries}
+        assert len(turn_ids) == 1 and turn_ids.pop()  # one, non-empty
 
     async def test_mode_commands_are_logged_too(
         self, services: Services, tmp_path
@@ -186,10 +191,13 @@ class TestPipelineTurnLogging:
         ], TurnLog(path, now=lambda: "T0"))
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
-        rejected = [e for e in _entries(path) if e["event"] == "tool_result"]
+        entries = _entries(path)
+        rejected = [e for e in entries if e["event"] == "tool_result"]
         assert len(rejected) == 1
         assert rejected[0]["mode"] == "authoring"
         assert "not available in authoring mode" in rejected[0]["result"]
+        # The two messages are two turns with two distinct ids.
+        assert len({e["turn"] for e in entries}) == 2
 
     async def test_no_turn_log_means_no_file_and_no_crash(
         self, services: Services, tmp_path

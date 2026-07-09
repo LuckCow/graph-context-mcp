@@ -54,18 +54,25 @@ class TurnLog:
 
     # Every entry names the active mode so a single grepped line is
     # self-describing -- no walking back to the turn's opening entry.
+    # ``turn`` is the shared id of the handle_message call these records
+    # belong to: it ties one user query to its driver decisions, tool
+    # calls, and final replies so a reader can group by request even when
+    # sessions interleave in the process-global file.
 
     def user_message(
-        self, session_id: str, mode: str, user_id: str, text: str
+        self, turn_id: str, session_id: str, mode: str, user_id: str, text: str
     ) -> None:
         self._append({
-            "event": "user", "session": session_id, "mode": mode,
-            "user": user_id, "text": text,
+            "event": "user", "turn": turn_id, "session": session_id,
+            "mode": mode, "user": user_id, "text": text,
         })
 
-    def llm_turn(self, session_id: str, mode: str, turn: LLMTurn) -> None:
+    def llm_turn(
+        self, turn_id: str, session_id: str, mode: str, turn: LLMTurn
+    ) -> None:
         entry: dict[str, Any] = {
-            "event": "llm_turn", "session": session_id, "mode": mode,
+            "event": "llm_turn", "turn": turn_id, "session": session_id,
+            "mode": mode,
         }
         if turn.tool_calls:
             entry["tool_calls"] = [
@@ -77,19 +84,22 @@ class TurnLog:
         self._append(entry)
 
     def tool_result(
-        self, session_id: str, mode: str, call: ToolCall, result: str
+        self, turn_id: str, session_id: str, mode: str, call: ToolCall,
+        result: str,
     ) -> None:
         self._append({
-            "event": "tool_result", "session": session_id, "mode": mode,
-            "tool": call.name, "arguments": dict(call.arguments),
+            "event": "tool_result", "turn": turn_id, "session": session_id,
+            "mode": mode, "tool": call.name, "arguments": dict(call.arguments),
             "result": result,
         })
 
     def turn_end(
-        self, session_id: str, mode: str, events: Iterable[ReplyEvent]
+        self, turn_id: str, session_id: str, mode: str,
+        events: Iterable[ReplyEvent],
     ) -> None:
         self._append({
-            "event": "turn_end", "session": session_id, "mode": mode,
+            "event": "turn_end", "turn": turn_id, "session": session_id,
+            "mode": mode,
             "replies": [{"kind": e.kind, "text": e.text} for e in events],
         })
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -201,13 +202,21 @@ class Orchestrator:
     ) -> list[ReplyEvent]:
         state = await self._session(session_id)
         stripped = text.strip()
+        # One id per handle_message call ties this turn's diary records --
+        # user query, driver decisions, tool calls, final replies -- into
+        # one group even when sessions interleave in the shared log file.
+        turn_id = uuid.uuid4().hex[:12]
         if self.turn_log:
-            self.turn_log.user_message(session_id, state.mode, user_id, stripped)
+            self.turn_log.user_message(
+                turn_id, session_id, state.mode, user_id, stripped
+            )
         if stripped.startswith("/mode"):
             mode_events = await self._switch_mode(state, stripped)
             if self.turn_log:
                 # state.mode is post-switch: the mode the session is IN now.
-                self.turn_log.turn_end(session_id, state.mode, mode_events)
+                self.turn_log.turn_end(
+                    turn_id, session_id, state.mode, mode_events
+                )
             return mode_events
         if stripped == "/clear":
             state.memory.clear()
@@ -218,7 +227,9 @@ class Orchestrator:
                 kind="notice",
             )]
             if self.turn_log:
-                self.turn_log.turn_end(session_id, state.mode, clear_events)
+                self.turn_log.turn_end(
+                    turn_id, session_id, state.mode, clear_events
+                )
             return clear_events
 
         spec = self._spec(state)
@@ -242,7 +253,7 @@ class Orchestrator:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(transcript, tools, spec.goal)
             if self.turn_log:
-                self.turn_log.llm_turn(session_id, spec.name, turn)
+                self.turn_log.llm_turn(turn_id, session_id, spec.name, turn)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -264,7 +275,9 @@ class Orchestrator:
                     )
                     events.append(ReplyEvent(result, kind="error"))
                 if self.turn_log:
-                    self.turn_log.tool_result(session_id, spec.name, call, result)
+                    self.turn_log.tool_result(
+                        turn_id, session_id, spec.name, call, result
+                    )
                 transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
             if final_decision and turn.reply.strip():
                 # The warned driver bundled its answer with a last update:
@@ -286,7 +299,7 @@ class Orchestrator:
             # Error-only / budget-exhausted turns leave no useful memory.
             state.memory.remember_turn(stripped, reply_text)
         if self.turn_log:
-            self.turn_log.turn_end(session_id, spec.name, events)
+            self.turn_log.turn_end(turn_id, session_id, spec.name, events)
         return events
 
     async def seed_memory(
