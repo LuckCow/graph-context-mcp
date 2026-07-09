@@ -74,6 +74,9 @@ services:
       # transport. Endpoint-agnostic -- works against the desktop today
       # and the sidecar after cutover.
       GC_SPACES_FILE: "/workspaces/graph-context-mcp/spaces.toml"
+      # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
+      # account's CLI default; pinned here to Sonnet 5.
+      GC_DRIVER_MODEL: "claude-sonnet-5"
 
     secrets:
       - anytype_api_key
