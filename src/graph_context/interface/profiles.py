@@ -149,19 +149,40 @@ saw it. An empty string clears it. Never list the node's links in the
 description: a Connections section is maintained automatically at the
 bottom of the page (you never see or write it).
 
-fields: {"key": "value"} attributes. A key matching one of the space's
-own properties (by key or display name -- get_node shows what a node
-already carries) updates THAT property, visible and filterable in
+fields: {"key": "value"} attributes. Every key MUST match one of the
+space's own properties, by key or display name -- get_node shows what a
+node already carries, and context action='overview' lists each type's
+properties. The value updates THAT property, visible and filterable in
 Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful").
-Unmatched keys land in a bot-only extras store, which this parameter
-replaces wholesale -- resend extras you want kept.
+multi-select values are comma-separated names ("Dark, Hopeful"). An
+unmatched key ERRORS, listing the properties you can reuse -- prefer
+reusing one. Only when none fits, resend with
+create_missing_fields={"key": "format"} to create a real new property
+(formats: checkbox, date, email, multi_select, number, phone, select,
+text, url).
 
 add_links: same shape as create_node's links (set create_missing_relations
 to create a brand-new relation label rather than reuse an existing one).
 remove_links: list of {"source", "edge_type", "target"} exactly as shown
 by get_node.
 """
+
+def _fields_doc(examples: str) -> str:
+    """The create_node ``fields`` parameter doc (ADR 023): shared semantics,
+    profile-specific example property names. Lives here exactly once."""
+    return f"""\
+fields: {{"key": "value"}} attributes. Every key MUST match one of the
+  space's own properties, by key or display name (e.g. {examples});
+  context action='overview' lists each type's properties, and get_node
+  shows what a node already carries. The value writes THAT property,
+  visible and filterable in Anytype; select options match by name and
+  are created when new; multi-select values are comma-separated names.
+  An unmatched key ERRORS, listing the properties you can reuse --
+  prefer reusing one. Only when none fits, resend with
+  create_missing_fields={{"key": "format"}} to create a real new property
+  (formats: checkbox, date, email, multi_select, number, phone, select,
+  text, url)."""
+
 
 def _query_doc(examples: str) -> str:
     """Assemble the ``query`` doc: shared grammar + profile-specific
@@ -244,11 +265,12 @@ Actions:
   get          -- session snapshot: graph statistics plus your current
                   scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
-                  counts plus the highest-degree "hub" nodes with name,
-                  type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / hold. The map
-                  is rebuilt from the graph each call -- nothing to
-                  maintain. (alias: map)
+                  counts, each type's properties (reuse these as create/
+                  update `fields` keys), plus the highest-degree "hub"
+                  nodes with name, type, id and summary. START HERE in a
+                  fresh session to obtain node ids for explore /
+                  get_node / hold. The map is rebuilt from the graph
+                  each call -- nothing to maintain. (alias: map)
   resync       -- pull in edits a human made directly in Anytype; reports
                   which nodes changed. Use before a long writing session.
   note         -- REPLACE your scratchpad with `text` (empty text clears
@@ -279,12 +301,7 @@ description: long-form text (a portrait, a place's atmosphere, an
   user reads and edits it directly; returned by get_node and
   explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
-fields: {"key": "value"} attributes. A key matching one of the space's
-  own properties (e.g. role, tech_type -- by key or display name) writes
-  THAT property, visible and filterable in Anytype; select options match
-  by name and are created when new; multi-select values are
-  comma-separated names. Unmatched keys are kept in a bot-only extras
-  store.
+""" + _fields_doc("role, tech_type") + """
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you (ambiguous names report the candidates).
@@ -429,11 +446,12 @@ Actions:
   get          -- session snapshot: graph statistics plus your current
                   scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
-                  counts plus the highest-degree "hub" nodes with name,
-                  type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / hold. The map
-                  is rebuilt from the graph each call -- nothing to
-                  maintain. (alias: map)
+                  counts, each type's properties (reuse these as create/
+                  update `fields` keys), plus the highest-degree "hub"
+                  nodes with name, type, id and summary. START HERE in a
+                  fresh session to obtain node ids for explore /
+                  get_node / hold. The map is rebuilt from the graph
+                  each call -- nothing to maintain. (alias: map)
   resync       -- pull in edits a human made directly in Anytype; reports
                   which nodes changed. Use before a long working session.
   note         -- REPLACE your scratchpad with `text` (empty text clears
@@ -467,12 +485,7 @@ story_time: REQUIRED for an Event-role node (meetings, decisions,
   milestones): its position on the timeline as a sortable number -- use
   epoch seconds or YYYYMMDD (e.g. 20260702). The parameter name is
   historical; read it as "time".
-fields: {"key": "value"} attributes. A key matching one of the space's
-  own properties (e.g. status, priority -- by key or display name)
-  writes THAT property, visible and filterable in Anytype; select
-  options match by name and are created when new; multi-select values
-  are comma-separated names. Unmatched keys are kept in a bot-only
-  extras store.
+""" + _fields_doc("status, priority") + """
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you (ambiguous names report the candidates).
@@ -627,9 +640,11 @@ Actions:
   get          -- session snapshot: graph statistics plus your current
                   scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
-                  counts plus the highest-degree "hub" nodes with name,
-                  type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / hold. (alias: map)
+                  counts, each type's properties (reuse these as create/
+                  update `fields` keys), plus the highest-degree "hub"
+                  nodes with name, type, id and summary. START HERE in a
+                  fresh session to obtain node ids for explore /
+                  get_node / hold. (alias: map)
   resync       -- pull in edits made directly in Anytype; reports which
                   nodes changed. Use at the start of a work session.
   note         -- REPLACE your scratchpad with `text` (empty text clears
@@ -662,12 +677,7 @@ description: long-form text (a task's context, a procedure's overview, a
 story_time: REQUIRED for an Event-role node (meetings, milestones): an
   ISO date like "2026-07-04". The parameter name is historical; read it
   as "when".
-fields: {"key": "value"} attributes. A key matching one of the space's
-  own properties (e.g. status, priority, due -- by key or display name)
-  writes THAT property, visible and filterable in Anytype; select
-  options match by name and are created when new; multi-select values
-  are comma-separated names. Unmatched keys are kept in a bot-only
-  extras store.
+""" + _fields_doc('status, priority, "Due date"') + """
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you. Reuse an existing relation (e.g. part_of, assigned_to,

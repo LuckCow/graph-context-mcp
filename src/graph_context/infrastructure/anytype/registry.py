@@ -42,6 +42,11 @@ class TypeInfo:
     # (GET /types/{typeId}/templates), which is keyed by id, not key. "" for
     # entries built before ids mattered.
     id: str = ""
+    # The type's own properties as GET /types returns them (ADR 023) --
+    # the per-type half of the catalog shown to the LLM. Space-level
+    # properties never attached to a type are not in here; writes still
+    # match space-wide via field_property.
+    properties: tuple[PropertyInfo, ...] = ()
 
 
 # Read-compat with pre-pivot data (ADR 006): the old bootstrap minted a
@@ -168,6 +173,24 @@ class SpaceRegistry:
             and key not in self.hidden_field_keys
         )
 
+    def reflectable_type_properties(self, type_key: str) -> tuple[PropertyInfo, ...]:
+        """The type's own properties that are usable as ``fields`` keys."""
+        info = self.types_by_key.get(type_key)
+        if info is None:
+            return ()
+        return tuple(
+            prop for prop in info.properties
+            if self.reflects_field(prop.key, prop.format)
+        )
+
+    def reflectable_properties(self) -> tuple[PropertyInfo, ...]:
+        """Every space property usable as a ``fields`` key (the write-match
+        universe of :meth:`field_property`)."""
+        return tuple(
+            info for key, info in sorted(self.properties_by_key.items())
+            if self.reflects_field(key, info.format)
+        )
+
     def field_property(self, identifier: str) -> PropertyInfo | None:
         """Resolve a ``fields`` key to a reflectable scalar property.
 
@@ -200,8 +223,17 @@ async def load_registry(
     async for type_obj in client.list_types():
         key = type_obj.get("key")
         if key:
+            type_properties = tuple(
+                PropertyInfo(
+                    key=prop["key"], name=prop.get("name", prop["key"]),
+                    format=prop.get("format", ""), id=prop.get("id", ""),
+                )
+                for prop in type_obj.get("properties", [])
+                if prop.get("key")
+            )
             types_by_key[key] = TypeInfo(
                 key=key, name=type_obj.get("name", key), id=type_obj.get("id", ""),
+                properties=type_properties,
             )
     properties_by_key: dict[str, PropertyInfo] = {}
     async for prop in client.list_properties():

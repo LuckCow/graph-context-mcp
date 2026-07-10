@@ -25,7 +25,8 @@
       "Bash(python3 -)",
       "Bash(python -m pytest tests/orchestrator -q)",
       "Bash(python -m pytest tests/application/test_node_reader.py::TestProvenance::test_infra_edges_never_reach_the_edge_groups -q)",
-      "Bash(python -m pytest tests/semantic/test_ranker.py::test_graph_recruits_a_vocabulary_invisible_node -q)"
+      "Bash(python -m pytest tests/semantic/test_ranker.py::test_graph_recruits_a_vocabulary_invisible_node -q)",
+      "Bash(curl -s -m 5 -o /dev/null -w \"%{http_code}\" http://anytype:31012/v1/spaces -H \"Authorization: Bearer $\\(cat /workspaces/graph-context-mcp/.devcontainer/secrets/anytype_api_key 2>/dev/null\\)\" -H \"Anytype-Version: 2025-11-08\")"
     ]
   }
 }

@@ -666,12 +666,20 @@ class MockAnytype:
             # The live API requires both (spike: a missing plural_name 400s).
             return self._error(400, "bad_request")
         # An inline ``properties`` list attaches the fields to the type AND
-        # creates them as space properties (live-confirmed 2026-07-06).
+        # creates them as space properties (live-confirmed 2026-07-06). The
+        # type's own ``properties`` carry the property ids, exactly like the
+        # live GET /types response (the templates spike reads them).
         for entry in body.get("properties", []):
             self._properties.setdefault(
                 entry["key"], {"id": self._new_id(), **entry}
             )
-        self._types[body["key"]] = {"id": self._new_id(), **body}
+        type_properties = [
+            {**entry, "id": self._properties[entry["key"]]["id"]}
+            for entry in body.get("properties", [])
+        ]
+        self._types[body["key"]] = {
+            "id": self._new_id(), **body, "properties": type_properties,
+        }
         return httpx.Response(201, json={"type": self._types[body["key"]]})
 
     def _handle_properties(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
@@ -680,6 +688,9 @@ class MockAnytype:
         body = json.loads(request.content)
         self._properties[body["key"]] = {"id": self._new_id(), **body}
         if self.property_settle_patches > 0 and body.get("format") == "objects":
+            # Only ``objects``-format relations have the settle window. A
+            # fresh SCALAR property is immediately usable in POST /objects
+            # and PATCH (live-confirmed 2026-07-10, ADR 023 spike).
             self._settling[body["key"]] = self.property_settle_patches
         return httpx.Response(201, json={"property": self._properties[body["key"]]})
 

@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from graph_context.application.node_reader import NodeView
 from graph_context.application.ranker import RankedHit
 from graph_context.domain.models import Detail as Detail  # re-export (WP15)
-from graph_context.domain.models import Node
+from graph_context.domain.models import FieldSpec, Node
 from graph_context.domain.overview import GraphOverview
 from graph_context.domain.pathfinding import Path
 from graph_context.domain.query import QueryResult, SortKey, field_value
@@ -28,19 +28,34 @@ from graph_context.domain.traversal import ExploreResult
 EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
 
 
-def render_overview(overview: GraphOverview) -> str:
+def render_overview(
+    overview: GraphOverview,
+    field_catalog: Mapping[str, tuple[FieldSpec, ...]] | None = None,
+) -> str:
     """Render the cold-start entry-point map (``context action='overview'``).
 
     Ids are the last token before the colon on every hub line, so the LLM
     can copy one straight into ``explore`` / ``get_node`` / ``hold``.
+
+    ``field_catalog`` (ADR 023) appends each type's scalar properties --
+    the vocabulary create/update ``fields`` keys should reuse. Rendered
+    even for zero-instance types (that is exactly when the guidance
+    matters) and on an empty graph.
     """
+    catalog_lines = _render_field_catalog(field_catalog)
     if overview.total_story_nodes == 0:
-        return "overview: no nodes yet -- use create_node to add the first one."
+        return "\n".join(
+            [
+                "overview: no nodes yet -- use create_node to add the first one.",
+                *catalog_lines,
+            ]
+        )
     types = ", ".join(f"{tc.type} {tc.count}" for tc in overview.type_counts)
     lines = [
         f"overview: {overview.total_story_nodes} nodes across "
         f"{len(overview.type_counts)} types (derived entry-point map).",
         f"types: {types}",
+        *catalog_lines,
         "entry points (highest-degree nodes; pass an id to explore, "
         "get_node, or context action='hold'):",
     ]
@@ -51,6 +66,20 @@ def render_overview(overview: GraphOverview) -> str:
             f"- {node.name} ({node.type}, id={node.id}){stale}: {node.summary}"
         )
     return "\n".join(lines)
+
+
+def _render_field_catalog(
+    catalog: Mapping[str, tuple[FieldSpec, ...]] | None,
+) -> list[str]:
+    if not catalog:
+        return []
+    lines = ["properties by type (usable as fields keys on create/update):"]
+    for type_name in sorted(catalog):
+        rendered = ", ".join(
+            f"{spec.name} ({spec.format})" for spec in catalog[type_name]
+        )
+        lines.append(f"- {type_name}: {rendered}")
+    return lines
 
 
 def render_ranked_hits(hits: Sequence[RankedHit]) -> str:

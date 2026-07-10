@@ -1,7 +1,11 @@
 # ADR 012: Native scalar properties reflect into fields, with a noise filter
 
 **Status:** Accepted (2026-07-02) — WP10a; completes the attribute half of
-ADR 006's space-reflecting model
+ADR 006's space-reflecting model. **Amended by ADR 023 (2026-07-10):**
+the write-side blob fall-through is retired for story nodes — an
+unmatched `fields` key now errors, with `create_missing_fields` as the
+explicit path to a new native property; `gc_fields` is written for
+infra-role nodes only (read-compat merge unchanged).
 
 ## Context
 

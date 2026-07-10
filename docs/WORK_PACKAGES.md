@@ -790,6 +790,13 @@ The spurious-property filter shipped as specified:
   write path.
 - Charts the retirement path for `gc_fields` (the last human-invisible
   blob), but does NOT retire it in this WP — existing worlds use it.
+- **Retirement landed 2026-07-10 (ADR 023):** story-node writes are
+  native-only — an unmatched `fields` key errors with the type's property
+  catalog (per-type lists now read from `GET /types`, surfaced in the
+  overview), and `create_missing_fields={"key": "format"}` explicitly
+  mints a real scalar property (spike: no settle window for scalars).
+  `gc_fields` is written for infra-role nodes only; the read merge keeps
+  legacy story blobs visible, no migration.
 
 ### WP10b — Summary moves to the built-in `description` property — **shipped 2026-07-02**
 

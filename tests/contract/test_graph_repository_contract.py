@@ -12,10 +12,10 @@ import asyncio
 
 import pytest
 
-from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
-from graph_context.errors import NodeNotFound
+from graph_context.errors import NodeNotFound, UnknownFieldKey
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
@@ -117,9 +117,13 @@ class GraphRepositoryContract:
         assert list(repo.graph.edges(mira.id)) == []
 
     async def test_fields_round_trip(self, repo):
+        # "fuel" is not a property anywhere; the declaration mints it as a
+        # real one (ADR 023). In the live run this exercises scalar
+        # create_property for real; reruns reuse the surviving property.
         node = await repo.create_node(
             NodeDraft("Technology", name="Ashforge", summary="A forge.",
-                      fields={"fuel": "bonemeal"})
+                      fields={"fuel": "bonemeal"}),
+            create_missing_fields={"fuel": "text"},
         )
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
 
@@ -132,7 +136,8 @@ class GraphRepositoryContract:
         whichever repository populated the index."""
         ticked = await repo.create_node(
             NodeDraft("Item", name="Ticked", summary="s.",
-                      fields={"done": "true"})
+                      fields={"done": "true"}),
+            create_missing_fields={"done": "checkbox"},
         )
         unticked = await repo.create_node(
             NodeDraft("Item", name="Unticked", summary="s.")
@@ -239,6 +244,67 @@ class TemplateContract:
         assert body.index("Template header") < body.index("Caller body.")
 
 
+class FieldCatalogContract:
+    """ADR 023: story-node ``fields`` keys resolve against the space's
+    scalar properties identically in every implementation. Seeded with
+    "Due date" (date) and "Status" (select: To Do, In Progress)."""
+
+    async def test_unmatched_key_on_create_errors_with_guidance(self, catalog_repo):
+        with pytest.raises(UnknownFieldKey) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"due": "2026-08-01"})
+            )
+        message = str(err.value)
+        assert "Due date" in message and "(date)" in message
+        assert "create_missing_fields" in message
+
+    async def test_unmatched_key_on_update_errors_with_guidance(self, catalog_repo):
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.")
+        )
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.update_node(node.id, fields={"due": "2026-08-01"})
+
+    async def test_display_name_key_writes_the_property(self, catalog_repo):
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Due date": "2026-08-01"})
+        )
+        # Read-back is under the property's raw key, both backends alike.
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
+
+    async def test_declared_key_mints_a_reusable_property(self, catalog_repo):
+        first = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"effort": "3"}),
+            create_missing_fields={"effort": "number"},
+        )
+        assert first.fields["effort"] == "3"
+        # Now part of the space's vocabulary: reusable without the opt-in.
+        second = await catalog_repo.create_node(
+            NodeDraft("Item", name="Land it", summary="s.",
+                      fields={"effort": "5"})
+        )
+        assert second.fields["effort"] == "5"
+
+    async def test_catalog_is_exposed_for_guidance(self, catalog_repo):
+        catalog = catalog_repo.field_catalog()
+        rendered = {
+            (spec.name, spec.format)
+            for specs in catalog.values() for spec in specs
+        }
+        assert ("Due date", "date") in rendered
+        assert ("Status", "select") in rendered
+
+    async def test_infra_role_fields_are_exempt(self, catalog_repo):
+        node = await catalog_repo.create_node(
+            NodeDraft("gc_prose", name="Scene 1", summary="A capture.",
+                      fields={"user_id": "u-1"})
+        )
+        assert catalog_repo.graph.node(node.id).fields["user_id"] == "u-1"
+
+
 class TestInMemoryRoleOverrides(RoleOverrideContract):
     @pytest.fixture
     def meeting_repo(self):
@@ -261,6 +327,38 @@ class TestAnytypeRoleOverrides(RoleOverrideContract):
         repository = AnytypeGraphRepository(
             client, role_overrides={"meeting": Role.EVENT}
         )
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class TestInMemoryFieldCatalog(FieldCatalogContract):
+    @pytest.fixture
+    def catalog_repo(self):
+        return InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Due date", format="date", key="due_date"),
+            FieldSpec(name="Status", format="select", key="status",
+                      options=("To Do", "In Progress")),
+        ])
+
+
+class TestAnytypeFieldCatalog(FieldCatalogContract):
+    @pytest.fixture
+    async def catalog_repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        await client.create_property(
+            {"key": "due_date", "name": "Due date", "format": "date"}
+        )
+        status = await client.create_property(
+            {"key": "status", "name": "Status", "format": "select"}
+        )
+        await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
+        await client.create_tag(status["id"], {"name": "In Progress", "color": "lime"})
+        repository = AnytypeGraphRepository(client)
         await repository.hydrate()
         yield repository
         await client.aclose()

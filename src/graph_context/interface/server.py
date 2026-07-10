@@ -114,6 +114,7 @@ async def create_node(
     links: list[dict[str, Any]] | None = None,
     icon: str = "",
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.create_node_tool(
@@ -121,6 +122,7 @@ async def create_node(
         description=description, story_time=story_time, fields=fields, links=links,
         icon=icon,
         create_missing_relations=create_missing_relations,
+        create_missing_fields=create_missing_fields,
     )
 
 
@@ -136,6 +138,7 @@ async def update_node(
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.update_node_tool(
@@ -143,6 +146,7 @@ async def update_node(
         description=description, story_time=story_time, fields=fields,
         add_links=add_links, remove_links=remove_links,
         create_missing_relations=create_missing_relations,
+        create_missing_fields=create_missing_fields,
     )
 
 

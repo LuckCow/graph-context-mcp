@@ -65,6 +65,50 @@ class TestTypes:
         assert reg.role_for("gc_character") is Role.CHARACTER
 
 
+class TestFieldCatalog:
+    """ADR 023: per-type property lists and the reflectable views."""
+
+    def _registry_with_type_props(self) -> SpaceRegistry:
+        return SpaceRegistry(
+            types_by_key={
+                "task": TypeInfo(
+                    "task", "Task", id="type-task",
+                    properties=(
+                        PropertyInfo("due_date", "Due date", "date", id="p-due"),
+                        PropertyInfo("status", "Status", "select", id="p-status"),
+                        PropertyInfo("assignee", "Assignee", "objects", id="p-a"),
+                        PropertyInfo("created_date", "Created", "date", id="p-c"),
+                    ),
+                ),
+            },
+            properties_by_key={
+                "due_date": PropertyInfo("due_date", "Due date", "date", id="p-due"),
+                "status": PropertyInfo("status", "Status", "select", id="p-status"),
+                "fuel": PropertyInfo("fuel", "fuel", "text", id="p-fuel"),
+            },
+        )
+
+    def test_reflectable_type_properties_filter_edges_and_noise(self) -> None:
+        reg = self._registry_with_type_props()
+        assert [p.key for p in reg.reflectable_type_properties("task")] == [
+            "due_date", "status",
+        ]
+
+    def test_reflectable_type_properties_of_unknown_type_is_empty(self) -> None:
+        assert self._registry_with_type_props().reflectable_type_properties("x") == ()
+
+    def test_reflectable_properties_is_the_write_match_universe(self) -> None:
+        reg = self._registry_with_type_props()
+        assert [p.key for p in reg.reflectable_properties()] == [
+            "due_date", "fuel", "status",
+        ]
+
+    def test_types_without_properties_key_tolerated(self) -> None:
+        # load_registry builds TypeInfo with properties=() when GET /types
+        # items carry no list; the helpers must not blow up on those.
+        assert _registry().reflectable_type_properties("character") == ()
+
+
 class TestRelations:
     def test_label_for_strips_prefixes(self) -> None:
         reg = _registry()

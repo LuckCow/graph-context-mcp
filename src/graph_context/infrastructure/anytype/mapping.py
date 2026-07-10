@@ -62,6 +62,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
+from graph_context.domain.schema import FIELD_FORMATS
 
 if TYPE_CHECKING:
     from graph_context.infrastructure.anytype.registry import SpaceRegistry
@@ -138,10 +139,9 @@ GENERIC_LINK_KEY = "links"
 
 # Property formats that surface in Node.fields (and are writable through
 # the ``fields`` parameter). ``objects`` is edges; everything else scalar.
-REFLECTED_FIELD_FORMATS: frozenset[str] = frozenset(
-    {"text", "number", "select", "multi_select", "date", "checkbox",
-     "url", "email", "phone"}
-)
+# Since ADR 023 the vocabulary is domain-owned (the LLM declares one of
+# these in create_missing_fields); this alias keeps the adapter-local name.
+REFLECTED_FIELD_FORMATS: frozenset[str] = FIELD_FORMATS
 
 # System properties that would be pure context-window noise if reflected.
 # Census-based (real space, 2026-07-02): every object carries these. A
@@ -214,26 +214,29 @@ def to_create_payload(
     key``. The repository writes outgoing relations via a follow-up PATCH (which
     tolerates any space-level property), mirroring the update path.
 
-    ADR 012 field routing: ``native_properties`` carries the already-resolved
-    entries for ``fields`` keys that matched native scalar properties (select
-    values resolved to existing tags -- inline select entries are validated
-    by POST, so resolution must precede it); ``fields_blob`` is the residual
-    written to ``gc_fields`` (defaults to all of ``draft.fields``).
-    ``timeline`` is the profile-declared (key, format) the story_time value
-    writes to (ADR 015).
+    Field routing (ADR 012, amended by ADR 023): ``native_properties``
+    carries the already-resolved entries for ``fields`` keys that matched
+    native scalar properties (select values resolved to existing tags --
+    inline select entries are validated by POST, so resolution must precede
+    it); ``fields_blob`` is the residual written to ``gc_fields``. ``None``
+    writes NO ``gc_fields`` entry at all -- story nodes are native-only
+    (ADR 023); only infra-role writes still pass a blob. ``timeline`` is the
+    profile-declared (key, format) the story_time value writes to (ADR 015).
 
     ``template_id`` (when set) applies a type template: Anytype fills the
     template's default property values and layout, then our inline
     ``properties`` override those keys and our ``body`` is appended below the
     template's body (both verified live -- see the templates spike/ADR).
     """
-    blob = dict(draft.fields) if fields_blob is None else dict(fields_blob)
     properties = [
         property_entry(PROP_SUMMARY, "text", draft.summary),
         property_entry(PROP_SUMMARY_STALE, "checkbox", False),
-        property_entry(PROP_FIELDS, "text", json.dumps(blob)),
         *native_properties,
     ]
+    if fields_blob is not None:
+        properties.insert(
+            2, property_entry(PROP_FIELDS, "text", json.dumps(dict(fields_blob)))
+        )
     if draft.story_time is not None:
         properties.append(property_entry(timeline[0], timeline[1], draft.story_time))
     payload: dict[str, Any] = {

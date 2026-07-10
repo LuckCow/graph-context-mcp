@@ -469,3 +469,65 @@ class TestQueryViewParam:
     ) -> None:
         out = await tools.query_tool(services, view="Open Tasks")
         assert out.startswith("ERROR:") and "(none)" in out
+
+
+# -- native-only fields end-to-end (ADR 023) ---------------------------------
+
+
+class TestFieldCatalogSurface:
+    """The tool layer over a catalog-strict fake: the overview teaches the
+    vocabulary, the unmatched-key error self-corrects, and the opt-in
+    creates a real property."""
+
+    def _services(self) -> tools.Services:
+        from graph_context.domain.models import FieldSpec
+        from graph_context.domain.session import SessionState
+        from graph_context.infrastructure.memory.fake_repository import (
+            InMemoryGraphRepository,
+        )
+
+        repository = InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Due date", format="date", key="due_date"),
+        ])
+        return tools.build_services(repository, SessionState(project="t"))
+
+    async def test_overview_lists_each_types_properties(self) -> None:
+        services = self._services()
+        out = await tools.context_tool(services, action="overview")
+        assert "properties by type" in out
+        assert "Due date (date)" in out
+
+    async def test_unmatched_field_key_errors_with_guidance(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"due": "2026-08-01"},
+        )
+        assert out.startswith("ERROR:")
+        assert "Due date (date)" in out and "create_missing_fields" in out
+
+    async def test_matching_by_display_name_writes_the_property(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Due date": "2026-08-01"},
+        )
+        assert out.startswith("created:")
+        assert "due_date: 2026-08-01" in out
+
+    async def test_create_missing_fields_creates_and_writes(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"effort": "3"}, create_missing_fields={"effort": "Number"},
+        )
+        assert out.startswith("created:")
+        assert "effort: 3" in out
+
+    async def test_bad_declared_format_errors_with_the_menu(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"due": "soon"}, create_missing_fields={"due": "datetime"},
+        )
+        assert out.startswith("ERROR:") and "formats:" in out

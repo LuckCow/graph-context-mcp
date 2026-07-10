@@ -39,6 +39,29 @@ class TestResolveRole:
         assert role is Role.EVENT
 
 
+class TestValidateFieldDeclarations:
+    def test_empty_declarations_are_a_noop(self) -> None:
+        schema.validate_field_declarations({"due": "2026-08-01"}, {})
+
+    def test_valid_declaration_passes(self) -> None:
+        schema.validate_field_declarations(
+            {"due": "2026-08-01"}, {"due": "date"}
+        )
+
+    def test_unknown_format_errors_listing_the_menu(self) -> None:
+        with pytest.raises(SchemaViolation, match="formats: .*date.*text"):
+            schema.validate_field_declarations(
+                {"due": "2026-08-01"}, {"due": "datetime"}
+            )
+
+    def test_declared_key_missing_from_fields_errors(self) -> None:
+        with pytest.raises(SchemaViolation, match="no value"):
+            schema.validate_field_declarations({}, {"due": "date"})
+
+    def test_format_matching_is_case_and_space_insensitive(self) -> None:
+        schema.validate_field_declarations({"due": "x"}, {"due": " Date "})
+
+
 class TestValidateNewNode:
     def test_summary_is_required(self) -> None:
         with pytest.raises(SchemaViolation, match="summary"):

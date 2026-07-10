@@ -8,10 +8,13 @@ space) is provided by ``tests/e2e/conftest.py``.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from graph_context.domain import schema
 from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.errors import UnknownFieldKey
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from tests.contract.test_graph_repository_contract import GraphRepositoryContract
@@ -83,10 +86,11 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         assert (await repo.fetch_body(mira.id)).strip() == "Body text stays intact."
 
     async def test_native_select_field_round_trips_live(self, repo):
-        """ADR 012 against the real server: a `fields` key matching a select
-        property resolves-or-creates the tag, writes the property, and
-        reflects back as the option's display name -- while system
-        timestamps stay filtered out of fields."""
+        """ADR 012/023 against the real server: a `fields` key matching a
+        select property resolves-or-creates the tag, writes the property,
+        and reflects back as the option's display name; an unmatched key
+        ERRORS with guidance and succeeds via create_missing_fields --
+        while system timestamps stay filtered out of fields."""
         client = repo._client  # E2E-only reach-in; the port has no property API
         if repo.registry.field_property("E2E Mood") is None:
             # NOTE: the live server slugifies the requested key its own way
@@ -98,12 +102,24 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
             )
             await repo.resync()  # refresh the registry snapshot
         key = repo.registry.field_property("E2E Mood").key
+        # Unmatched-key probe: uuid-fresh so reruns never match the
+        # properties earlier runs minted (the API cannot delete them).
+        probe = f"probe_{uuid4().hex[:8]}"
+        with pytest.raises(UnknownFieldKey, match="create_missing_fields"):
+            await repo.create_node(
+                NodeDraft("Character", name="Field Pin", summary="s",
+                          fields={"E2E Mood": "Wistful", probe: "nope"}),
+            )
+        # "extra" is minted on the first run and reused (declaration
+        # ignored) on every rerun -- both paths are the ADR 023 contract.
         node = await repo.create_node(
             NodeDraft("Character", name="Field Pin", summary="s",
-                      fields={"E2E Mood": "Wistful", "extra": "blob-bound"}),
+                      fields={"E2E Mood": "Wistful", "extra": "now native"}),
+            create_missing_fields={"extra": "text"},
         )
         assert node.fields[key] == "Wistful"          # tag auto-created
-        assert node.fields["extra"] == "blob-bound"   # residual -> blob
+        extra_key = repo.registry.field_property("extra").key
+        assert node.fields[extra_key] == "now native"  # minted property
         assert "created_date" not in node.fields      # noise filter, live
         updated = await repo.update_node(node.id, fields={"E2E Mood": "wistful"})
         assert updated.fields[key] == "Wistful"       # option REUSED by name

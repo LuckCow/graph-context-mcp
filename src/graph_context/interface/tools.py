@@ -344,6 +344,16 @@ def _validate_query_type(services: Services, requested: str) -> Role | None:
     raise UnknownNodeType(requested, tuple(services.repository.known_node_types()))
 
 
+def _parse_field_declarations(
+    raw: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Normalize a ``create_missing_fields`` map (key -> format); format
+    well-formedness is the writer's rule (schema.validate_field_declarations)."""
+    if raw is None:
+        return None
+    return {str(k).strip(): str(v).strip().lower() for k, v in raw.items()}
+
+
 def _node_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
     if values is None:
         return None
@@ -443,9 +453,13 @@ async def context_tool(
         return "\n".join(lines)
     if action in {"overview", "map"}:
         # Derived cold-start map: per-type counts + highest-degree hub nodes,
-        # each with an id to start exploring from. Empty graph -> guidance,
-        # not an error (a fresh session should get something actionable).
-        return presenters.render_overview(build_overview(graph))
+        # each with an id to start exploring from, plus the space's property
+        # catalog (ADR 023) so writes reuse existing properties as fields
+        # keys. Empty graph -> guidance, not an error (a fresh session
+        # should get something actionable).
+        return presenters.render_overview(
+            build_overview(graph), services.repository.field_catalog()
+        )
     if action == "resync":
         changed = await services.repository.resync()
         if services.projector is not None and changed:
@@ -548,6 +562,7 @@ async def create_node_tool(
     links: list[dict[str, Any]] | None = None,
     icon: str = "",
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     draft = NodeDraft(
         type=_parse_node_type(type),
@@ -563,6 +578,7 @@ async def create_node_tool(
         draft,
         await _parse_links(links, services),
         create_missing_relations=create_missing_relations,
+        create_missing_fields=_parse_field_declarations(create_missing_fields),
     )
     await _note_mutation(services)
     view = await services.reader.get_node(node.id)
@@ -581,6 +597,7 @@ async def update_node_tool(
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     node_id = await _resolve(services, node_id)
     removals = [
@@ -602,6 +619,7 @@ async def update_node_tool(
         add_links=await _parse_links(add_links, services),
         remove_links=removals,
         create_missing_relations=create_missing_relations,
+        create_missing_fields=_parse_field_declarations(create_missing_fields),
     )
     await _note_mutation(services)
     stale_note = (

@@ -26,6 +26,7 @@ from graph_context.domain import schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import (
     Edge,
+    FieldSpec,
     LinkSpec,
     Node,
     NodeDraft,
@@ -33,6 +34,7 @@ from graph_context.domain.models import (
     TimelineValue,
 )
 from graph_context.domain.schema import Role
+from graph_context.errors import GraphContextError, UnknownFieldKey
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ class InMemoryGraphRepository:
         *,
         role_overrides: Mapping[str, Role] | None = None,
         templates: Mapping[str, FakeTemplate] | None = None,
+        field_catalog: Sequence[FieldSpec] | None = None,
     ) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
@@ -62,6 +65,14 @@ class InMemoryGraphRepository:
         # Type-identifier -> template, mirroring the Anytype adapter applying a
         # type's template on create (default field values + scaffold body).
         self._templates: dict[str, FakeTemplate] = dict(templates or {})
+        # The space's scalar-property catalog (ADR 023). None keeps the
+        # historical open behavior -- any field key, stored verbatim -- so
+        # the memory backend and demos need no vocabulary. A catalog turns
+        # on the strict contract: story-node field keys must match a spec
+        # (by key or name) or be declared via create_missing_fields.
+        self._field_specs: list[FieldSpec] | None = (
+            list(field_catalog) if field_catalog is not None else None
+        )
 
     @property
     def graph(self) -> GraphIndex:
@@ -73,6 +84,7 @@ class InMemoryGraphRepository:
         links: Sequence[LinkSpec] = (),
         *,
         create_missing_relations: bool = False,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         role = schema.resolve_role(draft.type, self._role_overrides)
         # Apply the type's template (default field values + scaffold body),
@@ -80,7 +92,10 @@ class InMemoryGraphRepository:
         # override template defaults; the caller body is appended below the
         # scaffold (template first).
         template = None if role in schema.INFRA_ROLES else self._templates.get(draft.type)
-        fields = dict(draft.fields)
+        fields = self._resolve_fields(
+            draft.fields, role=role, type_name=draft.type,
+            create_missing=create_missing_fields,
+        )
         body = draft.body
         if template is not None:
             fields = {**template.default_fields, **fields}
@@ -124,7 +139,14 @@ class InMemoryGraphRepository:
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
+        existing = self._graph.node(node_id)
+        if fields is not None:
+            fields = self._resolve_fields(
+                fields, role=existing.role, type_name=existing.type,
+                create_missing=create_missing_fields,
+            )
         changes: dict[str, Any] = {
             key: value
             for key, value in {
@@ -136,7 +158,7 @@ class InMemoryGraphRepository:
             }.items()
             if value is not None
         }
-        updated = replace(self._graph.node(node_id), **changes)
+        updated = replace(existing, **changes)
         self._graph.upsert_node(updated)
         if body is not None:
             # A7 semantics: wholesale replace; empty string clears.
@@ -164,6 +186,114 @@ class InMemoryGraphRepository:
     def known_edge_labels(self) -> frozenset[str]:
         # No predefined relation vocabulary off a live space.
         return frozenset()
+
+    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+        if not self._field_specs:
+            return {}
+        # No per-type property attachment in the fake: the whole catalog is
+        # offered under every known (non-infra) type name.
+        specs = tuple(self._field_specs)
+        return {name: specs for name in sorted(self.known_node_types())}
+
+    # -- field routing (ADR 023) -------------------------------------------
+
+    def _resolve_fields(
+        self,
+        fields: Mapping[str, str],
+        *,
+        role: Role | None,
+        type_name: str,
+        create_missing: Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        """The fake's half of the ADR 023 contract.
+
+        Open mode (no catalog) or infra role: fields pass through verbatim
+        (the fake has no blob -- it just keeps everything). Catalog mode,
+        story role: each key must match a spec by key or display name
+        (case-insensitive) and is stored under the spec's canonical key --
+        mirroring the adapter, where a display-name write reads back under
+        the raw property key -- or be declared in ``create_missing``, which
+        registers a new spec. Values normalize like the adapter round-trip
+        (checkbox -> "true"/"false", numbers untrailed, multi_select
+        comma-spacing).
+        """
+        if self._field_specs is None or role in schema.INFRA_ROLES:
+            return dict(fields)
+        declared = {k: v.strip().lower() for k, v in (create_missing or {}).items()}
+        # All-keys-first check: an approval error never half-extends the
+        # catalog (same discipline as the adapter).
+        matched: dict[str, FieldSpec | None] = {}
+        for key in fields:
+            spec = self._spec_for(key)
+            if spec is None and key not in declared:
+                raise UnknownFieldKey(
+                    key,
+                    type_name,
+                    type_properties=tuple(
+                        self._render_spec(s) for s in self._field_specs
+                    ),
+                    formats=tuple(schema.FIELD_FORMATS),
+                )
+            matched[key] = spec
+        resolved: dict[str, str] = {}
+        for key, value in fields.items():
+            spec = matched[key]
+            if spec is None:
+                spec = FieldSpec(name=key, format=declared[key], key=key)
+                self._field_specs.append(spec)
+            store_key = spec.key or spec.name
+            resolved[store_key] = self._normalize_value(spec, value)
+        return resolved
+
+    def _spec_for(self, key: str) -> FieldSpec | None:
+        target = key.strip().lower()
+        assert self._field_specs is not None
+        for spec in self._field_specs:
+            if target in (spec.key.strip().lower(), spec.name.strip().lower()):
+                return spec
+        return None
+
+    @staticmethod
+    def _render_spec(spec: FieldSpec) -> str:
+        if spec.options:
+            return f"{spec.name} ({spec.format}: {', '.join(spec.options)})"
+        return f"{spec.name} ({spec.format})"
+
+    def _normalize_value(self, spec: FieldSpec, value: str) -> str:
+        """Match what the adapter reads back after a write (ADR 012's
+        ``field_value`` normalization), so round-trips agree across repos."""
+        if spec.format == "checkbox":
+            lowered = value.strip().lower()
+            if lowered not in {"true", "false", "yes", "no", "1", "0"}:
+                raise GraphContextError(
+                    f"field {spec.key or spec.name!r} is a checkbox property; "
+                    f"got {value!r} (pass \"true\" or \"false\")"
+                )
+            return "true" if lowered in {"true", "yes", "1"} else "false"
+        if spec.format == "number":
+            try:
+                number = float(value)
+            except ValueError:
+                raise GraphContextError(
+                    f"field {spec.key or spec.name!r} is a number property; "
+                    f"got {value!r} (pass a plain number, e.g. \"42\")"
+                ) from None
+            return str(int(number)) if number.is_integer() else str(number)
+        if spec.format in {"select", "multi_select"}:
+            names = [part.strip() for part in value.split(",") if part.strip()]
+            self._register_options(spec, names)
+            return ", ".join(names) if spec.format == "multi_select" else value.strip()
+        return value
+
+    def _register_options(self, spec: FieldSpec, names: list[str]) -> None:
+        """Unseen select values become options (the adapter auto-creates
+        tags, ADR 012); recorded so error hints can list them."""
+        assert self._field_specs is not None
+        known = {opt.strip().lower() for opt in spec.options}
+        new = [n for n in names if n.strip().lower() not in known]
+        if new:
+            updated = replace(spec, options=(*spec.options, *new))
+            self._field_specs[self._field_specs.index(spec)] = updated
 
     async def hydrate(self) -> None:
         """No backing store: the index is already authoritative here."""
