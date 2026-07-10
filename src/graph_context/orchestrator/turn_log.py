@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_BYTES = 10_000_000  # ~10 MB of JSONL before old entries drop
+DEFAULT_TURN_LOG = "logs/turns.jsonl"  # relative to the process cwd
+OFF_VALUES = frozenset({"", "0", "false", "no", "off"})  # the repo-wide "knob off" spellings
+
+
+def turn_log_path() -> str | None:
+    """``GC_TURN_LOG`` resolution: the JSONL path, or None (diary off).
+
+    The single home of the off-values rule -- the writer (bootstrap) and
+    the viewer (turn_log_server) both resolve the path through here.
+    """
+    raw = os.environ.get("GC_TURN_LOG", DEFAULT_TURN_LOG).strip()
+    if raw.lower() in OFF_VALUES:
+        return None
+    return raw
 
 
 def _utc_now() -> str:

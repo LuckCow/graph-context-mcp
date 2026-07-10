@@ -66,6 +66,23 @@ class ChannelRoute:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+def channels_declared(path: str) -> bool:
+    """Is at least one channel bound in ``GC_CHANNELS_FILE``?
+
+    The consolidated server's dormancy probe: a channels file with ZERO
+    tables means "Discord parked" (the WP14 cutover left exactly that),
+    not a broken config. Unreadable/invalid files return True so the
+    caller proceeds into :func:`load_channel_bindings`, which names the
+    problem loudly -- the error message lives in one place.
+    """
+    try:
+        data = tomllib.loads(Path(path).read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return True  # defer to load_channel_bindings' precise loud error
+    channels = data.get("channels")
+    return isinstance(channels, dict) and bool(channels)
+
+
 def load_channel_bindings(
     path: str, default_profile: str | None
 ) -> tuple[ChannelBinding, ...]:

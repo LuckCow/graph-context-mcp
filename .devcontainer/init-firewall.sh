@@ -162,6 +162,7 @@ if command -v ip6tables >/dev/null && ip6tables -L >/dev/null 2>&1; then
     ip6tables -A INPUT  -m state --state ESTABLISHED,RELATED -j ACCEPT
     ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     ip6tables -A INPUT  -p tcp --dport 8000 -j ACCEPT
+    ip6tables -A INPUT  -p tcp --dport 8765 -j ACCEPT
     ip6tables -A OUTPUT -j REJECT --reject-with adm-prohibited 2>/dev/null \
         || ip6tables -A OUTPUT -j DROP
     echo "[firewall] IPv6 locked down."
@@ -177,6 +178,9 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Your MCP server, published to the host as 127.0.0.1:8000
 iptables -A INPUT -p tcp --dport 8000 -j ACCEPT
+
+# The turn-log viewer (orchestrator serve), published as 127.0.0.1:8765
+iptables -A INPUT -p tcp --dport 8765 -j ACCEPT
 
 # Allowlisted destinations
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
