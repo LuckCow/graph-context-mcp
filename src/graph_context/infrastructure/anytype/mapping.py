@@ -204,6 +204,7 @@ def to_create_payload(
     native_properties: Sequence[dict[str, Any]] = (),
     fields_blob: Mapping[str, str] | None = None,
     timeline: tuple[str, str] = DEFAULT_TIMELINE,
+    template_id: str = "",
 ) -> dict[str, Any]:
     """Build the POST body for a node's system properties only.
 
@@ -220,6 +221,11 @@ def to_create_payload(
     written to ``gc_fields`` (defaults to all of ``draft.fields``).
     ``timeline`` is the profile-declared (key, format) the story_time value
     writes to (ADR 015).
+
+    ``template_id`` (when set) applies a type template: Anytype fills the
+    template's default property values and layout, then our inline
+    ``properties`` override those keys and our ``body`` is appended below the
+    template's body (both verified live -- see the templates spike/ADR).
     """
     blob = dict(draft.fields) if fields_blob is None else dict(fields_blob)
     properties = [
@@ -235,6 +241,8 @@ def to_create_payload(
         "type_key": type_key,
         "properties": properties,
     }
+    if template_id:
+        payload["template_id"] = template_id  # apply the type template (spiked)
     if draft.body:
         payload["body"] = draft.body  # A5/A7: `body` on create, `markdown` on update
     if draft.icon:

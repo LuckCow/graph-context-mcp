@@ -34,6 +34,16 @@ class PropertyInfo:
     id: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class TypeInfo:
+    key: str
+    name: str
+    # Type object id -- required by the templates route
+    # (GET /types/{typeId}/templates), which is keyed by id, not key. "" for
+    # entries built before ids mattered.
+    id: str = ""
+
+
 # Read-compat with pre-pivot data (ADR 006): the old bootstrap minted a
 # closed gc_ type per node kind; spaces it touched still contain objects of
 # these types. Seeded into every registry's role_overrides so those objects
@@ -54,7 +64,7 @@ class SpaceRegistry:
     """A snapshot of the space's types and relation properties."""
 
     properties_by_key: dict[str, PropertyInfo] = field(default_factory=dict)
-    types_by_key: dict[str, str] = field(default_factory=dict)  # key -> display name
+    types_by_key: dict[str, TypeInfo] = field(default_factory=dict)  # key -> TypeInfo
     role_overrides: dict[str, Role] = field(default_factory=dict)
     # Extra property keys hidden from field reflection (GC_FIELD_DENYLIST);
     # merged with mapping.SYSTEM_PROPERTY_DENYLIST in reflects_field().
@@ -67,7 +77,13 @@ class SpaceRegistry:
 
     def type_name(self, key: str) -> str:
         """Display name for a type key (falls back to the key itself)."""
-        return self.types_by_key.get(key, key)
+        info = self.types_by_key.get(key)
+        return info.name if info else key
+
+    def type_id_for(self, key: str) -> str | None:
+        """Type object id for a key (needed by the templates route), or None."""
+        info = self.types_by_key.get(key)
+        return info.id if info and info.id else None
 
     def role_for(self, key: str) -> Role | None:
         return schema.resolve_role(key, self.role_overrides)
@@ -83,8 +99,8 @@ class SpaceRegistry:
         for key in self.types_by_key:
             if key.lower() == target:
                 return key
-        for key, name in self.types_by_key.items():
-            if name.strip().lower() == target:
+        for key, info in self.types_by_key.items():
+            if info.name.strip().lower() == target:
                 return key
         role = schema.resolve_role(identifier, self.role_overrides)
         if role is not None:
@@ -96,8 +112,8 @@ class SpaceRegistry:
     def known_node_types(self) -> frozenset[str]:
         """Type display names available as create targets (non-infra)."""
         return frozenset(
-            name
-            for key, name in self.types_by_key.items()
+            info.name
+            for key, info in self.types_by_key.items()
             if self.role_for(key) not in schema.INFRA_ROLES
         )
 
@@ -180,11 +196,13 @@ async def load_registry(
     Role additions (WP5); they win over the legacy read-compat seeds.
     ``hidden_field_keys`` carries GC_FIELD_DENYLIST (ADR 012).
     """
-    types_by_key: dict[str, str] = {}
+    types_by_key: dict[str, TypeInfo] = {}
     async for type_obj in client.list_types():
         key = type_obj.get("key")
         if key:
-            types_by_key[key] = type_obj.get("name", key)
+            types_by_key[key] = TypeInfo(
+                key=key, name=type_obj.get("name", key), id=type_obj.get("id", ""),
+            )
     properties_by_key: dict[str, PropertyInfo] = {}
     async for prop in client.list_properties():
         key = prop.get("key")

@@ -1,0 +1,456 @@
+<meta charset="utf-8">
+<title>Turn log viewer</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #667085;
+    --line: #e3e7ee; --chip: #eef1f6; --accent: #2f6feb; --err: #c1352b;
+    --err-bg: #fdecea; --code: #f3f4f7; --user: #2f6feb; --asst: #12855b;
+    --tool: #8a5b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --ink: #e6e9ee; --muted: #93a0b4;
+      --line: #2c323c; --chip: #262c35; --accent: #5b9bff; --err: #ff8a80;
+      --err-bg: #3a1f1c; --code: #12151a; --user: #5b9bff; --asst: #4bd6a0;
+      --tool: #e0b24d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 8px 14px;
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+  }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+  header label { color: var(--muted); font-size: 12px; display: inline-flex;
+    gap: 5px; align-items: center; }
+  header input[type=text], header select {
+    font: inherit; padding: 4px 7px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--bg); color: var(--ink);
+  }
+  header input[type=text] { min-width: 200px; }
+  header button {
+    font: inherit; padding: 4px 9px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--bg); color: var(--ink);
+    cursor: pointer;
+  }
+  header button:hover { border-color: var(--accent); }
+  .spacer { flex: 1 1 auto; }
+  #status { font-size: 12px; color: var(--muted); display: inline-flex;
+    gap: 6px; align-items: center; }
+  #status .dot { width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); }
+  #status.live .dot { background: var(--asst); }
+  #status.err .dot { background: var(--err); }
+
+  main { padding: 14px; max-width: 1100px; margin: 0 auto; }
+  #stats { color: var(--muted); font-size: 12px; margin: 0 2px 10px; }
+
+  #drop {
+    display: none; margin: 40px auto; max-width: 520px; padding: 40px 24px;
+    border: 2px dashed var(--line); border-radius: 12px; text-align: center;
+    color: var(--muted); background: var(--panel);
+  }
+  #drop.show { display: block; }
+  #drop.over { border-color: var(--accent); color: var(--ink); }
+  #drop b { color: var(--ink); }
+
+  details.turn {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; margin: 0 0 9px; overflow: hidden;
+  }
+  details.turn.hidden { display: none; }
+  details.turn > summary {
+    list-style: none; cursor: pointer; padding: 9px 12px;
+    display: flex; gap: 9px; align-items: center;
+  }
+  details.turn > summary::-webkit-details-marker { display: none; }
+  summary .q {
+    flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; font-weight: 550;
+  }
+  summary .q.empty { color: var(--muted); font-weight: 400; font-style: italic; }
+  .chip {
+    font-size: 11px; padding: 1px 7px; border-radius: 20px;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+  }
+  .chip.mode { color: var(--accent); }
+  .badge {
+    font-size: 11px; padding: 1px 7px; border-radius: 20px;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+  }
+  .badge.err { background: var(--err-bg); color: var(--err); font-weight: 600; }
+  .time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+  .body { border-top: 1px solid var(--line); padding: 4px 12px 10px; }
+  .ev { padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  .ev:last-child { border-bottom: none; }
+  .ev .tag {
+    font-size: 11px; font-weight: 650; text-transform: uppercase;
+    letter-spacing: .03em; margin-right: 8px;
+  }
+  .ev.user .tag { color: var(--user); }
+  .ev.reply .tag { color: var(--asst); }
+  .ev.tool .tag { color: var(--tool); }
+  .ev.end .tag { color: var(--muted); }
+  .ev .text { white-space: pre-wrap; word-break: break-word; margin-top: 3px; }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; margin: 5px 0 0; overflow-x: auto; font-size: 12.5px;
+    white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  details.result { margin-top: 5px; }
+  details.result pre { white-space: pre-wrap; word-break: break-word; }
+  .meta { color: var(--muted); font-size: 11px; margin: 2px 0 6px;
+    word-break: break-all; }
+  details.result > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px; list-style: none;
+  }
+  details.result > summary::-webkit-details-marker { display: none; }
+  details.result > summary::before { content: "\25B8 "; }
+  details.result[open] > summary::before { content: "\25BE "; }
+  .kind {
+    font-size: 11px; padding: 0 6px; border-radius: 4px; margin-right: 6px;
+    background: var(--chip); color: var(--muted);
+  }
+  .kind.error { background: var(--err-bg); color: var(--err); }
+  .kind.notice { color: var(--accent); }
+</style>
+
+<header>
+  <h1>Turn log</h1>
+  <label>session
+    <select id="f-session"><option value="">all</option></select>
+  </label>
+  <label>mode
+    <select id="f-mode"><option value="">all</option></select>
+  </label>
+  <label>search
+    <input id="f-search" type="text" placeholder="user query…">
+  </label>
+  <label><input id="f-errors" type="checkbox"> errors only</label>
+  <label><input id="f-commands" type="checkbox" checked> hide /commands</label>
+  <label>order
+    <select id="f-sort">
+      <option value="chrono">oldest first</option>
+      <option value="newest">newest first</option>
+    </select>
+  </label>
+  <label><input id="f-follow" type="checkbox" checked> follow</label>
+  <button id="b-expand">expand all</button>
+  <button id="b-collapse">collapse all</button>
+  <button id="b-file">load file…</button>
+  <input id="file" type="file" accept=".jsonl,.json,.log,text/plain" hidden>
+  <span class="spacer"></span>
+  <span id="status"><span class="dot"></span><span id="status-text">idle</span></span>
+</header>
+
+<main>
+  <div id="stats"></div>
+  <div id="drop">
+    <p><b>Drop <code>logs/turns.jsonl</code> here</b> or <button id="drop-pick">choose a file</button></p>
+    <p>Or serve it live: <code>python scripts/serve_turn_log.py</code></p>
+  </div>
+  <div id="cards"></div>
+</main>
+
+<script>
+"use strict";
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const cardsEl = $("cards"), statsEl = $("stats"), dropEl = $("drop");
+  const statusEl = $("status"), statusText = $("status-text");
+
+  const state = {
+    groups: new Map(),        // key -> group model
+    order: [],                // group keys in arrival (ascending ts) order
+    cards: new Map(),         // key -> {details, q, badges, body}
+    synthCounter: 0,          // for legacy records lacking a turn id
+    sessionSynth: new Map(),  // session -> current synthesized turn key
+    filters: { session: "", mode: "", search: "", errorsOnly: false, hideCommands: true },
+    sort: "chrono",
+    follow: true,
+  };
+
+  // ---- element helper (textContent only: log data is never trusted HTML) ----
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return ts || "";
+    return d.toLocaleTimeString([], { hour12: false }) +
+      "." + String(d.getMilliseconds()).padStart(3, "0");
+  }
+  function ensureOption(sel, value) {
+    if (!value) return;
+    for (const o of sel.options) if (o.value === value) return;
+    sel.appendChild(el("option", null, value)).value = value;
+  }
+
+  // ---- grouping ----
+  function groupKeyFor(rec) {
+    if (rec.turn) return rec.turn;                       // explicit turn id
+    const s = rec.session || "?";
+    if (rec.event === "user" || !state.sessionSynth.has(s)) {
+      const key = "synth:" + s + ":" + (++state.synthCounter);
+      state.sessionSynth.set(s, key);
+      return key;
+    }
+    return state.sessionSynth.get(s);                    // legacy bracket walk
+  }
+
+  function ingest(rec) {
+    const key = groupKeyFor(rec);
+    let g = state.groups.get(key), isNew = false;
+    if (!g) {
+      g = { key, session: rec.session || "?", mode: rec.mode || "",
+        ts: rec.ts, userText: "", toolCount: 0, hasError: false,
+        assistantReplies: new Set() };
+      state.groups.set(key, g);
+      state.order.push(key);
+      isNew = true;
+      ensureOption($("f-session"), g.session);
+      ensureOption($("f-mode"), g.mode);
+    }
+    if (rec.event === "user") g.userText = rec.text || "";
+    if (rec.event === "llm_turn" && rec.reply != null) g.assistantReplies.add(rec.reply);
+    if (rec.event === "tool_result") g.toolCount++;
+    if (rec.event === "turn_end")
+      g.hasError = (rec.replies || []).some((r) => r.kind === "error");
+    if (isNew) buildCard(g);
+    const refs = state.cards.get(key);
+    const node = renderRecord(rec, g);
+    if (node) refs.body.appendChild(node);  // turn_end may collapse to nothing
+    updateSummary(g, refs);
+    applyFilterToCard(key);
+    return { g, isNew };
+  }
+
+  // ---- rendering ----
+  function buildCard(g) {
+    const details = el("details", "turn");
+    const summary = el("summary");
+    const q = el("span", "q");
+    const time = el("span", "time");
+    const badges = el("span");
+    summary.appendChild(q);
+    if (g.mode) summary.appendChild(el("span", "chip mode", g.mode));
+    summary.appendChild(badges);
+    summary.appendChild(time);
+    time.textContent = fmtTime(g.ts);
+    const body = el("div", "body");
+    let metaText = "session: " + g.session;   // moved out of the summary
+    if (!g.key.startsWith("synth:")) metaText += "  ·  turn " + g.key;
+    body.appendChild(el("div", "meta", metaText));
+    details.appendChild(summary);
+    details.appendChild(body);
+    if (state.sort === "newest") cardsEl.insertBefore(details, cardsEl.firstChild);
+    else cardsEl.appendChild(details);
+    state.cards.set(g.key, { details, q, badges, body });
+  }
+
+  function updateSummary(g, refs) {
+    refs.q.textContent = g.userText || "(no user message)";
+    refs.q.classList.toggle("empty", !g.userText);
+    refs.badges.textContent = "";
+    if (g.toolCount)
+      refs.badges.appendChild(
+        el("span", "badge", g.toolCount + (g.toolCount === 1 ? " tool" : " tools")));
+    if (g.hasError) refs.badges.appendChild(el("span", "badge err", "error"));
+  }
+
+  function renderRecord(rec, g) {
+    switch (rec.event) {
+      case "user": {
+        const d = el("div", "ev user");
+        d.appendChild(el("span", "tag", "user"));
+        d.appendChild(el("div", "text", rec.text || ""));
+        return d;
+      }
+      case "llm_turn": {
+        // A tool-call decision renders nothing on its own -- each call is
+        // shown merged with its output by the matching tool_result below.
+        if (rec.tool_calls) return null;
+        const d = el("div", "ev reply");
+        d.appendChild(el("span", "tag", "assistant"));
+        d.appendChild(el("div", "text", rec.reply || ""));
+        return d;
+      }
+      case "tool_result": {
+        // The consolidated call+result unit: the tool name, the arguments
+        // it was called with, and its full output together in one block.
+        const d = el("div", "ev tool");
+        d.appendChild(el("span", "tag", "tool: " + (rec.tool || "?")));
+        const args = rec.arguments ?? {};
+        if (Object.keys(args).length)
+          d.appendChild(el("pre", null, JSON.stringify(args, null, 2)));
+        const res = String(rec.result ?? "");
+        const det = el("details", "result");
+        det.appendChild(el("summary", null, "result (" + res.length + " chars)"));
+        det.appendChild(el("pre", null, res));
+        d.appendChild(det);
+        return d;
+      }
+      case "turn_end": {
+        // Drop replies already shown verbatim as an assistant reply above
+        // (the no-tool-call case logs the same text twice); keep notices/
+        // errors. If nothing distinct remains, render no block at all.
+        const shown = (rec.replies || []).filter(
+          (r) => !((r.kind || "reply") === "reply" && g.assistantReplies.has(r.text)));
+        if (!shown.length) return null;
+        const d = el("div", "ev end");
+        d.appendChild(el("span", "tag", "replies"));
+        for (const r of shown) {
+          const line = el("div", "text");
+          line.appendChild(el("span", "kind " + (r.kind || "reply"), r.kind || "reply"));
+          line.appendChild(document.createTextNode(r.text || ""));
+          d.appendChild(line);
+        }
+        return d;
+      }
+      default: {
+        const d = el("div", "ev");
+        d.appendChild(el("pre", null, JSON.stringify(rec, null, 2)));
+        return d;
+      }
+    }
+  }
+
+  // ---- filtering / sorting ----
+  function matches(g) {
+    const f = state.filters;
+    if (f.session && g.session !== f.session) return false;
+    if (f.mode && g.mode !== f.mode) return false;
+    if (f.errorsOnly && !g.hasError) return false;
+    if (f.hideCommands && (g.userText || "").trim().startsWith("/")) return false;
+    if (f.search && !(g.userText || "").toLowerCase().includes(f.search)) return false;
+    return true;
+  }
+  function applyFilterToCard(key) {
+    const g = state.groups.get(key), refs = state.cards.get(key);
+    refs.details.classList.toggle("hidden", !matches(g));
+  }
+  function applyAllFilters() {
+    let shown = 0;
+    for (const key of state.order) {
+      applyFilterToCard(key);
+      if (matches(state.groups.get(key))) shown++;
+    }
+    updateStats(shown);
+  }
+  function updateStats(shown) {
+    const total = state.order.length;
+    if (shown == null) shown = state.order.filter((k) => matches(state.groups.get(k))).length;
+    statsEl.textContent = total
+      ? `showing ${shown} of ${total} request${total === 1 ? "" : "s"}`
+      : "no records loaded yet";
+  }
+  function resort() {
+    const keys = state.sort === "newest" ? [...state.order].reverse() : state.order;
+    for (const k of keys) cardsEl.appendChild(state.cards.get(k).details); // moves
+  }
+
+  // ---- follow / scroll ----
+  function atEdge() {
+    if (state.sort === "newest") return window.scrollY <= 80;
+    return window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
+  }
+  function scrollToEdge() {
+    window.scrollTo(0, state.sort === "newest" ? 0 : document.body.scrollHeight);
+  }
+
+  // ---- loading ----
+  function ingestLine(line) {
+    const t = line.trim();
+    if (!t) return false;
+    let rec;
+    try { rec = JSON.parse(t); } catch { return false; }
+    ingest(rec);
+    return true;
+  }
+  function loadText(text) {
+    clearAll();
+    for (const line of text.split("\n")) ingestLine(line);
+    applyAllFilters();
+    resort();
+    if (state.follow) scrollToEdge();
+  }
+  function clearAll() {
+    state.groups.clear(); state.order = []; state.cards.clear();
+    state.synthCounter = 0; state.sessionSynth.clear();
+    cardsEl.textContent = "";
+    updateStats(0);
+  }
+
+  function setStatus(text, cls) {
+    statusText.textContent = text;
+    statusEl.className = cls || "";
+  }
+
+  // Live push over Server-Sent Events (served mode only).
+  function startLive() {
+    let es;
+    try { es = new EventSource("events"); }
+    catch { showDrop(); return; }
+    setStatus("connecting…");
+    es.onopen = () => setStatus("live", "live");
+    es.addEventListener("reset", () => clearAll());  // file was trimmed/cleared
+    es.onmessage = (e) => {
+      const following = state.follow && atEdge();
+      if (ingestLine(e.data)) {
+        updateStats();
+        if (following) scrollToEdge();
+      }
+    };
+    es.onerror = () => {
+      setStatus("reconnecting…", "err");  // EventSource retries on its own
+      if (state.order.length === 0) showDrop();  // never connected: offer a file
+    };
+  }
+
+  function showDrop() { dropEl.classList.add("show"); }
+
+  // ---- wire controls ----
+  $("f-session").onchange = (e) => { state.filters.session = e.target.value; applyAllFilters(); };
+  $("f-mode").onchange = (e) => { state.filters.mode = e.target.value; applyAllFilters(); };
+  $("f-search").oninput = (e) => { state.filters.search = e.target.value.toLowerCase(); applyAllFilters(); };
+  $("f-errors").onchange = (e) => { state.filters.errorsOnly = e.target.checked; applyAllFilters(); };
+  $("f-commands").onchange = (e) => { state.filters.hideCommands = e.target.checked; applyAllFilters(); };
+  $("f-sort").onchange = (e) => { state.sort = e.target.value; resort(); if (state.follow) scrollToEdge(); };
+  $("f-follow").onchange = (e) => { state.follow = e.target.checked; if (state.follow) scrollToEdge(); };
+  $("b-expand").onclick = () => { for (const k of state.order) { const r = state.cards.get(k); if (!r.details.classList.contains("hidden")) r.details.open = true; } };
+  $("b-collapse").onclick = () => { for (const k of state.order) state.cards.get(k).details.open = false; };
+
+  const fileInput = $("file");
+  $("b-file").onclick = () => fileInput.click();
+  $("drop-pick").onclick = () => fileInput.click();
+  fileInput.onchange = () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    setStatus("file: " + f.name);
+    dropEl.classList.remove("show");
+    f.text().then(loadText);
+  };
+  ["dragover", "dragenter"].forEach((ev) =>
+    dropEl.addEventListener(ev, (e) => { e.preventDefault(); dropEl.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) =>
+    dropEl.addEventListener(ev, (e) => { e.preventDefault(); dropEl.classList.remove("over"); }));
+  dropEl.addEventListener("drop", (e) => {
+    const f = e.dataTransfer.files[0];
+    if (f) { setStatus("file: " + f.name); dropEl.classList.remove("show"); f.text().then(loadText); }
+  });
+
+  // ---- boot ----
+  updateStats(0);
+  if (location.protocol === "file:") { setStatus("file mode"); showDrop(); }
+  else startLive();
+})();
+</script>

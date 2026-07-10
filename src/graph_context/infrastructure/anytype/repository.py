@@ -139,6 +139,12 @@ class AnytypeGraphRepository:
         # + hydrate), so resync's watermark query never reports our own
         # boundary write as an out-of-band change.
         self._seen_stamps: dict[NodeId, str] = {}
+        # type_key -> template object id to apply on create (or None: no
+        # template / infra). Negative entries are cached because most types
+        # have none, so a create must not pay an extra GET on the hot path;
+        # cleared whenever the registry rebuilds so a newly UI-authored
+        # template appears.
+        self._templates: dict[str, str | None] = {}
 
     @property
     def graph(self) -> GraphIndex:
@@ -175,6 +181,7 @@ class AnytypeGraphRepository:
             hidden_field_keys=self._field_denylist,
             timeline_key=self._timeline[0],
         )
+        self._templates.clear()  # registry rebuilt: re-resolve templates lazily
         self._graph, watermark, stamps = await sync.load_index(
             self._client, self._registry
         )
@@ -192,6 +199,7 @@ class AnytypeGraphRepository:
             hidden_field_keys=self._field_denylist,
             timeline_key=self._timeline[0],
         )
+        self._templates.clear()  # registry rebuilt: re-resolve templates lazily
         fetched = await sync.fetch_changes(self._client, self._watermark)
         unseen = [
             obj for obj in fetched
@@ -214,6 +222,30 @@ class AnytypeGraphRepository:
         obj = await self._client.get_object(node_id)
         return mapping.body_of(obj)
 
+    async def _template_for(self, type_key: str) -> str | None:
+        """The template object id to apply when creating this type, or None.
+
+        Cached per type_key (including the negative -- most types have none).
+        Applying a template gives new objects the type template's default
+        property values + layout (the human "+"-button experience); our inline
+        properties/body then override/append (spiked)."""
+        if type_key in self._templates:
+            return self._templates[type_key]
+        chosen: str | None = None
+        type_id = self._registry.type_id_for(type_key)
+        if type_id:
+            ids = [t["id"] async for t in self._client.list_templates(type_id)]
+            chosen = self._choose_template(ids)
+        self._templates[type_key] = chosen
+        return chosen
+
+    @staticmethod
+    def _choose_template(ids: list[str]) -> str | None:
+        """Pick which template to apply. The API exposes no "default" flag, so
+        we take the first one it returns (the sole policy knob -- a per-type
+        config override would live here)."""
+        return ids[0] if ids else None
+
     # -- writes -----------------------------------------------------------
 
     async def create_node(
@@ -226,6 +258,13 @@ class AnytypeGraphRepository:
         type_key = self._registry.type_key_for(draft.type)
         if type_key is None:
             raise UnknownNodeType(draft.type, tuple(self._registry.known_node_types()))
+
+        # Apply the type's template on create (default property values + layout),
+        # except for infra roles -- bot-owned bookkeeping whose bodies are
+        # write-once and must not carry a human's UI scaffold.
+        template_id: str | None = None
+        if self._registry.role_for(type_key) not in schema.INFRA_ROLES:
+            template_id = await self._template_for(type_key)
 
         # Pre-validate endpoints (index-only) before any API call.
         for link in links:
@@ -257,6 +296,7 @@ class AnytypeGraphRepository:
                         draft, type_key=type_key,
                         native_properties=native_fields, fields_blob=blob,
                         timeline=self._timeline,
+                        template_id=template_id or "",
                     )
                 )
             )

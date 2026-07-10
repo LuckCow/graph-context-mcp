@@ -873,11 +873,14 @@ Original spec follows.
 
 ### Decisions (settled)
 
-- **Templates: skipped deliberately.** Reading type templates as
-  description scaffolds was considered and cut — templates are
-  human-owned structure, the auto-population interaction with our
-  create-with-body path is an unspiked collision risk, and profile
-  docstrings already carry the "write it for the page" guidance.
+- **Templates: ~~skipped deliberately~~ → applied on create (ADR 022).**
+  The original cut called the auto-population-vs-create-with-body interaction
+  an unspiked collision risk. It was spiked
+  (`docs/spikes/templates-body-collision.md`, `scripts/spike_template_props.py`)
+  and settled: creating with `template_id` applies the template's default
+  property values + layout, our inline properties override those keys, and our
+  body concatenates below the template's. `create_node` now passes the type's
+  first template's `template_id` (non-infra types only). See ADR 022.
 - Footer is server-owned below the delimiter and never touches text above
   it; if no delimiter is found the footer is appended, never merged.
 - 10b lands before or with 10a (the `description`-exclusion rule in 10a

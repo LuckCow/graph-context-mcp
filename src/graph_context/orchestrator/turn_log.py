@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_BYTES = 10_000_000  # ~10 MB of JSONL before old entries drop
+DEFAULT_TURN_LOG = "logs/turns.jsonl"  # relative to the process cwd
+OFF_VALUES = frozenset({"", "0", "false", "no", "off"})  # the repo-wide "knob off" spellings
+
+
+def turn_log_path() -> str | None:
+    """``GC_TURN_LOG`` resolution: the JSONL path, or None (diary off).
+
+    The single home of the off-values rule -- the writer (bootstrap) and
+    the viewer (turn_log_server) both resolve the path through here.
+    """
+    raw = os.environ.get("GC_TURN_LOG", DEFAULT_TURN_LOG).strip()
+    if raw.lower() in OFF_VALUES:
+        return None
+    return raw
 
 
 def _utc_now() -> str:
@@ -54,18 +69,25 @@ class TurnLog:
 
     # Every entry names the active mode so a single grepped line is
     # self-describing -- no walking back to the turn's opening entry.
+    # ``turn`` is the shared id of the handle_message call these records
+    # belong to: it ties one user query to its driver decisions, tool
+    # calls, and final replies so a reader can group by request even when
+    # sessions interleave in the process-global file.
 
     def user_message(
-        self, session_id: str, mode: str, user_id: str, text: str
+        self, turn_id: str, session_id: str, mode: str, user_id: str, text: str
     ) -> None:
         self._append({
-            "event": "user", "session": session_id, "mode": mode,
-            "user": user_id, "text": text,
+            "event": "user", "turn": turn_id, "session": session_id,
+            "mode": mode, "user": user_id, "text": text,
         })
 
-    def llm_turn(self, session_id: str, mode: str, turn: LLMTurn) -> None:
+    def llm_turn(
+        self, turn_id: str, session_id: str, mode: str, turn: LLMTurn
+    ) -> None:
         entry: dict[str, Any] = {
-            "event": "llm_turn", "session": session_id, "mode": mode,
+            "event": "llm_turn", "turn": turn_id, "session": session_id,
+            "mode": mode,
         }
         if turn.tool_calls:
             entry["tool_calls"] = [
@@ -77,19 +99,22 @@ class TurnLog:
         self._append(entry)
 
     def tool_result(
-        self, session_id: str, mode: str, call: ToolCall, result: str
+        self, turn_id: str, session_id: str, mode: str, call: ToolCall,
+        result: str,
     ) -> None:
         self._append({
-            "event": "tool_result", "session": session_id, "mode": mode,
-            "tool": call.name, "arguments": dict(call.arguments),
+            "event": "tool_result", "turn": turn_id, "session": session_id,
+            "mode": mode, "tool": call.name, "arguments": dict(call.arguments),
             "result": result,
         })
 
     def turn_end(
-        self, session_id: str, mode: str, events: Iterable[ReplyEvent]
+        self, turn_id: str, session_id: str, mode: str,
+        events: Iterable[ReplyEvent],
     ) -> None:
         self._append({
-            "event": "turn_end", "session": session_id, "mode": mode,
+            "event": "turn_end", "turn": turn_id, "session": session_id,
+            "mode": mode,
             "replies": [{"kind": e.kind, "text": e.text} for e in events],
         })
 

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from graph_context.domain.schema import Role
-from graph_context.infrastructure.anytype.registry import PropertyInfo, SpaceRegistry
+from graph_context.infrastructure.anytype.registry import (
+    PropertyInfo,
+    SpaceRegistry,
+    TypeInfo,
+)
 
 
 def _registry() -> SpaceRegistry:
     return SpaceRegistry(
         types_by_key={
-            "character": "Character",
-            "event": "Event",
-            "realization": "Realization",  # unmapped role
-            "gc_prose": "Prose",
+            "character": TypeInfo("character", "Character", id="type-character"),
+            "event": TypeInfo("event", "Event"),
+            "realization": TypeInfo("realization", "Realization"),  # unmapped role
+            "gc_prose": TypeInfo("gc_prose", "Prose"),
         },
         properties_by_key={
             "gc_edge_knows": PropertyInfo("gc_edge_knows", "edge: knows", "objects"),
@@ -38,6 +42,12 @@ class TestTypes:
         assert reg.type_key_for("Event") == "event"
         assert reg.type_key_for("nonsense") is None
 
+    def test_type_id_for_returns_id_or_none(self) -> None:
+        reg = _registry()
+        assert reg.type_id_for("character") == "type-character"
+        assert reg.type_id_for("event") is None  # no id captured
+        assert reg.type_id_for("nonsense") is None  # unknown key
+
     def test_known_node_types_excludes_infra(self) -> None:
         reg = _registry()
         known = reg.known_node_types()
@@ -49,7 +59,7 @@ class TestTypes:
         from graph_context.infrastructure.anytype.registry import LEGACY_TYPE_ROLES
 
         reg = SpaceRegistry(
-            types_by_key={"gc_character": "gc_character"},
+            types_by_key={"gc_character": TypeInfo("gc_character", "gc_character")},
             role_overrides=dict(LEGACY_TYPE_ROLES),
         )
         assert reg.role_for("gc_character") is Role.CHARACTER

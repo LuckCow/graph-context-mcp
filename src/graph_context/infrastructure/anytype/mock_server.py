@@ -70,6 +70,9 @@ _OBJECTS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects$")
 _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
 _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
 _TYPES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types$")
+_TEMPLATES = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/types/(?P<type>[^/]+)/templates$"
+)
 _PROPERTIES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties$")
 _TAGS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties/(?P<prop>[^/]+)/tags$")
 _LIST_VIEWS = re.compile(
@@ -146,6 +149,11 @@ class MockAnytype:
         self._objects: dict[str, dict[str, Any]] = {}
         self._types: dict[str, dict[str, Any]] = {}
         self._properties: dict[str, dict[str, Any]] = {}
+        # Type templates (UI-authored; the API can't mint them, so tests seed
+        # via seed_template). Keyed by type OBJECT id, plus a by-id index for
+        # applying a template on create.
+        self._templates: dict[str, list[dict[str, Any]]] = {}
+        self._templates_by_id: dict[str, dict[str, Any]] = {}
         # Chat state (WP14, spike S10 quirks C1-C5 in chat.py). The caller's
         # own member id -- the live server attributes API posts to the
         # authenticated account's participant id.
@@ -202,6 +210,7 @@ class MockAnytype:
             (_OBJECT, self._handle_object),
             (_OBJECTS, self._handle_objects),
             (_SEARCH, self._handle_search),
+            (_TEMPLATES, self._handle_templates),  # before _TYPES (more specific)
             (_TYPES, self._handle_types),
             (_TAGS, self._handle_tags),
             (_PROPERTIES, self._handle_properties),
@@ -243,6 +252,29 @@ class MockAnytype:
         }
         self._stamp(self._objects[object_id], PROP_CREATED)
         return object_id
+
+    def seed_template(
+        self,
+        type_key: str,
+        *,
+        body: str = "",
+        default_properties: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Author a type template as a human would in the UI (the API can't
+        mint them). ``default_properties`` are pre-resolved property entries
+        (e.g. a select envelope) the template applies on create; ``body`` is
+        the template's scaffold, prepended to a caller body on create."""
+        type_id = self._types[type_key]["id"]
+        template_id = self._new_id()
+        template = {
+            "id": template_id,
+            "name": f"{type_key} template",
+            "body": body,
+            "default_properties": list(default_properties or []),
+        }
+        self._templates.setdefault(type_id, []).append(template)
+        self._templates_by_id[template_id] = template
+        return template_id
 
     def edit_object_directly(self, object_id: str, **changes: Any) -> None:
         """Mutate an object as a human edit; stamps last_modified_date.
@@ -376,6 +408,19 @@ class MockAnytype:
             error = self._resolve_select_values(body.get("properties", []))
             if error is not None:
                 return error
+            # template_id (spiked): the template supplies default property
+            # values + a scaffold body server-side; the request's properties
+            # override defaults per key, and the request body is appended below
+            # the template body (template first). Defaults are trusted (seeded)
+            # so they bypass the request validation above.
+            tpl = self._templates_by_id.get(body.get("template_id", ""))
+            properties: list[dict[str, Any]] = list(tpl["default_properties"]) if tpl else []
+            for entry in body.get("properties", []):
+                properties = [p for p in properties if p.get("key") != entry.get("key")]
+                properties.append(entry)
+            tpl_body = tpl["body"] if tpl else ""
+            req_body = body.get("body", "")
+            markdown = f"{tpl_body}\n{req_body}" if tpl_body and req_body else tpl_body or req_body
             object_id = self._new_id()
             self._objects[object_id] = {
                 "id": object_id,
@@ -383,9 +428,9 @@ class MockAnytype:
                 "type": {"key": body["type_key"]},
                 "archived": False,
                 "icon": body.get("icon"),
-                "properties": list(body.get("properties", [])),
+                "properties": properties,
                 "snippet": "",
-                "markdown": body.get("body", ""),  # A5: body in, markdown out
+                "markdown": markdown,  # A5: body in, markdown out
             }
             self._stamp(self._objects[object_id], PROP_CREATED)
             return httpx.Response(201, json={"object": self._objects[object_id]})
@@ -595,6 +640,23 @@ class MockAnytype:
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=frames()
         )
+
+    def _handle_templates(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        """A type's templates, addressed by type OBJECT id (like the live
+        route). The list view carries id/name only; body + defaults are the
+        server-side apply state, read only when the template is applied."""
+        if request.method != "GET":
+            return self._error(405, "method_not_allowed")
+        type_id = match.group("type")
+        if not any(t["id"] == type_id for t in self._types.values()):
+            return self._error(404, "type_not_found")
+        listed = [
+            {"id": t["id"], "name": t["name"]}
+            for t in self._templates.get(type_id, [])
+        ]
+        return self._paginated(listed, request.url.params)
 
     def _handle_types(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":

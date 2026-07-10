@@ -60,6 +60,16 @@ ignore_missing_imports = true
 module = "discord.*"
 ignore_missing_imports = true
 
+# bootstrap passes a validated str to ClaudeAgentDriver(effort=...), whose
+# param is claude-agent-sdk's EffortLevel Literal. With the [orchestrator]
+# extra installed (devcontainer) that's a real arg-type mismatch, so the line
+# carries `# type: ignore[arg-type]`. In CI the extra is absent, so EffortLevel
+# resolves to Any (via the override above), the call type-checks, and strict's
+# warn_unused_ignores would flag the now-redundant comment. Silence that here.
+[[tool.mypy.overrides]]
+module = "graph_context.orchestrator.bootstrap"
+warn_unused_ignores = false
+
 # The dependency rule (README "Architecture in one paragraph"), enforced.
 [tool.importlinter]
 root_package = "graph_context"
@@ -114,6 +124,7 @@ source_modules = [
     "graph_context.orchestrator.drivers",
     "graph_context.orchestrator.pipeline",
     "graph_context.orchestrator.turn_log",
+    "graph_context.orchestrator.turn_log_server",
     "graph_context.orchestrator.channels",
     "graph_context.orchestrator.spaces",
     "graph_context.orchestrator.discord_transport",
@@ -133,6 +144,7 @@ source_modules = [
     "graph_context.orchestrator.drivers",
     "graph_context.orchestrator.pipeline",
     "graph_context.orchestrator.turn_log",
+    "graph_context.orchestrator.turn_log_server",
     "graph_context.orchestrator.capture",
     "graph_context.orchestrator.claude_driver",
     "graph_context.orchestrator.bootstrap",

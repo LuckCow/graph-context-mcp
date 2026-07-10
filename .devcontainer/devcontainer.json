@@ -13,9 +13,10 @@
   // Idempotent: re-applies the same rules if VS Code (re)starts the container itself.
   "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
 
-  // Your MCP server port, forwarded to the host when attached via VS Code.
-  // (docker-compose.yml also publishes it, so it works without VS Code too.)
-  "forwardPorts": [8000],
+  // Forwarded to the host when attached via VS Code: 8000 = MCP server,
+  // 8765 = turn-log viewer (orchestrator serve).
+  // (docker-compose.yml also publishes them, so they work without VS Code too.)
+  "forwardPorts": [8000, 8765],
 
   "customizations": {
     "vscode": {

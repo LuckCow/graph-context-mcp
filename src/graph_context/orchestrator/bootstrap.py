@@ -49,11 +49,9 @@ from graph_context.orchestrator.spaces import (
     load_space_bindings,
     served_chat_ids,
 )
-from graph_context.orchestrator.turn_log import TurnLog
+from graph_context.orchestrator.turn_log import TurnLog, turn_log_path
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_TURN_LOG = "logs/turns.jsonl"  # relative to the process cwd
 
 MANUAL_HELP = (
     "you are the model (GC_DRIVER=manual): /tool <name> {json-args} runs a "
@@ -139,8 +137,8 @@ def build_turn_log() -> TurnLog | None:
     entries are dropped -- and, like every other config knob, a value
     that isn't a positive integer fails loudly at startup.
     """
-    raw_path = os.environ.get("GC_TURN_LOG", DEFAULT_TURN_LOG).strip()
-    if raw_path.lower() in {"", "0", "false", "no", "off"}:
+    raw_path = turn_log_path()
+    if raw_path is None:
         return None
     raw_max = os.environ.get("GC_TURN_LOG_MAX_BYTES", "").strip()
     if not raw_max:

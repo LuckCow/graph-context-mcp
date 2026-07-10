@@ -239,9 +239,13 @@ async def _watch_chats(
             )
 
 
-async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+async def run() -> None:
+    """Serve every bound space's chats until cancelled.
 
+    Loop-composable: no logging setup, teardown in ``finally`` -- the
+    consolidated server (``serve``) runs this next to the other
+    transports; ``main()`` wraps it for standalone launches.
+    """
     chat_clients: dict[str, AnytypeChatClient] = {}  # space id -> client
     transport_clients: list[AnytypeClient] = []
 
@@ -306,6 +310,11 @@ async def main() -> None:
                     ))
     finally:
         await composition.run_teardown(teardown)
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    await run()
 
 
 if __name__ == "__main__":

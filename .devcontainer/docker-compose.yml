@@ -36,9 +36,11 @@ services:
 
     working_dir: /workspaces/graph-context-mcp
 
-    # Only loopback on the host can reach the published MCP server port.
+    # Only loopback on the host can reach the published ports:
+    # 8000 = MCP server, 8765 = turn-log viewer (orchestrator serve).
     ports:
       - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8765:8765"
 
     # Lets the container reach the Anytype desktop app running on your Windows host.
     extra_hosts:
@@ -74,6 +76,14 @@ services:
       # transport. Endpoint-agnostic -- works against the desktop today
       # and the sidecar after cutover.
       GC_SPACES_FILE: "/workspaces/graph-context-mcp/spaces.toml"
+      # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
+      # account's CLI default; pinned here to Sonnet 5.
+      GC_DRIVER_MODEL: "claude-sonnet-5"
+      # The turn-log viewer must bind all interfaces INSIDE the container:
+      # Docker's published-port DNAT delivers host traffic to eth0, not
+      # loopback. The host side stays private -- the ports: mapping above
+      # pins it to 127.0.0.1.
+      GC_LOG_VIEWER_HOST: "0.0.0.0"
 
     secrets:
       - anytype_api_key

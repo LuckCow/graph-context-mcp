@@ -18,7 +18,7 @@ The methods are ``async`` to satisfy the port, but never actually await.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any
 
@@ -35,16 +35,33 @@ from graph_context.domain.models import (
 from graph_context.domain.schema import Role
 
 
+@dataclass(frozen=True)
+class FakeTemplate:
+    """A type's template, as the fake models its resolved effect: default field
+    values applied on create, and a scaffold body prepended to the caller's."""
+
+    default_fields: Mapping[str, str] = field(default_factory=dict)
+    body: str = ""
+
+
 class InMemoryGraphRepository:
     """``GraphRepository`` whose only store is its own :class:`GraphIndex`."""
 
-    def __init__(self, *, role_overrides: Mapping[str, Role] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        role_overrides: Mapping[str, Role] | None = None,
+        templates: Mapping[str, FakeTemplate] | None = None,
+    ) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
         self._bodies: dict[NodeId, str] = {}
         # Profile-supplied type-key -> Role additions (WP5); same contract
         # as the Anytype adapter's registry overrides.
         self._role_overrides: dict[str, Role] = dict(role_overrides or {})
+        # Type-identifier -> template, mirroring the Anytype adapter applying a
+        # type's template on create (default field values + scaffold body).
+        self._templates: dict[str, FakeTemplate] = dict(templates or {})
 
     @property
     def graph(self) -> GraphIndex:
@@ -58,6 +75,20 @@ class InMemoryGraphRepository:
         create_missing_relations: bool = False,
     ) -> Node:
         role = schema.resolve_role(draft.type, self._role_overrides)
+        # Apply the type's template (default field values + scaffold body),
+        # except for infra roles -- matching the Anytype adapter. Caller fields
+        # override template defaults; the caller body is appended below the
+        # scaffold (template first).
+        template = None if role in schema.INFRA_ROLES else self._templates.get(draft.type)
+        fields = dict(draft.fields)
+        body = draft.body
+        if template is not None:
+            fields = {**template.default_fields, **fields}
+            body = (
+                f"{template.body}\n{draft.body}"
+                if draft.body and template.body
+                else draft.body or template.body
+            )
         node = Node(
             id=f"n{next(self._ids):04d}",
             # Display name mirrors the Anytype backend: a mapped role renders
@@ -66,13 +97,13 @@ class InMemoryGraphRepository:
             name=draft.name,
             summary=draft.summary,
             story_time=draft.story_time,
-            fields=dict(draft.fields),
+            fields=fields,
             type_key=draft.type,
             role=role,
         )
         self._graph.upsert_node(node)
-        if draft.body:
-            self._bodies[node.id] = draft.body
+        if body:
+            self._bodies[node.id] = body
         try:
             for link in links:
                 self._graph.add_edge(link.to_edge(anchor=node.id))
