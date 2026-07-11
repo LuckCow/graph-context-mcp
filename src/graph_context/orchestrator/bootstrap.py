@@ -42,6 +42,7 @@ from graph_context.orchestrator.drivers import (
     LLMTurn,
     ToolCall,
     TranscriptEvent,
+    plain_transcript,
 )
 from graph_context.orchestrator.pipeline import Orchestrator
 from graph_context.orchestrator.spaces import (
@@ -70,6 +71,9 @@ class ManualDriver:
 
     def system_prompt(self, goal: str) -> str:
         return goal  # no model behind this driver; the goal stands in
+
+    def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
+        return plain_transcript(transcript)  # ditto
 
     async def decide(
         self,

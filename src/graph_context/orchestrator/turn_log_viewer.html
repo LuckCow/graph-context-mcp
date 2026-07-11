@@ -106,6 +106,12 @@
   }
   details.result { margin-top: 5px; }
   details.result pre { white-space: pre-wrap; word-break: break-word; }
+  /* Large text blobs (the assembled prompt, the context block): read as
+     prose, not code -- roomier type, own scrollbar past ~a screenful. */
+  pre.longtext {
+    font-size: 13.5px; line-height: 1.65; padding: 12px 14px;
+    max-height: 70vh; overflow-y: auto;
+  }
   .meta { color: var(--muted); font-size: 11px; margin: 2px 0 6px;
     word-break: break-all; }
   details.result > summary {
@@ -319,6 +325,20 @@
         d.appendChild(det);
         return d;
       }
+      case "llm_prompt": {
+        // The turn's assembled prompt exactly as the driver sends it
+        // (memory replay + context block + live message, driver-rendered).
+        // Text only -- the envelope (ids, mode, ts) is chrome, not content.
+        const d = el("div", "ev prompt");
+        d.appendChild(el("span", "tag", "llm prompt"));
+        const text = String(rec.text || "");
+        const det = el("details", "result");
+        det.appendChild(el("summary", null,
+          "assembled prompt (" + text.length + " chars)"));
+        det.appendChild(el("pre", "longtext", text));
+        d.appendChild(det);
+        return d;
+      }
       case "context": {
         // The turn's context block (scratchpad, working set, recent trail).
         const d = el("div", "ev ctx");
@@ -327,7 +347,7 @@
         const det = el("details", "result");
         det.appendChild(el("summary", null,
           "context block (" + text.length + " chars)"));
-        det.appendChild(el("pre", null, text));
+        det.appendChild(el("pre", "longtext", text));
         d.appendChild(det);
         return d;
       }

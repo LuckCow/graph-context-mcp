@@ -72,6 +72,14 @@ class DecideUsage:
     num_turns: int = 0
 
 
+def plain_transcript(transcript: Sequence[TranscriptEvent]) -> str:
+    """The trivial transcript rendering: event texts, blank-line joined.
+
+    The ``render_prompt`` answer for drivers that send nothing anywhere
+    (scripted, manual) -- the assembled prompt IS the transcript."""
+    return "\n\n".join(event.text for event in transcript)
+
+
 class LLMDriver(Protocol):
     async def decide(
         self,
@@ -92,6 +100,16 @@ class LLMDriver(Protocol):
         assembled string -- from the same code path that sends it."""
         ...
 
+    def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
+        """The exact prompt string this driver sends for ``transcript``.
+
+        The other half of the prompt-capture seam: ``system_prompt`` is
+        the standing input, this is the per-turn one. A driver must answer
+        from the same rendering code path ``decide`` sends through
+        (ClaudeAgentDriver fences tool results and prior replies), so the
+        diary shows the model's true input, not a reconstruction."""
+        ...
+
 
 class ScriptedDriver:
     """Plays back a fixed list of turns; deterministic by construction.
@@ -107,6 +125,9 @@ class ScriptedDriver:
 
     def system_prompt(self, goal: str) -> str:
         return goal  # nothing sends it anywhere; the goal IS the prompt
+
+    def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
+        return plain_transcript(transcript)  # ditto
 
     async def decide(
         self,

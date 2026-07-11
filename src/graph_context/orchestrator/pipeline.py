@@ -158,9 +158,10 @@ class Orchestrator:
     switches the whole subsystem off.
 
     ``turn_log`` is the same shape of toggle for the full-fidelity turn
-    diary: when wired, every message logs its input, each driver
-    decision, each tool call with its complete output, and the final
-    reply events (see ``turn_log.py``). ``None`` logs nothing.
+    diary: when wired, every message logs its input, the assembled
+    prompt the driver sends, each driver decision, each tool call with
+    its complete output, and the final reply events (see
+    ``turn_log.py``). ``None`` logs nothing.
     """
 
     services: Services
@@ -260,6 +261,14 @@ class Orchestrator:
                     turn_id, session_id, spec.name, context_block
                 )
         transcript.append(TranscriptEvent("user", stripped))
+        if self.turn_log:
+            # The assembled prompt as the driver will render it for the
+            # FIRST decision; later decisions add only tool results, which
+            # the diary already records in full.
+            self.turn_log.llm_prompt(
+                turn_id, session_id, spec.name,
+                self.driver.render_prompt(transcript),
+            )
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
         reply_text = ""

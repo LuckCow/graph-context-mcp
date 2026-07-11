@@ -256,6 +256,9 @@ class ClaudeAgentDriver:
     def system_prompt(self, goal: str) -> str:
         return assembled_system_prompt(goal)
 
+    def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
+        return render_transcript(transcript)  # what decide() queries with
+
     async def decide(
         self,
         transcript: Sequence[TranscriptEvent],

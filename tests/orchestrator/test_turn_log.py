@@ -151,17 +151,19 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         entries = _entries(path)
         assert [e["event"] for e in entries] == [
-            "user", "prompt", "llm_turn", "tool_result", "llm_turn", "turn_end",
+            "user", "prompt", "llm_prompt", "llm_turn", "tool_result",
+            "llm_turn", "turn_end",
         ]
         assert all(e["mode"] == "world_modeling" for e in entries)
         assert entries[0]["text"] == "Add Mira."
         assert entries[1]["goal"]  # the mode's system-prompt fragment
         assert entries[1]["system_prompt"]  # what the driver actually sends
         assert "create_node" in entries[1]["tools"]  # name -> doc
-        assert entries[2]["tool_calls"][0]["name"] == "create_node"
-        assert "Mira" in entries[3]["result"]  # the tool's full output
-        assert entries[4]["reply"] == "Mira now exists."
-        assert entries[5]["replies"] == [
+        assert "Add Mira." in entries[2]["text"]  # the assembled prompt
+        assert entries[3]["tool_calls"][0]["name"] == "create_node"
+        assert "Mira" in entries[4]["result"]  # the tool's full output
+        assert entries[5]["reply"] == "Mira now exists."
+        assert entries[6]["replies"] == [
             {"kind": "reply", "text": "Mira now exists."},
         ]
         # Every record of one handle_message call shares one turn id, so a
@@ -233,6 +235,26 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s2", "u1", "hello")
         prompts = [e for e in _entries(path) if e["event"] == "prompt"]
         assert [p["session"] for p in prompts] == ["s1", "s2"]
+
+    async def test_the_assembled_prompt_is_logged_once_per_turn(
+        self, services: Services, tmp_path
+    ) -> None:
+        """One llm_prompt per message, capturing the driver's actual input:
+        the second turn's prompt replays the first turn's conversation --
+        both halves, the user's message AND the bot's reply."""
+        path = tmp_path / "turns.jsonl"
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),  # a multi-decision turn...
+            LLMTurn(reply="Mira now exists."),   # ...logs ONE prompt
+            LLMTurn(reply="She is an engineer."),
+        ], TurnLog(path, now=lambda: "T0"))
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        await orchestrator.handle_message("s1", "u1", "Who is Mira?")
+        prompts = [e for e in _entries(path) if e["event"] == "llm_prompt"]
+        assert len(prompts) == 2
+        assert "Add Mira." in prompts[1]["text"]        # prior user half
+        assert "Mira now exists." in prompts[1]["text"]  # prior bot half
+        assert prompts[1]["text"].endswith("Who is Mira?")  # live message last
 
     async def test_a_non_empty_context_block_is_logged(
         self, services: Services, tmp_path

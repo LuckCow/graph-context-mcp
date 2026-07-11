@@ -48,6 +48,9 @@ class RecordingDriver:
     def system_prompt(self, goal: str) -> str:
         return self._inner.system_prompt(goal)
 
+    def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
+        return self._inner.render_prompt(transcript)
+
     async def decide(
         self,
         transcript: Sequence[TranscriptEvent],

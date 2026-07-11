@@ -1,10 +1,11 @@
 """Size-capped JSONL record of everything that crosses the turn seam.
 
 Every message the orchestrator handles is logged as it flows: the user's
-input, each driver decision (tool calls or the final reply), every
-executed tool call with its FULL rendered result, and the turn's final
-reply events. One JSON object per line so the file tails and greps
-cleanly; every entry carries an ISO-8601 UTC timestamp.
+input, the turn's assembled prompt exactly as the driver sends it, each
+driver decision (tool calls or the final reply), every executed tool call
+with its FULL rendered result, and the turn's final reply events. One
+JSON object per line so the file tails and greps cleanly; every entry
+carries an ISO-8601 UTC timestamp.
 
 The file is bounded, not rotated: once an append pushes it past
 ``max_bytes``, the OLDEST entries are dropped until the newest fit in
@@ -108,6 +109,23 @@ class TurnLog:
         hide from reviewers."""
         self._append({
             "event": "context", "turn": turn_id, "session": session_id,
+            "mode": mode, "text": text,
+        })
+
+    def llm_prompt(
+        self, turn_id: str, session_id: str, mode: str, text: str
+    ) -> None:
+        """The turn's assembled prompt exactly as the driver sends it --
+        replayed conversation memory, the context block, and the live
+        message, in the driver's own rendering (fences and all).
+
+        Logged once per turn, before the first decision: later decisions
+        within the turn send this same prompt plus the tool results
+        already logged in full, so re-logging the growing transcript per
+        decision would only burn the byte budget repeating itself.
+        """
+        self._append({
+            "event": "llm_prompt", "turn": turn_id, "session": session_id,
             "mode": mode, "text": text,
         })
 
