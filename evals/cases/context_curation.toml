@@ -1,0 +1,75 @@
+# Context curation (WP15/ADR 020): the model owns its cross-turn context
+# via the context tool -- the working set for nodes a scene needs at hand,
+# the scratchpad for intentions. These graders read the SESSION, not the
+# graph: curation requests must change what is held, and nothing else.
+
+[suite]
+name = "context_curation"
+profile = "fiction"
+embedder = "off"
+
+# 11. An explicit hold request must land in the working set.
+[[case]]
+id = "hold_nodes_for_the_scene"
+mode = "world_modeling"
+trials = 2
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer of Brakk."
+
+[[case.seed.node]]
+type = "Location"
+name = "The Undercroft"
+summary = "Flooded vaults beneath the city."
+
+[[case.turn]]
+user = "We're about to work on a scene set in the Undercroft with Mira. Hold both of them in your working set."
+
+[case.expect.graph]
+node_count_delta = 0
+
+[case.expect.tools]
+called_any = ["context"]
+not_executed = ["create_node", "update_node"]
+
+[case.expect.session]
+working_set_holds = ["Mira", "The Undercroft"]
+
+[[case.script]]
+tool_calls = [{ name = "context", arguments = { action = "hold", node_id = "Mira", detail = "full" } }, { name = "context", arguments = { action = "hold", node_id = "The Undercroft", detail = "summaries" } }]
+
+[[case.script]]
+reply = "Holding Mira (full detail) and the Undercroft for the scene."
+
+
+# 12. A tone note belongs in the scratchpad, not in the graph.
+[[case]]
+id = "note_scene_tone_in_the_scratchpad"
+mode = "world_modeling"
+trials = 2
+
+[[case.seed.node]]
+type = "Location"
+name = "The Undercroft"
+summary = "Flooded vaults beneath the city."
+
+[[case.turn]]
+user = "Note for yourself: the tone of this scene is grim and rain-soaked. Don't put that in the world graph -- it's direction, not fact."
+
+[case.expect.graph]
+node_count_delta = 0
+
+[case.expect.tools]
+called_any = ["context"]
+not_executed = ["create_node", "update_node"]
+
+[case.expect.session]
+scratchpad_contains = ["grim"]
+
+[[case.script]]
+tool_calls = [{ name = "context", arguments = { action = "note", text = "Scene direction: tone is grim and rain-soaked." } }]
+
+[[case.script]]
+reply = "Noted -- grim, rain-soaked tone for this scene; kept out of the graph."

@@ -1,0 +1,91 @@
+# Multi-turn continuity: conversation memory (WP15) and seeded history
+# (Orchestrator.seed_memory, the restart path) must actually inform later
+# turns -- pronouns resolve, promised work happens without re-asking.
+
+[suite]
+name = "multi_turn"
+profile = "fiction"
+embedder = "off"
+
+# 13. Pronoun continuity: "her" in turn 2 is Orla from turn 1. The rivals
+# link accepts any label and either direction -- the wording is the
+# model's, the connection is the outcome.
+[[case]]
+id = "pronoun_refers_to_prior_turn"
+mode = "world_modeling"
+trials = 2
+
+[[case.turn]]
+user = "Add Orla, a fence and information broker in the flooded vaults."
+
+[[case.turn]]
+user = "Give her a rival named Vex -- add him and link the two of them."
+
+[case.expect.graph]
+node_count_delta = 2
+node_exists = [{ name = "Orla", type = "Character" }, { name = "Vex", type = "Character" }]
+edge_exists = [{ source = "Vex", target = "Orla", directed = false }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[case.expect.reply]
+must_mention = ["Vex"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Orla", summary = "A fence and information broker in the flooded vaults." } }]
+
+[[case.script]]
+reply = "Orla is in the world."
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Vex", summary = "A rival broker circling Orla's territory.", links = [{ edge_type = "rival_of", other = "Orla" }], create_missing_relations = true } }]
+
+[[case.script]]
+reply = "Vex now exists, linked to Orla as her rival."
+
+
+# 14. Restart continuity: the plan for Sefa lives only in seeded history
+# (what a transport replays after a restart). "The sister we discussed"
+# must resolve from there -- creating her without re-asking who she is.
+[[case]]
+id = "seeded_history_carries_the_plan"
+mode = "world_modeling"
+trials = 2
+
+[[case.seed.node]]
+type = "Character"
+name = "Orla"
+summary = "A fence and information broker in the flooded vaults."
+
+[[case.turn]]
+user = "Go ahead and add the sister we discussed."
+seed_memory = [
+    ["user", "I'm thinking Orla has a sister -- a chandler named Sefa who wants nothing to do with the vaults."],
+    ["assistant", "Noted: Sefa, a chandler, Orla's sister, deliberately clear of the vault trade. Say the word and I'll add her to the world."],
+]
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Sefa", type = "Character" }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[case.expect.reply]
+must_mention = ["Sefa"]
+
+[case.judge]
+rubric = """
+The only knowledge of Sefa lives in the replayed conversation history: a
+chandler, Orla's sister, avoiding the vault trade. Pass only if the
+assistant created Sefa from that history without asking the user to repeat
+themselves, and the node's summary reflects those remembered facts rather
+than invented ones.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Sefa", summary = "A chandler, Orla's sister, who wants nothing to do with the vaults.", links = [{ edge_type = "sibling_of", other = "Orla" }], create_missing_relations = true } }]
+
+[[case.script]]
+reply = "Sefa is in the world -- Orla's sister, the chandler keeping clear of the vault trade."

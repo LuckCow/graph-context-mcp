@@ -53,6 +53,7 @@ from claude_agent_sdk import (
     McpSdkServerConfig,
     PermissionResultAllow,
     PermissionResultDeny,
+    ResultMessage,
     SdkMcpTool,
     TextBlock,
     ToolPermissionContext,
@@ -61,7 +62,12 @@ from claude_agent_sdk import (
     tool,
 )
 
-from graph_context.orchestrator.drivers import LLMTurn, ToolCall, TranscriptEvent
+from graph_context.orchestrator.drivers import (
+    DecideUsage,
+    LLMTurn,
+    ToolCall,
+    TranscriptEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -218,10 +224,15 @@ class ClaudeAgentDriver:
         effort: EffortLevel | None = None,
         cli_path: str | None = None,
         schemas: Mapping[str, Mapping[str, Any]] | None = None,
+        on_result: Callable[[DecideUsage], None] | None = None,
     ) -> None:
         self._model = model
         self._effort = effort
         self._cli_path = cli_path
+        # Cost/usage observer (the eval harness's metrics tap): called once
+        # per decide with the session's translated ResultMessage. The
+        # pipeline never sees usage -- it is diagnostics, not a decision.
+        self._on_result = on_result
         if schemas is None:
             # Derived once from the full tool surface; decide() registers
             # only the names the active mode's binding hands it.
@@ -260,9 +271,12 @@ class ClaudeAgentDriver:
         )
         reply_parts: list[str] = []
         calls: list[ToolCall] = []
+        last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query(render_transcript(transcript))
             async for message in client.receive_response():
+                if isinstance(message, ResultMessage):
+                    last_result = message
                 if not isinstance(message, AssistantMessage):
                     continue
                 for block in message.content:
@@ -272,6 +286,8 @@ class ClaudeAgentDriver:
                         calls.append(
                             ToolCall(local_tool_name(block.name), dict(block.input))
                         )
+        if self._on_result is not None and last_result is not None:
+            self._on_result(usage_from_result(last_result))
         # Text alongside tool calls is usually preamble ("I'll look that
         # up"), but it travels with the calls anyway: on a turn's FINAL
         # decision the pipeline treats it as the bundled reply (see
@@ -279,3 +295,23 @@ class ClaudeAgentDriver:
         # pipeline's rule, not this adapter's.
         reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
         return LLMTurn(reply=reply, tool_calls=tuple(calls))
+
+
+def usage_from_result(result: ResultMessage) -> DecideUsage:
+    """SDK ResultMessage -> the pure DecideUsage value.
+
+    The ``usage`` dict is the CLI's passthrough of the API usage block;
+    absent keys read as zero rather than failing -- usage is diagnostics
+    and must never take a decision down.
+    """
+    usage = result.usage or {}
+    return DecideUsage(
+        duration_ms=result.duration_ms,
+        duration_api_ms=result.duration_api_ms,
+        total_cost_usd=result.total_cost_usd,
+        input_tokens=int(usage.get("input_tokens", 0)),
+        output_tokens=int(usage.get("output_tokens", 0)),
+        cache_read_tokens=int(usage.get("cache_read_input_tokens", 0)),
+        cache_creation_tokens=int(usage.get("cache_creation_input_tokens", 0)),
+        num_turns=result.num_turns,
+    )

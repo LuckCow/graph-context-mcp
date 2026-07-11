@@ -1485,6 +1485,61 @@ Verification fallout (2026-07-08), both live-caught:
 
 ---
 
+## WP16 — Behavioral eval harness (ADR 024) — **shipped 2026-07-10**
+
+**Status:** complete. `python -m evals run` drives real end-to-end turns
+(pipeline + mode registry + live `ClaudeAgentDriver`) against a fresh
+in-memory runtime per trial and grades outcomes; the risk register's
+"dogfooding transcripts" answer to *LLM misuses tools* now has a
+repeatable, comparable form.
+
+What shipped:
+
+* **The `evals/` package** (outside the import-linter root; never
+  pytest-collected). `dataset.py` loads `evals/cases/*.toml` with the
+  ranking-golden validation posture; `runner.py` isolates each trial in
+  its own `composition.build_runtime` (memory backend, provenance off
+  unless the case opts in), seeds the world through the repository
+  port, and runs the conversation through `Orchestrator.handle_message`;
+  `graders.py` asserts on graph end-state, session state (working set /
+  scratchpad), final reply substrings, and loose trajectory bounds —
+  executed vs rejected calls decided by the mode's binding table, never
+  by prescribed sequences.
+* **Two drivers, one control flow.** `--driver claude` (default) is the
+  real model on the subscription; `--driver scripted` replays each
+  case's `[[case.script]]` — its reference solution. CI
+  (`tests/evals/`) replays every shipped script and fails on unsolvable
+  cases, plus a `must_fail` fixture that keeps the graders honest; the
+  scripted path never imports claude-agent-sdk.
+* **Metrics at the driver seam.** `ClaudeAgentDriver` gained an
+  `on_result` callback (SDK `ResultMessage` → pure `DecideUsage`), so
+  runs report cost/latency/tokens per trial without touching the
+  pipeline.
+* **Artifacts per run** (`evals/runs/<ts>[-label]/`, gitignored):
+  `turns.jsonl` written by the production `TurnLog` — the existing
+  viewer replays eval transcripts unchanged — plus `results.json` and
+  `report.md` with pass@k / pass^k per case. `python -m evals compare
+  A B` diffs two runs and exits nonzero on pass-rate regressions.
+* **Optional judge** (`--judge`): rubric-bearing cases get a
+  reasoning-first JSON verdict from a tool-less, settings-less
+  claude-agent-sdk session; judge verdicts report alongside code grades
+  and never overrule them.
+* **Candidate follow-up** (from eval calibration 2026-07-10): mirror the
+  active profile's mode specs into the space as Activity Mode objects at
+  bootstrap (`ensure_schema` currently seeds only the "Example Mode"
+  template). Real spaces would then always contain referenceable,
+  editable mode exemplars — the `mode_management` eval suite seeds its
+  worlds this way already.
+* **The starter dataset**: 14 live cases across five suites
+  (world-building creates/links/duplicate-trap/stale-sweep; lookups
+  with mutation bans and call ceilings; the mode-boundary pair plus
+  authoring self-correction; context curation into working set and
+  scratchpad; multi-turn pronoun continuity and seeded-history restart),
+  plus 3 scripted smoke fixtures. Grown from dogfooding; calibrate by
+  reading run transcripts in the viewer.
+
+---
+
 ## Sequencing
 
 ```
@@ -1543,7 +1598,7 @@ WP11 and WP12 are independent of each other.
 | Hydration too slow at scale (S2) | Spike timing | Persisted index snapshot + delta resync |
 | Human deletions invisible to resync (S4) | Spike | Periodic full reconciliation; document staleness window |
 | Tool surface churn after release | Param-naming review skipped | WP2's scheduled naming review before first external use |
-| LLM misuses tools | Dogfooding transcripts | Docstrings-as-prompts discipline; iterate on descriptions, not new tools |
+| LLM misuses tools | Eval-run regressions (WP16) + dogfooding transcripts | Docstrings-as-prompts discipline; iterate on descriptions, verify with `python -m evals compare` |
 | Anytype API version drift | Changelog page | Pin `Anytype-Version`; subscribe to the changelog; bump deliberately |
 | LangGraph abstractions leak into core layers | import-linter CI failure | ADR 007 quarantine; a framework swap must stay orchestrator-internal |
 | Intent nodes clutter the human editing surface | dogfooding in the Anytype UI | Naming convention + infra-role hiding + subsystem toggle (ADR 008) |

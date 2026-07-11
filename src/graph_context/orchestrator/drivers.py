@@ -52,6 +52,26 @@ class LLMTurn:
     tool_calls: tuple[ToolCall, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class DecideUsage:
+    """What one ``decide`` call cost, translated off the SDK's result.
+
+    Pure data so consumers (the eval harness's RecordingDriver) never need
+    the claude-agent-sdk installed; ``ClaudeAgentDriver`` fills it from the
+    session's ResultMessage and hands it to its ``on_result`` callback.
+    ``None`` fields are values the SDK did not report.
+    """
+
+    duration_ms: int = 0
+    duration_api_ms: int = 0
+    total_cost_usd: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    num_turns: int = 0
+
+
 class LLMDriver(Protocol):
     async def decide(
         self,

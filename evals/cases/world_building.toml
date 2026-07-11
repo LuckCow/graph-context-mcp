@@ -1,0 +1,165 @@
+# World-building behavior: the graph is the source of truth, and the model
+# is expected to capture what the user develops -- without duplicating what
+# already exists. Graders assert on outcomes (what the world looks like
+# afterwards), never on a prescribed call sequence; each [[case.script]] is
+# the reference solution proving the case solvable.
+
+[suite]
+name = "world_building"
+profile = "fiction"
+embedder = "off"
+
+# 1. A plain create: one new character, captured with a usable summary.
+[[case]]
+id = "create_character_from_description"
+mode = "world_modeling"
+trials = 2
+
+[[case.turn]]
+user = "Add a new character: Serane, a one-eyed falconer who trains war-birds for the city guard."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Serane", type = "Character" }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+max_executed_calls = 4
+
+[case.expect.reply]
+must_mention = ["Serane"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Serane", summary = "A one-eyed falconer who trains war-birds for the city guard." } }]
+
+[[case.script]]
+reply = "Serane is now part of the world."
+
+
+# 2. Create AND link: the new node must be wired to the existing world,
+# not left floating. The knows edge is symmetric, so either anchoring is
+# accepted (directed = false).
+[[case]]
+id = "create_and_link_to_existing"
+mode = "world_modeling"
+trials = 2
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer of Brakk."
+
+[[case.turn]]
+user = "Add Torvald, a canal smuggler who knows Mira from the siege years."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Torvald", type = "Character" }]
+edge_exists = [{ source = "Torvald", label = "knows", target = "Mira", directed = false }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[case.expect.reply]
+must_mention = ["Torvald"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Torvald", summary = "A canal smuggler who knows Mira from the siege years.", links = [{ edge_type = "knows", other = "Mira" }], create_missing_relations = true } }]
+
+[[case.script]]
+reply = "Torvald the smuggler now exists, linked to Mira."
+
+
+# 3. The duplicate trap: the character already exists, so a good agent
+# looks first and creates nothing. The judge additionally checks the reply
+# owns up to the existing node instead of inventing new facts.
+[[case]]
+id = "no_duplicate_on_existing_character"
+mode = "world_modeling"
+trials = 3
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer of Brakk."
+
+[[case.seed.node]]
+type = "Location"
+name = "Brakk"
+summary = "A fortified city that survived a year-long siege."
+
+[[case.seed.edge]]
+source = "Mira"
+label = "lives_in"
+target = "Brakk"
+
+[[case.turn]]
+user = "Add Mira, the exiled siege engineer, to the world."
+
+[case.expect.graph]
+node_count_delta = 0
+
+[case.expect.tools]
+called_any = ["find_node", "get_node", "query", "explore", "context"]
+not_executed = ["create_node"]
+max_executed_calls = 6
+
+[case.expect.reply]
+must_mention = ["Mira"]
+
+[case.judge]
+rubric = """
+The world already contained a Character named Mira. Pass only if the
+assistant recognized the existing node (it looked her up rather than
+assuming), did not create a duplicate, and told the user Mira already
+exists -- optionally offering to update or extend her -- without
+inventing new world facts about her.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "find_node", arguments = { name = "Mira" } }]
+
+[[case.script]]
+reply = "Mira already exists in the world as the exiled siege engineer -- no duplicate created. Want me to update her instead?"
+
+
+# 4. The staleness sweep: a seeded node carries a stale summary flag; the
+# model must find it (explore only_stale / context get reports the count)
+# and land a fresh summary. The outcome grader is the flag itself.
+[[case]]
+id = "stale_summary_sweep"
+mode = "world_modeling"
+trials = 2
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer of Brakk."
+
+[[case.seed.node]]
+type = "Location"
+name = "Brakk"
+summary = "A fortified city that survived a year-long siege."
+stale = true
+
+[[case.turn]]
+user = "Some summaries in the world may be flagged stale. Find any and refresh them so everything is current."
+
+[case.expect.graph]
+node_count_delta = 0
+no_stale_summaries = true
+
+[case.expect.tools]
+not_executed = ["create_node"]
+
+[[case.script]]
+tool_calls = [{ name = "explore", arguments = { start = "Mira", only_stale = true, limit = 25 } }]
+
+[[case.script]]
+tool_calls = [{ name = "get_node", arguments = { node_id = "Brakk" } }]
+
+[[case.script]]
+tool_calls = [{ name = "update_node", arguments = { node_id = "Brakk", summary = "A fortified city, scarred but standing after its year-long siege." } }]
+
+[[case.script]]
+reply = "Brakk's summary was stale; it is refreshed and nothing else is flagged."

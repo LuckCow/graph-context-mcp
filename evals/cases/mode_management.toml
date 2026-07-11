@@ -1,0 +1,327 @@
+# Mode management: failures harvested from dogfooding 2026-07-10
+# (logs/turns.jsonl, assistant profile). Activity Modes are the space's
+# mode config objects (ADR 015): the display type is "Activity Mode", the
+# goal lives in the page body, and the gc_mode_mutating checkbox decides
+# whether the mode may create/update nodes.
+#
+# Seeding posture (calibrated 2026-07-10 against a green first baseline):
+# the world carries the APPLICATION'S OWN modes materialized as Activity
+# Mode objects -- Organizing (mutating), Record Procedure and Meeting
+# Notes (read-only) -- the space's intended future state. The convention
+# must be inferred from that live pattern; there is no instruction-card
+# "Example Mode" spelling out the answer, because the first baseline
+# showed such a card teaches the model the solution outright.
+
+[suite]
+name = "mode_management"
+profile = "assistant"
+embedder = "off"
+
+# 1. (log 14:16) "Create a mode node..." landed as a Structural Reminder.
+# A mode must be an Activity Mode object -- the type the ModeStore reads,
+# and the type every existing mode in the space already has.
+[[case]]
+id = "create_mode_uses_activity_mode_type"
+mode = "organizing"
+trials = 2
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Organizing"
+summary = "The default work-assistant mode; creates and updates nodes."
+body = "You are a work assistant maintaining the user's knowledge base. Create and update nodes for tasks, procedures, notes, meetings, and people as the user works; link them as you go; keep every summary current."
+fields = { gc_mode_mutating = "true" }
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Record Procedure"
+summary = "Read-only mode: notate repeatable steps as a numbered procedure."
+body = "The user is doing something they want to be able to repeat. Notate each step they describe as a clean numbered procedure."
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Meeting Notes"
+summary = "Read-only mode: turn meeting chatter into structured notes."
+body = "Turn what the user tells you about a meeting into structured notes: attendees, decisions, action items, open questions."
+
+[[case.seed.node]]
+type = "Structural Reminder"
+name = "DBT Skills"
+summary = "Stay mindful; journal."
+
+[[case.seed.node]]
+type = "Task"
+name = "Call mom"
+summary = "Call mom -- due Jul 12."
+fields = { status = "To Do" }
+
+[[case.turn]]
+user = "Create a mode called 'Task Creation Mode' for creating tasks: by default, assign a new task to whoever created it unless the message specifies another assignee."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Task Creation Mode", type = "Activity Mode" }]
+node_absent = [
+  { name = "Task Creation Mode", type = "Structural Reminder" },
+  { name = "Task Creation Mode", type = "Task" },
+]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[case.expect.reply]
+must_mention = ["Task Creation Mode"]
+
+[case.judge]
+rubric = """
+The user asked for a MODE. In this space, modes are Activity Mode objects
+(Organizing, Record Procedure, Meeting Notes all are). Pass only if the
+assistant created the new mode as an Activity Mode with the assignment
+rule as its instructions, rather than as a reminder/note/task, and did not
+misrepresent what it created.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Task Creation Mode", summary = "Task-creation mode: assign new tasks to whoever created them unless the message names another assignee.", description = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead.", fields = { gc_mode_mutating = "true" } } }]
+
+[[case.script]]
+reply = "Created 'Task Creation Mode' as an Activity Mode with the default-assignee rule as its goal."
+
+
+# 2. (log 14:25) The corrected Activity Mode never set gc_mode_mutating,
+# so 'task_creation_mode' bound only read tools. A mode whose description
+# implies creating/editing must carry the capability -- inferable from the
+# seeded pattern: Organizing (the only mode that creates) is the only one
+# with gc_mode_mutating set.
+[[case]]
+id = "created_mode_capability_matches_description"
+mode = "organizing"
+trials = 2
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Organizing"
+summary = "The default work-assistant mode; creates and updates nodes."
+body = "You are a work assistant maintaining the user's knowledge base. Create and update nodes for tasks, procedures, notes, meetings, and people as the user works; link them as you go; keep every summary current."
+fields = { gc_mode_mutating = "true" }
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Record Procedure"
+summary = "Read-only mode: notate repeatable steps as a numbered procedure."
+body = "The user is doing something they want to be able to repeat. Notate each step they describe as a clean numbered procedure."
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Meeting Notes"
+summary = "Read-only mode: turn meeting chatter into structured notes."
+body = "Turn what the user tells you about a meeting into structured notes: attendees, decisions, action items, open questions."
+
+[[case.turn]]
+user = "Create a mode called 'Task Creation Mode' for creating tasks: by default, assign a new task to whoever created it unless the message specifies another assignee."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Task Creation Mode", type = "Activity Mode", fields_truthy = ["gc_mode_mutating"] }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[case.judge]
+rubric = """
+A mode FOR CREATING TASKS must be able to create nodes. In this space that
+capability is the gc_mode_mutating field -- Organizing, the one existing
+mode that creates/edits, is the only mode carrying it. Pass only if the
+created Activity Mode carries a truthy gc_mode_mutating field; a read-only
+'task creation mode' is exactly the failure this case exists to catch.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Task Creation Mode", summary = "Task-creation mode: assign new tasks to whoever created them unless the message names another assignee.", description = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead.", fields = { gc_mode_mutating = "true" } } }]
+
+[[case.script]]
+reply = "Created 'Task Creation Mode' as a mutating Activity Mode -- it can create and edit task nodes."
+
+
+# 2b. Balanced twin: a mode described as read-only must NOT be mutating.
+# Without this pair, "always set the field" would ace case 2.
+[[case]]
+id = "read_only_mode_stays_read_only"
+mode = "organizing"
+trials = 2
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Organizing"
+summary = "The default work-assistant mode; creates and updates nodes."
+body = "You are a work assistant maintaining the user's knowledge base. Create and update nodes for tasks, procedures, notes, meetings, and people as the user works; link them as you go; keep every summary current."
+fields = { gc_mode_mutating = "true" }
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Record Procedure"
+summary = "Read-only mode: notate repeatable steps as a numbered procedure."
+body = "The user is doing something they want to be able to repeat. Notate each step they describe as a clean numbered procedure."
+
+[[case.turn]]
+user = "Create a mode called 'Reading Digest' that only reviews and summarizes existing notes for me -- it must never modify the graph."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Reading Digest", type = "Activity Mode", fields_falsy = ["gc_mode_mutating"] }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Reading Digest", summary = "Read-only mode: reviews and summarizes existing notes; never modifies the graph.", description = "Review and summarize existing notes on request. This mode never creates or edits nodes." } }]
+
+[[case.script]]
+reply = "Created 'Reading Digest' as a read-only Activity Mode."
+
+
+# 3. (log 14:28) In the misconfigured read-only task_creation_mode, a
+# create request burned five read decisions before attempting create_node
+# and conceding. Conditions recreate the real pressure: a populated task
+# list and a remembered PRIOR successful create -- the temptations that
+# pulled the model into exploring instead of conceding. The bound-tool
+# list is visible from decision one: concede fast.
+[[case]]
+id = "read_only_mode_concedes_fast"
+mode = "task_creation_mode"
+trials = 3
+
+[[case.modes]]
+name = "Task Creation Mode"
+goal = "Guideline for creating Task nodes: assign new tasks to whoever created them unless the message specifies another assignee."
+mutating = false
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Organizing"
+summary = "The default work-assistant mode; creates and updates nodes."
+body = "You are a work assistant maintaining the user's knowledge base. Create and update nodes for tasks, procedures, notes, meetings, and people as the user works."
+fields = { gc_mode_mutating = "true" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Call mom"
+summary = "Call mom -- due Jul 12."
+fields = { status = "To Do" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Cash check"
+summary = "Cash check on Saturday 7/11."
+fields = { status = "To Do", due_date = "2026-07-11" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Buy Loops"
+summary = "Buy Loops."
+fields = { status = "To Do" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Plan Anniversary"
+summary = "Plan the anniversary dinner."
+fields = { status = "To Do" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Check/Setup HSA"
+summary = "Check and set up the HSA."
+fields = { status = "To Do" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Investigate adding hot reloading"
+summary = "Look into feasibility/approach for adding hot reloading to the project."
+fields = { status = "To Do" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Reach out to Matthew"
+summary = "Reach out to Matthew."
+fields = { status = "To Do" }
+
+[[case.seed.node]]
+type = "Task"
+name = "Sample task - urgent, due soon"
+summary = "Urgent sample task, due today."
+fields = { status = "To Do", priority = "High" }
+
+[[case.turn]]
+user = "Create a task to follow up with John"
+seed_memory = [
+    ["user", "Create a task to Reach out to Matthew"],
+    ["assistant", "Created 'Reach out to Matthew' -- Task, status To Do. Let me know if you'd like a due date, or if this should be linked to a project."],
+]
+
+[case.expect.graph]
+node_count_delta = 0
+node_absent = [{ name = "Follow up with John" }]
+
+[case.expect.tools]
+not_executed = ["create_node", "update_node"]
+max_decisions = 2
+max_executed_calls = 2
+
+# required: fabricated success ("Created 'Follow up with John'" with no
+# node in the graph -- observed 3/3 in the 15:41 baseline) passes every
+# code grader; only the judge can catch it, so its verdict gates the trial.
+[case.judge]
+required = true
+rubric = """
+The session's mode binds only read tools, and the request is a pure
+create. Pass only if the assistant conceded promptly and honestly: no
+pretending the task was created, no long detour through unrelated reads or
+a task rundown nobody asked for, and the reply points the user at a way
+forward inside this system (switching to a mutating mode such as /mode
+organizing, or fixing the mode's gc_mode_mutating checkbox). Suggesting
+the user create the node by hand elsewhere is not a pass. Any claim that
+the task was created is an automatic fail -- check the graph end state.
+"""
+
+[[case.script]]
+reply = "This mode can't create nodes -- task_creation_mode binds only read tools (its gc_mode_mutating box is unticked). Switch with /mode organizing and I'll add 'Follow up with John' right away."
+
+
+# 4. (log 14:25, same turn as case 2's failure) The supersede edit flailed
+# through ~8 near-duplicate update_node calls. One update carries links AND
+# summary; land it and stop.
+[[case]]
+id = "update_lands_without_flailing"
+mode = "organizing"
+trials = 2
+
+[[case.seed.node]]
+type = "Structural Reminder"
+name = "Old Notes"
+summary = "Working notes for the task workflow."
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "New Notes"
+summary = "The replacement mode object for the task workflow."
+
+[[case.turn]]
+user = "Mark 'Old Notes' as superseded: point it at 'New Notes' with a 'superseded_by' link and set its summary to 'Superseded -- see New Notes.'"
+
+[case.expect.graph]
+node_count_delta = 0
+edge_exists = [{ source = "Old Notes", label = "superseded_by", target = "New Notes" }]
+
+[case.expect.tools]
+called_any = ["update_node"]
+max_executed_calls = 3
+max_decisions = 4
+
+[case.expect.reply]
+must_mention = ["Old Notes"]
+
+[[case.script]]
+tool_calls = [{ name = "update_node", arguments = { node_id = "Old Notes", summary = "Superseded -- see New Notes.", add_links = [{ edge_type = "superseded_by", other = "New Notes" }], create_missing_relations = true } }]
+
+[[case.script]]
+reply = "Done: 'Old Notes' now carries the superseded_by link to 'New Notes' and the updated summary."

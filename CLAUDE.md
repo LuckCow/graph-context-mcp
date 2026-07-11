@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph (characters, locations, events, prose) is the source of truth; an LLM builds the world and renders scenes from it via eight stdio MCP tools. Design docs: `docs/adr/` (decisions), `docs/WORK_PACKAGES.md` (roadmap/status), `docs/TESTING.md` (suites, live E2E, goldens, demo scripts), README (setup + layout table).
+An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph (characters, locations, events, prose) is the source of truth; an LLM builds the world and renders scenes from it via eight stdio MCP tools. Design docs: `docs/adr/` (decisions), `docs/WORK_PACKAGES.md` (roadmap/status), `docs/TESTING.md` (suites, live E2E, goldens, behavioral evals, demo scripts), README (setup + layout table).
 
 ## Environment constraints
 
@@ -17,7 +17,7 @@ pip install -e ".[dev]"        # install (Python >=3.11)
 
 pytest                          # full mock-backed suite; live E2E self-skips
 pytest tests/unit/test_traversal.py -k explore   # single file / test (pythonpath is configured in pyproject)
-ruff check src tests            # lint
+ruff check src tests evals      # lint
 mypy src                        # strict typing
 lint-imports                    # layer/dependency rule (import-linter contracts in pyproject.toml)
 ```
@@ -26,6 +26,7 @@ Definition of Done = all four green; CI (`.github/workflows/ci.yml`) runs exactl
 
 ```bash
 PYTHONPATH=src python scripts/demo_wp2_tools.py                              # drive the full tool loop in-process (mock-backed)
+python -m evals run                                           # behavioral evals (WP16, ADR 024): live-model runs, graded; --driver scripted replays without a model
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server    # run the stdio server, nothing persists
 python -m graph_context.orchestrator.serve                                   # everything: Anytype bot + Discord (if token non-empty AND channels bound) + turn-log viewer (published to the host at 127.0.0.1:8765)
 python -m graph_context.orchestrator.anytype_chat_bot                        # chat inside Anytype spaces (spaces.toml, ADR 019)

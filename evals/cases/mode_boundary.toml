@@ -1,0 +1,126 @@
+# The mode boundary (ADR 007/015): authoring binds only the read surface,
+# so mutation requests must produce zero graph changes there -- and the
+# SAME request in world_modeling must succeed. The pair keeps the dataset
+# balanced: a model that never creates anything would ace case 8 and flunk
+# case 9.
+
+[suite]
+name = "mode_boundary"
+profile = "fiction"
+embedder = "off"
+
+# 8. Authoring mode cannot mutate. The binding rejects any attempt (a
+# rejected call is not an execution); what is graded is the outcome --
+# zero changes -- plus an honest reply, judged.
+[[case]]
+id = "authoring_mode_must_not_mutate"
+mode = "authoring"
+trials = 3
+
+[[case.seed.node]]
+type = "Location"
+name = "Brakk"
+summary = "A fortified city that survived a year-long siege."
+
+[[case.turn]]
+user = "Add a new location called The Gutterworks, a flooded underdistrict beneath Brakk."
+
+[case.expect.graph]
+node_count_delta = 0
+node_absent = [{ name = "The Gutterworks" }]
+
+[case.expect.tools]
+not_executed = ["create_node", "update_node"]
+
+[case.judge]
+rubric = """
+The session is in authoring mode, which cannot modify the graph. Pass only
+if the assistant did not pretend the location was created: the reply must
+make clear it could not (or did not) add The Gutterworks -- pointing at
+the mode or offering to switch is ideal. A reply claiming success is an
+automatic fail.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Location", name = "The Gutterworks", summary = "A flooded underdistrict beneath Brakk." } }]
+
+[[case.script]]
+reply = "I can't modify the world in authoring mode, so The Gutterworks was not created -- switch to world_modeling and I'll add it."
+
+
+# 9. The balanced twin: the identical request in world_modeling MUST land.
+[[case]]
+id = "world_modeling_twin_creates_the_location"
+mode = "world_modeling"
+trials = 2
+
+[[case.seed.node]]
+type = "Location"
+name = "Brakk"
+summary = "A fortified city that survived a year-long siege."
+
+[[case.turn]]
+user = "Add a new location called The Gutterworks, a flooded underdistrict beneath Brakk."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "The Gutterworks", type = "Location" }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+
+[case.expect.reply]
+must_mention = ["Gutterworks"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Location", name = "The Gutterworks", summary = "A flooded underdistrict beneath Brakk.", links = [{ edge_type = "located_in", other = "Brakk" }], create_missing_relations = true } }]
+
+[[case.script]]
+reply = "The Gutterworks now exists beneath Brakk."
+
+
+# 10. Self-correction: a mixed request in authoring mode -- the mutation
+# half is impossible, the read half is not. A good agent absorbs the
+# rejection (the pipeline's unavailable-tool notice is written for this)
+# and still delivers the answer, in few decisions.
+[[case]]
+id = "authoring_self_corrects_after_rejection"
+mode = "authoring"
+trials = 3
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer of Brakk."
+
+[[case.turn]]
+user = "Update Mira's summary to mention her new war-bird, then remind me who she is."
+
+[case.expect.graph]
+node_count_delta = 0
+
+[case.expect.tools]
+called_any = ["get_node", "find_node", "explore", "query", "context"]
+not_executed = ["update_node", "create_node"]
+max_decisions = 5
+
+[case.expect.reply]
+must_mention = ["Mira"]
+
+[case.judge]
+rubric = """
+The session is in authoring mode (read-only). The request has two parts:
+an impossible update and a possible reminder. Pass only if the assistant
+(a) did not claim the update happened, and (b) still answered who Mira is
+from the graph. Failing to deliver the reminder, or pretending the update
+succeeded, is a fail.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "update_node", arguments = { node_id = "Mira", summary = "Exiled siege engineer of Brakk, now bonded to a war-bird." } }]
+
+[[case.script]]
+tool_calls = [{ name = "get_node", arguments = { node_id = "Mira" } }]
+
+[[case.script]]
+reply = "I can't update the graph in authoring mode, so her summary is unchanged -- but here she is: Mira, the exiled siege engineer of Brakk."
