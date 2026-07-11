@@ -150,3 +150,29 @@ class TestA7BodyEditing:
             assert "markdown" not in obj
         results = [obj async for obj in client.search()]
         assert results and all("markdown" not in obj for obj in results)
+
+
+class TestA9FirstLineHeadingFlattening:
+    """A9 (live-confirmed 2026-07-11): the PATCH markdown importer strips
+    heading markup from the body's FIRST line; later headings survive.
+    Import-side mirror of the A8 export prefix."""
+
+    async def test_patch_flattens_only_the_first_line_heading(
+        self, repo: AnytypeGraphRepository
+    ) -> None:
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="s")
+        )
+        await repo.update_node(node.id, body="## Log\ntext\n## Later")
+        assert await repo.fetch_body(node.id) == "Log\ntext\n## Later"
+
+    async def test_create_keeps_a_first_line_heading(
+        self, repo: AnytypeGraphRepository
+    ) -> None:
+        """The quirk is PATCH-only: bodies supplied at create keep their
+        heading (how template scaffolds get their headings in the first
+        place)."""
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="s", body="## Log\ntext")
+        )
+        assert await repo.fetch_body(node.id) == "## Log\ntext"

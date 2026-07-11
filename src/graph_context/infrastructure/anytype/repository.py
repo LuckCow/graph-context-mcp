@@ -147,6 +147,10 @@ class AnytypeGraphRepository:
         # cleared whenever the registry rebuilds so a newly UI-authored
         # template appears.
         self._templates: dict[str, str | None] = {}
+        # type_key -> the type's template carries a body scaffold, which a
+        # markdown write would destroy (A7/A9) -- such types never get a
+        # connections footer (ADR 013 amendment). Same lifetime as above.
+        self._scaffolded: dict[str, bool] = {}
         # property id -> select option names, for rendering the ADR 023
         # unmatched-field error; same lifetime as the template cache.
         self._tag_names: dict[str, tuple[str, ...]] = {}
@@ -220,6 +224,7 @@ class AnytypeGraphRepository:
             timeline_key=self._timeline[0],
         )
         self._templates.clear()  # registry rebuilt: re-resolve templates lazily
+        self._scaffolded.clear()
         self._tag_names.clear()
         self._graph, watermark, stamps = await sync.load_index(
             self._client, self._registry
@@ -239,6 +244,7 @@ class AnytypeGraphRepository:
             timeline_key=self._timeline[0],
         )
         self._templates.clear()  # registry rebuilt: re-resolve templates lazily
+        self._scaffolded.clear()
         self._tag_names.clear()
         fetched = await sync.fetch_changes(self._client, self._watermark)
         unseen = [
@@ -360,7 +366,7 @@ class AnytypeGraphRepository:
                 # the rollback, which archives the node (and with it these edges).
                 if outgoing:
                     payload = mapping.relations_patch_payload(outgoing)
-                    markdown = self._footer_markdown(
+                    markdown = await self._footer_markdown(
                         created, node,
                         [link.to_edge(anchor=node.id, property_key=key)
                          for link, key in resolved if link.outgoing],
@@ -376,7 +382,7 @@ class AnytypeGraphRepository:
                     # restore what the store really held, not an index view.
                     obj, previous = await self._current_state(link.other, key)
                     payload = mapping.relation_patch_payload(key, [*previous, node.id])
-                    markdown = self._footer_markdown(
+                    markdown = await self._footer_markdown(
                         obj, self._graph.node(link.other),
                         [*self._graph.edges(link.other, Direction.OUT),
                          link.to_edge(anchor=node.id, property_key=key)],
@@ -425,7 +431,7 @@ class AnytypeGraphRepository:
                 fields, role=existing.role, type_key=existing.type_key,
                 create_missing=create_missing_fields,
             )
-        if body is not None and existing.role not in schema.INFRA_ROLES:
+        if body is not None and await self._writes_footer(existing):
             # ADR 013: re-render the footer around the new text (index edges;
             # link changes maintain it on their own writes).
             footer = mapping.render_connections_footer(
@@ -465,7 +471,7 @@ class AnytypeGraphRepository:
             obj, targets = await self._current_state(edge.source, key)
             if edge.target not in targets:
                 payload = mapping.relation_patch_payload(key, [*targets, edge.target])
-                markdown = self._footer_markdown(
+                markdown = await self._footer_markdown(
                     obj, source,
                     [*self._graph.edges(edge.source, Direction.OUT), edge],
                 )
@@ -485,7 +491,7 @@ class AnytypeGraphRepository:
             obj, current = await self._current_state(edge.source, key)
             targets = [t for t in current if t != edge.target]
             payload = mapping.relation_patch_payload(key, targets)
-            markdown = self._footer_markdown(
+            markdown = await self._footer_markdown(
                 obj, self._graph.node(edge.source),
                 [e for e in self._graph.edges(edge.source, Direction.OUT) if e != edge],
             )
@@ -621,7 +627,34 @@ class AnytypeGraphRepository:
         rows.sort(key=lambda row: (row[0], row[1].lower(), row[2]))
         return rows
 
-    def _footer_markdown(
+    async def _writes_footer(self, node: Node) -> bool:
+        """Whether this node's body takes a connections footer at all.
+
+        THE footer-eligibility rule (ADR 013, amended): infra-role bodies are
+        write-once by policy, and types whose template carries a body
+        scaffold ("property header") are hands-off -- a ``markdown`` PATCH
+        is a wholesale block replace (A7) that would destroy template blocks
+        markdown cannot express, and it flattens a first-line heading (A9).
+        """
+        if node.role in schema.INFRA_ROLES:
+            return False
+        return not await self._has_scaffold(node.type_key)
+
+    async def _has_scaffold(self, type_key: str) -> bool:
+        """True when the type's template carries a non-empty body scaffold.
+
+        Cached per type_key alongside :meth:`_template_for`; the template
+        object answers the single-object GET with its scaffold as
+        ``markdown`` (reads are unthrottled, S7)."""
+        if type_key not in self._scaffolded:
+            template_id = await self._template_for(type_key)
+            scaffold = ""
+            if template_id is not None:
+                scaffold = mapping.body_of(await self._client.get_object(template_id))
+            self._scaffolded[type_key] = bool(scaffold.strip())
+        return self._scaffolded[type_key]
+
+    async def _footer_markdown(
         self,
         obj: Mapping[str, Any],
         node: Node,
@@ -630,12 +663,13 @@ class AnytypeGraphRepository:
     ) -> str | None:
         """The ``markdown`` value to ride an existing PATCH, or ``None``.
 
-        ``None`` means don't touch the body: infra-role nodes never get a
-        footer (write-once by policy), and an unchanged footer is a no-op
-        (every skipped rewrite is a mention-pill spared, WP10c caveat).
-        Composed from ``body_of`` output -- never the raw export (A8).
+        ``None`` means don't touch the body: footer-ineligible nodes
+        (:meth:`_writes_footer`) keep their bodies untouched, and an
+        unchanged footer is a no-op (every skipped rewrite is a mention-pill
+        spared, WP10c caveat). Composed from ``body_of`` output -- never the
+        raw export (A8).
         """
-        if node.role in schema.INFRA_ROLES:
+        if not await self._writes_footer(node):
             return None
         footer = mapping.render_connections_footer(
             self._connections(edges, extra_names), self._client.space_id

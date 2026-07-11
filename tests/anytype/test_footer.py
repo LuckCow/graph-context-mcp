@@ -110,6 +110,78 @@ async def test_prose_nodes_never_get_a_footer(
     assert await repo.fetch_body(prose.id) == "Ash drifted."
 
 
+SCAFFOLD = "## Details\n---"
+
+
+async def test_scaffolded_template_type_never_gets_a_footer(
+    repo: AnytypeGraphRepository, mock: MockAnytype
+) -> None:
+    """A template body ("property header") would be destroyed by any
+    markdown write -- A7 wholesale-replaces blocks and A9 flattens the
+    scaffold's first-line heading -- so types whose template carries a body
+    are footer-suppressed. Regression: the template-clobber bug
+    (2026-07-11, "Buy paint that matches stairs")."""
+    mock.seed_template("character", body=SCAFFOLD)
+    place = await repo.create_node(NodeDraft("Location", name="Keep", summary="s"))
+    mira = await repo.create_node(
+        MIRA, links=[LinkSpec("located_at", other=place.id)],
+    )
+    raw = mock.object(mira.id)["markdown"]
+    assert CONNECTIONS_HEADING not in raw
+    assert raw.startswith("## Details")  # scaffold intact, heading unflattened
+    # Only the body write is suppressed; the relation itself still landed.
+    assert [e.target for e in repo.graph.edges(mira.id)] == [place.id]
+
+
+async def test_add_link_on_scaffolded_type_leaves_the_body_untouched(
+    repo: AnytypeGraphRepository, mock: MockAnytype
+) -> None:
+    mock.seed_template("character", body=SCAFFOLD)
+    mira = await repo.create_node(MIRA)
+    orla = await repo.create_node(NodeDraft("Character", name="Orla", summary="Ally."))
+    before = mock.object(mira.id)["markdown"]
+    await repo.add_link(mira.id, LinkSpec("knows", other=orla.id))
+    assert mock.object(mira.id)["markdown"] == before
+
+
+async def test_incoming_link_leaves_scaffolded_source_body_untouched(
+    repo: AnytypeGraphRepository, mock: MockAnytype
+) -> None:
+    """The create-with-incoming-link path rewrites the SOURCE node's body;
+    a scaffolded source must be left alone too."""
+    mock.seed_template("character", body=SCAFFOLD)
+    mira = await repo.create_node(MIRA)
+    before = mock.object(mira.id)["markdown"]
+    await repo.create_node(
+        NodeDraft("Event", name="Siege", summary="s", story_time=10),
+        links=[LinkSpec("participated_in", other=mira.id, outgoing=False)],
+    )
+    assert mock.object(mira.id)["markdown"] == before
+
+
+async def test_template_without_body_scaffold_keeps_the_footer(
+    repo: AnytypeGraphRepository, mock: MockAnytype
+) -> None:
+    """Property-only templates (defaults, no body) stay footer-eligible."""
+    mock.seed_template("character", body="")
+    orla = await repo.create_node(NodeDraft("Character", name="Orla", summary="Ally."))
+    mira = await repo.create_node(MIRA, links=[LinkSpec("knows", other=orla.id)])
+    assert CONNECTIONS_HEADING in mock.object(mira.id)["markdown"]
+
+
+async def test_update_body_on_scaffolded_type_omits_the_footer(
+    repo: AnytypeGraphRepository, mock: MockAnytype
+) -> None:
+    """An explicit body write replaces the scaffold by intent, but no footer
+    is appended -- link writes would not maintain it on this type, and a
+    stale footer is worse than none."""
+    mock.seed_template("character", body=SCAFFOLD)
+    orla = await repo.create_node(NodeDraft("Character", name="Orla", summary="Ally."))
+    mira = await repo.create_node(MIRA, links=[LinkSpec("knows", other=orla.id)])
+    await repo.update_node(mira.id, body="Leads the survivors now.")
+    assert mock.object(mira.id)["markdown"] == "Leads the survivors now."
+
+
 async def test_unchanged_footer_is_not_rewritten(
     repo: AnytypeGraphRepository, mock: MockAnytype
 ) -> None:

@@ -31,6 +31,12 @@ something:
   ``description`` property is prepended as the first line, while PATCH
   writes body blocks only -- so a raw GET -> PATCH round-trip duplicates
   the summary line. Reads must go through ``mapping.body_of``.
+* The PATCH ``markdown`` importer flattens a FIRST-line heading to plain
+  text (A9, live-confirmed 2026-07-11); headings on later lines survive.
+* Template objects are readable via the single-object GET, ``markdown``
+  carrying the template's body scaffold (live-confirmed by the templates
+  spike) -- how the repository detects scaffolded types (ADR 013
+  amendment).
 * Select/multi_select options are **tags** (ADR 012): ``GET/POST
   /properties/{propertyId}/tags`` (property ID, not key -- a key 404s
   "invalid property id"). A write referencing a tag that does not exist
@@ -118,6 +124,16 @@ def _without_markdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     bodies never ride the hydrate sweep or resync queries.
     """
     return [{k: v for k, v in o.items() if k != "markdown"} for o in items]
+
+
+_LEADING_HEADING = re.compile(r"^#{1,6}\s+")
+
+
+def _flatten_first_line_heading(markdown: str) -> str:
+    """A9 (live-confirmed 2026-07-11): the PATCH importer strips heading
+    markup from the body's first line; later headings survive."""
+    first, sep, rest = markdown.partition("\n")
+    return _LEADING_HEADING.sub("", first) + sep + rest
 
 
 class MockAnytype:
@@ -457,6 +473,19 @@ class MockAnytype:
     def _handle_object(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         obj = self._objects.get(match.group("obj"))
         if obj is None:
+            template = self._templates_by_id.get(match.group("obj"))
+            if template is not None and request.method == "GET":
+                # Templates answer the single-object GET like any object,
+                # markdown carrying their body scaffold (live-confirmed).
+                return httpx.Response(200, json={"object": {
+                    "id": template["id"],
+                    "name": template["name"],
+                    "type": {"key": "template"},
+                    "archived": False,
+                    "properties": [],
+                    "snippet": "",
+                    "markdown": template["body"],
+                }})
             return self._error(404, "object_not_found")
         if request.method == "GET":
             return httpx.Response(200, json={"object": self._exported(obj)})
@@ -485,7 +514,7 @@ class MockAnytype:
             # unchanged) -- the create/update field-name mismatch is the
             # documented gotcha the original S6 spike tripped on.
             if "markdown" in body:
-                obj["markdown"] = body["markdown"]
+                obj["markdown"] = _flatten_first_line_heading(body["markdown"])
             self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":

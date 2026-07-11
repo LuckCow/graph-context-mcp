@@ -39,6 +39,14 @@ Representation (v2, space-reflecting):
   body blocks only -- GET -> PATCH round-trips would duplicate the
   summary line. :func:`body_of` strips the prefix; write-backs must
   write its output, never the raw ``markdown`` field.
+* **A9 (live-confirmed 2026-07-11):** the PATCH ``markdown`` importer
+  strips heading markup from the FIRST line of the body (``## Details``
+  comes back as plain ``Details``); the same heading on any later line
+  survives. Import-side mirror of A8's export prefix. Together with A7's
+  wholesale replace (which destroys body blocks markdown cannot express,
+  e.g. a template's property widgets) this is why the connections footer
+  is suppressed on types whose template carries a body scaffold (ADR 013
+  amendment; ``AnytypeGraphRepository._writes_footer``).
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")

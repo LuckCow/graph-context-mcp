@@ -71,3 +71,7 @@ override those keys, and our body is appended below the template's.
   one).
 - Out of scope: the `done`-vs-`status` redundancy on some task types; defaulting
   `status` addresses the wrong-field symptom, collapsing the fields is separate.
+- Amended by ADR 013's 2026-07-11 amendment: a template with a body scaffold
+  makes its type footer-ineligible (a `markdown` write would destroy the
+  scaffold — A7 wholesale replace, A9 first-line heading flattening), at the
+  cost of one extra cached template GET per scaffolded type.
