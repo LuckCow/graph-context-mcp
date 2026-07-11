@@ -6,8 +6,9 @@ Launches, in one asyncio loop:
     one channel is bound; the devcontainer composes DISCORD_BOT_TOKEN_FILE
     and GC_CHANNELS_FILE unconditionally, so an EMPTY secret file or a
     zero-table channels file is the sanctioned "no Discord" state),
-  - the turn-log viewer (a daemon thread; skipped when GC_TURN_LOG or
-    GC_LOG_VIEWER_PORT is off).
+  - the inspection server (a daemon thread; the eval dashboard + the live
+    turn-log viewer; skipped when GC_TURN_LOG or GC_LOG_VIEWER_PORT is
+    off; GC_EVAL_ROOT points it at the eval artifacts).
 
 Failure semantics are the TaskGroup's: one transport's unhandled crash
 takes the whole process down loudly -- a half-alive server silently
@@ -28,14 +29,14 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from graph_context.orchestrator import anytype_chat_bot, discord_bot, turn_log_server
+from graph_context.orchestrator import anytype_chat_bot, discord_bot, inspect_server
 from graph_context.orchestrator.turn_log import turn_log_path
 
 logger = logging.getLogger(__name__)
 
 
 def _start_viewer() -> ThreadingHTTPServer | None:
-    """The turn-log viewer in a daemon thread, or None when switched off.
+    """The inspection server in a daemon thread, or None when switched off.
 
     ``serve_forever`` blocks and cannot be cancelled from the loop, so it
     lives in a plain daemon thread (NOT asyncio.to_thread) and ``run()``
@@ -43,18 +44,20 @@ def _start_viewer() -> ThreadingHTTPServer | None:
     """
     log = turn_log_path()
     if log is None:
-        logger.info("turn-log viewer: not starting (GC_TURN_LOG is off)")
+        logger.info("inspection server: not starting (GC_TURN_LOG is off)")
         return None
-    settings = turn_log_server.viewer_settings()
+    settings = inspect_server.viewer_settings()
     if settings is None:
-        logger.info("turn-log viewer: not starting (GC_LOG_VIEWER_PORT is off)")
+        logger.info("inspection server: not starting (GC_LOG_VIEWER_PORT is off)")
         return None
     host, port = settings
-    server = turn_log_server.create_server(host, port, Path(log))
+    server = inspect_server.create_server(
+        host, port, Path(log), inspect_server.eval_root_setting()
+    )
     threading.Thread(
-        target=server.serve_forever, daemon=True, name="turn-log-viewer"
+        target=server.serve_forever, daemon=True, name="inspection-server"
     ).start()
-    logger.info("turn-log viewer: http://%s:%d/ (tailing %s)", host, port, log)
+    logger.info("inspection server: http://%s:%d/ (tailing %s)", host, port, log)
     return server
 
 

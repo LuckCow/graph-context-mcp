@@ -51,13 +51,13 @@ Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `
 The orchestrator is the agentic harness over the same tool surface: a driver decides, activity modes bind tools, provenance records each mutating turn. Every transport shares one runtime assembly (`orchestrator/bootstrap.py`) and differs only in its message loop.
 
 ```
-python -m graph_context.orchestrator.serve                                  # everything: Anytype bot + Discord (if configured) + turn-log viewer
+python -m graph_context.orchestrator.serve                                  # everything: Anytype bot + Discord (if configured) + inspection server
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # keyboard loop; dev backend
 python -m graph_context.orchestrator.discord_bot                            # Discord bot standalone
 python -m graph_context.orchestrator.anytype_chat_bot                       # Anytype in-space chat bot standalone
 ```
 
-`serve` is the consolidated entry point: one process running the Anytype chat bot (always), the Discord bot (only when the token file has content **and** at least one channel is bound — an empty secret file or a zero-table channels file is the "Discord off" switch), and the turn-log viewer in a daemon thread. One transport's crash takes the whole process down loudly; restarts belong to the supervisor.
+`serve` is the consolidated entry point: one process running the Anytype chat bot (always), the Discord bot (only when the token file has content **and** at least one channel is bound — an empty secret file or a zero-table channels file is the "Discord off" switch), and the inspection server in a daemon thread. One transport's crash takes the whole process down loudly; restarts belong to the supervisor.
 
 `GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). The **mode** is per-chat (`/mode <name>` switches it). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
 
@@ -82,11 +82,11 @@ modes_file = "ashfall-modes.toml"  # optional; overrides GC_MODES_FILE for this 
 
 It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer; the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty.
 
-### Turn log
+### Turn log & inspection server
 
-Every turn — user message, each model decision, every tool call with complete output, final replies — is written to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB, oldest entries drop).
+Every turn — user message, each model decision, every tool call with complete output, the mode/system prompt and per-turn context block the model actually received, final replies — is written to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB, oldest entries drop).
 
-The viewer runs automatically inside `serve` (the devcontainer publishes it to the host at `http://127.0.0.1:8765/`), or standalone via `python -m graph_context.orchestrator.turn_log_server`: a dependency-free web UI grouping the diary into one collapsible card per user request, live-tailing new turns via SSE (filter by session/mode, search, errors-only). Point it elsewhere with `--log` / `--port` or `GC_LOG_VIEWER_HOST` / `GC_LOG_VIEWER_PORT`. No server needed either: open `src/graph_context/orchestrator/turn_log_viewer.html` directly in a browser and pick a `turns.jsonl` file.
+The inspection server ([ADR 025](docs/adr/025-inspection-server.md)) runs automatically inside `serve` (the devcontainer publishes it to the host at `http://127.0.0.1:8765/`), or standalone via `python -m graph_context.orchestrator.inspect_server`. It is dependency-free and serves two things: an **eval dashboard** at `/` (every case with its latest verdict and history, per-run grade/judge/prompt detail, one-click trial transcripts — `GC_EVAL_ROOT` points it at the artifacts, default `evals`) and the **live turn-log viewer** at `/logs`, grouping the diary into one collapsible card per user request and live-tailing via SSE (filter by session/mode, search, errors-only). Point it elsewhere with `--log` / `--port` / `--eval-root` or `GC_LOG_VIEWER_HOST` / `GC_LOG_VIEWER_PORT`. No server needed either: open `src/graph_context/orchestrator/turn_log_viewer.html` directly in a browser and pick a `turns.jsonl` file.
 
 ## Connecting Claude Desktop (from the dev container)
 
@@ -225,7 +225,8 @@ interface  ──▶  application  ──▶  domain
 | `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |
 | `orchestrator/capture.py` | Authoring auto-capture | Exact-name entity linking; the harness records what tools used to ask for |
 | `orchestrator/turn_log.py` | Full-fidelity turn diary (JSONL) | Input, every driver decision, every tool call + complete output, final replies; byte-capped — oldest entries drop |
-| `orchestrator/turn_log_server.py` | Turn-log viewer HTTP server | Stdlib-only; SSE live tail with shrink→reset; hosts the packaged `turn_log_viewer.html` |
+| `orchestrator/inspect_server.py` | Inspection server (eval dashboard + turn-log viewer) | Stdlib-only; SSE live tail with shrink→reset; hosts `inspect.html` + `turn_log_viewer.html`; `turn_log_server.py` is its back-compat shim |
+| `orchestrator/eval_index.py` | Read-side index over eval artifacts | Tolerant json/tomllib scanning for the dashboard; never imports `evals` |
 | `orchestrator/serve.py` | Consolidated composition root | One process: Anytype bot + Discord bot (if configured) + viewer thread; fail-together |
 | `orchestrator/bootstrap.py` | Orchestrator runtime wiring | Shared by every transport; `GC_DRIVER` / `GC_PROVENANCE` / `GC_TURN_LOG` resolution; one runtime per channel or space binding |
 | `orchestrator/channels.py` | Channel→space bindings (`GC_CHANNELS_FILE`, [ADR 017](docs/adr/017-channel-bound-spaces.md)) | Plain parsing/validation; one channel per space, enforced at startup |

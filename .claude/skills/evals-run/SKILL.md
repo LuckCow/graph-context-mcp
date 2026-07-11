@@ -38,8 +38,10 @@ Workflow:
    probable cause (grader too strict vs. behavior change). For any failed
    live case, read that session's slice of `<run>/turns.jsonl` before
    concluding — the transcript, not the grade, is the evidence. Offer the
-   viewer for the user's own reading:
-   `python -m graph_context.orchestrator.turn_log_server --log <run>/turns.jsonl`
+   inspection server for the user's own reading (dashboard, grades, judge
+   reasoning, prompts, per-trial transcripts):
+   `python -m graph_context.orchestrator.inspect_server` then
+   `http://127.0.0.1:8765/#/runs/<run-dir-name>` (also runs inside `serve`).
 
 Adding cases is /evals-add's job — it interrogates the failure and aligns
 graders with the user before any TOML is written. Hand over rather than

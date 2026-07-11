@@ -45,6 +45,9 @@ class RecordingDriver:
         self._inner = inner
         self.decisions: list[DecisionRecord] = []
 
+    def system_prompt(self, goal: str) -> str:
+        return self._inner.system_prompt(goal)
+
     async def decide(
         self,
         transcript: Sequence[TranscriptEvent],
@@ -78,6 +81,7 @@ class TrialRecord:
     decisions: list[DecisionRecord] = field(default_factory=list)
     usages: list[DecideUsage] = field(default_factory=list)
     bound_tools: frozenset[str] = frozenset()
+    system_prompt: str = ""  # the exact prompt the driver sends (format 2)
     harness_error: str = ""  # the harness (not the model) broke the trial
 
     @property

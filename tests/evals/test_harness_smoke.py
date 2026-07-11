@@ -24,8 +24,11 @@ SMOKE_CASES = Path(__file__).parents[2] / "evals" / "cases" / "smoke.toml"
 @pytest.fixture
 async def smoke_run(tmp_path: Path) -> tuple[RunResult, bool]:
     sdk_loaded_before = "claude_agent_sdk" in sys.modules
+    # out_root sits at <eval_root>/runs, mirroring the real evals/ layout,
+    # so the round-trip test can point eval_index at tmp_path directly.
     result = await run_evals(RunConfig(
-        cases=str(SMOKE_CASES), driver="scripted", out_root=str(tmp_path)
+        cases=str(SMOKE_CASES), driver="scripted",
+        out_root=str(tmp_path / "runs"),
     ))
     return result, sdk_loaded_before
 
@@ -39,8 +42,31 @@ class TestScriptedSmokeRun:
             (result.run_dir / "turns.jsonl").read_text().strip().splitlines()
         )
         events = [json.loads(line)["event"] for line in turn_lines]
-        # The viewer replays the same record shapes the production bots log.
-        assert {"user", "llm_turn", "tool_result", "turn_end"} <= set(events)
+        # The viewer replays the same record shapes the production bots log,
+        # including the model's standing inputs (WP16 inspection server).
+        assert {"user", "prompt", "llm_turn", "tool_result", "turn_end"} <= set(events)
+
+    async def test_results_json_is_format_2(self, smoke_run) -> None:
+        """The writer/reader contract the inspection server depends on:
+        the run's own artifact must aggregate through eval_index."""
+        from graph_context.orchestrator import eval_index
+
+        result, _ = smoke_run
+        results = json.loads((result.run_dir / "results.json").read_text())
+        assert results["format"] == 2
+        trial = next(
+            c for c in results["cases"] if c["id"] == "smoke_scripted_create"
+        )["trials"][0]
+        assert trial["session"] == "smoke_scripted_create#t1"
+        assert trial["system_prompt"]  # the scripted driver's goal text
+        assert trial["bound_tools"]
+        assert trial["harness_error"] == ""
+        # Round-trip: point the read side at this run's eval root shape.
+        eval_root = result.run_dir.parent.parent  # <root>/runs/<run> -> <root>
+        detail = eval_index.run_detail(eval_root, result.run_dir.name)
+        assert detail is not None and detail["has_transcript"]
+        summary = eval_index.summary(eval_root)
+        assert any(r["id"] == result.run_dir.name for r in summary["runs"])
 
     async def test_passing_cases_pass(self, smoke_run) -> None:
         result, _ = smoke_run

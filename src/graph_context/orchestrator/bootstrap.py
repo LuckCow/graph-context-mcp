@@ -68,6 +68,9 @@ class ManualDriver:
     boundary are the thing being exercised, not this driver.
     """
 
+    def system_prompt(self, goal: str) -> str:
+        return goal  # no model behind this driver; the goal stands in
+
     async def decide(
         self,
         transcript: Sequence[TranscriptEvent],

@@ -82,6 +82,35 @@ class TurnLog:
             "mode": mode, "user": user_id, "text": text,
         })
 
+    def prompt(
+        self, turn_id: str, session_id: str, mode: str, goal: str,
+        system_prompt: str, tools: Mapping[str, str],
+    ) -> None:
+        """The model's standing inputs: mode goal, the exact assembled
+        system prompt, and the bound tool surface (name -> LLM-facing doc).
+
+        Logged by the pipeline only when the combination CHANGES for a
+        session (first turn, after a /mode switch) -- the content is
+        per-mode-stable, so per-decision logging would only burn the byte
+        budget repeating itself.
+        """
+        self._append({
+            "event": "prompt", "turn": turn_id, "session": session_id,
+            "mode": mode, "goal": goal, "system_prompt": system_prompt,
+            "tools": dict(tools),
+        })
+
+    def context(
+        self, turn_id: str, session_id: str, mode: str, text: str
+    ) -> None:
+        """The turn's rendered context block (scratchpad, working set,
+        recent trail) -- a model input the transcript would otherwise
+        hide from reviewers."""
+        self._append({
+            "event": "context", "turn": turn_id, "session": session_id,
+            "mode": mode, "text": text,
+        })
+
     def llm_turn(
         self, turn_id: str, session_id: str, mode: str, turn: LLMTurn
     ) -> None:

@@ -70,12 +70,24 @@ overruling the code grades — unless the case sets `[case.judge] required =
 true`, for judge-only expectations like fabricated success; required
 judges run on every live run and gate the trial). Runs land in
 `evals/runs/<ts>[-label]/`
-(gitignored): `results.json`, `report.md`, and a `turns.jsonl` the
-standard viewer replays:
+(gitignored): `results.json` (format 2 — per-trial grades, judge
+verdicts, the transcript session key, the exact system prompt and bound
+tools), `report.md`, and a `turns.jsonl` in the standard diary format,
+including the `prompt`/`context` events that record what the model was
+told (ADR 025).
+
+**Reviewing runs** happens in the inspection server (ADR 025), which
+also runs inside `serve`:
 
 ```bash
-python -m graph_context.orchestrator.turn_log_server --log evals/runs/<run>/turns.jsonl
+python -m graph_context.orchestrator.inspect_server   # http://127.0.0.1:8765/
 ```
+
+The dashboard lists every case with its latest verdict and run history;
+run/case pages show grades, judge reasoning, and prompts, and link each
+trial to its transcript (the viewer opens pre-filtered to
+`<case>#t<n>`). `GC_EVAL_ROOT` / `--eval-root` point it at the
+artifacts (default `evals`).
 
 **Adding a case** (`evals/cases/*.toml`): give it an `id`, seed nodes,
 one or more `[[case.turn]]` user messages, `[case.expect.*]` graders, and

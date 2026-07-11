@@ -140,6 +140,10 @@ class _SessionState:
     mode: str  # a loaded ModeSpec name; authoritative in-memory (WP8)
     services: Services  # this session's view: own SessionState, shared space
     memory: ConversationMemory = field(default_factory=ConversationMemory)
+    # The last (mode, goal, bound tools) logged as a `prompt` diary event;
+    # a change (first turn, /mode switch, registry edit) re-logs so the
+    # diary always holds the prompt the NEXT decisions actually run with.
+    logged_prompt: tuple[str, str, tuple[str, ...]] | None = None
 
 
 @dataclass(slots=True)
@@ -237,12 +241,24 @@ class Orchestrator:
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
         tools = modes.tool_docs(spec, self.profile)
+        if self.turn_log:
+            fingerprint = (spec.name, spec.goal, tuple(sorted(tools)))
+            if state.logged_prompt != fingerprint:
+                self.turn_log.prompt(
+                    turn_id, session_id, spec.name, spec.goal,
+                    self.driver.system_prompt(spec.goal), tools,
+                )
+                state.logged_prompt = fingerprint
         # [prior conversation..., context block, the live message]: history
         # reads as conversation; the block stays adjacent to the message.
         transcript: list[TranscriptEvent] = list(state.memory.events())
         context_block = await build_turn_context(state.services)
         if context_block:
             transcript.append(TranscriptEvent("user", context_block))
+            if self.turn_log:
+                self.turn_log.context(
+                    turn_id, session_id, spec.name, context_block
+                )
         transcript.append(TranscriptEvent("user", stripped))
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []

@@ -97,6 +97,7 @@
   .ev.reply .tag { color: var(--asst); }
   .ev.tool .tag { color: var(--tool); }
   .ev.end .tag { color: var(--muted); }
+  .ev.prompt .tag, .ev.ctx .tag { color: var(--muted); }
   .ev .text { white-space: pre-wrap; word-break: break-word; margin-top: 3px; }
   pre {
     background: var(--code); border: 1px solid var(--line); border-radius: 6px;
@@ -123,6 +124,7 @@
 
 <header>
   <h1>Turn log</h1>
+  <a href="/" style="font-size:12px">← inspection</a>
   <label>session
     <select id="f-session"><option value="">all</option></select>
   </label>
@@ -153,7 +155,7 @@
   <div id="stats"></div>
   <div id="drop">
     <p><b>Drop <code>logs/turns.jsonl</code> here</b> or <button id="drop-pick">choose a file</button></p>
-    <p>Or serve it live: <code>python scripts/serve_turn_log.py</code></p>
+    <p>Or serve it live: <code>python -m graph_context.orchestrator.inspect_server</code></p>
   </div>
   <div id="cards"></div>
 </main>
@@ -296,6 +298,36 @@
         const det = el("details", "result");
         det.appendChild(el("summary", null, "result (" + res.length + " chars)"));
         det.appendChild(el("pre", null, res));
+        d.appendChild(det);
+        return d;
+      }
+      case "prompt": {
+        // The model's standing inputs at this point of the log: mode goal,
+        // the exact system prompt the driver sends, and the bound tools.
+        const d = el("div", "ev prompt");
+        d.appendChild(el("span", "tag", "system prompt"));
+        const toolNames = Object.keys(rec.tools || {}).sort();
+        const det = el("details", "result");
+        det.appendChild(el("summary", null,
+          "mode " + (rec.mode || "?") + " · " + toolNames.length +
+          " tools · prompt (" + String(rec.system_prompt || "").length +
+          " chars)"));
+        det.appendChild(el("pre", null, rec.system_prompt || rec.goal || ""));
+        if (toolNames.length)
+          det.appendChild(el("div", "meta",
+            "bound tools: " + toolNames.join(", ")));
+        d.appendChild(det);
+        return d;
+      }
+      case "context": {
+        // The turn's context block (scratchpad, working set, recent trail).
+        const d = el("div", "ev ctx");
+        d.appendChild(el("span", "tag", "context"));
+        const text = String(rec.text || "");
+        const det = el("details", "result");
+        det.appendChild(el("summary", null,
+          "context block (" + text.length + " chars)"));
+        det.appendChild(el("pre", null, text));
         d.appendChild(det);
         return d;
       }
@@ -449,6 +481,17 @@
   });
 
   // ---- boot ----
+  // ?session=<key> deep-links straight to one session's turns (the
+  // inspection server's per-trial transcript links). /mode commands are
+  // unhidden so the linked trial's mode switch stays visible.
+  const preset = new URLSearchParams(location.search).get("session");
+  if (preset) {
+    ensureOption($("f-session"), preset);
+    $("f-session").value = preset;
+    state.filters.session = preset;
+    $("f-commands").checked = false;
+    state.filters.hideCommands = false;
+  }
   updateStats(0);
   if (location.protocol === "file:") { setStatus("file mode"); showDrop(); }
   else startLive();

@@ -1,0 +1,531 @@
+<meta charset="utf-8">
+<title>Inspection</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #667085;
+    --line: #e3e7ee; --chip: #eef1f6; --accent: #2f6feb; --err: #c1352b;
+    --err-bg: #fdecea; --code: #f3f4f7; --ok: #12855b; --ok-bg: #e7f5ef;
+    --warn: #8a5b00; --warn-bg: #fdf3e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --ink: #e6e9ee; --muted: #93a0b4;
+      --line: #2c323c; --chip: #262c35; --accent: #5b9bff; --err: #ff8a80;
+      --err-bg: #3a1f1c; --code: #12151a; --ok: #4bd6a0; --ok-bg: #17342a;
+      --warn: #e0b24d; --warn-bg: #363018;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 8px 14px;
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+  }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+  header a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+  .spacer { flex: 1 1 auto; }
+  main { padding: 14px; max-width: 1150px; margin: 0 auto; }
+  h2 { font-size: 15px; margin: 20px 2px 8px; }
+  h2:first-child { margin-top: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .crumbs { color: var(--muted); font-size: 12px; margin: 0 2px 12px; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 2px; }
+
+  .warnings {
+    background: var(--warn-bg); color: var(--warn);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; margin: 0 0 12px; font-size: 13px;
+  }
+  .warnings div { margin: 2px 0; }
+
+  table {
+    width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+  }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .04em; font-weight: 600; background: var(--panel); }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .chip {
+    font-size: 11px; padding: 1px 7px; border-radius: 20px;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+  }
+  .chip.mode { color: var(--accent); }
+  .badge {
+    font-size: 11px; padding: 1px 8px; border-radius: 20px; font-weight: 600;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.fail { background: var(--err-bg); color: var(--err); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+
+  .trend { display: inline-flex; gap: 2px; align-items: center; }
+  .trend span {
+    width: 10px; height: 14px; border-radius: 3px; background: var(--chip);
+    border: 1px solid var(--line);
+  }
+  .trend span.pass { background: var(--ok); border-color: var(--ok); }
+  .trend span.fail { background: var(--err); border-color: var(--err); }
+  .trend span.part { background: var(--warn); border-color: var(--warn); }
+
+  section.block {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 14px; margin: 0 0 10px;
+  }
+  .kv { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px;
+    color: var(--muted); margin: 2px 0 6px; }
+  .kv b { color: var(--ink); font-weight: 550; }
+
+  .trial { border-top: 1px dashed var(--line); padding: 8px 0; }
+  .trial-head { display: flex; flex-wrap: wrap; gap: 8px 14px;
+    align-items: center; }
+  .trial-head .stats { color: var(--muted); font-size: 12px; }
+  table.grades { margin-top: 6px; font-size: 12.5px; }
+  table.grades td:first-child { font-family: ui-monospace, SFMono-Regular,
+    Menlo, monospace; font-size: 12px; white-space: nowrap; }
+  .verdict-cell { width: 1%; white-space: nowrap; }
+
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; margin: 5px 0 0; overflow-x: auto; font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  details.fold { margin-top: 5px; }
+  details.fold > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px; list-style: none;
+  }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before { content: "\25B8 "; }
+  details.fold[open] > summary::before { content: "\25BE "; }
+  .judge { margin-top: 6px; font-size: 13px; }
+  .judge .reasoning { color: var(--muted); white-space: pre-wrap; }
+  .alert {
+    background: var(--err-bg); color: var(--err); border-radius: 6px;
+    padding: 6px 10px; margin-top: 6px; font-size: 13px;
+  }
+  .tools-list { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+</style>
+
+<header>
+  <h1><a href="#/" id="home">Inspection</a></h1>
+  <a href="logs">live turn log</a>
+  <span class="spacer"></span>
+  <span class="note" id="root-note"></span>
+</header>
+
+<main id="main"></main>
+
+<script>
+"use strict";
+(function () {
+  const main = document.getElementById("main");
+
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function link(href, text, cls) {
+    const a = el("a", cls, text);
+    a.href = href;
+    return a;
+  }
+  function fmtTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleString([], { hour12: false });
+  }
+  function fmtCost(v) { return v ? "$" + Number(v).toFixed(4) : "-"; }
+  function pct(v) { return v == null ? "-" : Math.round(v * 100) + "%"; }
+
+  async function fetchJson(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(url + " -> " + res.status);
+    return res.json();
+  }
+
+  function caseVerdict(latest) {
+    // status palette: ok/fail/skip states always carry their text label
+    if (!latest) return el("span", "badge", "never run");
+    if (latest.skipped) return el("span", "badge", "skipped");
+    if (latest.ok) return el("span", "badge ok", "ok");
+    return el("span", "badge fail", "FAIL");
+  }
+  function runVerdict(ok) {
+    if (ok === true) return el("span", "badge ok", "OK");
+    if (ok === false) return el("span", "badge fail", "FAILED");
+    return el("span", "badge", "?");
+  }
+  function trendStrip(history) {
+    // one cell per run, oldest -> newest so it reads chronologically;
+    // the title carries the same fact as text (never color alone)
+    const strip = el("span", "trend");
+    for (const h of [...history].reverse()) {
+      const cell = el("span");
+      if (h.skipped) cell.title = h.run_id + ": skipped";
+      else {
+        cell.className = h.ok ? (h.pass_all ? "pass" : "part") : "fail";
+        cell.title = h.run_id + ": " + (h.ok ? "ok" : "FAIL")
+          + " (pass rate " + pct(h.pass_rate) + ")";
+      }
+      strip.appendChild(cell);
+    }
+    return strip;
+  }
+  function headerRow(...labels) {
+    const tr = el("tr");
+    for (const label of labels) {
+      const [text, cls] = Array.isArray(label) ? label : [label, null];
+      tr.appendChild(el("th", cls, text));
+    }
+    return tr;
+  }
+
+  // ---- dashboard -----------------------------------------------------------
+
+  async function renderDashboard() {
+    const data = await fetchJson("api/summary");
+    main.textContent = "";
+    document.getElementById("root-note").textContent =
+      data.eval_root ? "evals: " + data.eval_root : "eval pages disabled";
+    if (data.warnings.length) {
+      const w = el("div", "warnings");
+      for (const msg of data.warnings) w.appendChild(el("div", null, "⚠ " + msg));
+      main.appendChild(w);
+    }
+
+    main.appendChild(el("h2", null, "Cases"));
+    if (!data.cases.length) {
+      main.appendChild(el("p", "note",
+        "No cases found. Case definitions live in evals/cases/*.toml; "
+        + "runs land in evals/runs/ via `python -m evals run`."));
+    } else {
+      const table = el("table");
+      table.appendChild(headerRow("case", "suite", "mode", "latest", "pass@k",
+        "pass^k", ["trials", "num"], "history", "latest run"));
+      for (const c of data.cases) {
+        const tr = el("tr");
+        const id = el("td");
+        id.appendChild(link("#/cases/" + encodeURIComponent(c.id), c.id));
+        if (!c.defined) id.appendChild(el("span", "chip", "undefined"));
+        if (c.must_fail) id.appendChild(el("span", "chip", "must-fail"));
+        if (c.has_judge)
+          id.appendChild(el("span", "chip",
+            c.judge_required ? "judge*" : "judge"));
+        tr.appendChild(id);
+        tr.appendChild(el("td", null, c.suite || ""));
+        const mode = el("td");
+        if (c.mode) mode.appendChild(el("span", "chip mode", c.mode));
+        tr.appendChild(mode);
+        const verdict = el("td", "verdict-cell");
+        verdict.appendChild(caseVerdict(c.latest));
+        tr.appendChild(verdict);
+        const latest = c.latest && !c.latest.skipped ? c.latest : null;
+        tr.appendChild(el("td", null, latest ? pct(latest.pass_rate) : "-"));
+        tr.appendChild(el("td", null,
+          latest ? (latest.pass_all ? "yes" : "no") : "-"));
+        tr.appendChild(el("td", "num", String(c.trials ?? "-")));
+        const trend = el("td");
+        trend.appendChild(trendStrip(c.history));
+        tr.appendChild(trend);
+        const runCell = el("td");
+        if (c.latest)
+          runCell.appendChild(link("#/runs/" +
+            encodeURIComponent(c.latest.run_id), c.latest.run_id));
+        tr.appendChild(runCell);
+        table.appendChild(tr);
+      }
+      main.appendChild(table);
+    }
+
+    main.appendChild(el("h2", null, "Runs"));
+    if (!data.runs.length) {
+      main.appendChild(el("p", "note", "No runs yet."));
+      return;
+    }
+    const runs = el("table");
+    runs.appendChild(headerRow("run", "driver", "model", "finished", "verdict",
+      ["cases", "num"], ["cost", "num"], "transcript"));
+    for (const r of data.runs) {
+      const tr = el("tr");
+      const id = el("td");
+      id.appendChild(link("#/runs/" + encodeURIComponent(r.id), r.id));
+      tr.appendChild(id);
+      tr.appendChild(el("td", null, r.driver));
+      tr.appendChild(el("td", null, r.model));
+      tr.appendChild(el("td", null, fmtTime(r.finished)));
+      const verdict = el("td", "verdict-cell");
+      verdict.appendChild(runVerdict(r.ok));
+      tr.appendChild(verdict);
+      tr.appendChild(el("td", "num", r.cases_ok + "/" + r.cases_total +
+        (r.cases_skipped ? " (+" + r.cases_skipped + " skipped)" : "")));
+      tr.appendChild(el("td", "num", fmtCost(r.cost_usd)));
+      const log = el("td");
+      if (r.has_transcript)
+        log.appendChild(link("runs/" + encodeURIComponent(r.id) + "/log",
+          "open"));
+      tr.appendChild(log);
+      runs.appendChild(tr);
+    }
+    main.appendChild(runs);
+  }
+
+  // ---- shared trial rendering ---------------------------------------------
+
+  function transcriptHref(runId, session) {
+    return "runs/" + encodeURIComponent(runId) + "/log?session=" +
+      encodeURIComponent(session || "");
+  }
+
+  function renderTrial(trial, runId, hasTranscript) {
+    const box = el("div", "trial");
+    const head = el("div", "trial-head");
+    head.appendChild(el("b", null, "trial " + trial.trial));
+    head.appendChild(trial.passed
+      ? el("span", "badge ok", "pass") : el("span", "badge fail", "fail"));
+    head.appendChild(el("span", "stats",
+      trial.decisions + " decisions · " + trial.executed_calls + " calls · " +
+      (trial.latency_s ?? 0) + "s · " + fmtCost(trial.cost_usd) +
+      (trial.output_tokens ? " · " + trial.output_tokens + " out-tokens" : "")));
+    if (hasTranscript && trial.session)
+      head.appendChild(link(transcriptHref(runId, trial.session),
+        "transcript ↗"));
+    box.appendChild(head);
+
+    if (trial.harness_error)
+      box.appendChild(el("div", "alert", "harness error: " + trial.harness_error));
+
+    const failed = (trial.grades || []).filter((g) => !g.passed);
+    const grades = el("details", "fold");
+    if (failed.length) grades.open = true;
+    grades.appendChild(el("summary", null,
+      "grades (" + (trial.grades || []).length + ", " +
+      (failed.length ? failed.length + " failed" : "all passed") + ")"));
+    const gt = el("table", "grades");
+    for (const g of trial.grades || []) {
+      const tr = el("tr");
+      tr.appendChild(el("td", null, g.grader));
+      const v = el("td", "verdict-cell");
+      v.appendChild(g.passed
+        ? el("span", "badge ok", "pass") : el("span", "badge fail", "fail"));
+      tr.appendChild(v);
+      tr.appendChild(el("td", null, g.detail));
+      gt.appendChild(tr);
+    }
+    grades.appendChild(gt);
+    box.appendChild(grades);
+
+    if (trial.judge) {
+      const j = el("div", "judge");
+      const label = trial.judge.error
+        ? el("span", "badge warn", "judge error")
+        : (trial.judge.passed
+            ? el("span", "badge ok", "judge pass")
+            : el("span", "badge fail", "judge fail"));
+      j.appendChild(label);
+      j.appendChild(document.createTextNode(
+        " score " + (trial.judge.score ?? "-")));
+      j.appendChild(el("div", "reasoning",
+        trial.judge.error || trial.judge.reasoning || ""));
+      box.appendChild(j);
+    }
+
+    if (trial.final_reply) {
+      const reply = el("details", "fold");
+      reply.appendChild(el("summary", null, "final reply"));
+      reply.appendChild(el("pre", null, trial.final_reply));
+      box.appendChild(reply);
+    }
+
+    if (trial.system_prompt) {
+      const sys = el("details", "fold");
+      sys.appendChild(el("summary", null, "system prompt"));
+      sys.appendChild(el("pre", null, trial.system_prompt));
+      box.appendChild(sys);
+    }
+    if (trial.bound_tools && trial.bound_tools.length) {
+      const tools = el("div", "tools-list");
+      for (const t of trial.bound_tools) tools.appendChild(el("span", "chip", t));
+      box.appendChild(tools);
+    }
+    return box;
+  }
+
+  function renderCaseOutcome(caseData, runId, hasTranscript) {
+    const section = el("section", "block");
+    const head = el("div", "trial-head");
+    const title = el("b");
+    title.appendChild(link("#/cases/" + encodeURIComponent(caseData.id),
+      caseData.id));
+    head.appendChild(title);
+    if (caseData.skipped) head.appendChild(el("span", "badge", "skipped"));
+    else head.appendChild(caseData.ok
+      ? el("span", "badge ok", "ok") : el("span", "badge fail", "FAIL"));
+    if (caseData.must_fail) head.appendChild(el("span", "chip", "must-fail"));
+    if (caseData.mode) head.appendChild(el("span", "chip mode", caseData.mode));
+    if (!caseData.skipped)
+      head.appendChild(el("span", "stats",
+        "pass@k " + (caseData.pass_any ? "yes" : "no") +
+        " · pass^k " + (caseData.pass_all ? "yes" : "no") +
+        " · pass rate " + pct(caseData.pass_rate)));
+    section.appendChild(head);
+    if (caseData.judge_rubric) {
+      const rubric = el("details", "fold");
+      rubric.appendChild(el("summary", null, "judge rubric"));
+      rubric.appendChild(el("pre", null, caseData.judge_rubric));
+      section.appendChild(rubric);
+    }
+    for (const trial of caseData.trials || [])
+      section.appendChild(renderTrial(trial, runId, hasTranscript));
+    return section;
+  }
+
+  // ---- run detail ----------------------------------------------------------
+
+  async function renderRun(runId) {
+    const data = await fetchJson("api/runs/" + encodeURIComponent(runId));
+    const meta = data.results.run || {};
+    main.textContent = "";
+    const crumbs = el("div", "crumbs");
+    crumbs.appendChild(link("#/", "dashboard"));
+    crumbs.appendChild(document.createTextNode(" / run"));
+    main.appendChild(crumbs);
+    main.appendChild(el("h2", null, runId));
+    const kv = el("div", "kv");
+    const facts = [
+      ["driver", meta.driver], ["model", meta.model],
+      ["label", meta.label || "-"],
+      ["started", fmtTime(meta.started)], ["finished", fmtTime(meta.finished)],
+      ["format", String(data.results.format || 1)],
+    ];
+    for (const [k, v] of facts) {
+      const item = el("span", null, k + ": ");
+      item.appendChild(el("b", null, v == null ? "" : String(v)));
+      kv.appendChild(item);
+    }
+    const verdict = el("span");
+    verdict.appendChild(runVerdict(meta.ok));
+    kv.appendChild(verdict);
+    main.appendChild(kv);
+    if (data.has_transcript)
+      main.appendChild(el("p", "note")).appendChild(
+        link("runs/" + encodeURIComponent(runId) + "/log",
+          "full run transcript ↗"));
+    for (const c of data.results.cases || [])
+      main.appendChild(renderCaseOutcome(c, runId, data.has_transcript));
+  }
+
+  // ---- case detail ---------------------------------------------------------
+
+  async function renderCase(caseId) {
+    const data = await fetchJson("api/cases/" + encodeURIComponent(caseId));
+    main.textContent = "";
+    const crumbs = el("div", "crumbs");
+    crumbs.appendChild(link("#/", "dashboard"));
+    crumbs.appendChild(document.createTextNode(" / case"));
+    main.appendChild(crumbs);
+    main.appendChild(el("h2", null, data.id));
+
+    const def = el("section", "block");
+    if (!data.defined) {
+      def.appendChild(el("div", "note",
+        "No definition in evals/cases/ (renamed or deleted); history only."));
+    } else {
+      const kv = el("div", "kv");
+      const facts = [
+        ["suite", data.suite], ["file", data.file], ["profile", data.profile],
+        ["mode", data.mode || "(default)"], ["trials", String(data.trials)],
+        ["must_fail", String(data.must_fail)],
+        ["judge", data.has_judge
+          ? (data.judge_required ? "required" : "on --judge") : "none"],
+        ["seed", (data.seed_nodes ?? 0) + " nodes, " +
+          (data.seed_edges ?? 0) + " edges"],
+        ["reference script", data.has_script ? "yes" : "no"],
+      ];
+      for (const [k, v] of facts) {
+        const item = el("span", null, k + ": ");
+        item.appendChild(el("b", null, v == null ? "" : String(v)));
+        kv.appendChild(item);
+      }
+      def.appendChild(kv);
+      for (const [i, turn] of (data.turns || []).entries()) {
+        def.appendChild(el("div", "note", "turn " + (i + 1) + " (user):"));
+        def.appendChild(el("pre", null, turn));
+      }
+      if (data.judge_rubric) {
+        def.appendChild(el("div", "note", "judge rubric:"));
+        def.appendChild(el("pre", null, data.judge_rubric));
+      }
+      if (Object.keys(data.expectations || {}).length) {
+        const exp = el("details", "fold");
+        exp.appendChild(el("summary", null, "expectations (code graders)"));
+        exp.appendChild(el("pre", null,
+          JSON.stringify(data.expectations, null, 2)));
+        def.appendChild(exp);
+      }
+      if ((data.modes || []).length) {
+        const modes = el("details", "fold");
+        modes.appendChild(el("summary", null, "staged in-space modes"));
+        modes.appendChild(el("pre", null, JSON.stringify(data.modes, null, 2)));
+        def.appendChild(modes);
+      }
+    }
+    main.appendChild(def);
+
+    main.appendChild(el("h2", null, "Runs (" + data.history.length + ")"));
+    if (!data.history.length)
+      main.appendChild(el("p", "note", "This case has not been run yet."));
+    for (const entry of data.history) {
+      const wrap = el("section", "block");
+      const head = el("div", "trial-head");
+      const title = el("b");
+      title.appendChild(link("#/runs/" + encodeURIComponent(entry.id),
+        entry.id));
+      head.appendChild(title);
+      head.appendChild(el("span", "stats",
+        entry.driver + " · " + entry.model + " · " + fmtTime(entry.finished)));
+      wrap.appendChild(head);
+      wrap.appendChild(renderCaseOutcome(entry.outcome, entry.id,
+        entry.has_transcript));
+      main.appendChild(wrap);
+    }
+  }
+
+  // ---- router --------------------------------------------------------------
+
+  async function route() {
+    const hash = location.hash || "#/";
+    try {
+      const run = hash.match(/^#\/runs\/(.+)$/);
+      const kase = hash.match(/^#\/cases\/(.+)$/);
+      if (run) await renderRun(decodeURIComponent(run[1]));
+      else if (kase) await renderCase(decodeURIComponent(kase[1]));
+      else await renderDashboard();
+    } catch (err) {
+      main.textContent = "";
+      const alert = el("div", "alert", "failed to load: " + err.message);
+      main.appendChild(alert);
+      const back = el("p", "note");
+      back.appendChild(link("#/", "back to dashboard"));
+      main.appendChild(back);
+    }
+    window.scrollTo(0, 0);
+  }
+  window.addEventListener("hashchange", route);
+  route();
+})();
+</script>

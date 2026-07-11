@@ -35,6 +35,12 @@ class TrialOutcome:
     cost_usd: float = 0.0
     output_tokens: int = 0
     final_reply: str = ""
+    # Format 2 (inspection server): the transcript address and the model's
+    # standing inputs, so a reviewer never has to reconstruct them.
+    session: str = ""  # this trial's session key in the run's turns.jsonl
+    system_prompt: str = ""  # the exact prompt the driver sent
+    bound_tools: tuple[str, ...] = ()
+    harness_error: str = ""  # the harness (not the model) broke the trial
     # The judge's SEPARATE verdict (--judge + a case rubric); it reports
     # alongside the code grades and never overrides them.
     judge: JudgeVerdict | None = None
@@ -46,6 +52,8 @@ class CaseOutcome:
     suite: str
     must_fail: bool = False
     skipped: bool = False
+    mode: str = ""  # the mode the case ran in ("" = the profile default)
+    judge_rubric: str = ""  # the rubric as it was at run time
     trials: tuple[TrialOutcome, ...] = ()
 
     @property
@@ -105,6 +113,9 @@ def load_results(run_dir: Path) -> dict[str, Any]:
 
 def _as_json(result: RunResult) -> dict[str, Any]:
     return {
+        # Bumped when the shape gains fields the inspection server reads;
+        # readers treat missing keys as "an older run", never an error.
+        "format": 2,
         "run": {
             "driver": result.driver,
             "model": result.model,
@@ -119,6 +130,8 @@ def _as_json(result: RunResult) -> dict[str, Any]:
                 "suite": case.suite,
                 "must_fail": case.must_fail,
                 "skipped": case.skipped,
+                "mode": case.mode,
+                "judge_rubric": case.judge_rubric,
                 "ok": case.ok,
                 "pass_rate": round(case.pass_rate, 3),
                 "pass_any": case.pass_any,
@@ -127,6 +140,10 @@ def _as_json(result: RunResult) -> dict[str, Any]:
                     {
                         "trial": t.trial,
                         "passed": t.passed,
+                        "session": t.session,
+                        "system_prompt": t.system_prompt,
+                        "bound_tools": list(t.bound_tools),
+                        "harness_error": t.harness_error,
                         "decisions": t.decisions,
                         "executed_calls": t.executed_calls,
                         "latency_s": round(t.latency_s, 3),
@@ -223,8 +240,9 @@ def _as_markdown(result: RunResult) -> str:
         lines += [f"- `{c.case_id}` (no script for this driver)" for c in skipped]
     lines += [
         "",
-        "Transcripts: `python -m graph_context.orchestrator.turn_log_server "
-        f"--log {result.run_dir / 'turns.jsonl'}`",
+        "Review: `python -m graph_context.orchestrator.inspect_server` then "
+        f"open `http://127.0.0.1:8765/#/runs/{result.run_dir.name}` "
+        "(transcripts, grades, prompts).",
         "",
     ]
     return "\n".join(lines)

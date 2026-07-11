@@ -1537,6 +1537,16 @@ What shipped:
   scratchpad; multi-turn pronoun continuity and seeded-history restart),
   plus 3 scripted smoke fixtures. Grown from dogfooding; calibrate by
   reading run transcripts in the viewer.
+* **Inspection server follow-up (ADR 025, shipped 2026-07-11):** the
+  turn-log viewer grew into `orchestrator/inspect_server.py` — an eval
+  dashboard at `/` (case-centric latest results + history, per-run
+  grade/judge detail, per-trial transcript links), the live viewer at
+  `/logs`, per-run replay at `/runs/<id>/log`. `results.json` moved to
+  format 2 (per-trial `session`/`system_prompt`/`bound_tools`/
+  `harness_error`, per-case `mode`/`judge_rubric`), and the turn diary
+  gained `prompt`/`context` events so transcripts record the mode goal,
+  the exact assembled system prompt, the bound tool surface, and the
+  per-turn context block the model actually received.
 
 ---
 

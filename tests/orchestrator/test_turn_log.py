@@ -151,14 +151,17 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         entries = _entries(path)
         assert [e["event"] for e in entries] == [
-            "user", "llm_turn", "tool_result", "llm_turn", "turn_end",
+            "user", "prompt", "llm_turn", "tool_result", "llm_turn", "turn_end",
         ]
         assert all(e["mode"] == "world_modeling" for e in entries)
         assert entries[0]["text"] == "Add Mira."
-        assert entries[1]["tool_calls"][0]["name"] == "create_node"
-        assert "Mira" in entries[2]["result"]  # the tool's full output
-        assert entries[3]["reply"] == "Mira now exists."
-        assert entries[4]["replies"] == [
+        assert entries[1]["goal"]  # the mode's system-prompt fragment
+        assert entries[1]["system_prompt"]  # what the driver actually sends
+        assert "create_node" in entries[1]["tools"]  # name -> doc
+        assert entries[2]["tool_calls"][0]["name"] == "create_node"
+        assert "Mira" in entries[3]["result"]  # the tool's full output
+        assert entries[4]["reply"] == "Mira now exists."
+        assert entries[5]["replies"] == [
             {"kind": "reply", "text": "Mira now exists."},
         ]
         # Every record of one handle_message call shares one turn id, so a
@@ -198,6 +201,52 @@ class TestPipelineTurnLogging:
         assert "not available in authoring mode" in rejected[0]["result"]
         # The two messages are two turns with two distinct ids.
         assert len({e["turn"] for e in entries}) == 2
+
+    async def test_prompt_is_logged_once_until_the_mode_changes(
+        self, services: Services, tmp_path
+    ) -> None:
+        """The prompt event fires when the session's effective prompt
+        CHANGES -- first turn and after a /mode switch -- never per turn."""
+        path = tmp_path / "turns.jsonl"
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="one"), LLMTurn(reply="two"), LLMTurn(reply="three"),
+        ], TurnLog(path, now=lambda: "T0"))
+        await orchestrator.handle_message("s1", "u1", "first")
+        await orchestrator.handle_message("s1", "u1", "second")
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        await orchestrator.handle_message("s1", "u1", "third")
+        prompts = [e for e in _entries(path) if e["event"] == "prompt"]
+        assert [p["mode"] for p in prompts] == ["world_modeling", "authoring"]
+        # The authoring binding drops the mutation tools; the logged tool
+        # surface is the one the boundary will actually enforce.
+        assert "create_node" in prompts[0]["tools"]
+        assert "create_node" not in prompts[1]["tools"]
+
+    async def test_each_session_logs_its_own_prompt(
+        self, services: Services, tmp_path
+    ) -> None:
+        path = tmp_path / "turns.jsonl"
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="one"), LLMTurn(reply="two"),
+        ], TurnLog(path, now=lambda: "T0"))
+        await orchestrator.handle_message("s1", "u1", "hello")
+        await orchestrator.handle_message("s2", "u1", "hello")
+        prompts = [e for e in _entries(path) if e["event"] == "prompt"]
+        assert [p["session"] for p in prompts] == ["s1", "s2"]
+
+    async def test_a_non_empty_context_block_is_logged(
+        self, services: Services, tmp_path
+    ) -> None:
+        path = tmp_path / "turns.jsonl"
+        # A held note makes build_turn_context render a block.
+        services.session.scratchpad = "Mira is the protagonist."
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="ok"),
+        ], TurnLog(path, now=lambda: "T0"))
+        await orchestrator.handle_message("s1", "u1", "hello")
+        contexts = [e for e in _entries(path) if e["event"] == "context"]
+        assert len(contexts) == 1
+        assert "Mira is the protagonist." in contexts[0]["text"]
 
     async def test_no_turn_log_means_no_file_and_no_crash(
         self, services: Services, tmp_path

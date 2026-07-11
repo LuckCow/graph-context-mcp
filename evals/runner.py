@@ -103,7 +103,9 @@ async def _run_case(
         logger.info("case %s: no [[case.script]]; skipped under --driver scripted",
                     case.id)
         return CaseOutcome(case_id=case.id, suite=suite.name,
-                           must_fail=case.must_fail, skipped=True)
+                           must_fail=case.must_fail, skipped=True,
+                           mode=case.mode,
+                           judge_rubric=case.judge.rubric if case.judge else "")
     trials = config.trials_override or case.trials
     results = []
     for trial in range(1, trials + 1):
@@ -134,6 +136,10 @@ async def _run_case(
             cost_usd=record.total_cost_usd,
             output_tokens=record.total_output_tokens,
             final_reply=record.final_reply,
+            session=record.session_id,
+            system_prompt=record.system_prompt,
+            bound_tools=tuple(sorted(record.bound_tools)),
+            harness_error=record.harness_error,
         ))
         logger.info(
             "case %s trial %d/%d: %s", case.id, trial, trials,
@@ -141,6 +147,7 @@ async def _run_case(
         )
     return CaseOutcome(
         case_id=case.id, suite=suite.name, must_fail=case.must_fail,
+        mode=case.mode, judge_rubric=case.judge.rubric if case.judge else "",
         trials=tuple(results),
     )
 
@@ -199,6 +206,7 @@ async def _run_trial(
             baseline_nodes=seed.node_count,
             baseline_edges=seed.edge_count,
             bound_tools=frozenset(binding_for(spec)),
+            system_prompt=recorder.system_prompt(spec.goal),
         )
         if case.mode:
             switch = await orchestrator.handle_message(

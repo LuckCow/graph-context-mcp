@@ -178,6 +178,16 @@ def sdk_tools(
     ]
 
 
+def assembled_system_prompt(goal: str) -> str:
+    """Goal + the static tool-calling guidance: the ENTIRE system prompt.
+
+    The one assembly point -- ``session_options`` sends it and
+    ``ClaudeAgentDriver.system_prompt`` reports it to the turn diary, so
+    the logged prompt can never drift from the sent one.
+    """
+    return f"{goal}\n\n{_GUIDANCE}".strip()
+
+
 def session_options(
     server: McpSdkServerConfig,
     goal: str,
@@ -203,7 +213,7 @@ def session_options(
         mcp_servers={_SERVER_NAME: server},
         tools=[],
         setting_sources=[],
-        system_prompt=f"{goal}\n\n{_GUIDANCE}".strip(),
+        system_prompt=assembled_system_prompt(goal),
         model=model,
         effort=effort,
         can_use_tool=can_use_tool,
@@ -242,6 +252,9 @@ class ClaudeAgentDriver:
                 name: derive_schema(fn) for name, fn in modes.full_surface().items()
             }
         self._schemas = schemas
+
+    def system_prompt(self, goal: str) -> str:
+        return assembled_system_prompt(goal)
 
     async def decide(
         self,

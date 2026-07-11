@@ -83,6 +83,15 @@ class LLMDriver(Protocol):
         active mode's goal prompt (ADR 015 -- the system-prompt fragment)."""
         ...
 
+    def system_prompt(self, goal: str) -> str:
+        """The exact system prompt this driver sends for ``goal``.
+
+        The prompt-capture seam: the turn diary logs what the model
+        actually received, so a driver that assembles more than the goal
+        (ClaudeAgentDriver appends its guidance) must answer with the
+        assembled string -- from the same code path that sends it."""
+        ...
+
 
 class ScriptedDriver:
     """Plays back a fixed list of turns; deterministic by construction.
@@ -95,6 +104,9 @@ class ScriptedDriver:
     def __init__(self, turns: Sequence[LLMTurn]) -> None:
         self._turns = list(turns)
         self._cursor = 0
+
+    def system_prompt(self, goal: str) -> str:
+        return goal  # nothing sends it anywhere; the goal IS the prompt
 
     async def decide(
         self,
