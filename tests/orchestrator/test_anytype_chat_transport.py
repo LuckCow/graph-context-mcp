@@ -425,3 +425,25 @@ class TestClearWatermarkAndSeeding:
         handler = _handler(cursor=cursor)
         window = [_message(message_id="h1", order_id="o3", text="hello")]
         assert handler.seed_events(CHAT, window) == [("user", "hello")]
+
+    def test_seed_events_keeps_the_reply_posted_after_the_cursor(self) -> None:
+        """The reply to the last answered message always lands AFTER it, so
+        its order_id sits above the cursor -- but it is ours, not unanswered
+        backlog (the gate never re-answers our own posts). Dropping it made
+        every restart-seeded prompt end in an apparently-unanswered user
+        message, so the model re-served the previous request each turn
+        (dogfooding 2026-07-11)."""
+        sent = SentMessages()
+        sent.add("bot-2")
+        cursor = ChatCursor()
+        cursor.fast_forward(CHAT, "o6")  # the last ANSWERED user message
+        handler = _handler(sent=sent, cursor=cursor)
+        window = [
+            _message(message_id="h1", order_id="o6", text="add the pottery task"),
+            _message(message_id="bot-2", order_id="o7", text="Created it."),
+            _message(message_id="h2", order_id="o8", text="true backlog"),
+        ]
+        assert handler.seed_events(CHAT, window) == [
+            ("user", "add the pottery task"),
+            ("assistant", "Created it."),
+        ]

@@ -308,11 +308,15 @@ class AnytypeChatTurnHandler:
         events (WP15 startup catch-up).
 
         ``messages`` is the fetched recency window, oldest-first. Kept:
-        messages after the chat's ``/clear`` watermark and at or below the
-        cursor (anything newer is about to be answered as a real turn and
-        remembered there). Bot messages are recognised by the same two
-        signals the gate uses -- the sent ledger and the identity suffix;
-        ``/``-commands are dropped (they were never conversation).
+        messages after the chat's ``/clear`` watermark, minus unanswered
+        USER backlog above the cursor (the catch-up turn answers and
+        remembers those). Bot messages above the cursor stay: the reply to
+        the last answered message always posts after it, and the gate never
+        re-answers our own posts -- dropping it left every restart-seeded
+        prompt ending in an apparently-unanswered request. Bot messages are
+        recognised by the same two signals the gate uses -- the sent ledger
+        and the identity suffix; ``/``-commands are dropped (they were
+        never conversation).
         """
         seed: list[tuple[str, str]] = []
         for message in messages:
@@ -320,15 +324,15 @@ class AnytypeChatTurnHandler:
                 continue
             if not self.clear_marks.is_new(message):
                 continue  # at or before the last /clear
-            if self.cursor.is_new(message):
-                continue  # unanswered backlog: the catch-up turn owns it
-            text = message.text.strip()
-            if not text:
-                continue
             ours = message.message_id in self.sent or (
                 self.bot_identity != ""
                 and message.creator.endswith(self.bot_identity)
             )
+            if not ours and self.cursor.is_new(message):
+                continue  # unanswered backlog: the catch-up turn owns it
+            text = message.text.strip()
+            if not text:
+                continue
             if not ours and text.startswith("/"):
                 continue
             seed.append(("assistant" if ours else "user", text))
