@@ -76,6 +76,22 @@ class TestChatRest:
             {"target": "obj-2", "type": "link"},
         ]
 
+    async def test_an_edit_replaces_text_and_attachments_wholesale(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        """Quirk C8 (live-confirmed): PATCH is a full content replacement
+        -- attachments not re-sent on the edit are removed."""
+        chat_id = mock.seed_chat()
+        message_id = await chat.send(chat_id, "v1", attachments=("obj-1",))
+        await chat.edit(chat_id, message_id, "v2", attachments=("obj-2",))
+        (stored,) = await chat._client.list_chat_messages(chat_id)
+        assert stored["content"]["text"] == "v2"
+        assert stored["attachments"] == [{"target": "obj-2", "type": "link"}]
+        await chat.edit(chat_id, message_id, "v3")  # text-only edit
+        (stored,) = await chat._client.list_chat_messages(chat_id)
+        assert stored["content"]["text"] == "v3"
+        assert stored["attachments"] == []  # C8: wiped, not preserved
+
 
 class TestSseParsing:
     async def test_backlog_then_live_events_arrive_in_order(

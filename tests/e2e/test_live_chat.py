@@ -3,8 +3,9 @@
 Pins against a real server the exact behaviors the mock asserts in
 ``tests/anytype/test_chat_client.py``: chat creation via API (S10e), the
 flat ``message_id`` create response (C1), the ``messages`` recency window
-(C2), SSE ``message_added`` framing with heartbeat comments (C5), and
-message deletion. Gated by ``ANYTYPE_E2E=1`` like the rest of the suite.
+(C2), SSE ``message_added`` framing with heartbeat comments (C5), the
+wholesale-replacement edit (C8), and message deletion. Gated by
+``ANYTYPE_E2E=1`` like the rest of the suite.
 
 NOTE: the session-scoped ``live_config`` resets the GC-E2E space before
 and after the run -- spike artifacts (S9/S10 chats, sets, todos) do not
@@ -49,6 +50,25 @@ class TestLiveChat:
 
             window = await client.list_chat_messages(chat_id)  # C2
             assert [m["id"] for m in window] == [message_id]
+
+            # C8: an edit replaces content wholesale -- attachments in the
+            # body land; attachments absent from a later edit are removed.
+            card = await client.create_object(
+                {"name": "E2E edit card", "type_key": "page"}
+            )
+            await chat_client.edit(
+                chat_id, message_id, "e2e ping v2",
+                attachments=(str(card["id"]),),
+            )
+            (edited,) = await client.list_chat_messages(chat_id)
+            assert edited["content"]["text"] == "e2e ping v2"
+            assert edited["attachments"] == [
+                {"target": str(card["id"]), "type": "link"}
+            ]
+            await chat_client.edit(chat_id, message_id, "e2e ping v3")
+            (edited,) = await client.list_chat_messages(chat_id)
+            assert edited["content"]["text"] == "e2e ping v3"
+            assert not edited.get("attachments")  # C8: wiped, not kept
 
             await client.delete_chat_message(chat_id, message_id)
             assert await client.list_chat_messages(chat_id) == []

@@ -128,14 +128,24 @@ async def _maybe_turn(
     async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
         return await chat_client.send(chat_id, text, attachments)
 
+    async def edit(
+        message_id: str, text: str, attachments: tuple[str, ...] = ()
+    ) -> None:
+        await chat_client.edit(chat_id, message_id, text, attachments)
+
+    # Errors deliver through the same reply, so they replace the turn's
+    # "Processing…" placeholder instead of stranding it in the chat.
+    reply = handler.reply(send, edit)
     try:
-        await handler.run_turn(inbound, send)
+        await handler.run_turn(inbound, reply)
     except GraphContextError as err:
         # Config-shaped errors are actionable; show them in-chat.
-        await send(f"[error] {err}")
+        await reply.deliver(f"[error] {err}")
     except Exception:  # a turn must never take the serve loop down
         logger.exception("turn failed (chat=%s)", chat_id)
-        await send("[error] the turn failed; see the bot log for the traceback")
+        await reply.deliver(
+            "[error] the turn failed; see the bot log for the traceback"
+        )
 
 
 async def _catch_up(

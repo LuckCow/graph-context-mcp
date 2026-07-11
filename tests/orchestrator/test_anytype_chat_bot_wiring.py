@@ -183,12 +183,15 @@ class TestLiveDiscovery:
                         await asyncio.sleep(0.01)
                     await asyncio.sleep(0.05)  # serve task's catch-up settles
                     mock.post_chat_message_directly(chat_id, "human", "hello?")
-                    while True:
+                    while True:  # placeholder first, then the edit lands
                         replies = [
                             m for m in mock._chat_messages[chat_id]
                             if m["creator"] == mock.api_member_id
                         ]
-                        if replies:
+                        if any(
+                            m["content"]["text"] == "served the new thread"
+                            for m in replies
+                        ):
                             break
                         await asyncio.sleep(0.01)
                 assert runtimes.spaces[chat_id] == mock.space_id
@@ -210,6 +213,8 @@ class TestServeLoop:
         try:
             await asyncio.sleep(0.05)  # catch-up done, stream open
             mock.post_chat_message_directly(chat_id, "human", "hi bot")
+            # The first bot post is the "Processing…" placeholder; wait for
+            # the edit that turns it into the reply.
             async with asyncio.timeout(5):
                 while True:
                     texts = [
@@ -217,10 +222,10 @@ class TestServeLoop:
                         for m in mock._chat_messages[chat_id]
                         if m["creator"] == mock.api_member_id
                     ]
-                    if texts:
+                    if "hello from the graph" in texts:
                         break
                     await asyncio.sleep(0.01)
-            assert texts == ["hello from the graph"]
+            assert texts == ["hello from the graph"]  # edited in place
             # The bot's own reply echoed back on the stream but ran no turn
             # (echo suppression) -- give it a beat to prove it.
             await asyncio.sleep(0.05)

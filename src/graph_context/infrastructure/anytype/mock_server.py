@@ -596,7 +596,15 @@ class MockAnytype:
             return self._error(404, "message_not_found")
         if request.method == "PATCH":
             body = json.loads(request.content)
+            raw_attachments = body.get("attachments")
+            if raw_attachments is not None and any(
+                not isinstance(e, dict) for e in raw_attachments
+            ):
+                return self._error(400, "bad_request")  # C7: envelopes only
             message["content"]["text"] = str(body.get("text", ""))
+            # C8: an edit replaces content wholesale -- attachments absent
+            # from the body are removed (live-confirmed).
+            message["attachments"] = list(raw_attachments or [])
             message["modified_at"] = next(self._clock)
             self._notify_chat(
                 chat_id, {"kind": "message_updated", "message": message}

@@ -18,10 +18,12 @@ from graph_context.interface.profiles import get_profile
 from graph_context.interface.tools import build_services
 from graph_context.orchestrator.anytype_chat_transport import (
     MAX_ATTACHMENTS,
+    PROCESSING_NOTICE,
     AnytypeChatTurnHandler,
     ChatCursor,
     InboundChatMessage,
     SentMessages,
+    TurnReply,
     object_references,
     plainify,
 )
@@ -66,17 +68,50 @@ def _message(**overrides: object) -> InboundChatMessage:
     return InboundChatMessage(**base)
 
 
-class _SendRecorder:
-    """A ``send`` fake returning fresh message ids like the live API."""
+class _ChatRecorder:
+    """send/edit fakes over an in-memory message list, so assertions read
+    the chat as a user would see it (edits applied in place, C8:
+    attachments replaced wholesale)."""
 
     def __init__(self) -> None:
-        self.pieces: list[str] = []
-        self.attachments: list[tuple[str, ...]] = []
+        self.messages: list[dict[str, object]] = []
+        self.posted: list[str] = []  # send texts, pre-edit, in post order
+        self.edited: list[str] = []  # ids that received an edit
 
-    async def __call__(self, piece: str, attachments: tuple[str, ...] = ()) -> str:
-        self.pieces.append(piece)
-        self.attachments.append(attachments)
-        return f"sent-{len(self.pieces)}"
+    async def send(self, text: str, attachments: tuple[str, ...] = ()) -> str:
+        message_id = f"sent-{len(self.messages) + 1}"
+        self.messages.append(
+            {"id": message_id, "text": text, "attachments": attachments}
+        )
+        self.posted.append(text)
+        return message_id
+
+    async def edit(
+        self, message_id: str, text: str, attachments: tuple[str, ...] = ()
+    ) -> None:
+        message = next(m for m in self.messages if m["id"] == message_id)
+        message["text"] = text
+        message["attachments"] = attachments
+        self.edited.append(message_id)
+
+    def texts(self) -> list[str]:
+        return [str(m["text"]) for m in self.messages]
+
+    def attachments(self) -> list[object]:
+        return [m["attachments"] for m in self.messages]
+
+
+async def _run(
+    handler: AnytypeChatTurnHandler,
+    message: InboundChatMessage,
+    recorder: _ChatRecorder | None = None,
+) -> _ChatRecorder:
+    """One run_turn through a handler-wired reply; returns its recorder."""
+    recorder = recorder or _ChatRecorder()
+    await handler.run_turn(
+        message, handler.reply(recorder.send, recorder.edit)
+    )
+    return recorder
 
 
 class TestGate:
@@ -125,49 +160,92 @@ class TestTurn:
         handler = AnytypeChatTurnHandler(
             routes={CHAT: route}, spaces={CHAT: SPACE}
         )
-        send = _SendRecorder()
-        await handler.run_turn(_message(), send)
-        assert send.pieces == ["hi there"]
+        recorder = await _run(handler, _message())
+        assert recorder.texts() == ["hi there"]
         assert route.orchestrator.mode_of(f"anytype:{CHAT}") == "world_modeling"
 
-    async def test_every_sent_id_is_recorded_for_echo_suppression(self) -> None:
+    async def test_every_posted_id_is_recorded_for_echo_suppression(self) -> None:
         handler = _handler([LLMTurn(reply="a\n" + "b" * 2500)])
-        send = _SendRecorder()
-        await handler.run_turn(_message(), send)
-        assert len(send.pieces) > 1  # chunked
-        for i in range(len(send.pieces)):
-            assert f"sent-{i + 1}" in handler.sent
+        recorder = await _run(handler, _message())
+        assert len(recorder.messages) > 1  # chunked
+        for message in recorder.messages:  # the placeholder's id included
+            assert str(message["id"]) in handler.sent
 
     async def test_referenced_objects_ride_the_first_chunk_as_attachments(
         self,
     ) -> None:
         reply = f"made [Mira]({OBJECT_ID})\n" + "pad " * 700
         handler = _handler([LLMTurn(reply=reply)])
-        send = _SendRecorder()
-        await handler.run_turn(_message(), send)
-        assert len(send.pieces) > 1  # chunked
-        assert send.attachments[0] == (OBJECT_ID,)
-        assert all(a == () for a in send.attachments[1:])
-        assert "[Mira](" not in send.pieces[0]  # plainified: name only
+        recorder = await _run(handler, _message())
+        assert len(recorder.messages) > 1  # chunked
+        # C8: the first chunk EDITS the placeholder, so its cards must
+        # ride the edit body -- the edit is a wholesale replacement.
+        assert recorder.attachments()[0] == (OBJECT_ID,)
+        assert all(a == () for a in recorder.attachments()[1:])
+        assert "[Mira](" not in recorder.texts()[0]  # plainified: name only
 
     async def test_a_processed_message_is_not_eligible_twice(self) -> None:
         handler = _handler([LLMTurn(reply="once")])
-        send = _SendRecorder()
         message = _message()
         assert handler.accepts(message)
-        await handler.run_turn(message, send)
+        await _run(handler, message)
         assert not handler.accepts(message)  # replay after reconnect
 
     async def test_concurrent_messages_in_one_chat_serialize_on_the_route_lock(
         self,
     ) -> None:
         handler = _handler([LLMTurn(reply="first"), LLMTurn(reply="second")])
-        send = _SendRecorder()
+        recorder = _ChatRecorder()
         await asyncio.gather(
-            handler.run_turn(_message(message_id="m1", order_id="o5"), send),
-            handler.run_turn(_message(message_id="m2", order_id="o6"), send),
+            _run(handler, _message(message_id="m1", order_id="o5"), recorder),
+            _run(handler, _message(message_id="m2", order_id="o6"), recorder),
         )
-        assert sorted(send.pieces) == ["first", "second"]
+        assert sorted(recorder.texts()) == ["first", "second"]
+
+
+class TestProcessingPlaceholder:
+    """The turn posts a visible placeholder at once, then EDITS it into
+    the real reply -- the user sees progress instead of silence while
+    turns (which serialize per space) run."""
+
+    async def test_the_placeholder_posts_first_and_becomes_the_reply(
+        self,
+    ) -> None:
+        handler = _handler([LLMTurn(reply="done thinking")])
+        recorder = await _run(handler, _message())
+        assert recorder.posted == [PROCESSING_NOTICE]  # the only raw send
+        assert recorder.texts() == ["done thinking"]  # edited in place
+        assert recorder.edited == ["sent-1"]
+
+    async def test_later_chunks_post_as_ordinary_messages(self) -> None:
+        handler = _handler([LLMTurn(reply="a\n" + "b" * 2500)])
+        recorder = await _run(handler, _message())
+        assert recorder.posted[0] == PROCESSING_NOTICE
+        assert recorder.edited == ["sent-1"]  # only the placeholder
+        assert len(recorder.messages) > 1
+
+    async def test_a_delivery_without_a_placeholder_degrades_to_a_send(
+        self,
+    ) -> None:
+        # The composition root's error path when open() itself failed.
+        sent = SentMessages()
+        recorder = _ChatRecorder()
+        reply = TurnReply(send=recorder.send, edit=recorder.edit, sent=sent)
+        await reply.deliver("[error] boom")
+        assert recorder.texts() == ["[error] boom"]
+        assert "sent-1" in sent  # error posts feed echo suppression too
+
+    async def test_an_eventless_turn_does_not_strand_the_placeholder(
+        self,
+    ) -> None:
+        recorder = _ChatRecorder()
+        reply = TurnReply(
+            send=recorder.send, edit=recorder.edit, sent=SentMessages()
+        )
+        await reply.open()
+        await reply.finish()
+        assert recorder.texts() == ["(the turn produced no reply)"]
+        assert recorder.edited == ["sent-1"]
 
 
 class TestReplyPreparation:
@@ -286,7 +364,7 @@ class TestIntentOrigin:
             routes={CHAT: ChannelRoute(orchestrator=orchestrator)},
             spaces={CHAT: SPACE},
         )
-        await handler.run_turn(_message(message_id="msg-42"), _SendRecorder())
+        await _run(handler, _message(message_id="msg-42"))
         intents = [n for n in repository.graph.nodes() if n.type_key == "gc_intent"]
         assert len(intents) == 1
         assert intents[0].fields["origin"] == f"anytype:{CHAT}:msg-42"
@@ -299,9 +377,7 @@ class TestClearWatermarkAndSeeding:
     async def test_clear_records_a_persisted_watermark(self, tmp_path: Path) -> None:
         clear_marks = ChatCursor(str(tmp_path / "cleared.json"))
         handler = _handler(clear_marks=clear_marks)
-        await handler.run_turn(
-            _message(text="/clear", order_id="o7"), _SendRecorder()
-        )
+        await _run(handler, _message(text="/clear", order_id="o7"))
         assert not clear_marks.is_new(_message(order_id="o7"))
         assert clear_marks.is_new(_message(order_id="o8"))
         # Persisted: a fresh cursor instance reads the same boundary.
@@ -310,9 +386,8 @@ class TestClearWatermarkAndSeeding:
 
     async def test_clear_reaches_the_orchestrator_as_a_notice(self) -> None:
         handler = _handler()
-        send = _SendRecorder()
-        await handler.run_turn(_message(text="/clear"), send)
-        assert any("memory cleared" in piece for piece in send.pieces)
+        recorder = await _run(handler, _message(text="/clear"))
+        assert any("memory cleared" in text for text in recorder.texts())
 
     def test_seed_events_classifies_and_bounds_the_window(self) -> None:
         sent = SentMessages()
