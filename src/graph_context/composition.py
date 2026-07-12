@@ -52,7 +52,11 @@ from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_registry import SessionRegistry
 from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import DomainProfile
-from graph_context.interface.tools import Services, build_services, derive_services
+from graph_context.interface.services import (
+    Services,
+    build_services,
+    derive_services,
+)
 from graph_context.ports.graph_repository import GraphRepository
 from graph_context.ports.mode_store import ModeStore
 from graph_context.ports.semantic import Embedder, SemanticIndex

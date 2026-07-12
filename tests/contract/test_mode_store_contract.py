@@ -62,13 +62,16 @@ async def test_memory_store_empty_loads_nothing() -> None:
 
 
 @pytest.fixture
-async def anytype_client() -> AnytypeClient:
-    mock = MockAnytype()
+def mock() -> MockAnytype:
+    return MockAnytype()
+
+
+@pytest.fixture
+async def anytype_client(mock: MockAnytype) -> AnytypeClient:
     client = AnytypeClient(
         AnytypeConfig(api_key="t", space_id=mock.space_id), transport=mock.transport
     )
     await ensure_schema(client)  # mints gc_activity_mode + the example
-    client._mock = mock  # type: ignore[attr-defined]  # handy for seeding
     return client
 
 
@@ -116,9 +119,8 @@ async def test_bootstrap_seeds_the_example_mode_once(
 
 
 async def test_anytype_store_round_trips_a_mode_object(
-    anytype_client: AnytypeClient,
+    anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
-    mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     object_id = _seed_mode(
         # Trailing padding mirrors the live export (it pads the body);
         # the store must hand the loader a clean goal either way.
@@ -138,20 +140,18 @@ async def test_anytype_store_round_trips_a_mode_object(
 
 
 async def test_anytype_store_skips_archived_objects(
-    anytype_client: AnytypeClient,
+    anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
-    mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     object_id = _seed_mode(mock, "Disabled", "Old goal.")
     mock.archive_directly(object_id)
     assert "Disabled" not in await _load_by_name(anytype_client)
 
 
 async def test_capture_absent_when_capture_type_empty(
-    anytype_client: AnytypeClient,
+    anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
     """Presence of gc_capture_type is the capture switch: an empty text
     (the property exists, the human left it blank) means no capture."""
-    mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     _seed_mode(mock, "Plain", "A goal.", capture_type="", min_chars=99.0)
     plain = (await _load_by_name(anytype_client))["Plain"]
     assert plain["capture"] is None

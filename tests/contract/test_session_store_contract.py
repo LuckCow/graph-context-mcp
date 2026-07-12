@@ -10,7 +10,7 @@ its observable behaviour:
 * an empty key raises ``ValueError`` (a bug, never data);
 * unreadable/corrupt stored state loads ``None`` rather than raising
   (the lenient-load contract that keeps startup from crashing);
-* pre-WP8 unkeyed session nodes match NO key (adapter-only: warned once,
+* stray unkeyed session nodes match NO key (adapter-only: warned once,
   left for the human to delete).
 """
 
@@ -80,13 +80,16 @@ async def test_memory_store_rejects_an_empty_key() -> None:
 
 
 @pytest.fixture
-async def anytype_client() -> AnytypeClient:
-    mock = MockAnytype()
+def mock() -> MockAnytype:
+    return MockAnytype()
+
+
+@pytest.fixture
+async def anytype_client(mock: MockAnytype) -> AnytypeClient:
     client = AnytypeClient(
         AnytypeConfig(api_key="t", space_id=mock.space_id), transport=mock.transport
     )
     await ensure_schema(client)  # creates gc_session_context type
-    client._mock = mock  # type: ignore[attr-defined]  # handy for seeding
     return client
 
 
@@ -143,11 +146,10 @@ async def test_anytype_node_carries_key_and_label(
 
 
 async def test_stray_unkeyed_node_matches_no_key(
-    anytype_client: AnytypeClient,
+    anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
     """Nodes without gc_session_key (e.g. hand-created) are inert: never
     loaded, never overwritten -- a new keyed node is minted beside them."""
-    mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     mock.seed_object(
         SESSION_TYPE_KEY,
         "Session context (managed)",
@@ -182,9 +184,8 @@ async def test_two_spaces_persist_sessions_independently() -> None:
 
 
 async def test_anytype_store_corrupt_json_loads_none(
-    anytype_client: AnytypeClient,
+    anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
-    mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     mock.seed_object(
         SESSION_TYPE_KEY,
         "Session context — broken",

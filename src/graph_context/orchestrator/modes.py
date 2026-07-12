@@ -41,7 +41,7 @@ from typing import Any
 from graph_context.errors import GraphContextError
 from graph_context.interface import tools
 from graph_context.interface.profiles import CapturePolicy, DomainProfile, ModeSpec
-from graph_context.interface.tools import Services
+from graph_context.interface.services import Services
 
 ToolFn = Callable[..., Awaitable[str]]
 

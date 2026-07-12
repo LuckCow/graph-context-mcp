@@ -25,7 +25,7 @@ from graph_context.interface.profiles import (
     ModeSpec,
     get_profile,
 )
-from graph_context.interface.tools import Services, build_services
+from graph_context.interface.services import Services, build_services
 from graph_context.orchestrator import modes
 from graph_context.orchestrator.driver_common import assembled_system_prompt
 from graph_context.orchestrator.drivers import (
@@ -618,7 +618,7 @@ def _keyed_orchestrator(
     one shared repository, a keyed session store, independent SessionState
     per session id -- the multi-chat shape."""
     from graph_context.application.session_registry import SessionRegistry
-    from graph_context.interface.tools import derive_services
+    from graph_context.interface.services import derive_services
 
     store = store or InMemorySessionStore()
     repository = InMemoryGraphRepository(role_overrides=FICTION.role_overrides)
@@ -649,11 +649,12 @@ class TestKeyedSessions:
         ])
         await orchestrator.handle_message("anytype:a", "u1", "note the siege")
         await orchestrator.handle_message("anytype:b", "u1", "note the exile")
-        state_a = orchestrator._sessions["anytype:a"]
-        state_b = orchestrator._sessions["anytype:b"]
-        assert state_a.services.session.scratchpad == "arc: the siege"
-        assert state_b.services.session.scratchpad == "arc: the exile"
-        assert state_a.services.session is not state_b.services.session
+        services_a = orchestrator.services_of("anytype:a")
+        services_b = orchestrator.services_of("anytype:b")
+        assert services_a is not None and services_b is not None
+        assert services_a.session.scratchpad == "arc: the siege"
+        assert services_b.session.scratchpad == "arc: the exile"
+        assert services_a.session is not services_b.session
 
     async def test_mode_switch_persists_per_chat_and_survives_restart(self) -> None:
         store = InMemorySessionStore()

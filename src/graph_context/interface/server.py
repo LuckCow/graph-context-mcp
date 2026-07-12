@@ -42,7 +42,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from graph_context import composition
 from graph_context.interface import profiles, tools
-from graph_context.interface.tools import Services
+from graph_context.interface.services import Services
 
 logger = logging.getLogger(__name__)
 

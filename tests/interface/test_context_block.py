@@ -11,6 +11,7 @@ import pytest
 from graph_context.domain.models import Detail
 from graph_context.interface import tools
 from graph_context.interface.context_block import build_turn_context
+from graph_context.interface.services import build_services
 
 pytestmark = pytest.mark.usefixtures("world")
 
@@ -21,7 +22,7 @@ class TestEmptySession:
         # already touched the shared one): zero tokens on a cold start.
         from graph_context.domain.session import SessionState
 
-        fresh = tools.build_services(repository, SessionState(project="Ashfall"))
+        fresh = build_services(repository, SessionState(project="Ashfall"))
         assert await build_turn_context(fresh) == ""
 
     async def test_recent_alone_is_enough_to_render(

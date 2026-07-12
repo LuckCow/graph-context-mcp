@@ -9,7 +9,7 @@ all, and which request field name actually triggers template application.
 Surgical + self-cleaning: it only ever *creates* objects, tracks their ids, and
 archives them in a ``finally`` block. It never resets or mass-deletes a space, so
 it is safe to point at a working space that already owns a template. It does NOT
-depend on the production client -- raw httpx, like scripts/spike_s10_chat.py.
+depend on the production client -- raw httpx only.
 
     ANYTYPE_API_KEY_FILE=/run/secrets/anytype_api_key \
     ANYTYPE_API_BASE_URL=http://anytype:31012 \

@@ -16,7 +16,7 @@ from graph_context.domain import attribution
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface.profiles import get_profile
-from graph_context.interface.tools import build_services
+from graph_context.interface.services import build_services
 from graph_context.orchestrator.anytype_chat_transport import (
     MAX_ATTACHMENTS,
     PROCESSING_NOTICE,

@@ -17,6 +17,7 @@ from graph_context.domain.models import NodeDraft
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface import tools
+from graph_context.interface.services import build_services
 from tests.conftest import World
 
 pytestmark = pytest.mark.usefixtures("world")
@@ -247,7 +248,7 @@ async def _semantic_services(world: World) -> tools.Services:
     index = InMemorySemanticIndex()
     projector = SemanticProjector(repository, embedder, index)
     await projector.refresh()
-    return tools.build_services(
+    return build_services(
         repository, SessionState(project="Ashfall"),
         projector=projector, ranker=Ranker(repository, embedder, index),
     )
@@ -325,7 +326,7 @@ class TestFindNodeResyncOnMiss:
         repo.stage_out_of_band(
             NodeDraft("Project", name="Garden", summary="Yard work.")
         )
-        services = tools.build_services(repo, SessionState(project="Todo"))
+        services = build_services(repo, SessionState(project="Todo"))
         out = await tools.find_node_tool(services, name="Garden")
         assert "no match" not in out
         assert "Garden" in out
@@ -335,14 +336,14 @@ class TestFindNodeResyncOnMiss:
         await repo.create_node(
             NodeDraft("Project", name="Garden", summary="Yard work.")
         )
-        services = tools.build_services(repo, SessionState(project="Todo"))
+        services = build_services(repo, SessionState(project="Todo"))
         out = await tools.find_node_tool(services, name="Garden")
         assert "Garden" in out
         assert repo.resync_calls == 0
 
     async def test_a_true_miss_answers_no_match_after_one_resync(self) -> None:
         repo = CountingRepository()
-        services = tools.build_services(repo, SessionState(project="Todo"))
+        services = build_services(repo, SessionState(project="Todo"))
         out = await tools.find_node_tool(services, name="Garden")
         assert "no match" in out
         assert repo.resync_calls == 1
@@ -479,7 +480,7 @@ class TestQueryViewParam:
                 order_by=(SortKey("due_date"),),
             ),
         )
-        return tools.build_services(
+        return build_services(
             InMemoryGraphRepository(), SessionState(project="x"),
             views=InMemoryViewCatalog([saved]),
         )
@@ -540,7 +541,7 @@ class TestFieldCatalogSurface:
         repository = InMemoryGraphRepository(field_catalog=[
             FieldSpec(name="Due date", format="date", key="due_date"),
         ])
-        return tools.build_services(repository, SessionState(project="t"))
+        return build_services(repository, SessionState(project="t"))
 
     async def test_overview_lists_each_types_properties(self) -> None:
         services = self._services()
@@ -593,7 +594,7 @@ class TestScheduleTool:
     hiding that keeps events out of story traversal."""
 
     def _services(self, session_key: str = "anytype:chat-1") -> tools.Services:
-        return tools.build_services(
+        return build_services(
             InMemoryGraphRepository(), SessionState(project="t"),
             session_key=session_key,
         )
@@ -693,7 +694,7 @@ class TestScheduleTool:
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
-        services = tools.build_services(
+        services = build_services(
             InMemoryGraphRepository(), SessionState(project="t"),
             timezone="Pacific/Kiritimati",  # UTC+14: unmistakably not UTC
         )

@@ -11,7 +11,7 @@ import pytest
 
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
-from graph_context.interface.tools import Services, build_services
+from graph_context.interface.services import Services, build_services
 
 
 @pytest.fixture

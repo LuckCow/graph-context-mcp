@@ -19,7 +19,7 @@ from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface.profiles import get_profile
-from graph_context.interface.tools import Services, build_services
+from graph_context.interface.services import Services, build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver, ToolCall
 from graph_context.orchestrator.modes import load_registry

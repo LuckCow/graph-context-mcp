@@ -18,6 +18,7 @@ from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
 from graph_context.interface import tools
+from graph_context.interface.services import build_services
 
 
 async def main() -> None:
@@ -34,7 +35,7 @@ async def main() -> None:
         )
     repo = AnytypeGraphRepository(client)
     await repo.hydrate()
-    svc = tools.build_services(repo, SessionState(project="Ashfall"))
+    svc = build_services(repo, SessionState(project="Ashfall"))
 
     def show(label, out):
         print(f"\n### {label}\n{out}")

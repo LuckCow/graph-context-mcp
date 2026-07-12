@@ -400,6 +400,12 @@ class MockAnytype:
         of ``edit_object_directly``. Live streams see ``message_added``."""
         return str(self._new_chat_message(chat_id, creator, text)["id"])
 
+    def chat_messages(self, chat_id: str) -> list[dict[str, Any]]:
+        """The chat's delivered messages, oldest first (assertion surface --
+        the read-side twin of ``post_chat_message_directly``). Copies, so
+        a test cannot accidentally mutate the store."""
+        return [dict(m) for m in self._chat_messages[chat_id]]
+
     def emit_chat_heartbeat(self, chat_id: str) -> None:
         """Push a ``: heartbeat`` comment to every open stream (C5)."""
         self._notify_chat(chat_id, {"kind": "heartbeat"})

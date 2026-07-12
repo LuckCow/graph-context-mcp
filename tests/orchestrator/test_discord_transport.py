@@ -17,7 +17,7 @@ from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface import tools
 from graph_context.interface.profiles import get_profile
-from graph_context.interface.tools import build_services
+from graph_context.interface.services import build_services
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.discord_transport import (
     DISCORD_MESSAGE_LIMIT,

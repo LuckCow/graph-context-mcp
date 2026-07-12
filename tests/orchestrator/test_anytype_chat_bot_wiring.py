@@ -21,7 +21,7 @@ from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface.profiles import get_profile
-from graph_context.interface.tools import build_services
+from graph_context.interface.services import build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
@@ -187,7 +187,7 @@ class TestLiveDiscovery:
                     mock.post_chat_message_directly(chat_id, "human", "hello?")
                     while True:  # placeholder first, then the edit lands
                         replies = [
-                            m for m in mock._chat_messages[chat_id]
+                            m for m in mock.chat_messages(chat_id)
                             if m["creator"] == mock.api_member_id
                         ]
                         if any(
@@ -250,7 +250,7 @@ class TestServeLoop:
                 while True:
                     texts = [
                         m["content"]["text"]
-                        for m in mock._chat_messages[chat_id]
+                        for m in mock.chat_messages(chat_id)
                         if m["creator"] == mock.api_member_id
                     ]
                     if "hello from the graph" in texts:
@@ -260,7 +260,7 @@ class TestServeLoop:
             # The bot's own reply echoed back on the stream but ran no turn
             # (echo suppression) -- give it a beat to prove it.
             await asyncio.sleep(0.05)
-            assert len(mock._chat_messages[chat_id]) == 2  # hi + one reply
+            assert len(mock.chat_messages(chat_id)) == 2  # hi + one reply
         finally:
             serve.cancel()
             await asyncio.gather(serve, return_exceptions=True)
@@ -276,7 +276,7 @@ class TestServeLoop:
             mock, [LLMTurn(reply="caught up")], ChatCursor(cursor_path)
         )
         seen_id = mock.post_chat_message_directly(chat_id, "human", "seen before")
-        seen_order = mock._chat_messages[chat_id][-1]["order_id"]
+        seen_order = mock.chat_messages(chat_id)[-1]["order_id"]
         primer.fast_forward(chat_id, seen_order)
         mock.post_chat_message_directly(chat_id, "human", "sent while offline")
         # Reload the persisted position, then catch up.
@@ -284,7 +284,7 @@ class TestServeLoop:
         await _catch_up(handler, chat_client, chat_id, handler.cursor)
         replies = [
             m["content"]["text"]
-            for m in mock._chat_messages[chat_id]
+            for m in mock.chat_messages(chat_id)
             if m["creator"] == mock.api_member_id
         ]
         assert replies == ["caught up"]  # one turn: the offline message only
@@ -298,7 +298,7 @@ class TestServeLoop:
         mock.post_chat_message_directly(chat_id, "human", "ancient history")
         await _catch_up(handler, chat_client, chat_id, handler.cursor)
         replies = [
-            m for m in mock._chat_messages[chat_id]
+            m for m in mock.chat_messages(chat_id)
             if m["creator"] == mock.api_member_id
         ]
         assert replies == []
@@ -336,7 +336,7 @@ class TestScheduledEventWatcher:
                 while True:
                     texts = [
                         m["content"]["text"]
-                        for m in mock._chat_messages[chat_id]
+                        for m in mock.chat_messages(chat_id)
                         if m["creator"] == mock.api_member_id
                     ]
                     if "Reminder: taxes are due April 15." in texts:
@@ -348,7 +348,7 @@ class TestScheduledEventWatcher:
             await asyncio.sleep(0.05)
             bot_posts = [
                 m["content"]["text"]
-                for m in mock._chat_messages[chat_id]
+                for m in mock.chat_messages(chat_id)
                 if m["creator"] == mock.api_member_id
             ]
             assert bot_posts == ["Reminder: taxes are due April 15."]
@@ -383,7 +383,7 @@ class TestScheduledEventWatcher:
                     scheduling.FIELD_LAST_FIRED
                 ):
                     await asyncio.sleep(0.01)
-            assert mock._chat_messages[chat_id] == []  # armed, not fired
+            assert mock.chat_messages(chat_id) == []  # armed, not fired
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)

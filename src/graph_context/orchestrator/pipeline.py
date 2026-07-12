@@ -46,7 +46,8 @@ from graph_context.application.scheduler import SchedulerTick
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
-from graph_context.interface.tools import Services, resync_out_of_band
+from graph_context.interface.services import Services
+from graph_context.interface.tools import resync_out_of_band
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
 from graph_context.orchestrator.modes import ModeRegistry
@@ -220,6 +221,12 @@ class Orchestrator:
         """Non-creating peek: the mode a session IS in (default if unseen)."""
         state = self._sessions.get(session_id)
         return state.mode if state is not None else self.registry.default
+
+    def services_of(self, session_id: str) -> Services | None:
+        """Non-creating peek: the Services view a session runs on, or
+        ``None`` for a session no turn has touched yet (ADR 021)."""
+        state = self._sessions.get(session_id)
+        return state.services if state is not None else None
 
     async def resync_graph(self) -> frozenset[str]:
         """Pull edits made directly in Anytype into the shared index.
