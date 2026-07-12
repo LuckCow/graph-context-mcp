@@ -67,7 +67,7 @@ from graph_context.domain.query import (
     normalize_value,
 )
 from graph_context.domain.schema import Role
-from graph_context.domain.session import SessionState
+from graph_context.domain.session import SCRATCHPAD_MAX_CHARS, SessionState
 from graph_context.domain.traversal import ExploreQuery, node_identifiers
 from graph_context.errors import GraphContextError, NodeNotFound, UnknownNodeType
 from graph_context.interface import presenters
@@ -386,9 +386,6 @@ def _edge_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
 
 
 # -- tools ------------------------------------------------------------------
-
-
-SCRATCHPAD_MAX_CHARS = 2000  # over-cap is an error that teaches condensing
 
 
 def _parse_hold_detail(value: str) -> Detail:
