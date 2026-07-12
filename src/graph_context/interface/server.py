@@ -221,6 +221,22 @@ async def find_path(
     )
 
 
+@mcp.tool(description=_PROFILE.tool_docs["schedule"])
+async def schedule(
+    ctx: Context[Any, Any, Any],
+    action: str = "list",
+    name: str = "",
+    schedule: str = "",
+    prompt: str = "",
+    node_id: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.schedule_tool(
+        _services(ctx), action=action, name=name, schedule=schedule,
+        prompt=prompt, node_id=node_id,
+    )
+
+
 @mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
     ctx: Context[Any, Any, Any],

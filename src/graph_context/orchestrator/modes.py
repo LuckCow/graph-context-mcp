@@ -54,6 +54,10 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     "find_path": tools.find_path_tool,
     "find_node": tools.find_node_tool,
     "query": tools.query_tool,
+    # ADR 027: like `context`, session bookkeeping rather than graph
+    # authorship -- deliberately NOT a mutation tool, so read-only modes
+    # can still take "remind me" requests (the node it mints is infra).
+    "schedule": tools.schedule_tool,
 }
 
 MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})

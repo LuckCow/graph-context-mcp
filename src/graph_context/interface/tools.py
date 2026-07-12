@@ -53,6 +53,7 @@ from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
 from graph_context.application.querier import Querier
 from graph_context.application.ranker import Ranker
+from graph_context.application.scheduler import Scheduler, local_clock
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
@@ -95,7 +96,13 @@ class Services:
     explorer: Explorer
     querier: Querier
     capture: CaptureRecorder
+    scheduler: Scheduler
     persister: SessionPersister | None = None  # wired in server lifespan
+    # WP18 (ADR 027): the transport-scoped session key this view serves
+    # ("mcp", "anytype:<chat_id>", ...). The schedule tool stamps it onto
+    # scheduled events so a fired event's turn lands in the right chat.
+    # "" (tests, bare construction) means "no specific chat".
+    session_key: str = ""
     # WP7: the orchestrator passes a real MutationJournal and drains it per
     # turn; the MCP server keeps the NullJournal (no turn boundary).
     journal: MutationJournal = field(default_factory=NullJournal)
@@ -114,6 +121,8 @@ def build_services(
     projector: SemanticProjector | None = None,
     ranker: Ranker | None = None,
     views: ViewCatalog | None = None,
+    session_key: str = "",
+    timezone: str = "",
 ) -> Services:
     journal = journal or NullJournal()
     return Services(
@@ -124,22 +133,30 @@ def build_services(
         explorer=Explorer(repository, session),
         querier=Querier(repository, views),
         capture=CaptureRecorder(repository, journal=journal),
+        # GC_TIMEZONE (ADR 027): schedules mean the USER's wall clock,
+        # not the container's (usually UTC); resolved loudly at startup.
+        scheduler=Scheduler(repository, journal=journal, now=local_clock(timezone)),
         persister=persister,
         journal=journal,
         projector=projector,
         ranker=ranker,
+        session_key=session_key,
     )
 
 
 def derive_services(
-    base: Services, session: SessionState, persister: SessionPersister | None
+    base: Services,
+    session: SessionState,
+    persister: SessionPersister | None,
+    session_key: str = "",
 ) -> Services:
     """A per-session view of one runtime (WP8): rebind the three
     session-bound services, share everything expensive by reference.
 
-    Repository (and its GraphIndex), querier, capture, journal, projector,
-    and ranker stay THE runtime's instances -- sessions are views over one
-    space, not runtimes of their own. Cheap: three thin wrappers, no I/O.
+    Repository (and its GraphIndex), querier, capture, scheduler, journal,
+    projector, and ranker stay THE runtime's instances -- sessions are
+    views over one space, not runtimes of their own. Cheap: three thin
+    wrappers, no I/O.
     """
     return Services(
         repository=base.repository,
@@ -149,10 +166,12 @@ def derive_services(
         explorer=Explorer(base.repository, session),
         querier=base.querier,
         capture=base.capture,
+        scheduler=base.scheduler,
         persister=persister,
         journal=base.journal,
         projector=base.projector,
         ranker=base.ranker,
+        session_key=session_key,
     )
 
 
@@ -557,6 +576,74 @@ async def context_tool(
     raise GraphContextError(
         f"unknown action {action!r}; allowed: get, overview, resync, "
         "set_project, note, hold, release, clear"
+    )
+
+
+_PROMPT_EXCERPT_CHARS = 160  # list action: enough to recognize, not a wall
+
+
+def _clock_line(scheduler: Scheduler) -> str:
+    return (
+        "server local time: "
+        f"{scheduler.now().isoformat(sep=' ', timespec='minutes')}"
+    )
+
+
+@guarded
+async def schedule_tool(
+    services: Services,
+    action: str = "list",
+    name: str = "",
+    schedule: str = "",
+    prompt: str = "",
+    node_id: str = "",
+) -> str:
+    scheduler = services.scheduler
+    if action == "set":
+        node, next_at = await scheduler.set(
+            name, schedule, prompt, services.session_key
+        )
+        await _note_mutation(services)
+        when = (
+            next_at.isoformat(sep=" ", timespec="minutes")
+            if next_at is not None else "never"
+        )
+        return (
+            f"scheduled {node.name!r} (id={node.id}); next fire: {when}. "
+            f"{_clock_line(scheduler)}. Verify the next-fire time matches "
+            "what the user asked for; reschedule with action='cancel' + "
+            "'set' if not."
+        )
+    if action == "list":
+        views = scheduler.events()
+        if not views:
+            return (
+                "no scheduled events. Create one with action='set' "
+                f"(name, schedule, prompt). {_clock_line(scheduler)}."
+            )
+        lines = [_clock_line(scheduler), f"scheduled events ({len(views)}):"]
+        for view in views:
+            target = view.session_key or "(default chat)"
+            lines.append(
+                f"- {view.node.name} (id={view.node.id}, chat={target}) "
+                f"-- {view.status}"
+            )
+            excerpt = view.prompt.strip().replace("\n", " ")
+            if len(excerpt) > _PROMPT_EXCERPT_CHARS:
+                excerpt = excerpt[:_PROMPT_EXCERPT_CHARS] + "…"
+            lines.append(f"  prompt: {excerpt or '(none: fires with the name)'}")
+        return "\n".join(lines)
+    if action == "cancel":
+        node = await scheduler.cancel(node_id or name)
+        await _note_mutation(services)
+        return (
+            f"cancelled {node.name!r} (id={node.id}); it will not fire. "
+            "The object stays in Anytype with Schedule status 'Cancelled' "
+            "-- the user can re-enable it there by setting the status back "
+            "to Pending."
+        )
+    raise GraphContextError(
+        f"unknown action {action!r}; allowed: set, list, cancel"
     )
 
 

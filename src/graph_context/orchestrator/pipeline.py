@@ -42,6 +42,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.application.scheduler import SchedulerTick
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
@@ -77,6 +78,22 @@ class ReplyEvent:
 
     text: str
     kind: str = "reply"
+
+
+def scheduled_prompt(name: str, prompt: str) -> str:
+    """The transcript form of a fired Scheduled Event (WP18, ADR 027).
+
+    The consumer is the LLM waking up with no triggering user message: the
+    framing says why the turn exists and that the stored instructions --
+    written by its past self or the user -- are to be acted on now, in
+    chat. The single format rule lives here (like ``sender_attributed``)
+    so every transport fires events identically.
+    """
+    return (
+        f"[scheduled event {name!r} fired] This turn was started by the "
+        "scheduler, not by a user message. Follow these stored "
+        f"instructions now, replying in the chat as usual: {prompt}"
+    )
 
 
 def sender_attributed(text: str, sender: str) -> str:
@@ -212,6 +229,23 @@ class Orchestrator:
         action, so the embedding cache stays in step with the graph.
         """
         return await resync_out_of_band(self.services)
+
+    # -- scheduled events (WP18, ADR 027): the transports' scheduler
+    # loop calls these; the rules live in application.scheduler. The
+    # shared bundle is correct here (like resync_graph): scheduled
+    # events belong to the space, not to any one session. --------------
+
+    def scheduled_tick(self) -> SchedulerTick:
+        """One due-scan over the shared graph (pure read)."""
+        return self.services.scheduler.tick()
+
+    async def arm_scheduled(self, node_id: str) -> None:
+        """Anchor a UI-created recurring event without firing it."""
+        await self.services.scheduler.arm(node_id)
+
+    async def mark_scheduled_fired(self, node_id: str) -> None:
+        """Stamp an event as fired (call BEFORE its turn runs)."""
+        await self.services.scheduler.mark_fired(node_id)
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)

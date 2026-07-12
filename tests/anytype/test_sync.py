@@ -45,7 +45,9 @@ class TestHydrate:
         # paged sweeps only (objects + types + properties + members) -- no
         # N+1 per-OBJECT GETs. Members are the one per-item exception
         # (S11: fetchable only individually), and there are none here.
-        assert len(get_calls) <= 9
+        # (The cap moves only when bootstrap grows enough properties for
+        # another page at page_limit=10 -- ADR 027 added the third.)
+        assert len(get_calls) <= 10
         assert not any("/objects/" in p for p in get_calls)
 
     async def test_hydrate_keeps_open_edges_but_skips_dangling(self, mock, client, repo):

@@ -303,3 +303,87 @@ class TestServeLoop:
         ]
         assert replies == []
         assert handler.cursor.has(chat_id)  # positioned past the history
+
+
+class TestScheduledEventWatcher:
+    """ADR 027: the third watcher fires due Scheduled Events as turns."""
+
+    async def test_a_due_event_fires_a_turn_into_the_chat_once(self) -> None:
+        from graph_context.domain import scheduling
+        from graph_context.orchestrator.anytype_chat_bot import _watch_schedule
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [LLMTurn(reply="Reminder: taxes are due April 15.")],
+            ChatCursor(),
+        )
+        route = handler.routes[chat_id]
+        repository = route.orchestrator.services.repository
+        await repository.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="tax reminder",
+            summary="s",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2020-01-01T09:00",  # long due
+                scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
+                scheduling.FIELD_SESSION_KEY: f"anytype:{chat_id}",
+            },
+        ))
+        watcher = asyncio.ensure_future(_watch_schedule(
+            handler, chat_client, route, mock.space_id, interval=0.01
+        ))
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    texts = [
+                        m["content"]["text"]
+                        for m in mock._chat_messages[chat_id]
+                        if m["creator"] == mock.api_member_id
+                    ]
+                    if "Reminder: taxes are due April 15." in texts:
+                        break
+                    await asyncio.sleep(0.01)
+            # A few more ticks must not re-fire the spent one-shot (the
+            # scripted driver has no second turn: a re-fire would post an
+            # error message).
+            await asyncio.sleep(0.05)
+            bot_posts = [
+                m["content"]["text"]
+                for m in mock._chat_messages[chat_id]
+                if m["creator"] == mock.api_member_id
+            ]
+            assert bot_posts == ["Reminder: taxes are due April 15."]
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_ui_created_recurring_event_is_armed_without_a_post(
+        self,
+    ) -> None:
+        from graph_context.domain import scheduling
+        from graph_context.orchestrator.anytype_chat_bot import _watch_schedule
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        route = handler.routes[chat_id]
+        repository = route.orchestrator.services.repository
+        node = await repository.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="weekly review",
+            summary="s",
+            fields={
+                scheduling.FIELD_SCHEDULE: "0 9 * * 1",
+                scheduling.FIELD_PROMPT: "Review the backlog.",
+            },
+        ))
+        watcher = asyncio.ensure_future(_watch_schedule(
+            handler, chat_client, route, mock.space_id, interval=0.01
+        ))
+        try:
+            async with asyncio.timeout(5):
+                while not repository.graph.node(node.id).fields.get(
+                    scheduling.FIELD_LAST_FIRED
+                ):
+                    await asyncio.sleep(0.01)
+            assert mock._chat_messages[chat_id] == []  # armed, not fired
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)

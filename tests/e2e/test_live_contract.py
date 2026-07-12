@@ -17,7 +17,10 @@ from graph_context.domain.models import LinkSpec, NodeDraft
 from graph_context.errors import UnknownFieldKey
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
-from tests.contract.test_graph_repository_contract import GraphRepositoryContract
+from tests.contract.test_graph_repository_contract import (
+    GraphRepositoryContract,
+    ScheduledEventContract,
+)
 
 
 async def test_get_space_returns_a_name(live_config) -> None:
@@ -56,6 +59,10 @@ async def test_a7_body_editing_field_name_mismatch(live_config) -> None:
             assert not obj.get("markdown")
     finally:
         await client.aclose()
+
+
+class TestAnytypeLiveScheduledEvents(ScheduledEventContract):
+    """ADR 027's node shape against the real server (same spec as the mocks)."""
 
 
 class TestAnytypeLiveRepository(GraphRepositoryContract):

@@ -23,6 +23,11 @@ Environment surface (unchanged from the server's original wiring):
 * ``GC_SEMANTIC_CACHE``    -- embedding-cache directory (default
                               ``~/.cache/graph-context``); files are
                               disposable projections.
+* ``GC_TIMEZONE``          -- IANA zone (e.g. ``America/Chicago``) the
+                              scheduled-event clock runs in (ADR 027).
+                              Empty = the system clock; containers
+                              usually sit at UTC, so set this (or TZ)
+                              to make "9am" mean the user's 9am.
 
 (``GC_STORE_LLM_INPUT`` moved to the orchestrator's root: WP7 retired
 record_prose's llm_* parameters, so the knob now governs intent-node
@@ -139,6 +144,7 @@ async def build_runtime(
             journal=journal,
             projector=projector,
             ranker=ranker,
+            timezone=os.environ.get("GC_TIMEZONE", ""),
         )
         base = await _bind_primary(base, registry, session_key)
         return BuiltRuntime(
@@ -211,6 +217,7 @@ async def build_runtime(
         # WP13 view param (ADR 018): saved Set views, compiled to
         # NodeQuery per call so desktop edits apply immediately.
         views=AnytypeViewCatalog(client),
+        timezone=os.environ.get("GC_TIMEZONE", ""),
     )
     base = await _bind_primary(base, registry, session_key)
     return BuiltRuntime(
@@ -235,7 +242,7 @@ async def _bind_primary(
     if session_key is None:
         return base
     session, persister = await registry.get(session_key)
-    return derive_services(base, session, persister)
+    return derive_services(base, session, persister, session_key=session_key)
 
 
 def _session_seam(
@@ -243,7 +250,7 @@ def _session_seam(
 ) -> Callable[[str], Awaitable[Services]]:
     async def services_for(key: str) -> Services:
         session, persister = await registry.get(key)
-        return derive_services(base, session, persister)
+        return derive_services(base, session, persister, session_key=key)
 
     return services_for
 

@@ -490,3 +490,119 @@ class TestClearWatermarkAndSeeding:
             ("user", "add the pottery task"),
             ("assistant", "Created it."),
         ]
+
+
+# -- scheduled turns (WP18, ADR 027) -----------------------------------------
+
+
+class TestTargetChat:
+    def test_the_events_own_chat_wins_when_served_in_the_space(self) -> None:
+        handler = _handler()
+        assert handler.target_chat(SPACE, f"anytype:{CHAT}") == CHAT
+
+    def test_foreign_or_missing_keys_fall_back_to_the_first_served_chat(
+        self,
+    ) -> None:
+        handler = _handler()
+        for key in ("", "mcp", "discord:123", "anytype:not-served"):
+            assert handler.target_chat(SPACE, key) == CHAT
+
+    def test_a_chat_key_from_another_space_does_not_cross_spaces(self) -> None:
+        other_chat, other_space = "bafychatbetabetabetabetabeta2", "space-b"
+        route = _route()
+        handler = AnytypeChatTurnHandler(
+            routes={CHAT: route, other_chat: route},
+            spaces={CHAT: SPACE, other_chat: other_space},
+        )
+        assert handler.target_chat(other_space, f"anytype:{CHAT}") == other_chat
+
+    def test_a_space_with_no_served_chat_returns_none(self) -> None:
+        handler = _handler()
+        assert handler.target_chat("space-without-chats", "") is None
+
+
+class TestScheduledTurn:
+    async def _seed_event(self, handler: AnytypeChatTurnHandler):
+        from graph_context.domain import scheduling
+        from graph_context.domain.models import NodeDraft
+
+        repository = handler.routes[CHAT].orchestrator.services.repository
+        node = await repository.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="tax reminder",
+            summary="s",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2026-01-01T09:00",
+                scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
+                scheduling.FIELD_SESSION_KEY: f"anytype:{CHAT}",
+            },
+        ))
+        return repository, node
+
+    async def test_the_model_wakes_with_the_stored_prompt(self) -> None:
+        from graph_context.application.scheduler import DueEvent
+
+        driver = _TranscriptRecordingDriver([LLMTurn(reply="On it.")])
+        handler = _handler(routes={CHAT: _route(driver=driver)})
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder",
+            prompt="Remind Nick about taxes.",
+            session_key=f"anytype:{CHAT}",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        prompt_event = driver.transcripts[0][-1]
+        assert prompt_event.kind == "user"
+        assert "[scheduled event 'tax reminder' fired]" in prompt_event.text
+        assert "Remind Nick about taxes." in prompt_event.text
+        assert "not by a user message" in prompt_event.text
+
+    async def test_no_placeholder_posts_only_the_finished_reply(self) -> None:
+        # Nobody is waiting on a turn they didn't start, so nothing
+        # appears in the chat until the reply is ready -- no
+        # "Processing" placeholder, one message, echo-suppressed.
+        from graph_context.application.scheduler import DueEvent
+
+        handler = _handler([LLMTurn(reply="On it.")])
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder", prompt="p",
+            session_key=f"anytype:{CHAT}",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        assert recorder.posted == ["On it."]
+        assert recorder.edited == []  # nothing to edit: no placeholder
+        assert all(m["id"] in handler.sent for m in recorder.messages)
+
+    async def test_the_event_is_marked_fired_even_when_the_turn_fails(
+        self,
+    ) -> None:
+        from graph_context.application.scheduler import DueEvent
+        from graph_context.domain import scheduling
+
+        class _ExplodingDriver(ScriptedDriver):
+            async def decide(self, transcript, tools, goal):  # type: ignore[override]
+                raise RuntimeError("driver down")
+
+        handler = _handler(routes={CHAT: _route(driver=_ExplodingDriver([]))})
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder", prompt="p",
+            session_key=f"anytype:{CHAT}",
+        )
+        raised = False
+        try:
+            await handler.run_scheduled(
+                CHAT, due, handler.reply(recorder.send, recorder.edit)
+            )
+        except RuntimeError:
+            raised = True  # the composition root's error posture owns it
+        assert raised
+        stored = repository.graph.node(node.id)
+        assert stored.fields.get(scheduling.FIELD_LAST_FIRED)  # at-most-once

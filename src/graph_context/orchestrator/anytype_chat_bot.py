@@ -24,8 +24,9 @@ Config: ANYTYPE_API_KEY(_FILE) / ANYTYPE_BASE_URL family (endpoint-
 agnostic: the desktop app today, the headless sidecar after cutover),
 GC_SPACES_FILE (required), GC_CHAT_CURSOR, GC_CHAT_RESCAN_SECONDS (live
 chat discovery), GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
-both default 60, ``off`` disables), plus the usual GC_DRIVER /
-GC_PROFILE / GC_MODES_FILE / provenance knobs.
+both default 60, ``off`` disables), GC_SCHEDULE_TICK_SECONDS (scheduled-
+event firing, ADR 027; default 30, ``off`` disables), plus the usual
+GC_DRIVER / GC_PROFILE / GC_MODES_FILE / provenance knobs.
 
 Run:  python -m graph_context.orchestrator.anytype_chat_bot
 """
@@ -39,6 +40,7 @@ import random
 from pathlib import Path
 
 from graph_context import composition
+from graph_context.application.scheduler import DueEvent
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import (
     AnytypeChatClient,
@@ -64,6 +66,7 @@ CATCHUP_WINDOW = 100  # the messages endpoint's recency window (C2)
 _RECONNECT_CAP_SECONDS = 60.0
 CHAT_RESCAN_SECONDS = 60  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
 GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
+SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_SECONDS
 
 
 def _cursor_path() -> str | None:
@@ -97,6 +100,11 @@ def _rescan_seconds() -> float | None:
 def _graph_resync_seconds() -> float | None:
     """Out-of-band resync interval; ``0``/``off`` disables the poll."""
     return _interval_seconds("GC_GRAPH_RESYNC_SECONDS", GRAPH_RESYNC_SECONDS)
+
+
+def _schedule_tick_seconds() -> float | None:
+    """Scheduled-event scan interval; ``0``/``off`` disables firing."""
+    return _interval_seconds("GC_SCHEDULE_TICK_SECONDS", SCHEDULE_TICK_SECONDS)
 
 
 def _sent_path(cursor_path: str | None) -> str | None:
@@ -292,6 +300,94 @@ async def _watch_graph(
             )
 
 
+async def _fire_scheduled(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    chat_id: str,
+    due: DueEvent,
+) -> None:
+    """Deliver one due Scheduled Event's turn (same error posture as
+    ``_maybe_turn``: the failure replaces the placeholder, never the loop)."""
+
+    async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
+        return await chat_client.send(chat_id, text, attachments)
+
+    async def edit(
+        message_id: str, text: str, attachments: tuple[str, ...] = ()
+    ) -> None:
+        await chat_client.edit(chat_id, message_id, text, attachments)
+
+    reply = handler.reply(send, edit)
+    try:
+        await handler.run_scheduled(chat_id, due, reply)
+    except GraphContextError as err:
+        await reply.deliver(f"[error] scheduled event {due.name!r}: {err}")
+    except Exception:  # a fired event must never take the serve loop down
+        logger.exception(
+            "scheduled event %s failed (chat=%s)", due.node_id, chat_id
+        )
+        await reply.deliver(
+            f"[error] scheduled event {due.name!r}: the turn failed; see "
+            "the bot log for the traceback"
+        )
+
+
+async def _watch_schedule(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    route: ChannelRoute,
+    space_id: str,
+    interval: float,
+) -> None:
+    """Fire due Scheduled Events (ADR 027; third sibling of the watchers).
+
+    Every tick scans the shared index (a pure read; ``_watch_graph``'s
+    resync keeps it fresh for events humans create/edit in the Anytype
+    UI), arms recurring strays, and fires what is due -- the fired turn
+    itself takes the route's turn lock inside ``run_scheduled``. Never
+    raises -- a failed tick logs and retries -- so it is safe inside the
+    bot's TaskGroup.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            tick = route.orchestrator.scheduled_tick()
+        except GraphContextError as err:
+            logger.warning("schedule scan for space %s failed: %s", space_id, err)
+            continue
+        for node_id in tick.arm:
+            try:
+                async with route.lock:
+                    await route.orchestrator.arm_scheduled(node_id)
+                logger.info("armed recurring scheduled event %s", node_id)
+            except GraphContextError as err:
+                logger.warning(
+                    "could not arm scheduled event %s: %s", node_id, err
+                )
+        for due in tick.fire:
+            chat_id = handler.target_chat(space_id, due.session_key)
+            if chat_id is None:
+                logger.warning(
+                    "scheduled event %r (%s) is due but space %s serves no "
+                    "chat; retrying next tick", due.name, due.node_id, space_id,
+                )
+                continue
+            logger.info(
+                "firing scheduled event %r (%s) into chat %s",
+                due.name, due.node_id, chat_id,
+            )
+            try:
+                await _fire_scheduled(handler, chat_client, chat_id, due)
+            except GraphContextError as err:
+                # Even the error DELIVERY failed (e.g. the chat API is
+                # down). Already marked fired unless marking itself
+                # failed; either way the loop must survive.
+                logger.warning(
+                    "scheduled event %s could not be delivered: %s",
+                    due.node_id, err,
+                )
+
+
 async def run() -> None:
     """Serve every bound space's chats until cancelled.
 
@@ -338,6 +434,7 @@ async def run() -> None:
     )
     rescan = _rescan_seconds()
     graph_resync = _graph_resync_seconds()
+    schedule_tick = _schedule_tick_seconds()
     try:
         served = "; ".join(
             f"{chat_id}: {desc}"
@@ -367,6 +464,12 @@ async def run() -> None:
                     task_group.create_task(
                         _watch_graph(route, space_id, graph_resync)
                     )
+            if schedule_tick is not None:
+                for space_id, route in runtimes.space_routes.items():
+                    task_group.create_task(_watch_schedule(
+                        handler, client_for(space_id), route, space_id,
+                        schedule_tick,
+                    ))
     finally:
         await composition.run_teardown(teardown)
 

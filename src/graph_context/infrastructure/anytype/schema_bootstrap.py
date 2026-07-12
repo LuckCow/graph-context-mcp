@@ -38,11 +38,27 @@ PROSE_TYPE_KEY = "gc_prose"
 SESSION_TYPE_KEY = "gc_session_context"
 INTENT_TYPE_KEY = "gc_intent"  # WP7/ADR 008: one provenance node per turn
 MODE_TYPE_KEY = "gc_activity_mode"  # ADR 015 amendment: in-space mode config
+SCHEDULED_TYPE_KEY = "gc_scheduled_event"  # WP18/ADR 027: timed prompts
 INFRA_TYPES: dict[str, str] = {
     PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
     INTENT_TYPE_KEY: Role.INTENT.value,
     MODE_TYPE_KEY: "Activity Mode",
+    SCHEDULED_TYPE_KEY: "Scheduled Event",
+}
+
+# Types whose fields humans edit in the Anytype UI get their properties
+# attached INLINE at type creation, so the object editor shows the fields
+# (live-confirmed 2026-07-06). The properties also register space-wide, so
+# ensure_schema's property loops skip them on a fresh mint.
+_INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
+    MODE_TYPE_KEY: mapping.MODE_PROPERTIES,
+    SCHEDULED_TYPE_KEY: {
+        **mapping.SCHEDULED_PROPERTIES,
+        # Reused across session + scheduled nodes; inline here so a human
+        # creating a Scheduled Event sees the delivery-target field too.
+        **mapping.SESSION_PROPERTIES,
+    },
 }
 
 # Seeded once, when the Activity Mode type is first minted: a template
@@ -77,6 +93,39 @@ built-in mode (e.g. world_modeling) overrides it.
 - Archive an object to disable its mode.
 """
 
+# Seeded once, when the Scheduled Event type is first minted (ADR 027):
+# the same explainer pattern as the example mode. Its schedule is left
+# EMPTY, so it can never fire; a human copies the recipe, the LLM uses
+# the `schedule` tool.
+EXAMPLE_EVENT_NAME = "Example Scheduled Event"
+EXAMPLE_EVENT_SUMMARY = (
+    "Template: fill Schedule and Schedule prompt to make the assistant "
+    "check in on its own; this example never fires (its Schedule is empty)."
+)
+EXAMPLE_EVENT_BODY = """\
+A Scheduled Event makes the assistant start a chat turn on its own at a \
+time you choose, following the instructions you store here.
+
+Fields:
+
+- Schedule -- WHEN, in the server's local time. Either a one-shot ISO \
+date-time like 2027-04-08T09:00 (fires once), or a 5-field cron line \
+"minute hour day month weekday" like 0 9 * * 1 (Mondays 09:00; weekday \
+0 and 7 are Sunday).
+- Schedule prompt -- the instructions the assistant receives when it \
+fires. Write them self-contained, e.g. "Remind Nick that taxes are due \
+April 15 and ask whether he has filed."
+- Schedule status -- Pending events fire; set Completed or Cancelled to \
+stop one, or back to Pending to re-enable it. Empty counts as Pending. \
+The assistant marks a one-shot Completed after it fires.
+- Last fired -- bookkeeping, written by the assistant.
+- Session key -- optional: which chat the fired turn speaks into \
+(anytype:<chat id>). Empty delivers to the space's first served chat.
+
+You can also just ask the assistant in chat ("remind me a week before \
+taxes are due") -- it creates these objects itself.
+"""
+
 # Starter relation vocabulary (key, display name). Reusable defaults; the
 # space-reflecting reader also picks up any human-created relation.
 DEFAULT_EDGE_RELATIONS: list[tuple[str, str]] = [
@@ -105,6 +154,7 @@ async def ensure_schema(
     fresh space, and an inline create naming an unknown property 400s.
     """
     existing_types = {t["key"] async for t in client.list_types()}
+    existing_properties = {p["key"] async for p in client.list_properties()}
     for key, name in INFRA_TYPES.items():
         if key not in existing_types:
             logger.info("bootstrap: creating infra type %s", key)
@@ -114,20 +164,23 @@ async def ensure_schema(
                 "plural_name": f"{name}s",
                 "layout": "basic",
             }
-            if key == MODE_TYPE_KEY:
-                # Inline properties attach to the type so the fields show
-                # in the UI's object editor (live-confirmed 2026-07-06);
-                # they also become space properties, so the loop below
-                # skips them.
-                payload["properties"] = [
-                    {"key": prop, "name": prop, "format": fmt}
-                    for prop, fmt in mapping.MODE_PROPERTIES.items()
-                ]
+            # Only NOT-yet-existing keys go inline: attaching an already-
+            # minted space property inline is unverified against the live
+            # server (upgraded spaces hit this; fresh spaces inline all).
+            inline = [
+                {"key": prop, "name": _display_name(prop), "format": fmt}
+                for prop, fmt in _INLINE_TYPE_PROPERTIES.get(key, {}).items()
+                if prop not in existing_properties
+            ]
+            if inline:
+                payload["properties"] = inline
+                existing_properties.update(entry["key"] for entry in inline)
             await client.create_type(payload)
             if key == MODE_TYPE_KEY:
                 await _seed_example_mode(client)
+            if key == SCHEDULED_TYPE_KEY:
+                await _seed_example_event(client)
 
-    existing_properties = {p["key"] async for p in client.list_properties()}
     timeline_key, timeline_format = timeline
     if timeline_key not in existing_properties:
         logger.info("bootstrap: creating timeline property %s (%s)",
@@ -147,15 +200,61 @@ async def ensure_schema(
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
             await client.create_property({"key": key, "name": key, "format": fmt})
-    # Session discriminator (WP8/ADR 021): lives only on session nodes.
+    # Session discriminator (WP8/ADR 021): lives only on session nodes
+    # (and, since ADR 027, on scheduled events as the delivery target).
     for key, fmt in mapping.SESSION_PROPERTIES.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
             await client.create_property({"key": key, "name": key, "format": fmt})
+    # Scheduled Event fields (WP18/ADR 027): same coverage posture as the
+    # mode fields -- a fresh mint attaches them inline with the type.
+    for key, fmt in mapping.SCHEDULED_PROPERTIES.items():
+        if key not in existing_properties:
+            logger.info("bootstrap: creating property %s (%s)", key, fmt)
+            await client.create_property(
+                {"key": key, "name": _display_name(key), "format": fmt}
+            )
     for key, name in DEFAULT_EDGE_RELATIONS:
         if key not in existing_properties:
             logger.info("bootstrap: creating relation property %s", key)
             await client.create_property({"key": key, "name": name, "format": "objects"})
+
+
+def _display_name(key: str) -> str:
+    """A property's human-facing mint name (people edit these fields in
+    the Anytype editor); keys without one mint under the raw key. Mint
+    time only -- names are human-owned afterwards."""
+    return mapping.PROPERTY_DISPLAY_NAMES.get(key, key)
+
+
+async def _seed_example_event(client: AnytypeClient) -> None:
+    """The Scheduled Event explainer object (see EXAMPLE_EVENT_BODY).
+
+    Best-effort, like the example mode. The schedule is left empty so it
+    can never fire; the prompt shows what one looks like.
+    """
+    try:
+        await client.create_object({
+            "name": EXAMPLE_EVENT_NAME,
+            "type_key": SCHEDULED_TYPE_KEY,
+            "body": EXAMPLE_EVENT_BODY,
+            "icon": {"format": "emoji", "emoji": "⏰"},
+            "properties": [
+                mapping.property_entry(
+                    mapping.PROP_SUMMARY, "text", EXAMPLE_EVENT_SUMMARY
+                ),
+                mapping.property_entry(
+                    mapping.PROP_SCHEDULE_PROMPT, "text",
+                    "Remind Nick that taxes are due April 15 and ask "
+                    "whether he has filed.",
+                ),
+            ],
+        })
+    except AnytypeApiError:
+        logger.warning(
+            "bootstrap: could not seed the example Scheduled Event",
+            exc_info=True,
+        )
 
 
 async def _seed_example_mode(client: AnytypeClient) -> None:

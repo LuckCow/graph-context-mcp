@@ -1593,6 +1593,66 @@ What shipped:
 
 ---
 
+## WP18 — Scheduled Events (ADR 027) — **shipped 2026-07-12**
+
+**Status:** complete. "Remind me a week before to pay taxes" works
+end-to-end: the model stores a timed prompt, and at fire time the bot
+opens a turn in the same chat and the model acts on it.
+
+What shipped:
+
+* **A new infra node type** `gc_scheduled_event` ("Scheduled Event",
+  role `ScheduledEvent`, in `INFRA_ROLES`) with minted properties under
+  human display names: `gc_schedule` "Schedule" (one-shot ISO local
+  datetime OR five-field cron), `gc_schedule_prompt` "Schedule prompt",
+  `gc_schedule_status` "Schedule status" (select: Pending fires;
+  Completed/Cancelled inert; empty = Pending; the scheduler completes a
+  fired one-shot, cancel preserves the schedule so a human re-enables by
+  flipping back to Pending), `gc_last_fired` "Last fired", plus the
+  ADR 021 `gc_session_key` "Session key" as the delivery target. The
+  values live in the REAL properties, never the `gc_fields` blob
+  (`GC_REFLECTED_FIELD_KEYS` punches the registry's `gc_` exclusion for
+  this surface on both the write and read paths — contract-pinned).
+  Properties attach inline at type creation so humans get real fields
+  in the Anytype editor, an "Example Scheduled Event" explainer is
+  seeded alongside the type (empty schedule: can never fire), and
+  `_watch_graph`'s resync makes UI-created/edited events schedulable.
+* **Pure domain timing** (`domain/scheduling.py`): dependency-free cron
+  (ranges/steps/lists, vixie day-OR-weekday, 0/7=Sunday), `next_fire`,
+  `due_at`. Semantics: one-shots re-arm when rescheduled later;
+  recurring events fire only once ARMED (anchored by a first
+  `gc_last_fired` — the tool arms at creation, the watcher stamps
+  UI-created strays without firing); downtime collapses to ONE late
+  fire. All times naive server-local; offsets rejected with guidance.
+  "Local" is the USER's region: the devcontainer pins `TZ`
+  (America/New_York), and `GC_TIMEZONE` (IANA name, validated at
+  startup) pins the scheduler's clock independently of the container's.
+* **A ninth tool, `schedule`** (set/list/cancel), bound like `context`
+  in every mode (bookkeeping, not graph authorship — read-only modes
+  keep it). Echoes next-fire AND current server time so the LLM can
+  check its own date math; errors teach both syntaxes.
+  `application/scheduler.py` is the service (repository-direct like
+  CaptureRecorder, journalled); `Services` now carries its
+  `session_key` so the tool stamps the creating chat.
+* **The firing loop**: `_watch_schedule` in the Anytype bot
+  (`GC_SCHEDULE_TICK_SECONDS`, default 30, `off` disables), third
+  sibling of the chat/graph watchers. Due event → mark `gc_last_fired`
+  (at-most-once), then `handle_message(user_id="system:scheduler",
+  text=scheduled_prompt(...))` under the route lock
+  (`AnytypeChatTurnHandler.run_scheduled`); no "Processing…"
+  placeholder — nothing posts until the reply is ready (nobody is
+  waiting on a turn they didn't start). Targeting: the event's own chat
+  if served, else the space's first served chat; no chat → retry next
+  tick.
+
+Known limits (deliberate): only the Anytype bot fires (the MCP server
+and CLI can manage events but have no clock loop; Discord-keyed events
+deliver to the bound space's default Anytype chat until a Discord loop
+exists); firing is at-most-once — a crash between marking and replying
+surfaces as an in-chat `[error]`, never a re-fire loop.
+
+---
+
 ## Sequencing
 
 ```

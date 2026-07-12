@@ -76,6 +76,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from graph_context.domain import scheduling
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
 from graph_context.domain.schema import FIELD_FORMATS
 
@@ -140,11 +141,57 @@ MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # Session discriminator (WP8, ADR 021): every gc_session_context node
 # carries the transport-scoped session key it belongs to (e.g.
 # "anytype:<chat_id>", "mcp"). Kept OUT of SCALAR_PROPERTIES -- it lives
-# only on session nodes, never on ordinary nodes.
+# only on session nodes, never on ordinary nodes. Scheduled Event nodes
+# reuse it (ADR 027) to say which chat a fired event's turn belongs to.
 PROP_SESSION_KEY = "gc_session_key"
 SESSION_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_SESSION_KEY: "text",
 }
+
+# Scheduled Event fields (WP18, ADR 027): the human-editable properties of
+# a gc_scheduled_event object. Kept OUT of SCALAR_PROPERTIES -- they live
+# only on scheduled events, never on ordinary nodes. The schedule is a
+# one-shot ISO datetime OR a cron line (domain/scheduling.py parses),
+# gc_last_fired is a local ISO stamp the scheduler owns, and the status
+# select is the lifecycle switch (Pending fires; Completed/Cancelled is
+# inert; its option tags auto-create as values are first written, ADR
+# 012). The keys live in the domain (scheduling.py) -- these are the
+# adapter-local aliases.
+PROP_SCHEDULE = scheduling.FIELD_SCHEDULE
+PROP_SCHEDULE_PROMPT = scheduling.FIELD_PROMPT
+PROP_LAST_FIRED = scheduling.FIELD_LAST_FIRED
+PROP_SCHEDULE_STATUS = scheduling.FIELD_STATUS
+SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
+    PROP_SCHEDULE: "text",
+    PROP_SCHEDULE_PROMPT: "text",
+    PROP_SCHEDULE_STATUS: "select",
+    PROP_LAST_FIRED: "text",
+}
+
+# Human-facing display names for minted properties (people create and
+# edit Scheduled Events directly in the Anytype editor, so the fields
+# must read as fields, not wire keys). Consulted by bootstrap at mint
+# time only; keys stay gc_ for wire stability, and names remain
+# human-owned afterwards -- a rename in the UI sticks. Names are
+# "Schedule …"-prefixed to stay clear of common user properties like
+# "Status". Properties absent here mint under their raw key, as before.
+PROPERTY_DISPLAY_NAMES: dict[str, str] = {
+    PROP_SCHEDULE: "Schedule",
+    PROP_SCHEDULE_PROMPT: "Schedule prompt",
+    PROP_SCHEDULE_STATUS: "Schedule status",
+    PROP_LAST_FIRED: "Last fired",
+    PROP_SESSION_KEY: "Session key",
+}
+
+# gc_ keys that DO surface in Node.fields and match as fields keys,
+# overriding the blanket gc_ exclusion in ``SpaceRegistry.reflects_field``.
+# The Scheduled Event surface is deliberately human-facing (ADR 027):
+# these must live in REAL properties -- visible, filterable, editable in
+# the Anytype UI -- never in the gc_fields blob, on the write side AND
+# the read side (both route through reflects_field).
+GC_REFLECTED_FIELD_KEYS: frozenset[str] = (
+    frozenset(SCHEDULED_PROPERTIES) | frozenset(SESSION_PROPERTIES)
+)
 
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``
 # body links are mirrored here, so reading it surfaces inline links as edges.

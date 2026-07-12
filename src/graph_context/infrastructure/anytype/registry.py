@@ -166,14 +166,20 @@ class SpaceRegistry:
     def reflects_field(self, key: str, fmt: str) -> bool:
         """Should this property surface in ``Node.fields``?
 
-        Scalar formats only; excludes ``gc_`` keys (first-class or retired),
-        the built-in ``description`` (the summary channel, ADR 011), the
-        census-based system-noise denylist, and any space-specific keys the
-        user silenced via ``GC_FIELD_DENYLIST``.
+        Scalar formats only; excludes ``gc_`` keys (first-class or retired)
+        -- except the deliberately human-facing Scheduled Event/session
+        surface (``GC_REFLECTED_FIELD_KEYS``, ADR 027), which must write to
+        and read from real properties, never the blob -- the built-in
+        ``description`` (the summary channel, ADR 011), the census-based
+        system-noise denylist, and any space-specific keys the user
+        silenced via ``GC_FIELD_DENYLIST``.
         """
         return (
             fmt in mapping.REFLECTED_FIELD_FORMATS
-            and not key.startswith(mapping.GC_PREFIX)
+            and (
+                not key.startswith(mapping.GC_PREFIX)
+                or key in mapping.GC_REFLECTED_FIELD_KEYS
+            )
             and key != mapping.PROP_SUMMARY
             and key != self.timeline_key  # surfaced as story_time (ADR 015)
             and key not in mapping.SYSTEM_PROPERTY_DENYLIST

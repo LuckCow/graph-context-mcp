@@ -34,6 +34,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "find_path",
     "find_node",
     "query",
+    "schedule",
 )
 
 
@@ -227,6 +228,49 @@ detail: names | summaries (default) | full.
 {examples}"""
 
 
+_SCHEDULE_DOC = """\
+Schedule a future or recurring check-in (WHEN to act, not world data).
+At the scheduled time the system starts a turn in this same chat and
+hands you your stored prompt -- use it for reminders ("remind me a week
+before taxes are due"), follow-ups ("ask on Friday whether the draft
+shipped"), or recurring reviews ("every Monday 09:00, list stale
+summaries").
+
+Actions:
+  set    -- create one. Requires all three:
+            name     -- a short label (e.g. "tax reminder").
+            schedule -- WHEN, in the server's LOCAL time, two forms:
+                        * one-shot ISO date-time "2027-04-08T09:00"
+                          (fires once; must be in the future; no UTC
+                          offset)
+                        * cron, 5 fields "minute hour day month weekday"
+                          e.g. "0 9 * * 1" = Mondays 09:00 (ranges a-b,
+                          steps */n, lists a,b; weekday 0 and 7 = Sunday)
+            prompt   -- the instructions your future self receives when
+                        it fires, with NO other context -- write them
+                        self-contained: who/what/why and what to do
+                        (e.g. "Remind Nick that taxes are due April 15
+                        and ask whether he has filed yet.").
+            The response echoes the computed next-fire time and the
+            current server time -- CHECK the math against what the user
+            asked for ("a week before April 15" -> April 8).
+  list   -- every scheduled event: id, schedule and next fire, target
+            chat, prompt, status. Also shows the current server time --
+            call this when you need today's date.
+  cancel -- stop one; node_id is the id shown by list, or the exact
+            event name. Sets its "Schedule status" to Cancelled; the
+            object and its schedule stay in Anytype, and the user can
+            re-enable it there by setting the status back to Pending.
+
+A recurring event fires at most once per occurrence; occurrences missed
+while the system was down collapse into ONE late fire. Events live as
+"Scheduled Event" objects in Anytype (fields: Schedule, Schedule
+prompt, Schedule status, Last fired), so the user can view, edit, or
+create them there too -- an empty status counts as Pending, and a fired
+one-shot is marked Completed automatically.
+"""
+
+
 _FIND_NODE_DOC = """\
 Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
@@ -395,6 +439,7 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
   the most recently edited nodes, any type:
     query(order_by=["modified_at desc"], limit=10)
 """),
+    "schedule": _SCHEDULE_DOC,
 }
 
 _FICTION_MODES = (
@@ -579,6 +624,7 @@ EXAMPLES:
     query(type="Decision", linked_to="Q3 Replatform",
           order_by=["story_time"])
 """),
+    "schedule": _SCHEDULE_DOC,
 }
 
 _WORKSPACE_MODES = (
@@ -767,6 +813,7 @@ EXAMPLES:
   a person's meeting history, most recent first:
     query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
 """),
+    "schedule": _SCHEDULE_DOC,
 }
 
 _ASSISTANT_MODES = (

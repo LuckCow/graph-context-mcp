@@ -489,3 +489,107 @@ class TestAnytypeTemplates(TemplateContract):
         await repository.hydrate()
         yield repository
         await client.aclose()
+
+
+class ScheduledEventContract:
+    """ADR 027: Scheduled Event nodes round-trip identically on both
+    backends -- infra-hidden from name search, schedule fields readable
+    from the index, and partial field rewrites keep the rest."""
+
+    async def _create(self, repo):
+        from graph_context.domain import scheduling
+
+        return await repo.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="tax reminder",
+            summary="fires once at 2027-04-08 09:00",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2027-04-08T09:00",
+                scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
+                scheduling.FIELD_STATUS: scheduling.STATUS_PENDING,
+                scheduling.FIELD_SESSION_KEY: "anytype:chat-1",
+            },
+        ))
+
+    async def test_fields_round_trip_and_the_role_resolves(self, repo):
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        stored = repo.graph.node(node.id)
+        assert stored.role is Role.SCHEDULED
+        assert stored.fields[scheduling.FIELD_SCHEDULE] == "2027-04-08T09:00"
+        assert stored.fields[scheduling.FIELD_PROMPT] == "Remind Nick about taxes."
+        assert stored.fields[scheduling.FIELD_SESSION_KEY] == "anytype:chat-1"
+        # The status is a SELECT on the Anytype backend: the write
+        # auto-creates the option tag (ADR 012) and reads back as its
+        # display name -- identical to the fake's verbatim round-trip.
+        assert stored.fields[scheduling.FIELD_STATUS] == "Pending"
+
+    async def test_status_select_transitions_round_trip(self, repo):
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        stored = repo.graph.node(node.id)
+        await repo.update_node(node.id, fields={
+            **dict(stored.fields),
+            scheduling.FIELD_STATUS: scheduling.STATUS_CANCELLED,
+        })
+        after = repo.graph.node(node.id)
+        assert after.fields[scheduling.FIELD_STATUS] == "Cancelled"
+
+    async def test_a_bare_name_never_resolves_to_a_scheduled_event(self, repo):
+        await self._create(repo)
+        assert repo.graph.find_by_name("tax reminder") == []
+
+    async def test_merged_field_update_keeps_the_other_fields(self, repo):
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        stored = repo.graph.node(node.id)
+        merged = {**dict(stored.fields),
+                  scheduling.FIELD_LAST_FIRED: "2027-04-08 09:00:30"}
+        await repo.update_node(node.id, fields=merged)
+        after = repo.graph.node(node.id)
+        assert after.fields[scheduling.FIELD_LAST_FIRED] == "2027-04-08 09:00:30"
+        assert after.fields[scheduling.FIELD_PROMPT] == "Remind Nick about taxes."
+        assert after.fields[scheduling.FIELD_SCHEDULE] == "2027-04-08T09:00"
+
+
+class TestInMemoryScheduledEvents(ScheduledEventContract):
+    @pytest.fixture
+    def repo(self):
+        return InMemoryGraphRepository()
+
+
+class TestAnytypeScheduledEvents(ScheduledEventContract):
+    @pytest.fixture
+    async def repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+    async def test_values_land_in_native_properties_not_the_blob(self, repo):
+        """The whole point of the human-facing surface (ADR 027 amendment):
+        a person opening the object in Anytype sees real, editable fields
+        -- the values must never hide in the gc_fields JSON blob."""
+        import json
+
+        from graph_context.domain import scheduling
+        from graph_context.infrastructure.anytype import mapping
+
+        node = await self._create(repo)
+        raw = await repo._client.get_object(node.id)
+        properties = {
+            entry["key"]: entry for entry in raw.get("properties", [])
+        }
+        assert properties[scheduling.FIELD_SCHEDULE]["text"] == "2027-04-08T09:00"
+        assert properties[scheduling.FIELD_STATUS]["format"] == "select"
+        blob = json.loads(
+            properties.get(mapping.PROP_FIELDS, {}).get("text") or "{}"
+        )
+        assert blob == {}  # nothing fell through

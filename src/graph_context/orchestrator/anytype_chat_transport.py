@@ -37,8 +37,13 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from graph_context.application.scheduler import DueEvent
 from graph_context.orchestrator.channels import ChannelRoute
-from graph_context.orchestrator.pipeline import sender_attributed
+from graph_context.orchestrator.pipeline import (
+    ReplyEvent,
+    scheduled_prompt,
+    sender_attributed,
+)
 from graph_context.orchestrator.rendering import chunk, render
 
 logger = logging.getLogger(__name__)
@@ -383,6 +388,13 @@ class AnytypeChatTurnHandler:
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
                 sender=message.creator_name,
             )
+        await self.deliver_events(events, reply)
+
+    async def deliver_events(
+        self, events: Sequence[ReplyEvent], reply: TurnReply
+    ) -> None:
+        """A turn's reply events -> plain-text chunked chat deliveries,
+        every referenced object attached to the first chunk as a card."""
         for event in events:
             rendered = render(event)
             attachments = object_references(rendered)
@@ -390,3 +402,51 @@ class AnytypeChatTurnHandler:
                 await reply.deliver(piece, attachments)
                 attachments = ()  # cards ride the first chunk only
         await reply.finish()
+
+    def target_chat(self, space_id: str, session_key: str) -> str | None:
+        """Which served chat a fired Scheduled Event speaks into (ADR 027).
+
+        The event's stored session key wins when it names a chat this
+        handler serves IN that space; anything else -- an excluded or
+        deleted chat, an ``mcp``/``discord:*`` key, or no key (a
+        human-created event) -- falls back to the space's first served
+        chat (sorted: deterministic). ``None`` when the space serves no
+        chat yet; the caller retries next tick rather than dropping the
+        event.
+        """
+        if session_key.startswith("anytype:"):
+            chat_id = session_key.removeprefix("anytype:")
+            if self.spaces.get(chat_id) == space_id:
+                return chat_id
+        served = sorted(
+            chat_id for chat_id, space in self.spaces.items()
+            if space == space_id
+        )
+        return served[0] if served else None
+
+    async def run_scheduled(
+        self, chat_id: str, due: DueEvent, reply: TurnReply
+    ) -> None:
+        """One due Scheduled Event -> turn -> deliveries.
+
+        The system-initiated sibling of :meth:`run_turn`: no inbound
+        message, so no gate and no cursor -- and no "Processing"
+        placeholder either: nobody is waiting on a turn they didn't
+        start, so nothing posts until the reply is ready (``deliver``
+        without an open placeholder is a plain send). The event is
+        marked fired BEFORE the turn runs (at-most-once -- a crashing
+        turn must not re-fire every tick; its error still reaches the
+        chat through ``reply``), inside the route lock like the turn
+        itself.
+        """
+        route = self.routes[chat_id]
+        async with route.lock:
+            await route.orchestrator.mark_scheduled_fired(due.node_id)
+            events = await route.orchestrator.handle_message(
+                session_id=f"anytype:{chat_id}",
+                user_id="system:scheduler",
+                text=scheduled_prompt(due.name, due.prompt),
+                # Intent nodes point back at the event node that fired.
+                origin=f"schedule:{due.node_id}",
+            )
+        await self.deliver_events(events, reply)

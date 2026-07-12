@@ -43,12 +43,16 @@ class Role(StrEnum):
     # In-space activity-mode config objects (ADR 015 amendment): humans
     # browse and edit them in Anytype; the LLM's traversal never sees them.
     MODE = "ActivityMode"
+    # Scheduled Event nodes (WP18, ADR 027): a fire time/cron rule plus a
+    # prompt the orchestrator hands the LLM when it comes due. Humans edit
+    # them in Anytype; the LLM manages them through the `schedule` tool.
+    SCHEDULED = "ScheduledEvent"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
 INFRA_ROLES: frozenset[Role] = frozenset(
-    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE}
+    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE, Role.SCHEDULED}
 )
 
 
@@ -71,12 +75,14 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_session_context": Role.SESSION_CONTEXT,
     "gc_intent": Role.INTENT,
     "gc_activity_mode": Role.MODE,
-    # The mode type's DISPLAY name. Live spaces resolve it via the
-    # gc_activity_mode key above; backends without a key registry (the
-    # in-memory repository, eval worlds) see the display name as the type,
-    # and a mode object must be infra-hidden there too or the two backends
-    # disagree about what find_node can see.
+    "gc_scheduled_event": Role.SCHEDULED,
+    # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
+    # the gc_ keys above; backends without a key registry (the in-memory
+    # repository, eval worlds) see the display name as the type, and these
+    # objects must be infra-hidden there too or the two backends disagree
+    # about what find_node can see.
     "activity mode": Role.MODE,
+    "scheduled event": Role.SCHEDULED,
 }
 
 

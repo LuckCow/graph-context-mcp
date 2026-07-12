@@ -582,3 +582,124 @@ class TestFieldCatalogSurface:
             fields={"due": "soon"}, create_missing_fields={"due": "datetime"},
         )
         assert out.startswith("ERROR:") and "formats:" in out
+
+
+# -- the schedule tool (WP18, ADR 027) ---------------------------------------
+
+
+class TestScheduleTool:
+    """The tool surface over the Scheduler: echoes that let an LLM verify
+    its date math, errors that teach the schedule syntax, and the infra
+    hiding that keeps events out of story traversal."""
+
+    def _services(self, session_key: str = "anytype:chat-1") -> tools.Services:
+        return tools.build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            session_key=session_key,
+        )
+
+    async def test_set_echoes_next_fire_and_server_time(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="Remind Nick.",
+        )
+        assert out.startswith("scheduled 'tax reminder'")
+        assert "next fire: 2199-04-08 09:00" in out
+        assert "server local time:" in out
+
+    async def test_set_stamps_the_sessions_key_on_the_node(self) -> None:
+        services = self._services(session_key="anytype:chat-1")
+        await tools.schedule_tool(
+            services, action="set", name="ping",
+            schedule="2199-01-01T09:00", prompt="p",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "chat=anytype:chat-1" in out
+
+    async def test_past_time_error_carries_the_current_time(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="late",
+            schedule="1999-01-01T09:00", prompt="p",
+        )
+        assert out.startswith("ERROR:") and "past" in out
+
+    async def test_bad_schedule_error_teaches_both_formats(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="whenever", prompt="p",
+        )
+        assert out.startswith("ERROR:")
+        assert "ISO" in out and "cron" in out
+
+    async def test_empty_list_guides_and_shows_the_clock(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(services, action="list")
+        assert "no scheduled events" in out
+        assert "server local time:" in out
+
+    async def test_list_shows_schedule_prompt_and_target(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="standup", schedule="0 9 * * 1",
+            prompt="Post the weekly summary.",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "scheduled events (1):" in out
+        assert "standup" in out and "repeating '0 9 * * 1'" in out
+        assert "prompt: Post the weekly summary." in out
+
+    async def test_cancel_by_name_reports_and_disables(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="p",
+        )
+        out = await tools.schedule_tool(
+            services, action="cancel", node_id="tax reminder",
+        )
+        assert out.startswith("cancelled 'tax reminder'")
+        assert "re-enable" in out  # the human's Pending flip is taught
+        assert "cancelled" in await tools.schedule_tool(services, action="list")
+
+    async def test_unknown_action_lists_the_allowed_ones(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(services, action="fire")
+        assert out.startswith("ERROR:")
+        assert "set, list, cancel" in out
+
+    async def test_events_hide_from_query_unless_named(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="p",
+        )
+        everything = await tools.query_tool(services)
+        assert "tax reminder" not in everything
+        named = await tools.query_tool(services, type="ScheduledEvent")
+        assert "tax reminder" in named
+
+    async def test_events_hide_from_find_node(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="p",
+        )
+        out = await tools.find_node_tool(services, name="tax reminder")
+        assert "tax reminder" not in out
+
+    async def test_build_services_pins_the_schedulers_timezone(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        services = tools.build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            timezone="Pacific/Kiritimati",  # UTC+14: unmistakably not UTC
+        )
+        expected = datetime.now(
+            ZoneInfo("Pacific/Kiritimati")
+        ).replace(tzinfo=None)
+        assert abs(
+            (services.scheduler.now() - expected).total_seconds()
+        ) < 5

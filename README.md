@@ -2,7 +2,7 @@
 
 An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the default), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes).
 
-The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing eight tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
+The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing nine tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
 
 **Space-reflecting ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure (Prose, SessionContext, and a few scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)).
 
@@ -44,7 +44,7 @@ The server speaks **stdio** (one process per client; no network port). Run it di
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
 ```
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`, `schedule`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
 
 ## Running the orchestrator (CLI / Discord / Anytype chat)
 
@@ -116,7 +116,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** You should see the eight tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
+**3. Restart Claude Desktop.** You should see the nine tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
 
 ### Graduating to the live Anytype backend
 
@@ -215,7 +215,7 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/chat.py` | Chat quirk quarantine + `AnytypeChatClient` | Chat payload/SSE assumptions (C1–C6); the chat analogue of `mapping.py` |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
 | `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The eight tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
+| `interface/tools.py` | The nine tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
 | `interface/context_block.py` | Turn-start context block ([ADR 020](docs/adr/020-curated-cross-turn-context.md)) | Scratchpad + working-set buckets + recent trail, once per turn, budget-degraded |
 | `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
 | `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
@@ -241,6 +241,6 @@ The working conventions live in [CLAUDE.md](CLAUDE.md) (CLEAN principles and the
 
 ## Status & what's next
 
-Full history and specs live in [`docs/WORK_PACKAGES.md`](docs/WORK_PACKAGES.md). Shipped: the storage core and eight-tool MCP server, the space-reflecting pivot, domain profiles, the orchestrator harness with the real Claude driver, automatic provenance + auto-capture, body descriptions and attribute reflection, semantic search + graph-aware ranking, configurable activity modes, the Discord and Anytype chat transports, and per-chat keyed sessions. Definition of Done holds: `pytest`, `ruff`, `mypy --strict`, and `lint-imports` are all clean; CI runs exactly these on every push.
+Full history and specs live in [`docs/WORK_PACKAGES.md`](docs/WORK_PACKAGES.md). Shipped: the storage core and nine-tool MCP server, the space-reflecting pivot, domain profiles, the orchestrator harness with the real Claude driver, automatic provenance + auto-capture, body descriptions and attribute reflection, semantic search + graph-aware ranking, configurable activity modes, the Discord and Anytype chat transports, per-chat keyed sessions, and scheduled events ([ADR 027](docs/adr/027-scheduled-events.md)). Definition of Done holds: `pytest`, `ruff`, `mypy --strict`, and `lint-imports` are all clean; CI runs exactly these on every push.
 
 Open work, in rough order of proximity: the WP8 multi-user remainder (per-user sessions *within* one space, per-user mode authorization/consent, Telegram/Slack transports, queue fairness); WP11 stage 2 (passage-level search, reranker adapters, the Voyage embedder, the `off`→`local` embedder default flip, RAG prefetch); cross-turn driver memory (each `decide()` is deliberately a fresh stateless session for now); and the parked WP4 items (knowledge-query helper, staleness propagation, `propose_type`).
