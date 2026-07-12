@@ -12,6 +12,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from graph_context.domain import attribution
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface.profiles import get_profile
@@ -397,7 +398,7 @@ class TestIntentOrigin:
         await _run(handler, _message(message_id="msg-42"))
         intents = [n for n in repository.graph.nodes() if n.type_key == "gc_intent"]
         assert len(intents) == 1
-        assert intents[0].fields["origin"] == f"anytype:{CHAT}:msg-42"
+        assert intents[0].fields[attribution.FIELD_ORIGIN] == f"anytype:{CHAT}:msg-42"
 
 
 class TestClearWatermarkAndSeeding:

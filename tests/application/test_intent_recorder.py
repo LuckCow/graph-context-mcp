@@ -9,6 +9,7 @@ from graph_context.application.intent_recorder import (
     ToolTrace,
 )
 from graph_context.application.mutation_journal import MutationRecord
+from graph_context.domain import attribution
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -45,9 +46,9 @@ async def test_mutating_turn_yields_one_intent_node_with_edges_to_every_touch():
     assert node.role is Role.INTENT
     assert node.name.startswith("Intent: Add Mira and link her to the Keep.")
     assert node.name.endswith("2026-07-04T00:00:00Z")
-    assert node.fields["user_id"] == "cli:local"
-    assert node.fields["model"] == "scripted"
-    assert node.fields["mode"] == "world_modeling"
+    assert node.fields[attribution.FIELD_USER_ID] == "cli:local"
+    assert node.fields[attribution.FIELD_MODEL] == "scripted"
+    assert node.fields[attribution.FIELD_MODE] == "world_modeling"
     targets = {e.target for e in repository.graph.edges(node.id)}
     assert targets == {mira, keep}
     assert {e.type for e in repository.graph.edges(node.id)} == {"intent"}

@@ -60,8 +60,8 @@ class UnknownRelationLabel(ApprovalRequired):
 class UnknownFieldKey(ApprovalRequired):
     """A ``fields`` key matched no existing scalar property (ADR 023).
 
-    Story-node fields must land in real store properties -- never a hidden
-    extras blob -- so an unmatched key stops the write. The message lists the
+    Fields must land in real store properties -- never a hidden extras
+    blob (ADR 028) -- so an unmatched key stops the write. The message lists the
     reusable properties (the requested type's own first) and the explicit
     opt-in for creating a genuinely new one, mirroring
     :class:`UnknownRelationLabel`'s approval gesture.

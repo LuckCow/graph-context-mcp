@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+from graph_context.domain import attribution
 from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
@@ -334,12 +335,34 @@ class FieldCatalogContract:
         assert ("Due date", "date") in rendered
         assert ("Status", "select") in rendered
 
-    async def test_infra_role_fields_are_exempt(self, catalog_repo):
+    async def test_infra_attribution_fields_resolve_natively(self, catalog_repo):
+        """ADR 028: recorder stamps write the bootstrap-guaranteed
+        attribution properties -- no infra exemption, no blob."""
         node = await catalog_repo.create_node(
             NodeDraft("gc_prose", name="Scene 1", summary="A capture.",
-                      fields={"user_id": "u-1"})
+                      fields={attribution.FIELD_USER_ID: "u-1"})
         )
-        assert catalog_repo.graph.node(node.id).fields["user_id"] == "u-1"
+        stored = catalog_repo.graph.node(node.id).fields
+        assert stored[attribution.FIELD_USER_ID] == "u-1"
+
+    async def test_infra_unmatched_field_errors_like_any_other(self, catalog_repo):
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.create_node(
+                NodeDraft("gc_prose", name="Scene 1", summary="A capture.",
+                          fields={"free_form": "nope"})
+            )
+
+    async def test_attribution_keys_stay_out_of_the_offered_catalog(
+        self, catalog_repo
+    ):
+        """The stamps are recorder-owned (ADR 028): writable, but never
+        offered as story-field vocabulary."""
+        rendered = {
+            spec.key
+            for specs in catalog_repo.field_catalog().values()
+            for spec in specs
+        }
+        assert not rendered & set(attribution.ATTRIBUTION_FIELDS)
 
 
 class TestInMemoryRoleOverrides(RoleOverrideContract):
@@ -576,11 +599,8 @@ class TestAnytypeScheduledEvents(ScheduledEventContract):
     async def test_values_land_in_native_properties_not_the_blob(self, repo):
         """The whole point of the human-facing surface (ADR 027 amendment):
         a person opening the object in Anytype sees real, editable fields
-        -- the values must never hide in the gc_fields JSON blob."""
-        import json
-
+        -- never a JSON side-channel (the blob is retired, ADR 028)."""
         from graph_context.domain import scheduling
-        from graph_context.infrastructure.anytype import mapping
 
         node = await self._create(repo)
         raw = await repo._client.get_object(node.id)
@@ -589,7 +609,4 @@ class TestAnytypeScheduledEvents(ScheduledEventContract):
         }
         assert properties[scheduling.FIELD_SCHEDULE]["text"] == "2027-04-08T09:00"
         assert properties[scheduling.FIELD_STATUS]["format"] == "select"
-        blob = json.loads(
-            properties.get(mapping.PROP_FIELDS, {}).get("text") or "{}"
-        )
-        assert blob == {}  # nothing fell through
+        assert "gc_fields" not in properties  # nothing fell through

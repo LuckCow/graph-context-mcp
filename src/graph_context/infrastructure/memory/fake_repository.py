@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any
 
-from graph_context.domain import schema
+from graph_context.domain import attribution, schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import (
     Edge,
@@ -78,6 +78,17 @@ class InMemoryGraphRepository:
         self._field_specs: list[FieldSpec] | None = (
             list(field_catalog) if field_catalog is not None else None
         )
+        if self._field_specs is not None:
+            # Bootstrap parity (ADR 028): the Anytype adapter's
+            # ensure_schema guarantees the attribution properties exist,
+            # so recorder writes resolve without an opt-in. The fake's
+            # catalog carries the same guarantee.
+            existing_keys = {spec.key for spec in self._field_specs}
+            self._field_specs.extend(
+                FieldSpec(name=key, format=fmt, key=key)
+                for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
+                if key not in existing_keys
+            )
         # Space members reflected as read-only nodes (S11), mirroring the
         # Anytype adapter's member fetch: first-class, linkable (an
         # assignee-style edge needs a target IN the index), no role.
@@ -109,7 +120,7 @@ class InMemoryGraphRepository:
         # scaffold (template first).
         template = None if role in schema.INFRA_ROLES else self._templates.get(draft.type)
         fields = self._resolve_fields(
-            draft.fields, role=role, type_name=draft.type,
+            draft.fields, type_name=draft.type,
             create_missing=create_missing_fields,
         )
         body = draft.body
@@ -160,7 +171,7 @@ class InMemoryGraphRepository:
         existing = self._graph.node(node_id)
         if fields is not None:
             fields = self._resolve_fields(
-                fields, role=existing.role, type_name=existing.type,
+                fields, type_name=existing.type,
                 create_missing=create_missing_fields,
             )
         changes: dict[str, Any] = {
@@ -208,8 +219,12 @@ class InMemoryGraphRepository:
             return {}
         # No per-type property attachment in the fake: the whole catalog is
         # offered under every known (non-infra) type name. Relations
-        # (objects format) are edges, not fields-key vocabulary.
-        specs = tuple(s for s in self._field_specs if s.format != "objects")
+        # (objects format) are edges, not fields-key vocabulary; the
+        # attribution stamps are recorder-owned (ADR 028), not offered.
+        specs = tuple(
+            s for s in self._field_specs
+            if s.format != "objects" and s.key not in attribution.ATTRIBUTION_FIELDS
+        )
         return {name: specs for name in sorted(self.known_node_types())}
 
     # -- field routing (ADR 023) -------------------------------------------
@@ -218,15 +233,14 @@ class InMemoryGraphRepository:
         self,
         fields: Mapping[str, str],
         *,
-        role: Role | None,
         type_name: str,
         create_missing: Mapping[str, str] | None,
     ) -> dict[str, str]:
-        """The fake's half of the ADR 023 contract.
+        """The fake's half of the ADR 023/028 contract.
 
-        Open mode (no catalog) or infra role: fields pass through verbatim
-        (the fake has no blob -- it just keeps everything). Catalog mode,
-        story role: each key must match a spec by key or display name
+        Open mode (no catalog): fields pass through verbatim. Catalog
+        mode (every role -- infra writes are native-only too, ADR 028):
+        each key must match a spec by key or display name
         (case-insensitive) and is stored under the spec's canonical key --
         mirroring the adapter, where a display-name write reads back under
         the raw property key -- or be declared in ``create_missing``, which
@@ -234,7 +248,7 @@ class InMemoryGraphRepository:
         (checkbox -> "true"/"false", numbers untrailed, multi_select
         comma-spacing).
         """
-        if self._field_specs is None or role in schema.INFRA_ROLES:
+        if self._field_specs is None:
             return dict(fields)
         declared = {k: v.strip().lower() for k, v in (create_missing or {}).items()}
         # All-keys-first check: an approval error never half-extends the

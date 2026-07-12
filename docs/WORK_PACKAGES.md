@@ -807,6 +807,13 @@ The spurious-property filter shipped as specified:
   mints a real scalar property (spike: no settle window for scalars).
   `gc_fields` is written for infra-role nodes only; the read merge keeps
   legacy story blobs visible, no migration.
+- **Blob fully retired 2026-07-12 (ADR 028):** the last two uses moved to
+  minted native properties — session snapshots to `gc_chat_session`,
+  recorder attribution to `gc_generated_at`/`gc_user_id`/`gc_model`/
+  `gc_mode`/`gc_origin` (inline on `gc_intent`/`gc_prose`, reflected into
+  `Node.fields`). The infra fall-through, the read merge, the migration
+  scripts, and `LEGACY_TYPE_ROLES` are deleted; native-only is now the
+  rule for every role.
 
 ### WP10b — Summary moves to the built-in `description` property — **shipped 2026-07-02**
 

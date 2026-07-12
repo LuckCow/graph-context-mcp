@@ -8,10 +8,11 @@ infra-only and create-if-missing:
   name "Capture" since ADR 015 -- the managed SessionContext node, and
   gc_intent provenance records);
 * the scalar ``gc_`` properties we write onto native objects (stale flag,
-  story-time, fields JSON). Not minted here: descriptions live in the
-  object body (ADR 010), and summaries live in the **built-in**
-  ``description`` property every space already has (ADR 011) -- so neither
-  ``gc_description`` nor ``gc_summary`` is created anymore;
+  story-time), the session-state slots (key + snapshot), and the ADR 028
+  attribution properties the recorders stamp onto intent/capture nodes.
+  Not minted here: descriptions live in the object body (ADR 010), and
+  summaries live in the **built-in** ``description`` property every space
+  already has (ADR 011);
 * a small starter vocabulary of ``gc_edge_*`` relations so the model has
   reusable relation labels for common links without an approval round-trip.
   Human-created relations (``boss``, ``triggered_by``, ...) are first-class
@@ -26,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from graph_context.domain import attribution
 from graph_context.domain.schema import Role
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -58,6 +60,18 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
         # Reused across session + scheduled nodes; inline here so a human
         # creating a Scheduled Event sees the delivery-target field too.
         **mapping.SESSION_PROPERTIES,
+    },
+    # Attribution stamps (ADR 028) inline on the recorder-written types,
+    # so an Intent/Capture opened in the editor shows its provenance
+    # fields. gc_prose only carries the timestamp.
+    INTENT_TYPE_KEY: mapping.ATTRIBUTION_PROPERTIES,
+    PROSE_TYPE_KEY: {
+        attribution.FIELD_GENERATED_AT:
+            mapping.ATTRIBUTION_PROPERTIES[attribution.FIELD_GENERATED_AT],
+    },
+    SESSION_TYPE_KEY: {
+        **mapping.SESSION_PROPERTIES,
+        **mapping.SESSION_STATE_PROPERTIES,
     },
 }
 
@@ -200,15 +214,23 @@ async def ensure_schema(
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
             await client.create_property({"key": key, "name": key, "format": fmt})
-    # Session discriminator (WP8/ADR 021): lives only on session nodes
-    # (and, since ADR 027, on scheduled events as the delivery target).
-    for key, fmt in mapping.SESSION_PROPERTIES.items():
+    # Session discriminator + snapshot slot (WP8/ADR 021, ADR 028): live
+    # only on session nodes (the key also on scheduled events since ADR
+    # 027, as the delivery target).
+    for key, fmt in {
+        **mapping.SESSION_PROPERTIES, **mapping.SESSION_STATE_PROPERTIES,
+    }.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
-            await client.create_property({"key": key, "name": key, "format": fmt})
-    # Scheduled Event fields (WP18/ADR 027): same coverage posture as the
-    # mode fields -- a fresh mint attaches them inline with the type.
-    for key, fmt in mapping.SCHEDULED_PROPERTIES.items():
+            await client.create_property(
+                {"key": key, "name": _display_name(key), "format": fmt}
+            )
+    # Scheduled Event fields (WP18/ADR 027) and attribution stamps (ADR
+    # 028): same coverage posture as the mode fields -- a fresh mint
+    # attaches them inline with the type.
+    for key, fmt in {
+        **mapping.SCHEDULED_PROPERTIES, **mapping.ATTRIBUTION_PROPERTIES,
+    }.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
             await client.create_property(

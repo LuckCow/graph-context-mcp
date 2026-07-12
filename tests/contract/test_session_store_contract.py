@@ -142,25 +142,25 @@ async def test_anytype_node_carries_key_and_label(
     assert properties[mapping.PROP_SESSION_KEY] == KEY
 
 
-async def test_legacy_unkeyed_node_matches_no_key(
+async def test_stray_unkeyed_node_matches_no_key(
     anytype_client: AnytypeClient,
 ) -> None:
-    """Pre-WP8 nodes (no gc_session_key) are inert: never loaded, never
-    overwritten -- a new keyed node is minted beside them."""
+    """Nodes without gc_session_key (e.g. hand-created) are inert: never
+    loaded, never overwritten -- a new keyed node is minted beside them."""
     mock: MockAnytype = anytype_client._mock  # type: ignore[attr-defined]
     mock.seed_object(
         SESSION_TYPE_KEY,
         "Session context (managed)",
         properties=[
-            {"key": mapping.PROP_FIELDS, "format": "text",
-             "text": '{"version": 2, "project": "Legacy"}'},
+            {"key": mapping.PROP_CHAT_SESSION, "format": "text",
+             "text": '{"version": 2, "project": "Stray"}'},
         ],
     )
     store = AnytypeSessionStore(anytype_client)
     assert await store.load(KEY) is None  # inert, not adopted
     await store.save(SNAPSHOT, KEY)
     objs = [o async for o in anytype_client.search(types=[SESSION_TYPE_KEY])]
-    assert len(objs) == 2  # keyed node minted BESIDE the legacy one
+    assert len(objs) == 2  # keyed node minted BESIDE the stray one
     assert (await AnytypeSessionStore(anytype_client).load(KEY)) == SNAPSHOT
 
 
@@ -190,7 +190,8 @@ async def test_anytype_store_corrupt_json_loads_none(
         "Session context — broken",
         properties=[
             {"key": mapping.PROP_SESSION_KEY, "format": "text", "text": KEY},
-            {"key": mapping.PROP_FIELDS, "format": "text", "text": "{not valid json"},
+            {"key": mapping.PROP_CHAT_SESSION, "format": "text",
+             "text": "{not valid json"},
         ],
     )
     assert await AnytypeSessionStore(anytype_client).load(KEY) is None

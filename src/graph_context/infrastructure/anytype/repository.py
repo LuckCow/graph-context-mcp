@@ -210,6 +210,10 @@ class AnytypeGraphRepository:
             FieldSpec(name=prop.name, format=prop.format, key=prop.key)
             for prop in self._registry.reflectable_properties()
             if prop.key not in claimed
+            # Reflected gc_ keys (schedule/session/attribution) belong to
+            # dedicated surfaces -- the schedule tool and the recorders --
+            # not the generic fields vocabulary offered for story writes.
+            and not prop.key.startswith(mapping.GC_PREFIX)
         )
         if unclaimed:
             catalog["(any type)"] = unclaimed
@@ -338,19 +342,18 @@ class AnytypeGraphRepository:
                 else:
                     incoming.append((link, key))
 
-            # Field routing (ADR 012/023): native-matching keys become
-            # property entries (select tags resolved-or-created first --
-            # POST validates them inline); story roles are native-only
-            # (unmatched keys error), infra residuals go to the blob.
-            native_fields, blob = await self._resolve_field_entries(
-                draft.fields, role=role, type_key=type_key,
+            # Field routing (ADR 012/023/028): every key becomes a native
+            # property entry (select tags resolved-or-created first --
+            # POST validates them inline); unmatched keys error.
+            native_fields = await self._resolve_field_entries(
+                draft.fields, type_key=type_key,
                 create_missing=create_missing_fields,
             )
             created = await self._send_tolerating_fresh_tags(
                 lambda: self._client.create_object(
                     mapping.to_create_payload(
                         draft, type_key=type_key,
-                        native_properties=native_fields, fields_blob=blob,
+                        native_properties=native_fields,
                         timeline=self._timeline,
                         template_id=template_id or "",
                     )
@@ -429,10 +432,9 @@ class AnytypeGraphRepository:
     ) -> Node:
         existing = self._graph.node(node_id)  # NodeNotFound before any API call
         native_fields: list[dict[str, Any]] = []
-        blob: Mapping[str, str] | None = None
         if fields is not None:
-            native_fields, blob = await self._resolve_field_entries(
-                fields, role=existing.role, type_key=existing.type_key,
+            native_fields = await self._resolve_field_entries(
+                fields, type_key=existing.type_key,
                 create_missing=create_missing_fields,
             )
         if body is not None and await self._writes_footer(existing):
@@ -449,7 +451,6 @@ class AnytypeGraphRepository:
             summary_stale=summary_stale,
             body=body,
             story_time=story_time,
-            fields=blob,
             native_properties=native_fields,
             timeline=self._timeline,
         )
@@ -689,11 +690,10 @@ class AnytypeGraphRepository:
         self,
         fields: Mapping[str, str],
         *,
-        role: Role | None,
         type_key: str,
         create_missing: Mapping[str, str] | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
-        """Resolve ``fields`` into native property entries (+ blob for infra).
+    ) -> list[dict[str, Any]]:
+        """Resolve ``fields`` into native property entries.
 
         A key matching a reflectable native property (by key or display
         name) writes that property -- where humans filter and sort; select
@@ -701,30 +701,17 @@ class AnytypeGraphRepository:
         write (POST validates inline select entries, so resolution cannot
         wait).
 
-        Story roles are native-only (ADR 023): an unmatched key raises
-        :class:`UnknownFieldKey` -- listing the type's reusable properties --
-        unless declared in ``create_missing`` (key -> format), in which case
-        the property is created (immediately usable; live-confirmed
-        2026-07-10, unlike ``objects`` relations there is no settle window).
-        All keys are checked before anything is created, so an approval
-        error never leaves a half-minted vocabulary. The returned blob is
-        ``None``: story writes carry no ``gc_fields`` at all.
-
-        Infra roles keep the ADR 012 fall-through: unmatched keys land in
-        the returned ``gc_fields`` blob (bot bookkeeping, not vocabulary).
+        Writes are native-only for every role (ADR 023/028 -- infra
+        bookkeeping lands in bootstrap-minted attribution properties, not
+        a blob): an unmatched key raises :class:`UnknownFieldKey` --
+        listing the type's reusable properties -- unless declared in
+        ``create_missing`` (key -> format), in which case the property is
+        created (immediately usable; live-confirmed 2026-07-10, unlike
+        ``objects`` relations there is no settle window). All keys are
+        checked before anything is created, so an approval error never
+        leaves a half-minted vocabulary.
         """
         declared = {k: v.strip().lower() for k, v in (create_missing or {}).items()}
-        if role in schema.INFRA_ROLES:
-            native: list[dict[str, Any]] = []
-            residual: dict[str, str] = {}
-            for key, value in fields.items():
-                info = self._registry.field_property(key)
-                if info is None:
-                    residual[key] = value
-                    continue
-                native.append(await self._native_entry(info, value))
-            return native, residual
-
         resolved: list[tuple[PropertyInfo | None, str, str]] = []
         for key, value in fields.items():
             info = self._registry.field_property(key)
@@ -739,7 +726,7 @@ class AnytypeGraphRepository:
             if info is None:
                 info = await self._create_field_property(key, declared[key])
             entries.append(await self._native_entry(info, value))
-        return entries, None
+        return entries
 
     async def _create_field_property(self, key: str, fmt: str) -> PropertyInfo:
         """Mint a new scalar property (explicitly requested via

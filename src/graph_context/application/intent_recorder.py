@@ -10,10 +10,11 @@ exactly one ``gc_intent`` node is written:
              trace, and the created-vs-modified detail -- capped with the
              truncation marker. Write-once *by policy* (ADR 010): a
              provenance record must not be editable.
-* fields  -- ``user_id`` / ``model`` / ``mode`` / ``generated_at``
-             attribution (in a shared space Anytype's own creator shows
-             only the bot; ``mode`` names the activity mode whose binding
-             allowed the mutation).
+* fields  -- user / model / mode / generated-at attribution, written to
+             the native attribution properties (ADR 028,
+             ``domain.attribution``; in a shared space Anytype's own
+             creator shows only the bot; the mode field names the activity
+             mode whose binding allowed the mutation).
 * links   -- one ``intent`` edge to EVERY touched node, populated at
              creation (one write per turn).
 
@@ -32,6 +33,7 @@ from dataclasses import dataclass
 
 from graph_context.application.capture_recorder import TRUNCATION_MARKER, _utc_now_iso
 from graph_context.application.mutation_journal import MutationRecord
+from graph_context.domain import attribution
 from graph_context.domain.models import LinkSpec, Node, NodeDraft
 from graph_context.ports.graph_repository import GraphRepository
 
@@ -90,13 +92,13 @@ class IntentRecorder:
         # list views and summaries in Set rows, not just the body.
         shown = prompt if self._store_prompt else PROMPT_WITHHELD
         fields = {
-            "user_id": user_id,
-            "model": model,
-            "mode": mode,
-            "generated_at": stamp,
+            attribution.FIELD_USER_ID: user_id,
+            attribution.FIELD_MODEL: model,
+            attribution.FIELD_MODE: mode,
+            attribution.FIELD_GENERATED_AT: stamp,
         }
         if origin:
-            fields["origin"] = origin
+            fields[attribution.FIELD_ORIGIN] = origin
         draft = NodeDraft(
             type=INTENT_TYPE,
             name=f"Intent: {_condense(shown, _NAME_PROMPT_CHARS)} — {stamp}",

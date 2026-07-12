@@ -49,21 +49,6 @@ class TypeInfo:
     properties: tuple[PropertyInfo, ...] = ()
 
 
-# Read-compat with pre-pivot data (ADR 006): the old bootstrap minted a
-# closed gc_ type per node kind; spaces it touched still contain objects of
-# these types. Seeded into every registry's role_overrides so those objects
-# keep their semantic role. Adapter knowledge -- deliberately NOT in
-# ``schema.DEFAULT_TYPE_ROLES``.
-LEGACY_TYPE_ROLES: dict[str, Role] = {
-    "gc_character": Role.CHARACTER,
-    "gc_event": Role.EVENT,
-    "gc_location": Role.LOCATION,
-    "gc_technology": Role.TECHNOLOGY,
-    "gc_faction": Role.ORGANIZATION,
-    "gc_item": Role.ITEM,
-}
-
-
 @dataclass
 class SpaceRegistry:
     """A snapshot of the space's types and relation properties."""
@@ -166,10 +151,11 @@ class SpaceRegistry:
     def reflects_field(self, key: str, fmt: str) -> bool:
         """Should this property surface in ``Node.fields``?
 
-        Scalar formats only; excludes ``gc_`` keys (first-class or retired)
-        -- except the deliberately human-facing Scheduled Event/session
-        surface (``GC_REFLECTED_FIELD_KEYS``, ADR 027), which must write to
-        and read from real properties, never the blob -- the built-in
+        Scalar formats only; excludes ``gc_`` keys (first-class or
+        server-managed) -- except the deliberately reflected surface
+        (``GC_REFLECTED_FIELD_KEYS``: Scheduled Events per ADR 027,
+        attribution stamps per ADR 028), which reads from and writes to
+        real properties like any native field -- the built-in
         ``description`` (the summary channel, ADR 011), the census-based
         system-noise denylist, and any space-specific keys the user
         silenced via ``GC_FIELD_DENYLIST``.
@@ -208,8 +194,8 @@ class SpaceRegistry:
         """Resolve a ``fields`` key to a reflectable scalar property.
 
         Case-insensitive match on key or display name -- the write-side
-        mirror of :meth:`reflects_field` (an unmatched key falls through to
-        the ``gc_fields`` blob).
+        mirror of :meth:`reflects_field` (an unmatched key is surfaced for
+        approval by the repository).
         """
         target = identifier.strip().lower()
         for key, info in self.properties_by_key.items():
@@ -229,8 +215,8 @@ async def load_registry(
     """Build a registry from the space's live types and properties.
 
     ``extra_role_overrides`` carries the active DomainProfile's type-key ->
-    Role additions (WP5); they win over the legacy read-compat seeds.
-    ``hidden_field_keys`` carries GC_FIELD_DENYLIST (ADR 012).
+    Role additions (WP5). ``hidden_field_keys`` carries GC_FIELD_DENYLIST
+    (ADR 012).
     """
     types_by_key: dict[str, TypeInfo] = {}
     async for type_obj in client.list_types():
@@ -259,7 +245,7 @@ async def load_registry(
     return SpaceRegistry(
         properties_by_key=properties_by_key,
         types_by_key=types_by_key,
-        role_overrides={**LEGACY_TYPE_ROLES, **(extra_role_overrides or {})},
+        role_overrides=dict(extra_role_overrides or {}),
         hidden_field_keys=hidden_field_keys,
         timeline_key=timeline_key,
     )

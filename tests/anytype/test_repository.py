@@ -232,13 +232,11 @@ class TestSummaryChannel:
         assert node.id in changed
         assert repo.graph.node(node.id).summary == "Human-sharpened one-liner."
 
-    async def test_retired_gc_summary_is_invisible(self, repo, mock):
+    async def test_stray_gc_summary_property_is_invisible(self, repo, mock):
         """Only the built-in description is the summary channel (ADR 011).
-        An unmigrated object's gc_summary is not read -- the migration
-        script (scripts/migrate_summary_to_description.py) is the one
-        converter."""
+        A stray gc_summary property (pre-pivot artifact) is never read."""
         legacy_id = mock.seed_object("character", "Orla", properties=[
-            mapping.property_entry(mapping.PROP_LEGACY_SUMMARY, "text", "A smuggler."),
+            mapping.property_entry("gc_summary", "text", "A smuggler."),
         ])
         await repo.hydrate()
         assert repo.graph.node(legacy_id).summary == ""

@@ -54,15 +54,13 @@ class TestTypes:
         assert "Character" in known and "Realization" in known
         assert "Capture" not in known  # infra role hidden
 
-    def test_legacy_gc_entity_types_resolve_via_overrides(self) -> None:
-        # Pre-pivot read-compat (ADR 006): load_registry seeds these.
-        from graph_context.infrastructure.anytype.registry import LEGACY_TYPE_ROLES
-
+    def test_role_overrides_resolve_arbitrary_type_keys(self) -> None:
+        # Profile-supplied overrides (WP5) map any type key to a role.
         reg = SpaceRegistry(
-            types_by_key={"gc_character": TypeInfo("gc_character", "gc_character")},
-            role_overrides=dict(LEGACY_TYPE_ROLES),
+            types_by_key={"persona": TypeInfo("persona", "Persona")},
+            role_overrides={"persona": Role.CHARACTER},
         )
-        assert reg.role_for("gc_character") is Role.CHARACTER
+        assert reg.role_for("persona") is Role.CHARACTER
 
 
 class TestFieldCatalog:

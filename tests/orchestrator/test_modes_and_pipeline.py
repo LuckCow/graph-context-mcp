@@ -13,6 +13,7 @@ import pytest
 
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
+from graph_context.domain import attribution
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
@@ -699,8 +700,8 @@ class TestProvenanceTurns:
         await orchestrator.handle_message("s1", "cli:nick", "Add Mira.")
         (intent,) = _intent_nodes(services)
         assert intent.name.startswith("Intent: Add Mira.")
-        assert intent.fields["user_id"] == "cli:nick"
-        assert intent.fields["mode"] == "world_modeling"  # the active binding
+        assert intent.fields[attribution.FIELD_USER_ID] == "cli:nick"
+        assert intent.fields[attribution.FIELD_MODE] == "world_modeling"  # the active binding
         mira = services.repository.graph.resolve("Mira")
         assert {e.target for e in services.repository.graph.edges(intent.id)} == {
             mira.id

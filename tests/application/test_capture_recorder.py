@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from graph_context.application import capture_recorder as pr
 from graph_context.application.capture_recorder import CaptureRecorder
+from graph_context.domain import attribution
 from graph_context.domain.graph import Direction
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
@@ -20,7 +21,7 @@ async def test_record_creates_prose_node_with_references(
         references=[world.mira.id, world.undercroft.id],
     )
     assert node.role is Role.CAPTURE
-    assert node.fields == {"generated_at": "2026-01-01T00:00:00Z"}
+    assert node.fields == {attribution.FIELD_GENERATED_AT: "2026-01-01T00:00:00Z"}
     # references edges: Prose -> each source.
     targets = {
         e.target

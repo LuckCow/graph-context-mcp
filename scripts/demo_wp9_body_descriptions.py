@@ -5,8 +5,8 @@ Shows the three behaviors the WP promises, against the mock server:
 1. create_node's `description` lands in the page body and comes back
    from get_node (fetched on demand -- never hydrated into the index).
 2. A HUMAN rewriting the body in the Anytype editor is visible to the
-   very next get_node, with NO resync -- fresher than the old
-   gc_description property ever was.
+   very next get_node, with NO resync -- bodies are read on demand,
+   never cached in the index.
 3. explore(detail="full") assembles a scene with every hit's full
    description in one call (the body fan-out).
 

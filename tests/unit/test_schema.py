@@ -29,8 +29,8 @@ class TestResolveRole:
         assert Role.MODE in schema.INFRA_ROLES
 
     def test_legacy_gc_entity_keys_are_not_domain_knowledge(self) -> None:
-        # Pre-pivot read-compat lives in the Anytype adapter's registry
-        # overrides (registry.LEGACY_TYPE_ROLES), not the domain map.
+        # The pre-pivot closed gc_ entity types are gone (ADR 006/028);
+        # the domain map never knew them.
         assert schema.resolve_role("gc_character") is None
 
     def test_matching_is_case_insensitive_and_accepts_role_name(self) -> None:

@@ -49,12 +49,11 @@ async def test_body_survives_an_update_that_does_not_name_it(
     assert await repo.fetch_body(prose.id) == "original prose"
 
 
-async def test_fetch_body_ignores_the_retired_description_property(
+async def test_fetch_body_ignores_stray_gc_description_property(
     repo: AnytypeGraphRepository, mock: MockAnytype
 ) -> None:
-    """Only the body is the description (ADR 010). An unmigrated object's
-    gc_description is invisible to the server -- the migration script
-    (scripts/migrate_descriptions_to_body.py) is the one converter."""
+    """Only the body is the description (ADR 010). A stray gc_description
+    property (pre-pivot artifact) is invisible to the server."""
     legacy_id = mock.seed_object(
         "location", "Old Keep",
         properties=[
