@@ -33,12 +33,14 @@ def main(argv: list[str] | None = None) -> int:
                      help="a case .toml file or a directory of them")
     run.add_argument("--case", default="", dest="case_filter",
                      help="run only this case id")
-    run.add_argument("--driver", default="claude", choices=DRIVERS,
-                     help="claude = real model (subscription); scripted = playback")
-    run.add_argument("--model", default="", help="model override (claude driver)")
+    run.add_argument("--driver", default="anthropic_subscription", choices=DRIVERS,
+                     help="anthropic_subscription = real model on the Claude "
+                          "plan; anthropic_api = real model over the API (bills "
+                          "credits); scripted = playback")
+    run.add_argument("--model", default="", help="model override (real drivers)")
     run.add_argument("--effort", default="",
                      choices=("", "low", "medium", "high", "xhigh", "max"),
-                     help="reasoning effort (claude driver)")
+                     help="reasoning effort (real drivers)")
     run.add_argument("--trials", default=0, type=int, dest="trials_override",
                      help="override every case's trial count")
     run.add_argument("--judge", action="store_true",

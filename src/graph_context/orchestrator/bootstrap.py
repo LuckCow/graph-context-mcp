@@ -98,40 +98,95 @@ class ManualDriver:
         return LLMTurn(reply=MANUAL_HELP)
 
 
+# The selection names are vendor-namespaced (WHO PAYS, not which SDK):
+# ``anthropic_subscription`` is the Claude plan (claude-agent-sdk over the
+# CLI), ``anthropic_api`` is Anthropic API credits (the anthropic SDK).
+# The namespace leaves room for other vendors later (openai_api, ...). The
+# original SDK-flavored names stay accepted so existing env files keep
+# working.
+_DRIVER_ALIASES = {
+    "claude": "anthropic_subscription",
+    "subscription": "anthropic_subscription",
+    "anthropic": "anthropic_api",
+    "api": "anthropic_api",
+}
+
+
 def build_driver() -> tuple[LLMDriver, str, str]:
     """GC_DRIVER resolution -> (driver, attribution model name, help line).
 
-    Unknown values and a missing claude-agent-sdk fail loudly at startup,
-    like every other config error (specs, GC_EMBEDDER).
+    ``anthropic_subscription`` (default) | ``anthropic_api`` | ``manual``.
+    Unknown values and a missing SDK fail loudly at startup, like every
+    other config error (specs, GC_EMBEDDER).
     """
-    choice = os.environ.get("GC_DRIVER", "claude").strip().lower()
+    raw = os.environ.get("GC_DRIVER", "anthropic_subscription").strip().lower()
+    choice = _DRIVER_ALIASES.get(raw, raw)
+    if choice != raw:
+        logger.info("GC_DRIVER=%s is a legacy alias for %s", raw, choice)
     if choice == "manual":
         return ManualDriver(), "manual", MANUAL_HELP
-    if choice == "claude":
+    model = os.environ.get("GC_DRIVER_MODEL", "").strip() or None
+    effort = os.environ.get("GC_DRIVER_EFFORT", "").strip().lower() or None
+    allowed_efforts = ("low", "medium", "high", "xhigh", "max")
+    if effort is not None and effort not in allowed_efforts:
+        raise GraphContextError(
+            f"unknown GC_DRIVER_EFFORT {effort!r}; allowed: "
+            f"{', '.join(allowed_efforts)}"
+        )
+    if choice == "anthropic_subscription":
         try:
             from graph_context.orchestrator.claude_driver import ClaudeAgentDriver
         except ImportError as err:
             raise GraphContextError(
-                "GC_DRIVER=claude needs claude-agent-sdk (a container rebuild "
-                "installs the [orchestrator] extra); GC_DRIVER=manual runs "
-                "without it"
+                "GC_DRIVER=anthropic_subscription needs claude-agent-sdk (a "
+                "container rebuild installs the [orchestrator] extra); "
+                "GC_DRIVER=manual runs without it"
             ) from err
-        model = os.environ.get("GC_DRIVER_MODEL", "").strip() or None
-        effort = os.environ.get("GC_DRIVER_EFFORT", "").strip().lower() or None
-        allowed_efforts = ("low", "medium", "high", "xhigh", "max")
-        if effort is not None and effort not in allowed_efforts:
-            raise GraphContextError(
-                f"unknown GC_DRIVER_EFFORT {effort!r}; allowed: "
-                f"{', '.join(allowed_efforts)}"
-            )
         driver = ClaudeAgentDriver(model=model, effort=effort)  # type: ignore[arg-type]
         help_line = (
             "talking to the model on your Claude subscription; /mode [name] "
             "inspects/switches mode; /clear resets conversation memory."
         )
         return driver, model or "claude-code-default", help_line
+    if choice == "anthropic_api":
+        try:
+            from graph_context.orchestrator.anthropic_driver import (
+                DEFAULT_MODEL,
+                AnthropicDriver,
+            )
+        except ImportError as err:
+            raise GraphContextError(
+                "GC_DRIVER=anthropic_api needs the anthropic SDK (the "
+                "[anthropic] extra; a container rebuild installs it)"
+            ) from err
+        # The billing switch must be a conscious choice: no key, no driver.
+        # The SDK would otherwise silently fall back to an `ant auth login`
+        # OAuth profile, which hides WHO is paying.
+        if not (
+            os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+        ):
+            raise GraphContextError(
+                "GC_DRIVER=anthropic_api bills API credits, not the Claude "
+                "subscription -- set ANTHROPIC_API_KEY to opt in, or use "
+                "GC_DRIVER=anthropic_subscription for the plan-billed path"
+            )
+        logger.warning(
+            "GC_DRIVER=anthropic_api: model calls bill API credits, "
+            "not the Claude subscription"
+        )
+        anthropic_driver = AnthropicDriver(
+            model=model or DEFAULT_MODEL, effort=effort
+        )
+        help_line = (
+            "talking to the model over the Anthropic API (bills API "
+            "credits); /mode [name] inspects/switches mode; /clear resets "
+            "conversation memory."
+        )
+        return anthropic_driver, model or DEFAULT_MODEL, help_line
     raise GraphContextError(
-        f"unknown GC_DRIVER {choice!r}; allowed: claude (default), manual"
+        f"unknown GC_DRIVER {raw!r}; allowed: anthropic_subscription "
+        "(default), anthropic_api, manual"
     )
 
 

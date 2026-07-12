@@ -330,8 +330,18 @@ wrappers' Python signatures** (`derive_schema`; one source of truth,
 transcript; cross-turn memory is deliberately still absent — the SDK's
 session-resume machinery is the lever when dogfooding wants it, which
 also means **langgraph sits installed but unused**; whether it ever
-earns its place is now an open question, not a plan. CLI selection:
-`GC_DRIVER=claude` (default; `manual` keeps the keyboard stand-in),
+earns its place is now an open question, not a plan. *(Resolved
+2026-07-12: langgraph removed from pyproject — the pipeline IS the
+agentic harness; drivers stay single-decision. A second real driver,
+`anthropic_driver.py`, landed the same day: the raw Messages API as an
+explicit opt-in — `GC_DRIVER=anthropic_api` + `ANTHROPIC_API_KEY`, billing
+API credits, `[anthropic]` extra — sending the transcript as a native
+messages list with tool_use/tool_result round-tripping; the pipeline now
+records each mid-turn tool-call decision on the transcript, paired to
+results by id.)* CLI selection — vendor-namespaced values name WHO PAYS:
+`GC_DRIVER=anthropic_subscription` (default; `anthropic_api` = Messages
+API on credits; `manual` keeps the keyboard stand-in; legacy
+`claude`/`subscription` and `anthropic`/`api` resolve as aliases),
 `GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune the model. Verified live:
 unit tests (self-skip without the SDK — CI installs only `[dev]`), the
 gated `GC_CLAUDE_E2E=1` e2e (tool-call capture + reply path), and
@@ -1505,8 +1515,10 @@ What shipped:
   scratchpad), final reply substrings, and loose trajectory bounds —
   executed vs rejected calls decided by the mode's binding table, never
   by prescribed sequences.
-* **Two drivers, one control flow.** `--driver claude` (default) is the
-  real model on the subscription; `--driver scripted` replays each
+* **Two drivers, one control flow.** `--driver anthropic_subscription`
+  (default; formerly `claude`) is the real model on the subscription;
+  `--driver anthropic_api` (added 2026-07-12) runs it over the Messages
+  API on credits; `--driver scripted` replays each
   case's `[[case.script]]` — its reference solution. CI
   (`tests/evals/`) replays every shipped script and fails on unsolvable
   cases, plus a `must_fail` fixture that keeps the graders honest; the

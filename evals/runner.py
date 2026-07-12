@@ -11,8 +11,12 @@ unchanged.
 
 Driver selection is per RUN, not per case: ``scripted`` plays back each
 case's ``[[case.script]]`` (cases without one are skipped -- that's the CI
-smoke path) and ``claude`` runs the real model over the user's Claude
-subscription (the [orchestrator] extra; never the anthropic API).
+smoke path), ``anthropic_subscription`` runs the real model on the user's
+Claude plan via claude-agent-sdk (the [orchestrator] extra), and
+``anthropic_api`` runs it over the Messages API (the [anthropic] extra) --
+an explicit opt-in that bills API credits, not the subscription; its
+reports carry token totals but a 0.0 cost (the API does not price
+responses).
 """
 
 from __future__ import annotations
@@ -43,11 +47,25 @@ from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
 
-DRIVERS = ("scripted", "claude")
+# Vendor-namespaced, matching GC_DRIVER (leaves room for other vendors).
+DRIVERS = ("scripted", "anthropic_subscription", "anthropic_api")
 
 
 class RunnerError(Exception):
     """The run itself is misconfigured (unknown driver, empty selection)."""
+
+
+def _default_model_label(driver: str) -> str:
+    """What ran when no --model was given, for the report header."""
+    if driver == "scripted":
+        return "(scripted)"
+    if driver == "anthropic_api":
+        # Lazy import (the [anthropic] extra is opt-in); by report time an
+        # anthropic_api run has already imported the driver successfully.
+        from graph_context.orchestrator.anthropic_driver import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    return "(cli default)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +73,8 @@ class RunConfig:
     cases: str = "evals/cases"
     case_filter: str = ""  # exact case id; "" runs everything
     driver: str = "scripted"
-    model: str = ""  # claude driver only; "" = the account's CLI default
-    effort: str = ""  # claude driver only; "" = the CLI default
+    model: str = ""  # real drivers only; "" = each driver's own default
+    effort: str = ""  # real drivers only; "" = the driver's default
     trials_override: int = 0  # 0 = each case's own trial count
     judge: bool = False
     label: str = ""
@@ -86,7 +104,7 @@ async def run_evals(config: RunConfig) -> RunResult:
     result = RunResult(
         run_dir=run_dir,
         driver=config.driver,
-        model=config.model or ("(scripted)" if config.driver == "scripted" else "(cli default)"),
+        model=config.model or _default_model_label(config.driver),
         label=config.label,
         started=started,
         finished=datetime.now(UTC),
@@ -248,6 +266,18 @@ def _build_inner_driver(
 ) -> LLMDriver:
     if config.driver == "scripted":
         return ScriptedDriver(case.script)
+    if config.driver == "anthropic_api":
+        # Lazy import: the [anthropic] extra is opt-in (bills API credits).
+        from graph_context.orchestrator.anthropic_driver import (
+            DEFAULT_MODEL,
+            AnthropicDriver,
+        )
+
+        return AnthropicDriver(
+            model=config.model or DEFAULT_MODEL,
+            effort=config.effort or None,
+            on_result=usage_sink,
+        )
     # Lazy import: the [orchestrator] extra is absent in CI, and the
     # scripted path must never require it.
     from graph_context.orchestrator.claude_driver import ClaudeAgentDriver

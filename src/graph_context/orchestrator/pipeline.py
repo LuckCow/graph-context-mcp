@@ -32,6 +32,7 @@ can prime the ring after a restart via :meth:`Orchestrator.seed_memory`.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import uuid
@@ -283,7 +284,22 @@ class Orchestrator:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
                 break
-            for call in turn.tool_calls:
+            # Record the decision itself before executing: drivers that
+            # round-trip native tool_use/tool_result blocks need to see
+            # their own calls in the transcript, paired to results by id.
+            # Ids are guaranteed here (deterministic -- no clocks/random)
+            # so downstream events always carry one even for drivers that
+            # report none (scripted playback).
+            tool_calls = tuple(
+                call if call.id else dataclasses.replace(
+                    call, id=f"toolu_gc_{decisions_left}_{index}"
+                )
+                for index, call in enumerate(turn.tool_calls)
+            )
+            transcript.append(
+                TranscriptEvent("assistant", turn.reply, tool_calls=tool_calls)
+            )
+            for call in tool_calls:
                 trace.append(ToolTrace(
                     call.name, json.dumps(dict(call.arguments), default=str)
                 ))
@@ -303,7 +319,11 @@ class Orchestrator:
                     self.turn_log.tool_result(
                         turn_id, session_id, spec.name, call, result
                     )
-                transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
+                transcript.append(
+                    TranscriptEvent(
+                        "tool", result, tool_name=call.name, tool_use_id=call.id
+                    )
+                )
             if final_decision and turn.reply.strip():
                 # The warned driver bundled its answer with a last update:
                 # the calls just ran, the text is the reply.

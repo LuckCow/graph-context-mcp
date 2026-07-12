@@ -3,7 +3,9 @@
 Model access is the user's Claude SUBSCRIPTION: ``claude-agent-sdk`` runs
 the Claude Code CLI, which authenticates with the persisted ``claude
 login`` OAuth credential (or ``CLAUDE_CODE_OAUTH_TOKEN``) -- never an API
-key, which would bill credits instead of the plan.
+key, which would bill credits instead of the plan. (The API-key path
+exists as ``anthropic_driver.py``, an explicit opt-in via
+``GC_DRIVER=anthropic_api``.)
 
 The SDK ships its own agentic loop; this adapter fits it behind
 ``LLMDriver.decide`` (one decision in, tool calls OR a reply out -- the
@@ -38,11 +40,9 @@ when dogfooding asks for it.
 
 from __future__ import annotations
 
-import inspect
 import logging
-import types
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -62,6 +62,11 @@ from claude_agent_sdk import (
     tool,
 )
 
+from graph_context.orchestrator.driver_common import (
+    assembled_system_prompt,
+    derive_schema,
+    render_transcript,
+)
 from graph_context.orchestrator.drivers import (
     DecideUsage,
     LLMTurn,
@@ -69,90 +74,21 @@ from graph_context.orchestrator.drivers import (
     TranscriptEvent,
 )
 
+__all__ = [
+    "ClaudeAgentDriver",
+    "assembled_system_prompt",
+    "derive_schema",
+    "local_tool_name",
+    "render_transcript",
+    "sdk_tools",
+    "session_options",
+    "usage_from_result",
+]
+
 logger = logging.getLogger(__name__)
 
 _SERVER_NAME = "gc"
 _TOOL_PREFIX = f"mcp__{_SERVER_NAME}__"
-
-_GUIDANCE = (
-    "Call tools with a flat JSON object of their documented parameters. "
-    "The harness executes every call; results arrive as <tool_result> "
-    "blocks in the next message. Never repeat a call whose result is "
-    "already in the transcript."
-)
-
-
-def _json_type(annotation: Any) -> dict[str, Any]:
-    """One Python annotation -> a JSON-schema fragment (best effort;
-    an unknown shape degrades to unconstrained, never to wrong)."""
-    if annotation is bool:
-        return {"type": "boolean"}
-    if annotation is str:
-        return {"type": "string"}
-    if annotation is int:
-        return {"type": "integer"}
-    if annotation is float:
-        return {"type": "number"}
-    origin = get_origin(annotation)
-    if origin is list:
-        args = get_args(annotation)
-        items = _json_type(args[0]) if args else {}
-        return {"type": "array", "items": items} if items else {"type": "array"}
-    if origin is dict:
-        return {"type": "object"}
-    if origin in (types.UnionType, Union):
-        members = [a for a in get_args(annotation) if a is not type(None)]
-        fragments = [_json_type(m) for m in members]
-        if len(fragments) == 1:
-            return fragments[0]
-        if all(list(f) == ["type"] for f in fragments):
-            return {"type": [f["type"] for f in fragments]}
-        return {"anyOf": fragments}
-    return {}
-
-
-def derive_schema(fn: Callable[..., Any]) -> dict[str, Any]:
-    """A tool wrapper's signature as a JSON schema.
-
-    Everything after the ``services`` parameter is a model-facing
-    argument; no default means required. ``additionalProperties: false``
-    is load-bearing -- it is what stops the model inventing keys.
-    """
-    hints = get_type_hints(fn)
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for name, parameter in inspect.signature(fn).parameters.items():
-        if name == "services":
-            continue
-        properties[name] = _json_type(hints.get(name, Any))
-        if parameter.default is inspect.Parameter.empty:
-            required.append(name)
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
-
-
-def render_transcript(events: Sequence[TranscriptEvent]) -> str:
-    """The turn-local transcript as one prompt (fresh session per decide).
-
-    Tool results are fenced and named so the model can tell its own
-    earlier calls' output from user text.
-    """
-    parts: list[str] = []
-    for event in events:
-        if event.kind == "tool":
-            parts.append(
-                f'<tool_result tool="{event.tool_name}">\n{event.text}\n'
-                "</tool_result>"
-            )
-        elif event.kind == "assistant":
-            parts.append(f"<assistant_earlier>\n{event.text}\n</assistant_earlier>")
-        else:
-            parts.append(event.text)
-    return "\n\n".join(parts)
 
 
 def local_tool_name(sdk_name: str) -> str:
@@ -176,16 +112,6 @@ def sdk_tools(
         tool(name, doc, dict(schemas.get(name, {"type": "object"})))(_never_executed)
         for name, doc in sorted(tools.items())
     ]
-
-
-def assembled_system_prompt(goal: str) -> str:
-    """Goal + the static tool-calling guidance: the ENTIRE system prompt.
-
-    The one assembly point -- ``session_options`` sends it and
-    ``ClaudeAgentDriver.system_prompt`` reports it to the turn diary, so
-    the logged prompt can never drift from the sent one.
-    """
-    return f"{goal}\n\n{_GUIDANCE}".strip()
 
 
 def session_options(
@@ -300,7 +226,11 @@ class ClaudeAgentDriver:
                         reply_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         calls.append(
-                            ToolCall(local_tool_name(block.name), dict(block.input))
+                            ToolCall(
+                                local_tool_name(block.name),
+                                dict(block.input),
+                                id=block.id,
+                            )
                         )
         if self._on_result is not None and last_result is not None:
             self._on_result(usage_from_result(last_result))

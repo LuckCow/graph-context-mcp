@@ -2,9 +2,11 @@
 
 Code graders run first and their verdicts are never overwritten; the judge
 covers what substring checks can't -- "did the reply own up to the mode
-boundary", "did the answer invent relationships". Like the driver it rides
-the user's Claude SUBSCRIPTION via claude-agent-sdk (never the anthropic
-SDK, which would bill API credits), in a tool-less isolated session: same
+boundary", "did the answer invent relationships". The judge ALWAYS rides
+the user's Claude SUBSCRIPTION via claude-agent-sdk -- even when the run's
+driver is ``anthropic_api`` (the credit-billed opt-in, GC_DRIVER=anthropic_api /
+--driver anthropic_api), the judge stays on the plan -- in a tool-less
+isolated session: same
 ``tools=[] / setting_sources=[]`` posture as ``session_options``, because
 a judge that can touch the filesystem is a judge that can be prompted into
 doing so.

@@ -20,23 +20,38 @@ from typing import Any, Protocol
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCall:
+    """One requested tool invocation. ``id`` is the provider's tool_use
+    id when the driver reports one (the Messages API pairs results to
+    calls by it); the pipeline synthesizes a deterministic id when a
+    driver leaves it empty, so downstream events always carry one."""
+
+    name: str
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+    id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptEvent:
     """One entry of a turn's working transcript.
 
     ``kind``: ``user`` (the message that started the turn), ``tool`` (a
     tool's rendered result -- or the pipeline's unavailable-tool notice,
-    so a driver can self-correct), ``assistant`` (a prior reply).
+    so a driver can self-correct), ``assistant`` (a prior reply, or the
+    mid-turn tool-call decision the pipeline records before executing).
+
+    ``tool_calls`` is set on the mid-turn ``assistant`` event (the calls
+    that decision made); ``tool_use_id`` is set on ``tool`` result events
+    and matches the originating call's id. Together they let a driver
+    reconstruct a native tool_use/tool_result conversation; drivers that
+    flatten to text ignore both.
     """
 
     kind: str
     text: str
     tool_name: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCall:
-    name: str
-    arguments: Mapping[str, Any] = field(default_factory=dict)
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_use_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

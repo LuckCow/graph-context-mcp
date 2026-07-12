@@ -727,3 +727,74 @@ class TestProvenanceTurns:
         ])  # no provenance wired
         await orchestrator.handle_message("s1", "u", "Add Mira.")
         assert _intent_nodes(services) == []
+
+
+class TestToolRoundTripTranscript:
+    """The pipeline records each tool-call decision on the transcript,
+    paired to its results by id -- what a Messages-API driver needs to
+    round-trip native tool_use/tool_result blocks."""
+
+    async def test_the_decision_precedes_its_results_with_matching_ids(
+        self, services: Services
+    ) -> None:
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="Checking.", tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Done."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        second = driver.transcripts[1]
+        decision = second[-2]
+        result = second[-1]
+        assert decision.kind == "assistant"
+        assert decision.text == "Checking."
+        assert len(decision.tool_calls) == 1
+        assert decision.tool_calls[0].name == "create_node"
+        assert decision.tool_calls[0].id  # synthesized when the driver sent none
+        assert result.kind == "tool"
+        assert result.tool_use_id == decision.tool_calls[0].id
+
+    async def test_driver_provided_ids_are_preserved(
+        self, services: Services
+    ) -> None:
+        call = ToolCall(
+            "create_node",
+            {"type": "Character", "name": "Mira", "summary": "Engineer."},
+            id="toolu_real_api_id",
+        )
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(tool_calls=(call,)),
+            LLMTurn(reply="Done."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        second = driver.transcripts[1]
+        assert second[-2].tool_calls[0].id == "toolu_real_api_id"
+        assert second[-1].tool_use_id == "toolu_real_api_id"
+
+    async def test_mid_turn_events_never_reach_conversation_memory(
+        self, services: Services
+    ) -> None:
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira now exists."),
+            LLMTurn(reply="Second turn."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        await orchestrator.handle_message("s1", "u1", "And now?")
+        replayed = driver.transcripts[2]  # the second turn's history
+        assert [(e.kind, e.text) for e in replayed[:2]] == [
+            ("user", "Add Mira."), ("assistant", "Mira now exists."),
+        ]
+        # The tool-call decision and its result stayed turn-local.
+        assert all(e.tool_calls == () and e.tool_use_id == "" for e in replayed)

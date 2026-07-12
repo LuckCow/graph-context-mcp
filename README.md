@@ -59,7 +59,7 @@ python -m graph_context.orchestrator.anytype_chat_bot                       # An
 
 `serve` is the consolidated entry point: one process running the Anytype chat bot (always), the Discord bot (only when the token file has content **and** at least one channel is bound — an empty secret file or a zero-table channels file is the "Discord off" switch), and the inspection server in a daemon thread. One transport's crash takes the whole process down loudly; restarts belong to the supervisor.
 
-`GC_DRIVER=claude` (default) talks to the model on your Claude subscription (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune it); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). The **mode** is per-chat (`/mode <name>` switches it). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
+`GC_DRIVER=anthropic_subscription` (default) talks to the model on your Claude subscription; `GC_DRIVER=anthropic_api` talks to it over the Anthropic Messages API instead — an explicit opt-in that bills API credits and requires `ANTHROPIC_API_KEY` (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune either); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). The values are vendor-namespaced so other providers can slot in later; the legacy names `claude`/`subscription` and `anthropic`/`api` still resolve as aliases. The **mode** is per-chat (`/mode <name>` switches it). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
 
 ### Anytype chat (the all-in path)
 
