@@ -50,9 +50,15 @@ from graph_context.orchestrator.spaces import (
     load_space_bindings,
     served_chat_ids,
 )
-from graph_context.orchestrator.turn_log import TurnLog, turn_log_path
+from graph_context.orchestrator.turn_log import OFF_VALUES, TurnLog, turn_log_path
 
 logger = logging.getLogger(__name__)
+
+
+def _knob_on(env: str) -> bool:
+    """Default-on boolean knob: any repo-wide off spelling disables it."""
+    return os.environ.get(env, "1").strip().lower() not in OFF_VALUES
+
 
 MANUAL_HELP = (
     "you are the model (GC_DRIVER=manual): /tool <name> {json-args} runs a "
@@ -311,12 +317,8 @@ async def _assemble_runtime(
     per-turn stateless. ``modes_file`` overrides ``GC_MODES_FILE`` for
     this runtime (per-channel modes, ADR 017).
     """
-    provenance_on = os.environ.get("GC_PROVENANCE", "1").lower() not in {
-        "0", "false", "no",
-    }
-    store_prompt = os.environ.get("GC_STORE_LLM_INPUT", "1").lower() not in {
-        "0", "false", "no",
-    }
+    provenance_on = _knob_on("GC_PROVENANCE")
+    store_prompt = _knob_on("GC_STORE_LLM_INPUT")
     journal = MutationJournal() if provenance_on else None
     built = await composition.build_runtime(
         profile, journal=journal, space_id=space_id, project=project

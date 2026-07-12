@@ -109,3 +109,25 @@ class TestManualDriverStillDecides:
         driver, _model, _help = build_driver()
         turn = await driver.decide([TranscriptEvent("user", "hi")], {}, "")
         assert isinstance(turn, LLMTurn)
+
+
+class TestBooleanKnobs:
+    """The repo-wide "knob off" spellings (turn_log.OFF_VALUES) apply to
+    every boolean knob. Regression: bootstrap once re-inlined the set
+    without "off"/"", so GC_PROVENANCE=off silently stayed ON."""
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "OFF", "No"])
+    def test_every_off_spelling_disables(self, monkeypatch, value) -> None:
+        from graph_context.orchestrator.bootstrap import _knob_on
+
+        monkeypatch.setenv("GC_PROVENANCE", value)
+        assert _knob_on("GC_PROVENANCE") is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+    def test_on_spellings_and_default_enable(self, monkeypatch, value) -> None:
+        from graph_context.orchestrator.bootstrap import _knob_on
+
+        monkeypatch.setenv("GC_PROVENANCE", value)
+        assert _knob_on("GC_PROVENANCE") is True
+        monkeypatch.delenv("GC_PROVENANCE")
+        assert _knob_on("GC_PROVENANCE") is True  # default-on

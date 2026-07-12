@@ -86,6 +86,12 @@ def derive_schema(fn: Callable[..., Any]) -> dict[str, Any]:
     }
 
 
+def fenced_tool_result(tool_name: str, text: str) -> str:
+    """The one tool-result fence every driver renders: named so the model
+    can tell its own earlier calls' output from user text."""
+    return f'<tool_result tool="{tool_name}">\n{text}\n</tool_result>'
+
+
 def render_transcript(events: Sequence[TranscriptEvent]) -> str:
     """The turn-local transcript as one prompt (fresh session per decide).
 
@@ -99,10 +105,7 @@ def render_transcript(events: Sequence[TranscriptEvent]) -> str:
     parts: list[str] = []
     for event in events:
         if event.kind == "tool":
-            parts.append(
-                f'<tool_result tool="{event.tool_name}">\n{event.text}\n'
-                "</tool_result>"
-            )
+            parts.append(fenced_tool_result(event.tool_name, event.text))
         elif event.kind == "assistant":
             if event.text.strip():
                 parts.append(

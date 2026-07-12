@@ -36,6 +36,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from contextlib import asynccontextmanager
 from typing import Any, NoReturn
 
+from graph_context.domain import fields as domain_fields
 from graph_context.domain import schema
 from graph_context.domain.graph import Direction, GraphIndex
 from graph_context.domain.models import (
@@ -780,10 +781,12 @@ class AnytypeGraphRepository:
             names: tuple[str, ...] = ()
             if options and prop.format in {"select", "multi_select"} and prop.id:
                 names = await self._tag_names_for(prop)
-            if names:
-                lines.append(f"{prop.name} ({prop.format}: {', '.join(names)})")
-            else:
-                lines.append(f"{prop.name} ({prop.format})")
+            lines.append(
+                FieldSpec(
+                    name=prop.name, format=prop.format, key=prop.key,
+                    options=names,
+                ).render_hint()
+            )
         return tuple(lines)
 
     async def _tag_names_for(self, prop: PropertyInfo) -> tuple[str, ...]:
@@ -799,6 +802,9 @@ class AnytypeGraphRepository:
         return cached
 
     async def _native_entry(self, info: PropertyInfo, value: str) -> dict[str, Any]:
+        """One field value -> one wire property entry. Acceptance rules
+        (and their LLM-facing errors) live in ``domain.fields`` -- the
+        fake normalizes with the same functions, so both backends agree."""
         fmt = info.format
         if fmt == "select":
             return mapping.property_entry(
@@ -806,27 +812,17 @@ class AnytypeGraphRepository:
             )
         if fmt == "multi_select":
             keys = [
-                await self._resolve_tag(info, part.strip())
-                for part in value.split(",") if part.strip()
+                await self._resolve_tag(info, part)
+                for part in domain_fields.split_multi_select(value)
             ]
             return mapping.property_entry(info.key, fmt, keys)
         if fmt == "number":
-            try:
-                return mapping.property_entry(info.key, fmt, float(value))
-            except ValueError:
-                raise GraphContextError(
-                    f"field {info.key!r} is a number property; got {value!r} "
-                    "(pass a plain number, e.g. \"42\")"
-                ) from None
-        if fmt == "checkbox":
-            lowered = value.strip().lower()
-            if lowered not in {"true", "false", "yes", "no", "1", "0"}:
-                raise GraphContextError(
-                    f"field {info.key!r} is a checkbox property; got {value!r} "
-                    "(pass \"true\" or \"false\")"
-                )
             return mapping.property_entry(
-                info.key, fmt, lowered in {"true", "yes", "1"}
+                info.key, fmt, domain_fields.parse_number(info.key, value)
+            )
+        if fmt == "checkbox":
+            return mapping.property_entry(
+                info.key, fmt, domain_fields.parse_checkbox(info.key, value)
             )
         # text / date / url / email / phone: pass the string through.
         return mapping.property_entry(info.key, fmt, value)

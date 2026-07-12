@@ -60,6 +60,13 @@ class FieldSpec:
     key: str = ""
     options: tuple[str, ...] = ()
 
+    def render_hint(self) -> str:
+        """The one property-hint line format both backends render into
+        ``UnknownFieldKey`` messages: ``Name (format: options)``."""
+        if self.options:
+            return f"{self.name} ({self.format}: {', '.join(self.options)})"
+        return f"{self.name} ({self.format})"
+
 
 @dataclass(frozen=True, slots=True)
 class Edge:

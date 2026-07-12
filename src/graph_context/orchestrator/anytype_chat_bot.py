@@ -53,11 +53,15 @@ from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
     ChatCursor,
+    EditFn,
     InboundChatMessage,
+    SendFn,
     SentMessages,
 )
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
+from graph_context.orchestrator.turn_log import OFF_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -71,15 +75,17 @@ SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_S
 
 def _cursor_path() -> str | None:
     raw = os.environ.get("GC_CHAT_CURSOR", DEFAULT_CURSOR_PATH).strip()
-    if raw.lower() in {"", "0", "false", "no", "off"}:
+    if raw.lower() in OFF_VALUES:
         return None
     return raw
 
 
 def _interval_seconds(env: str, default: float) -> float | None:
-    """A positive polling interval from ``env``; ``0``/``off`` disables."""
+    """A positive polling interval from ``env``; ``0``/``off`` disables.
+    An empty value is NOT off here -- it errors loudly below, because a
+    blank interval is more likely a broken export than a choice."""
     raw = os.environ.get(env, str(default)).strip()
-    if raw.lower() in {"0", "false", "no", "off"}:
+    if raw.lower() in OFF_VALUES - {""}:
         return None
     try:
         seconds = float(raw)
@@ -137,6 +143,23 @@ def _inbound(
     )
 
 
+
+def _reply_primitives(
+    chat_client: AnytypeChatClient, chat_id: str
+) -> tuple[SendFn, EditFn]:
+    """The send/edit pair a turn handler's reply needs, bound to one chat."""
+
+    async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
+        return await chat_client.send(chat_id, text, attachments)
+
+    async def edit(
+        message_id: str, text: str, attachments: tuple[str, ...] = ()
+    ) -> None:
+        await chat_client.edit(chat_id, message_id, text, attachments)
+
+    return send, edit
+
+
 async def _maybe_turn(
     handler: AnytypeChatTurnHandler,
     space_id: str,
@@ -148,13 +171,7 @@ async def _maybe_turn(
     if not handler.accepts(inbound):
         return
 
-    async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
-        return await chat_client.send(chat_id, text, attachments)
-
-    async def edit(
-        message_id: str, text: str, attachments: tuple[str, ...] = ()
-    ) -> None:
-        await chat_client.edit(chat_id, message_id, text, attachments)
+    send, edit = _reply_primitives(chat_client, chat_id)
 
     # Errors deliver through the same reply, so they replace the turn's
     # "Processing…" placeholder instead of stranding it in the chat.
@@ -166,9 +183,7 @@ async def _maybe_turn(
         await reply.deliver(f"[error] {err}")
     except Exception:  # a turn must never take the serve loop down
         logger.exception("turn failed (chat=%s)", chat_id)
-        await reply.deliver(
-            "[error] the turn failed; see the bot log for the traceback"
-        )
+        await reply.deliver(TURN_FAILED_NOTICE)
 
 
 async def _catch_up(
@@ -309,13 +324,7 @@ async def _fire_scheduled(
     """Deliver one due Scheduled Event's turn (same error posture as
     ``_maybe_turn``: the failure replaces the placeholder, never the loop)."""
 
-    async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
-        return await chat_client.send(chat_id, text, attachments)
-
-    async def edit(
-        message_id: str, text: str, attachments: tuple[str, ...] = ()
-    ) -> None:
-        await chat_client.edit(chat_id, message_id, text, attachments)
+    send, edit = _reply_primitives(chat_client, chat_id)
 
     reply = handler.reply(send, edit)
     try:

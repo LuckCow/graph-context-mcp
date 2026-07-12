@@ -23,6 +23,7 @@ from itertools import count
 from typing import Any
 
 from graph_context.domain import attribution, schema
+from graph_context.domain import fields as domain_fields
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import (
     Edge,
@@ -34,7 +35,7 @@ from graph_context.domain.models import (
     TimelineValue,
 )
 from graph_context.domain.schema import Role
-from graph_context.errors import GraphContextError, UnknownFieldKey
+from graph_context.errors import UnknownFieldKey
 
 
 @dataclass(frozen=True)
@@ -267,7 +268,7 @@ class InMemoryGraphRepository:
                     key,
                     type_name,
                     type_properties=tuple(
-                        self._render_spec(s)
+                        s.render_hint()
                         for s in self._field_specs
                         if s.format != "objects"
                     ),
@@ -292,34 +293,19 @@ class InMemoryGraphRepository:
                 return spec
         return None
 
-    @staticmethod
-    def _render_spec(spec: FieldSpec) -> str:
-        if spec.options:
-            return f"{spec.name} ({spec.format}: {', '.join(spec.options)})"
-        return f"{spec.name} ({spec.format})"
-
     def _normalize_value(self, spec: FieldSpec, value: str) -> str:
         """Match what the adapter reads back after a write (ADR 012's
-        ``field_value`` normalization), so round-trips agree across repos."""
+        ``field_value`` normalization), so round-trips agree across repos.
+        Acceptance rules and errors are the shared ``domain.fields`` ones."""
+        field = spec.key or spec.name
         if spec.format == "checkbox":
-            lowered = value.strip().lower()
-            if lowered not in {"true", "false", "yes", "no", "1", "0"}:
-                raise GraphContextError(
-                    f"field {spec.key or spec.name!r} is a checkbox property; "
-                    f"got {value!r} (pass \"true\" or \"false\")"
-                )
-            return "true" if lowered in {"true", "yes", "1"} else "false"
+            return "true" if domain_fields.parse_checkbox(field, value) else "false"
         if spec.format == "number":
-            try:
-                number = float(value)
-            except ValueError:
-                raise GraphContextError(
-                    f"field {spec.key or spec.name!r} is a number property; "
-                    f"got {value!r} (pass a plain number, e.g. \"42\")"
-                ) from None
-            return str(int(number)) if number.is_integer() else str(number)
+            return domain_fields.render_number(
+                domain_fields.parse_number(field, value)
+            )
         if spec.format in {"select", "multi_select"}:
-            names = [part.strip() for part in value.split(",") if part.strip()]
+            names = domain_fields.split_multi_select(value)
             self._register_options(spec, names)
             return ", ".join(names) if spec.format == "multi_select" else value.strip()
         return value

@@ -44,6 +44,7 @@ from graph_context.orchestrator.discord_transport import (
     DiscordTurnHandler,
     InboundMessage,
 )
+from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 
 logger = logging.getLogger(__name__)
 
@@ -142,9 +143,7 @@ async def run() -> None:
             await message.channel.send(f"[error] {err}")
         except Exception:
             logger.exception("turn failed (channel=%s)", message.channel.id)
-            await message.channel.send(
-                "[error] the turn failed; see the bot log for the traceback"
-            )
+            await message.channel.send(TURN_FAILED_NOTICE)
 
     # Plain registration instead of @client.event: the decorator is untyped
     # until discord.py is installed (CI runs mypy without the [bot] extra).

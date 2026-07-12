@@ -40,6 +40,7 @@ from graph_context.errors import GraphContextError
 from graph_context.orchestrator.driver_common import (
     assembled_system_prompt,
     derive_schema,
+    fenced_tool_result,
 )
 from graph_context.orchestrator.drivers import (
     DecideUsage,
@@ -56,11 +57,6 @@ _REFUSAL_NOTICE = (
     "narrow the ask)"
 )
 _TRUNCATION_NOTE = "(reply truncated: the model hit its output-token limit)"
-
-
-def _fenced_tool_result(tool_name: str, text: str) -> str:
-    """The claude driver's fencing, reused as the orphan-result fallback."""
-    return f'<tool_result tool="{tool_name}">\n{text}\n</tool_result>'
 
 
 def messages_from_transcript(
@@ -134,7 +130,7 @@ def messages_from_transcript(
                         messages.append({"role": "user", "content": results})
                         results = []
                     append_user_text(
-                        _fenced_tool_result(tool_event.tool_name, tool_event.text)
+                        fenced_tool_result(tool_event.tool_name, tool_event.text)
                     )
                 index += 1
             if results:
