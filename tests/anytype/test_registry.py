@@ -123,6 +123,12 @@ class TestRelations:
         assert reg.key_for_label("boss") == "boss"
         assert reg.key_for_label("Boss") == "boss"  # case-insensitive
 
+    def test_key_for_label_matches_the_display_name(self) -> None:
+        """The human-visible name resolves too (like field_property):
+        'Triggered By' must find triggered_by even though the cleaned
+        key spells it with an underscore."""
+        assert _registry().key_for_label("Triggered By") == "triggered_by"
+
     def test_key_for_label_misses_unknown_and_denylisted(self) -> None:
         reg = _registry()
         assert reg.key_for_label("mentored_by") is None

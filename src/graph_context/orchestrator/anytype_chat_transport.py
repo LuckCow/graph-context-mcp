@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.pipeline import sender_attributed
 from graph_context.orchestrator.rendering import chunk, render
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,10 @@ class InboundChatMessage:
     creator: str
     text: str
     order_id: str
+    # The sender's display name (the API returns it on every message);
+    # the pipeline shows it to the model so "assign this to me"-shaped
+    # requests are answerable. "" degrades to an unattributed message.
+    creator_name: str = ""
 
 
 class SentMessages:
@@ -335,7 +340,14 @@ class AnytypeChatTurnHandler:
                 continue
             if not ours and text.startswith("/"):
                 continue
-            seed.append(("assistant" if ours else "user", text))
+            if ours:
+                seed.append(("assistant", text))
+            else:
+                # Same attribution the live turn applies, so restart-seeded
+                # history reads identically to remembered history.
+                seed.append(
+                    ("user", sender_attributed(text, message.creator_name))
+                )
         return seed
 
     def reply(self, send: SendFn, edit: EditFn) -> TurnReply:
@@ -369,6 +381,7 @@ class AnytypeChatTurnHandler:
                 text=message.text,
                 # Intent nodes point back at the triggering chat message.
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
+                sender=message.creator_name,
             )
         for event in events:
             rendered = render(event)

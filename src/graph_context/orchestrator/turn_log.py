@@ -76,12 +76,16 @@ class TurnLog:
     # sessions interleave in the process-global file.
 
     def user_message(
-        self, turn_id: str, session_id: str, mode: str, user_id: str, text: str
+        self, turn_id: str, session_id: str, mode: str, user_id: str,
+        text: str, sender: str = "",
     ) -> None:
-        self._append({
+        entry: dict[str, Any] = {
             "event": "user", "turn": turn_id, "session": session_id,
             "mode": mode, "user": user_id, "text": text,
-        })
+        }
+        if sender:  # the display name shown to the model, when known
+            entry["sender"] = sender
+        self._append(entry)
 
     def prompt(
         self, turn_id: str, session_id: str, mode: str, goal: str,

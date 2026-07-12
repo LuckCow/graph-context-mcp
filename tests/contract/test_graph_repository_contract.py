@@ -247,7 +247,44 @@ class TemplateContract:
 class FieldCatalogContract:
     """ADR 023: story-node ``fields`` keys resolve against the space's
     scalar properties identically in every implementation. Seeded with
-    "Due date" (date) and "Status" (select: To Do, In Progress)."""
+    "Due date" (date), "Status" (select: To Do, In Progress), and an
+    "Assignee" objects-format RELATION (an edge, never a fields key)."""
+
+    async def test_relation_named_as_a_field_redirects_to_links(
+        self, catalog_repo
+    ):
+        """Live-caught: a model wrote fields={'Assignee': ...} because the
+        relation is invisible in the scalar catalog; the error must point
+        at links, not at minting a shadowing scalar property."""
+        with pytest.raises(UnknownFieldKey) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Assignee": "Nick"})
+            )
+        message = str(err.value)
+        assert "RELATION" in message and "'edge_type'" in message
+        assert "create_missing_fields" not in message
+
+    async def test_a_relation_key_cannot_be_shadowed_by_declaration(
+        self, catalog_repo
+    ):
+        """create_missing_fields must not mint a scalar over a relation."""
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Assignee": "Nick"}),
+                create_missing_fields={"Assignee": "text"},
+            )
+
+    async def test_relations_stay_out_of_the_fields_catalog(
+        self, catalog_repo
+    ):
+        rendered = {
+            spec.name
+            for specs in catalog_repo.field_catalog().values()
+            for spec in specs
+        }
+        assert "Assignee" not in rendered
 
     async def test_unmatched_key_on_create_errors_with_guidance(self, catalog_repo):
         with pytest.raises(UnknownFieldKey) as err:
@@ -339,6 +376,7 @@ class TestInMemoryFieldCatalog(FieldCatalogContract):
             FieldSpec(name="Due date", format="date", key="due_date"),
             FieldSpec(name="Status", format="select", key="status",
                       options=("To Do", "In Progress")),
+            FieldSpec(name="Assignee", format="objects", key="assignee"),
         ])
 
 
@@ -358,6 +396,62 @@ class TestAnytypeFieldCatalog(FieldCatalogContract):
         )
         await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
         await client.create_tag(status["id"], {"name": "In Progress", "color": "lime"})
+        await client.create_property(
+            {"key": "assignee", "name": "Assignee", "format": "objects"}
+        )
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class MembersContract:
+    """S11: space members are first-class, linkable nodes in every
+    implementation -- seeded with one member named "Luckcow". Search/list
+    never return participants live, so reflection is what makes an
+    assignee-style edge possible at all."""
+
+    def _member(self, repo):
+        return next(
+            n for n in repo.graph.nodes() if n.type == "Space member"
+        )
+
+    async def test_members_are_reflected_as_nodes(self, members_repo):
+        member = self._member(members_repo)
+        assert member.name == "Luckcow"
+        assert member.type_key == "participant"
+
+    async def test_a_created_node_can_link_to_a_member(self, members_repo):
+        """The whole point (live-caught): 'assign the task to the
+        requester' needs the member as an edge target."""
+        member = self._member(members_repo)
+        task = await members_repo.create_node(
+            NodeDraft("Item", name="Take a shower", summary="s."),
+            links=[LinkSpec("assignee", other=member.id)],
+        )
+        assert {n.id for _, n in members_repo.graph.neighbors(task.id)} == {
+            member.id
+        }
+
+
+class TestInMemoryMembers(MembersContract):
+    @pytest.fixture
+    def members_repo(self):
+        return InMemoryGraphRepository(members=["Luckcow"])
+
+
+class TestAnytypeMembers(MembersContract):
+    @pytest.fixture
+    async def members_repo(self):
+        mock = MockAnytype()
+        mock.seed_member("Luckcow", role="owner")
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        await client.create_property(
+            {"key": "assignee", "name": "Assignee", "format": "objects"}
+        )
         repository = AnytypeGraphRepository(client)
         await repository.hydrate()
         yield repository

@@ -55,6 +55,7 @@ class InMemoryGraphRepository:
         role_overrides: Mapping[str, Role] | None = None,
         templates: Mapping[str, FakeTemplate] | None = None,
         field_catalog: Sequence[FieldSpec] | None = None,
+        members: Sequence[str] = (),
     ) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
@@ -70,10 +71,24 @@ class InMemoryGraphRepository:
         # historical open behavior -- any field key, stored verbatim -- so
         # the memory backend and demos need no vocabulary. A catalog turns
         # on the strict contract: story-node field keys must match a spec
-        # (by key or name) or be declared via create_missing_fields.
+        # (by key or name) or be declared via create_missing_fields. An
+        # ``objects``-format spec models a RELATION (an edge, ADR 006):
+        # never a fields target, and a fields key naming one redirects to
+        # ``links`` -- mirroring the adapter's registry.
         self._field_specs: list[FieldSpec] | None = (
             list(field_catalog) if field_catalog is not None else None
         )
+        # Space members reflected as read-only nodes (S11), mirroring the
+        # Anytype adapter's member fetch: first-class, linkable (an
+        # assignee-style edge needs a target IN the index), no role.
+        for name in members:
+            self._graph.upsert_node(Node(
+                id=f"member-{next(self._ids):04d}",
+                type="Space member",
+                type_key="participant",
+                name=name,
+                summary="",
+            ))
 
     @property
     def graph(self) -> GraphIndex:
@@ -192,8 +207,9 @@ class InMemoryGraphRepository:
         if not self._field_specs:
             return {}
         # No per-type property attachment in the fake: the whole catalog is
-        # offered under every known (non-infra) type name.
-        specs = tuple(self._field_specs)
+        # offered under every known (non-infra) type name. Relations
+        # (objects format) are edges, not fields-key vocabulary.
+        specs = tuple(s for s in self._field_specs if s.format != "objects")
         return {name: specs for name in sorted(self.known_node_types())}
 
     # -- field routing (ADR 023) -------------------------------------------
@@ -226,12 +242,20 @@ class InMemoryGraphRepository:
         matched: dict[str, FieldSpec | None] = {}
         for key in fields:
             spec = self._spec_for(key)
+            if spec is not None and spec.format == "objects":
+                # The key names a relation: an edge, never a field --
+                # redirect (even when declared; a scalar must not shadow it).
+                raise UnknownFieldKey(
+                    key, type_name, relation_label=spec.name,
+                )
             if spec is None and key not in declared:
                 raise UnknownFieldKey(
                     key,
                     type_name,
                     type_properties=tuple(
-                        self._render_spec(s) for s in self._field_specs
+                        self._render_spec(s)
+                        for s in self._field_specs
+                        if s.format != "objects"
                     ),
                     formats=tuple(schema.FIELD_FORMATS),
                 )

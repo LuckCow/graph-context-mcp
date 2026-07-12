@@ -17,11 +17,19 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from graph_context.orchestrator.drivers import TranscriptEvent
 
+# The "[from <name>]" tag is written by pipeline.sender_attributed; the
+# description here and the format there must stay in lockstep.
 _GUIDANCE = (
     "Call tools with a flat JSON object of their documented parameters. "
     "The harness executes every call; results arrive as <tool_result> "
     "blocks in the next message. Never repeat a call whose result is "
-    "already in the transcript."
+    "already in the transcript. User messages may open with a "
+    'harness-added "[from <name>]" tag: that is the sender\'s display '
+    "name, already resolved and authoritative -- use it as-is when a "
+    "task needs the requester's name. Space members also exist as "
+    "'Space member' nodes: to LINK a node to the sender or another "
+    "member (e.g. an assignee-style relation), find_node their name "
+    "and pass the node id as the link target."
 )
 
 

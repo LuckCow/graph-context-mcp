@@ -130,6 +130,7 @@ async def run() -> None:
             author_id=message.author.id,
             author_is_bot=message.author.bot,
             content=message.content,
+            author_name=message.author.display_name,
         )
         if not handler.accepts(inbound):
             return

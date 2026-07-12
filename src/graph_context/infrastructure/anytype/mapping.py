@@ -39,6 +39,13 @@ Representation (v2, space-reflecting):
   body blocks only -- GET -> PATCH round-trips would duplicate the
   summary line. :func:`body_of` strips the prefix; write-backs must
   write its output, never the raw ``markdown`` field.
+* **A10 (spike S11, 2026-07-12):** space members' *participant objects*
+  (layout ``participant``, type key ``participant``) are ordinary object
+  envelopes on the single-object GET -- :func:`to_node` maps them like
+  anything else -- but they NEVER appear in list or search; ``GET
+  /members`` is their only enumeration (``sync.fetch_member_objects``).
+  ``objects``-format relations accept participant ids as targets, which
+  is how Anytype's own Assignee works.
 * **A9 (live-confirmed 2026-07-11):** the PATCH ``markdown`` importer
   strips heading markup from the FIRST line of the body (``## Details``
   comes back as plain ``Details``); the same heading on any later line

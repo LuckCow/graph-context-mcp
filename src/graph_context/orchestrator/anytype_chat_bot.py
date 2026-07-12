@@ -125,6 +125,7 @@ def _inbound(
         creator=message.creator,
         text=message.text,
         order_id=message.order_id,
+        creator_name=message.creator_name,
     )
 
 

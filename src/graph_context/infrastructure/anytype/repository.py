@@ -247,6 +247,10 @@ class AnytypeGraphRepository:
         self._scaffolded.clear()
         self._tag_names.clear()
         fetched = await sync.fetch_changes(self._client, self._watermark)
+        # Members never appear in search (S11): refetch them every resync;
+        # the stamp filter below drops the unchanged ones, so a new member
+        # is the only thing this usually adds.
+        fetched.extend(await sync.fetch_member_objects(self._client))
         unseen = [
             obj for obj in fetched
             if mapping.effective_modified(obj)
@@ -724,7 +728,10 @@ class AnytypeGraphRepository:
         resolved: list[tuple[PropertyInfo | None, str, str]] = []
         for key, value in fields.items():
             info = self._registry.field_property(key)
-            if info is None and key not in declared:
+            if info is None and (
+                self._registry.key_for_label(key) is not None  # a relation
+                or key not in declared
+            ):
                 await self._raise_unknown_field(key, type_key)
             resolved.append((info, key, value))
         entries: list[dict[str, Any]] = []
@@ -753,7 +760,17 @@ class AnytypeGraphRepository:
     async def _raise_unknown_field(self, key: str, type_key: str) -> NoReturn:
         """Build and raise the unmatched-key approval error (errors are
         prompts: the type's own properties first, with select options,
-        then the rest of the space's without them)."""
+        then the rest of the space's without them). A key that names an
+        ``objects``-format relation redirects to ``links`` instead --
+        relations are edges here (ADR 006), and minting a scalar shadow
+        of one must stay impossible."""
+        relation = self._registry.key_for_label(key)
+        if relation is not None:
+            raise UnknownFieldKey(
+                key,
+                self._registry.type_name(type_key),
+                relation_label=self._registry.label_for(relation),
+            )
         type_props = self._registry.reflectable_type_properties(type_key)
         type_prop_keys = {prop.key for prop in type_props}
         others = tuple(

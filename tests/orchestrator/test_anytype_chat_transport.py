@@ -28,7 +28,11 @@ from graph_context.orchestrator.anytype_chat_transport import (
     plainify,
 )
 from graph_context.orchestrator.channels import ChannelRoute
-from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
+from graph_context.orchestrator.drivers import (
+    LLMTurn,
+    ScriptedDriver,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.pipeline import Orchestrator
 
 FICTION = get_profile("fiction")
@@ -37,7 +41,10 @@ CHAT = "bafychatalphaalphaalphaalpha2"
 OBJECT_ID = "bafyreidzubmznaff57mj4wxefz7s4s2qbc4lzowv2qskqjd2m5667smi5a"
 
 
-def _route(turns: list[LLMTurn] | None = None) -> ChannelRoute:
+def _route(
+    turns: list[LLMTurn] | None = None,
+    driver: ScriptedDriver | None = None,
+) -> ChannelRoute:
     from graph_context.orchestrator.modes import load_registry
 
     services = build_services(
@@ -45,7 +52,7 @@ def _route(turns: list[LLMTurn] | None = None) -> ChannelRoute:
         SessionState(project="Ashfall"),
     )
     orchestrator = Orchestrator(
-        services=services, driver=ScriptedDriver(turns or []),
+        services=services, driver=driver or ScriptedDriver(turns or []),
         profile=FICTION, registry=load_registry(FICTION),
     )
     return ChannelRoute(orchestrator=orchestrator)
@@ -154,7 +161,30 @@ class TestGate:
         assert handler.accepts(_message(order_id="o6"))
 
 
+class _TranscriptRecordingDriver(ScriptedDriver):
+    """Scripted, but keeps what the pipeline SHOWED it at each decision."""
+
+    def __init__(self, turns: list[LLMTurn]) -> None:
+        super().__init__(turns)
+        self.transcripts: list[tuple[TranscriptEvent, ...]] = []
+
+    async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+        self.transcripts.append(tuple(transcript))
+        return await super().decide(transcript, tools, goal)
+
+
 class TestTurn:
+    async def test_the_senders_display_name_reaches_the_model(self) -> None:
+        """The API names every message's creator; the model must see it,
+        or 'assign this to me'-shaped requests are unanswerable."""
+        driver = _TranscriptRecordingDriver([LLMTurn(reply="hi Nick")])
+        handler = AnytypeChatTurnHandler(
+            routes={CHAT: _route(driver=driver)}, spaces={CHAT: SPACE}
+        )
+        await _run(handler, _message(creator_name="Nick"))
+        (transcript,) = driver.transcripts
+        assert transcript[-1].text == "[from Nick] hello"
+
     async def test_one_message_becomes_one_turn_with_anytype_scoped_ids(self) -> None:
         route = _route([LLMTurn(reply="hi there")])
         handler = AnytypeChatTurnHandler(
@@ -425,6 +455,19 @@ class TestClearWatermarkAndSeeding:
         handler = _handler(cursor=cursor)
         window = [_message(message_id="h1", order_id="o3", text="hello")]
         assert handler.seed_events(CHAT, window) == [("user", "hello")]
+
+    def test_seed_events_attribute_user_messages_like_live_turns(self) -> None:
+        """Restart-seeded history must read identically to remembered
+        history: user messages carry their sender's display name."""
+        cursor = ChatCursor()
+        cursor.fast_forward(CHAT, "o9")
+        handler = _handler(cursor=cursor)
+        window = [_message(
+            message_id="h1", order_id="o3", text="hello", creator_name="Nick",
+        )]
+        assert handler.seed_events(CHAT, window) == [
+            ("user", "[from Nick] hello")
+        ]
 
     def test_seed_events_keeps_the_reply_posted_after_the_cursor(self) -> None:
         """The reply to the last answered message always lands AFTER it, so

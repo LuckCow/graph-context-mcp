@@ -72,6 +72,10 @@ class InboundMessage:
     author_id: int
     author_is_bot: bool
     content: str
+    # The author's display name; the pipeline shows it to the model so a
+    # shared channel's messages carry who sent them. "" degrades to an
+    # unattributed message.
+    author_name: str = ""
 
 
 @dataclass
@@ -116,6 +120,7 @@ class DiscordTurnHandler:
                 session_id=f"discord:{message.channel_id}",
                 user_id=f"discord:{message.author_id}",
                 text=message.content,
+                sender=message.author_name,
             )
         for event in events:
             for piece in chunk(render(event)):

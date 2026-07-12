@@ -21,6 +21,11 @@ something:
   list and search and cannot be enumerated (spike S4), so human deletions
   are only reconciled by a full hydrate -- there is deliberately no knob to
   make them visible.
+* Space members (S11, live-confirmed 2026-07-12): ``GET /members`` returns
+  member envelopes; each member's *participant object* answers the
+  single-object GET like any object but is invisible to **both** list and
+  search, and ``objects``-format relations accept participant ids as
+  targets (Anytype's own Assignee mechanism). Seed via ``seed_member``.
 * Bodies (A5/A7, ADR 010): created via the ``body`` key, echoed back as
   ``markdown``, updated via the ``markdown`` key in PATCH (wholesale
   replace; a ``body`` key in PATCH is silently ignored -- the documented
@@ -269,6 +274,47 @@ class MockAnytype:
         self._stamp(self._objects[object_id], PROP_CREATED)
         return object_id
 
+    def seed_member(
+        self,
+        name: str,
+        *,
+        identity: str = "",
+        role: str = "editor",
+        status: str = "active",
+    ) -> str:
+        """Add a space member as the live server represents one (S11).
+
+        The member envelope rides ``GET /members``; its participant OBJECT
+        answers the single-object GET like any object but is invisible to
+        list and search (the live blind spot member reflection works
+        around). Returns the participant/member id.
+        """
+        member_identity = identity or f"ident{self._new_id()}"
+        space_part = self.space_id.replace(".", "_")
+        member_id = f"_participant_{space_part}_{member_identity}"
+        self.members.append({
+            "object": "member", "id": member_id, "name": name,
+            "icon": None, "identity": member_identity, "global_name": "",
+            "status": status, "role": role,
+        })
+        self._types.setdefault("participant", {
+            "id": self._new_id(), "key": "participant",
+            "name": "Space member", "plural_name": "Space members",
+            "layout": "participant", "properties": [],
+        })
+        self._objects[member_id] = {
+            "id": member_id,
+            "name": name,
+            "type": {"key": "participant"},
+            "layout": "participant",
+            "archived": False,
+            "properties": [],
+            "snippet": "",
+            "markdown": "",
+        }
+        self._stamp(self._objects[member_id], PROP_CREATED)
+        return member_id
+
     def seed_template(
         self,
         type_key: str,
@@ -400,7 +446,12 @@ class MockAnytype:
     def _handle_objects(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             # Hydrate sweep: unfiltered, archived hidden, large pages honored.
-            items = [o for o in self._objects.values() if not o["archived"]]
+            # Participants are hidden too (S11): the live list NEVER returns
+            # participant-layout objects; /members is their only enumeration.
+            items = [
+                o for o in self._objects.values()
+                if not o["archived"] and o.get("layout") != "participant"
+            ]
             return self._paginated(_without_markdown(items), request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
@@ -456,7 +507,12 @@ class MockAnytype:
         if request.method != "POST":
             return self._error(405, "method_not_allowed")
         body = json.loads(request.content) if request.content else {}
-        items = [o for o in self._objects.values() if not o["archived"]]
+        # Participants are invisible to search exactly like the live server
+        # (S11) -- a name query for a member returns nothing.
+        items = [
+            o for o in self._objects.values()
+            if not o["archived"] and o.get("layout") != "participant"
+        ]
         types = body.get("types")
         if types:
             items = [o for o in items if o["type"]["key"] in types]

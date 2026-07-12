@@ -49,6 +49,17 @@ class TestTurnLogFile:
             "mode": "world_modeling", "reply": "done",
         }
 
+    def test_a_known_sender_is_logged_with_the_user_message(
+        self, tmp_path
+    ) -> None:
+        """The display name the model saw; absent when no transport
+        supplied one (pinned by the exact-shape test above)."""
+        path = tmp_path / "turns.jsonl"
+        log = TurnLog(path, now=lambda: "T0")
+        log.user_message("t0", "s1", "m", "u1", "hello", sender="Nick")
+        (entry,) = _entries(path)
+        assert entry["sender"] == "Nick"
+
     def test_tool_calls_and_results_are_logged_in_full(self, tmp_path) -> None:
         path = tmp_path / "turns.jsonl"
         log = TurnLog(path, now=lambda: "T0")

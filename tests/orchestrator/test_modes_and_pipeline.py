@@ -26,6 +26,7 @@ from graph_context.interface.profiles import (
 )
 from graph_context.interface.tools import Services, build_services
 from graph_context.orchestrator import modes
+from graph_context.orchestrator.driver_common import assembled_system_prompt
 from graph_context.orchestrator.drivers import (
     LLMTurn,
     ScriptedDriver,
@@ -37,6 +38,7 @@ from graph_context.orchestrator.pipeline import (
     LAST_TURN_WARNING,
     ConversationMemory,
     Orchestrator,
+    sender_attributed,
 )
 
 FICTION = get_profile("fiction")
@@ -323,6 +325,34 @@ class TestPipeline:
         assert second[0] == ("user", "hello")
         assert second[1] == ("assistant", "Hi there.")
         assert second[-1] == ("user", "and again")
+
+    async def test_sender_attribution_reaches_the_model_and_memory(
+        self, services: Services
+    ) -> None:
+        """A session can be a shared chat, so each message must say who
+        sent it (live-caught: Task Creation Mode could not fill
+        'Assignee = the requester' from a bare message)."""
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="Hi Nick."), LLMTurn(reply="Hi Sam."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "hello", sender="Nick")
+        assert driver.transcripts[0][-1].text == "[from Nick] hello"
+        await orchestrator.handle_message("s1", "u2", "me too", sender="Sam")
+        replayed = [(e.kind, e.text) for e in driver.transcripts[1]]
+        assert replayed[0] == ("user", "[from Nick] hello")
+        assert replayed[-1] == ("user", "[from Sam] me too")
+
+    def test_the_sender_tag_matches_its_system_prompt_description(self) -> None:
+        """The drivers' standing guidance tells the model the [from <name>]
+        tag is authoritative (live-caught: a model burned its whole tool
+        budget searching the graph for the sender instead); the tag format
+        and its description must stay in lockstep."""
+        assert sender_attributed("hello", "Nick") == "[from Nick] hello"
+        assert '"[from <name>]"' in assembled_system_prompt("any goal")
 
     async def test_memory_is_per_session(self, services: Services) -> None:
         driver = _TranscriptRecordingDriver([

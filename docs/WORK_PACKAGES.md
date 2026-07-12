@@ -1562,6 +1562,37 @@ What shipped:
 
 ---
 
+## WP17 — Sender attribution + space members as nodes (ADR 026) — **shipped 2026-07-12**
+
+**Status:** complete. "Assign the task to the requester" works
+end-to-end; both halves were live-caught failures (turns `2fb75badc8ca`
+and `3543a613ff3e`).
+
+What shipped:
+
+* **Sender attribution.** Transports pass the sender's display name
+  (`creator_name` rides every Anytype chat message; Discord uses
+  `author.display_name`); the pipeline prepends `[from <name>]` to the
+  live message, conversation memory, and startup seeding
+  (`pipeline.sender_attributed` is the single format rule), and the
+  drivers' system prompt tells the model the tag is authoritative. The
+  turn diary logs `sender` on `user` events.
+* **Member reflection (spike S11, quirk A10).** Participants never
+  appear in list/search; hydrate and resync now fetch active members via
+  `/members` + per-member GETs and feed the ordinary object envelopes
+  through `mapping.to_node`. Members are first-class read-only nodes:
+  findable by name, listed in overview type counts, and valid link
+  targets — an `objects` relation accepts a participant id (Anytype's
+  own Assignee mechanism, certified live).
+* **Relation-shaped `fields` keys redirect.** A `fields` key naming an
+  `objects`-format relation (e.g. `Assignee`) errors with a `links=`
+  redirect instead of listing scalar properties or offering
+  `create_missing_fields` (which could never mint a scalar shadow of a
+  relation). `SpaceRegistry.key_for_label` also matches relation display
+  names now ("Linked Projects" resolves like `linked_projects`).
+
+---
+
 ## Sequencing
 
 ```

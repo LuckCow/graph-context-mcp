@@ -65,6 +65,14 @@ class UnknownFieldKey(ApprovalRequired):
     reusable properties (the requested type's own first) and the explicit
     opt-in for creating a genuinely new one, mirroring
     :class:`UnknownRelationLabel`'s approval gesture.
+
+    ``relation_label``: the key DID match an ``objects``-format relation --
+    in this system an edge, not a field (ADR 006). The message then
+    redirects to ``links`` instead of listing properties or offering
+    ``create_missing_fields`` (which would try to mint a scalar shadowing
+    the relation). Live-caught: a space's "Assignee" relation was invisible
+    to a model that only knew fields, and the old message sent it further
+    astray.
     """
 
     def __init__(
@@ -74,11 +82,22 @@ class UnknownFieldKey(ApprovalRequired):
         type_properties: tuple[str, ...] = (),
         other_properties: tuple[str, ...] = (),
         formats: tuple[str, ...] = (),
+        relation_label: str = "",
     ) -> None:
         self.key = key
         self.type_name = type_name
         self.type_properties = tuple(type_properties)
         self.other_properties = tuple(other_properties)
+        self.relation_label = relation_label
+        if relation_label:
+            super().__init__(
+                f"{key!r} is an objects-format RELATION in this space -- "
+                f"an edge, not a scalar field. Drop the {key!r} fields key "
+                f"and pass links=[{{'edge_type': {relation_label!r}, "
+                "'other': '<target node id or name>'}] instead (the target "
+                "must be an existing node)."
+            )
+            return
         parts = [f"no property in this space matches field {key!r}."]
         if self.type_properties:
             parts.append(

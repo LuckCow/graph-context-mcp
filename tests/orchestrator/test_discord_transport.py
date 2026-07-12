@@ -27,7 +27,11 @@ from graph_context.orchestrator.discord_transport import (
     parse_channel_allowlist,
     render,
 )
-from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
+from graph_context.orchestrator.drivers import (
+    LLMTurn,
+    ScriptedDriver,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
 
@@ -106,6 +110,39 @@ class TestTurn:
         orchestrator = handler.routes[ALLOWED_CHANNEL].orchestrator
         assert orchestrator.mode_of(session) == "authoring"
         assert sends and sends[0].startswith("[notice] ")
+
+    async def test_the_authors_display_name_reaches_the_model(self) -> None:
+        """A shared channel's messages must say who sent them; the pipeline
+        prefixes the sender when the transport supplies one."""
+
+        class _RecordingDriver(ScriptedDriver):
+            def __init__(self) -> None:
+                super().__init__([LLMTurn(reply="hi Nick")])
+                self.transcripts: list[tuple[TranscriptEvent, ...]] = []
+
+            async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+                self.transcripts.append(tuple(transcript))
+                return await super().decide(transcript, tools, goal)
+
+        driver = _RecordingDriver()
+        services = build_services(
+            InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+            SessionState(project="Ashfall"),
+        )
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        handler = DiscordTurnHandler(
+            routes={ALLOWED_CHANNEL: ChannelRoute(orchestrator=orchestrator)}
+        )
+
+        async def send(text: str) -> None:
+            pass
+
+        await handler.run_turn(_message(author_name="Nick"), send)
+        (transcript,) = driver.transcripts
+        assert transcript[-1].text == "[from Nick] hello"
 
     async def test_a_long_reply_is_chunked_under_the_discord_limit(self) -> None:
         handler = _handler([LLMTurn(reply="x" * 2500)])

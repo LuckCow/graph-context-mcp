@@ -18,6 +18,17 @@ Known blind spot (spike S4): archived objects do not appear in list or
 search results, so human *deletions* are invisible to modified-since resync.
 They are only reconciled by the next full hydrate, which rebuilds the index
 from the live set.
+
+Space members (spike S11, 2026-07-12): participant objects NEVER appear in
+list or search results, but the single-object GET serves them like any
+object and ``objects``-format relations accept them as targets (that is how
+Anytype's own Assignee works). So both hydrate and resync fetch the space's
+active members via ``/members`` + per-member GETs (members are few; this is
+not an N+1 over the space) and feed the ordinary object envelopes through
+``mapping.to_node`` -- members become first-class, read-only nodes the LLM
+can see and link to. Member *renames* keep their modified stamp and member
+*removals* mirror the S4 blind spot: both reconcile on the next full
+hydrate.
 """
 
 from __future__ import annotations
@@ -27,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from graph_context.domain.graph import Direction, GraphIndex
 from graph_context.domain.models import NodeId
+from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 
@@ -39,13 +51,19 @@ logger = logging.getLogger(__name__)
 async def load_index(
     client: AnytypeClient, registry: SpaceRegistry
 ) -> tuple[GraphIndex, str, dict[NodeId, str]]:
-    """Full hydrate: one paged sweep, two in-memory passes (nodes, then edges).
+    """Full hydrate: one paged sweep + the member fetch, two in-memory
+    passes (nodes, then edges).
 
     Returns the new index, the last-modified watermark, and the per-node
     effective-modified stamps (used by the repository for self-write
     suppression).
     """
     objects = [obj async for obj in client.list_objects()]
+    swept = {obj.get("id") for obj in objects}
+    objects.extend(
+        obj for obj in await fetch_member_objects(client)
+        if obj.get("id") not in swept  # future-proof against overlap
+    )
     index = GraphIndex()
     watermark = ""
     stamps: dict[NodeId, str] = {}
@@ -64,6 +82,26 @@ async def load_index(
         index.node_count(), index.edge_count(), len(objects),
     )
     return index, watermark, stamps
+
+
+async def fetch_member_objects(client: AnytypeClient) -> list[dict[str, Any]]:
+    """The active members' participant objects, as ordinary envelopes (S11).
+
+    ``/members`` is the only enumeration of participants (list/search skip
+    them); the per-member GET returns a normal object payload that flows
+    through :func:`mapping.to_node` like anything else. Lenient reads: a
+    member whose object cannot be fetched is skipped with a warning.
+    """
+    objects: list[dict[str, Any]] = []
+    async for member in client.list_members():
+        member_id = str(member.get("id") or "")
+        if not member_id or member.get("status") != "active":
+            continue
+        try:
+            objects.append(await client.get_object(member_id))
+        except GraphContextError as err:
+            logger.warning("skipping member object %s: %s", member_id, err)
+    return objects
 
 
 async def fetch_changes(

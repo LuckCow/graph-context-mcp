@@ -130,15 +130,22 @@ class SpaceRegistry:
     def key_for_label(self, label: str) -> str | None:
         """Resolve a relation *label* to an existing ``objects`` property key.
 
-        Case-insensitive match on the cleaned label or the raw key. Returns
-        ``None`` when no existing relation matches (the writer then surfaces
-        it for approval).
+        Case-insensitive match on the cleaned label, the raw key, or the
+        property's display name -- the display name is what the space's
+        human (and therefore the LLM) sees, and ``field_property`` already
+        matches it for scalars ("Linked Projects" must resolve as well as
+        ``linked_projects``). Returns ``None`` when no existing relation
+        matches (the writer then surfaces it for approval).
         """
         target = label.strip().lower()
         for key, info in self.properties_by_key.items():
             if info.format != "objects" or key in mapping.SYSTEM_RELATION_DENYLIST:
                 continue
-            if mapping.clean_label(key).lower() == target or key.lower() == target:
+            if (
+                mapping.clean_label(key).lower() == target
+                or key.lower() == target
+                or info.name.strip().lower() == target
+            ):
                 return key
         return None
 

@@ -4,8 +4,9 @@ One message = one turn: the pipeline runs the driver/tool loop until the
 driver replies (or the tool budget runs out) and returns the turn's reply
 events. Transports (CLI now; Telegram/Slack in WP8) stay thin adapters
 over this function -- ``session_id`` is the transport's thread/channel,
-``user_id`` its user handle (unused until WP8's authz/attribution, logged
-today).
+``user_id`` its user handle (provenance attribution + logs), ``sender``
+the human-readable display name the model gets to see (see
+:func:`sender_attributed`).
 
 Mode switching is an EXPLICIT user command (settled in WP6): ``/mode
 <name>`` over whatever specs the deployment loaded (ADR 015), handled here
@@ -76,6 +77,21 @@ class ReplyEvent:
 
     text: str
     kind: str = "reply"
+
+
+def sender_attributed(text: str, sender: str) -> str:
+    """The transcript form of a user message with a known sender.
+
+    A session can be a shared surface (an Anytype space chat, a Discord
+    channel), so "assign this to me"-shaped requests are unanswerable
+    unless each message says who sent it -- the model otherwise sees only
+    bare text (live-caught: Task Creation Mode could not fill Assignee =
+    the requester). The prefix rides into conversation memory and startup
+    seeding too, so replayed history keeps its attribution; the single
+    format rule lives here. An empty sender (CLI, MCP, name unknown)
+    leaves the message bare.
+    """
+    return f"[from {sender}] {text}" if sender else text
 
 
 DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
@@ -213,7 +229,8 @@ class Orchestrator:
         return spec
 
     async def handle_message(
-        self, session_id: str, user_id: str, text: str, origin: str = ""
+        self, session_id: str, user_id: str, text: str, origin: str = "",
+        sender: str = "",
     ) -> list[ReplyEvent]:
         state = await self._session(session_id)
         stripped = text.strip()
@@ -223,7 +240,8 @@ class Orchestrator:
         turn_id = uuid.uuid4().hex[:12]
         if self.turn_log:
             self.turn_log.user_message(
-                turn_id, session_id, state.mode, user_id, stripped
+                turn_id, session_id, state.mode, user_id, stripped,
+                sender=sender,
             )
         if stripped.startswith("/mode"):
             mode_events = await self._switch_mode(state, stripped)
@@ -270,7 +288,8 @@ class Orchestrator:
                 self.turn_log.context(
                     turn_id, session_id, spec.name, context_block
                 )
-        transcript.append(TranscriptEvent("user", stripped))
+        spoken = sender_attributed(stripped, sender)
+        transcript.append(TranscriptEvent("user", spoken))
         if self.turn_log:
             # The assembled prompt as the driver will render it for the
             # FIRST decision; later decisions add only tool results, which
@@ -351,7 +370,8 @@ class Orchestrator:
         )
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
-            state.memory.remember_turn(stripped, reply_text)
+            # The attributed form: replayed history must keep who spoke.
+            state.memory.remember_turn(spoken, reply_text)
         if self.turn_log:
             self.turn_log.turn_end(turn_id, session_id, spec.name, events)
         return events

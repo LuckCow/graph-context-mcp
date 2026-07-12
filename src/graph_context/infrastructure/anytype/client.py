@@ -193,6 +193,15 @@ class AnytypeClient:
         payload = await self.request("GET", f"{self._space}/objects/{object_id}")
         return _unwrap(payload, "object")
 
+    def list_members(self) -> AsyncIterator[dict[str, Any]]:
+        """Space members (ordinary paginated ``data`` envelope).
+
+        The ONLY enumeration of participants (S11): list/search never
+        return participant-layout objects, though the single-object GET
+        serves them like any object.
+        """
+        return self.paginate(f"{self._space}/members")
+
     async def create_object(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/objects", json=body)
         return _unwrap(payload, "object")

@@ -85,6 +85,35 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         assert CONNECTIONS_HEADING not in raw
         assert (await repo.fetch_body(mira.id)).strip() == "Body text stays intact."
 
+    async def test_members_reflect_and_accept_assignee_links_live(self, repo):
+        """S11 against the real server: participants never ride list or
+        search, yet hydrate reflects them (via /members + per-member GETs)
+        as linkable nodes, and an objects relation accepts a participant
+        target -- the Assignee mechanism end-to-end."""
+        member = next(
+            (n for n in repo.graph.nodes() if n.type_key == "participant"),
+            None,
+        )
+        assert member is not None, "GC-E2E must reflect its bot member"
+        assert member.name  # the display name the LLM matches on
+        client = repo._client  # E2E-only reach-in; no property port
+        if repo.registry.key_for_label("E2E Assignee") is None:
+            await client.create_property(
+                {"key": "e2e_assignee", "name": "E2E Assignee",
+                 "format": "objects"}
+            )
+            await repo.resync()  # refresh the registry snapshot
+        label = repo.registry.key_for_label("E2E Assignee")
+        task = await repo.create_node(
+            NodeDraft("Character", name="Member Link Pin", summary="s"),
+            links=[LinkSpec(label, other=member.id)],
+        )
+        assert {n.id for _, n in repo.graph.neighbors(task.id)} == {member.id}
+        # The store really holds the participant target (not just our index).
+        assert member.id in mapping.relation_targets(
+            await client.get_object(task.id), label
+        )
+
     async def test_native_select_field_round_trips_live(self, repo):
         """ADR 012/023 against the real server: a `fields` key matching a
         select property resolves-or-creates the tag, writes the property,
