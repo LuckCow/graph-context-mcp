@@ -289,7 +289,9 @@ reply = "This mode can't create nodes -- task_creation_mode binds only read tool
 
 # 4. (log 14:25, same turn as case 2's failure) The supersede edit flailed
 # through ~8 near-duplicate update_node calls. One update carries links AND
-# summary; land it and stop.
+# summary; land it and stop. (The replacement is a plain Note: the case is
+# about update discipline, and a mode-typed target would be name-hidden
+# from link resolution -- infra roles are not addressable by name.)
 [[case]]
 id = "update_lands_without_flailing"
 mode = "organizing"
@@ -301,9 +303,9 @@ name = "Old Notes"
 summary = "Working notes for the task workflow."
 
 [[case.seed.node]]
-type = "Activity Mode"
+type = "Note"
 name = "New Notes"
-summary = "The replacement mode object for the task workflow."
+summary = "The replacement notes page for the task workflow."
 
 [[case.turn]]
 user = "Mark 'Old Notes' as superseded: point it at 'New Notes' with a 'superseded_by' link and set its summary to 'Superseded -- see New Notes.'"
@@ -325,3 +327,75 @@ tool_calls = [{ name = "update_node", arguments = { node_id = "Old Notes", summa
 
 [[case.script]]
 reply = "Done: 'Old Notes' now carries the superseded_by link to 'New Notes' and the updated summary."
+
+
+# 5. (log 2026-07-11 20:36, turn aabecafd1279) Two nodes both named
+# "Task Creation Mode" -- the superseded Structural Reminder and the live
+# Activity Mode. find_node surfaces only the reminder (mode objects are
+# infra-hidden by name) while query(type="Activity Mode") shows the mode;
+# fed that mixed information, the model re-rolled the identical find_node
+# three times (5 decisions / 5 calls) before answering. A deterministic
+# call repeated verbatim is pure waste: look once, cross-check by type,
+# answer.
+[[case]]
+id = "duplicate_name_answered_without_repeat_lookups"
+mode = "task_creation_mode"
+trials = 2
+
+[[case.modes]]
+name = "Task Creation Mode"
+goal = "Guideline for creating Task nodes: assign new tasks to whoever created them unless the message specifies another assignee."
+mutating = false
+
+[[case.seed.node]]
+type = "Activity Mode"
+name = "Task Creation Mode"
+ref = "Task Creation Mode (live)"
+summary = "Activity Mode: when creating tasks, assign to whoever created the task unless the message specifies another assignee."
+body = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead."
+
+[[case.seed.node]]
+type = "Structural Reminder"
+name = "Task Creation Mode"
+ref = "Task Creation Mode (old)"
+summary = "Superseded -- replaced by the Activity Mode version of Task Creation Mode."
+stale = true
+
+[[case.turn]]
+user = "Wait -- I still see two 'Task Creation Mode' entries. Which one is actually in use?"
+seed_memory = [
+    ["user", "The task creation mode was meant to be an Activity Mode, not a structural reminder. Please change it"],
+    ["assistant", "Fixed -- Task Creation Mode is now an Activity Mode node with the same rule: tasks default to being assigned to whoever created them unless the message specifies otherwise. I marked the old Structural Reminder version as superseded rather than deleting it, so there's a clean trail."],
+]
+
+[case.expect.graph]
+node_count_delta = 0
+
+[case.expect.tools]
+not_executed = ["create_node", "update_node"]
+max_decisions = 3
+max_executed_calls = 3
+
+[case.expect.reply]
+must_mention = ["Activity Mode"]
+
+[case.judge]
+rubric = """
+Two nodes share the name "Task Creation Mode": a superseded Structural
+Reminder and the live Activity Mode (the mode config actually in use).
+find_node only surfaces the reminder; the mode object appears via
+query(type="Activity Mode"). Pass only if the reply tells the user the
+Activity Mode version is the one in use (the reminder is a superseded
+leftover), and the trajectory contains no tool call repeated with
+identical arguments -- re-rolling the same deterministic lookup is
+exactly the failure this case pins.
+"""
+
+[[case.script]]
+tool_calls = [{ name = "find_node", arguments = { name = "Task Creation Mode" } }]
+
+[[case.script]]
+tool_calls = [{ name = "query", arguments = { type = "Activity Mode" } }]
+
+[[case.script]]
+reply = "The one in use is the Activity Mode version -- the mode config this chat's task_creation_mode runs on (assign new tasks to their creator unless someone else is named). The Structural Reminder with the same name is the superseded leftover from before the conversion; it's safe to delete in Anytype."

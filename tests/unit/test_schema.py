@@ -17,6 +17,12 @@ class TestResolveRole:
         assert schema.resolve_role("gc_session_context") is Role.SESSION_CONTEXT
         assert schema.resolve_role("gc_activity_mode") is Role.MODE
 
+    def test_mode_display_name_resolves_like_the_key(self) -> None:
+        # Backends without a key registry (in-memory, eval worlds) carry
+        # the display name as the type; a mode object must be infra-hidden
+        # there too, or find_node sees different worlds per backend.
+        assert schema.resolve_role("Activity Mode") is Role.MODE
+
     def test_mode_role_is_infra_hidden(self) -> None:
         # ADR 015 amendment: mode config objects are the human's editing
         # surface, never the LLM's traversal data.

@@ -22,7 +22,7 @@ class SeedError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class SeedResult:
-    """The built world's baseline: name->id plus post-seed counts."""
+    """The built world's baseline: seed handle->id plus post-seed counts."""
 
     ids: dict[str, NodeId]
     node_count: int
@@ -32,10 +32,13 @@ class SeedResult:
 async def seed_world(repository: GraphRepository, case: EvalCase) -> SeedResult:
     ids: dict[str, NodeId] = {}
     for spec in case.seed_nodes:
-        if spec.name in ids:
-            raise SeedError(f"case {case.id!r}: duplicate seed node {spec.name!r}")
+        if spec.handle in ids:
+            raise SeedError(
+                f"case {case.id!r}: duplicate seed node {spec.handle!r}"
+                " (same-named seeds must disambiguate with 'ref')"
+            )
         node = await repository.create_node(_draft(spec))
-        ids[spec.name] = node.id
+        ids[spec.handle] = node.id
         if spec.stale:
             # summary_stale is normally NodeWriter's rule; a seed sets the
             # flag directly because the STATE is the fixture, not the rule.

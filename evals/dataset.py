@@ -64,14 +64,23 @@ class EdgeRef:
 
 @dataclass(frozen=True, slots=True)
 class SeedNode:
+    """``ref`` is the handle seed edges use to name this node; it defaults
+    to ``name`` and only needs spelling out when two seeds share a display
+    name (a duplicate-name world is a legitimate fixture)."""
+
     type: str
     name: str
     summary: str
+    ref: str = ""
     stale: bool = False
     story_time: float | str | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     body: str = ""
     icon: str = ""
+
+    @property
+    def handle(self) -> str:
+        return self.ref or self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +190,9 @@ _CASE_KEYS = {
 }
 _MODE_KEYS = {"name", "goal", "mutating"}  # no capture until a case needs it
 _SEED_KEYS = {"node", "edge"}
-_SEED_NODE_KEYS = {"type", "name", "summary", "stale", "story_time", "fields", "body", "icon"}
+_SEED_NODE_KEYS = {
+    "type", "name", "summary", "stale", "story_time", "fields", "body", "icon", "ref",
+}
 _SEED_EDGE_KEYS = {"source", "label", "target"}
 _TURN_KEYS = {"user", "seed_memory"}
 _EXPECT_KEYS = {"graph", "tools", "session", "reply"}
@@ -325,6 +336,7 @@ def _parse_seed_node(raw: Mapping[str, Any], origin: str) -> SeedNode:
         type=_required_str(raw, "type", ctx),
         name=_required_str(raw, "name", ctx),
         summary=_required_str(raw, "summary", ctx),
+        ref=str(raw.get("ref", "")),
         stale=_flag(raw.get("stale", False), f"{ctx}: stale"),
         story_time=story_time,
         fields={str(k): str(v) for k, v in fields.items()},

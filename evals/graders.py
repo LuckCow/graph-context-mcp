@@ -195,12 +195,28 @@ def _grade_reply(case: EvalCase, trial: TrialRecord) -> list[GradeResult]:
 
 def _find(graph: GraphIndex, ref: NodeRef) -> list[Node]:
     """Name/type matches only -- field checks are `_grade_graph`'s layer,
-    so edge and working-set graders can share this with bare refs."""
-    matches = graph.find_by_name(ref.name, node_type=ref.type)
-    # Substring fallbacks are for resolving, not asserting: existence means
-    # a node NAMED this exists, so exact (case-insensitive) matches only.
+    so edge and working-set graders can share this with bare refs.
+
+    Deliberately NOT ``find_by_name``: that is the tool surface, which
+    hides infra roles (mode config objects). Graders assert the world's
+    true state, so they scan every node -- exact name (case-insensitive),
+    and ``type`` accepted in either the display or the type-key spelling
+    (the in-memory backend renders a mapped role's name, e.g.
+    "ActivityMode", while cases speak the space spelling "Activity Mode").
+    """
     wanted = ref.name.strip().casefold()
-    return [n for n in matches if n.name.casefold() == wanted]
+    type_q = ref.type.strip().casefold() if ref.type else None
+    return sorted(
+        (
+            n for n in graph.nodes()
+            if n.name.casefold() == wanted
+            and (
+                type_q is None
+                or type_q in {n.type.casefold(), n.type_key.casefold()}
+            )
+        ),
+        key=lambda n: (n.name.casefold(), n.id),
+    )
 
 
 def _fields_ok(node: Node, ref: NodeRef) -> bool:

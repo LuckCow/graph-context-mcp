@@ -71,6 +71,12 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_session_context": Role.SESSION_CONTEXT,
     "gc_intent": Role.INTENT,
     "gc_activity_mode": Role.MODE,
+    # The mode type's DISPLAY name. Live spaces resolve it via the
+    # gc_activity_mode key above; backends without a key registry (the
+    # in-memory repository, eval worlds) see the display name as the type,
+    # and a mode object must be infra-hidden there too or the two backends
+    # disagree about what find_node can see.
+    "activity mode": Role.MODE,
 }
 
 
