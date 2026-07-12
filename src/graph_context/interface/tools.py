@@ -56,7 +56,7 @@ from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain import schema
-from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
+from graph_context.domain.models import Edge, LinkSpec, Node, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
 from graph_context.domain.query import (
     NodeQuery,
@@ -428,6 +428,19 @@ def _render_session_echo(services: Services) -> list[str]:
     return lines
 
 
+async def resync_out_of_band(services: Services) -> frozenset[NodeId]:
+    """Pull edits made directly in Anytype into the index; return changed ids.
+
+    The single resync path -- the context tool's action, find_node's
+    miss retry, and the transports' periodic refresh all come through
+    here, so the embedding cache never falls out of step with the graph.
+    """
+    changed = await services.repository.resync()
+    if services.projector is not None and changed:
+        await services.projector.refresh(changed)
+    return changed
+
+
 @guarded
 async def context_tool(
     services: Services,
@@ -461,10 +474,7 @@ async def context_tool(
             build_overview(graph), services.repository.field_catalog()
         )
     if action == "resync":
-        changed = await services.repository.resync()
-        if services.projector is not None and changed:
-            # Keep the embedding cache in step with out-of-band edits.
-            await services.projector.refresh(changed)
+        changed = await resync_out_of_band(services)
         if not changed:
             return "resync: no out-of-band changes."
         names = sorted(
@@ -793,9 +803,17 @@ async def find_node_tool(
     type: str = "",
     limit: int = 10,
 ) -> str:
-    matches = services.repository.graph.find_by_name(
-        name, node_type=type or None, limit=limit
-    )
+    def by_name() -> list[Node]:
+        return services.repository.graph.find_by_name(
+            name, node_type=type or None, limit=limit
+        )
+
+    matches = by_name()
+    if not matches and await resync_out_of_band(services):
+        # A miss may just mean the node was created in the Anytype UI
+        # after the last sync -- exactly the moment a stale index mints
+        # duplicates (find -> "no match" -> create).
+        matches = by_name()
     if matches or services.ranker is None:
         return presenters.render_node_matches(matches)
     # Tier 3 (ADRs 014/016): no name matched -- treat the input as a

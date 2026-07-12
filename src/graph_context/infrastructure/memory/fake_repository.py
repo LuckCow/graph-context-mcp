@@ -59,6 +59,7 @@ class InMemoryGraphRepository:
         self._graph = GraphIndex()
         self._ids = count(1)
         self._bodies: dict[NodeId, str] = {}
+        self._out_of_band: list[NodeDraft] = []
         # Profile-supplied type-key -> Role additions (WP5); same contract
         # as the Anytype adapter's registry overrides.
         self._role_overrides: dict[str, Role] = dict(role_overrides or {})
@@ -295,12 +296,24 @@ class InMemoryGraphRepository:
             updated = replace(spec, options=(*spec.options, *new))
             self._field_specs[self._field_specs.index(spec)] = updated
 
+    def stage_out_of_band(self, draft: NodeDraft) -> None:
+        """Queue a node that exists in the space but not the index yet.
+
+        Simulates a human creating an object in the Anytype UI while the
+        server runs: invisible to every read until :meth:`resync` pulls it
+        in -- the same contract as the real adapter's modified-since
+        fetch. Test/eval surface only; not part of the port.
+        """
+        self._out_of_band.append(draft)
+
     async def hydrate(self) -> None:
         """No backing store: the index is already authoritative here."""
 
     async def resync(self) -> frozenset[NodeId]:
-        """No out-of-band editors can exist for an in-memory store."""
-        return frozenset()
+        """Materialize whatever was staged out-of-band (usually nothing)."""
+        staged, self._out_of_band = self._out_of_band, []
+        created = [await self.create_node(draft) for draft in staged]
+        return frozenset(node.id for node in created)
 
     async def fetch_body(self, node_id: NodeId) -> str:
         self._graph.node(node_id)  # NodeNotFound on bad id

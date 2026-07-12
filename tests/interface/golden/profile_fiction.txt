@@ -172,7 +172,10 @@ Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
 Matching is tiered: exact name first, then substring, and if nothing
 matches by name the input is treated as a description and matched by
-MEANING (when semantic search is enabled). Semantic hits are labelled
+MEANING (when semantic search is enabled). A name miss automatically
+pulls in edits made directly in Anytype and retries, so a no-match
+answer already accounts for just-created objects -- trust it before
+creating anything new. Semantic hits are labelled
 and each carries a "why" line (what matched, what it is linked to) so
 you can verify before using an id. Each result line carries the node
 id, ready to paste into any other tool.

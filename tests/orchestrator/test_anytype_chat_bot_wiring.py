@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from graph_context.domain.models import NodeDraft
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import AnytypeChatClient
@@ -26,6 +27,7 @@ from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
     _serve_chat,
     _watch_chats,
+    _watch_graph,
 )
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
@@ -199,6 +201,35 @@ class TestLiveDiscovery:
                 raise _Done
         except* _Done:
             pass
+
+
+class TestPeriodicGraphResync:
+    async def test_out_of_band_edits_reach_the_index_without_a_turn(
+        self,
+    ) -> None:
+        """A human edits the space in the Anytype UI while the bot idles;
+        the watcher pulls the change into the shared index (the duplicate-
+        Garden failure never gets a chance to happen)."""
+
+        repository = InMemoryGraphRepository()
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(repository, SessionState(project="Todo")),
+            driver=ScriptedDriver([]),
+            profile=FICTION, registry=load_registry(FICTION),
+        ))
+        repository.stage_out_of_band(
+            NodeDraft("Project", name="Garden", summary="Yard work.")
+        )
+        watcher = asyncio.ensure_future(
+            _watch_graph(route, "space-1", interval=0.01)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while not repository.graph.find_by_name("Garden"):
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
 
 
 class TestServeLoop:

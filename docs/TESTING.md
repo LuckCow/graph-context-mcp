@@ -102,7 +102,11 @@ The `/evals-add` skill drives this end-to-end from a failure report
 `/evals-run` runs and compares. Node refs support `fields_truthy` /
 `fields_falsy` value checks, and `[[case.modes]]` stages custom in-space
 Activity Modes (e.g. a deliberately misconfigured read-only mode) into
-the trial's registry.
+the trial's registry. A seed node with `out_of_band = true` exists in
+the space but not the index until a resync (a human editing the Anytype
+UI between syncs — the stale-index/duplicate-node class of failure); it
+counts toward the `node_count_delta` baseline, and the runner resyncs
+once after the turns so graders always judge the space, not the index.
 
 ## Demo scripts
 

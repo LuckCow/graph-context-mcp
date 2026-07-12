@@ -22,7 +22,9 @@ replays turn-free.
 
 Config: ANYTYPE_API_KEY(_FILE) / ANYTYPE_BASE_URL family (endpoint-
 agnostic: the desktop app today, the headless sidecar after cutover),
-GC_SPACES_FILE (required), GC_CHAT_CURSOR, plus the usual GC_DRIVER /
+GC_SPACES_FILE (required), GC_CHAT_CURSOR, GC_CHAT_RESCAN_SECONDS (live
+chat discovery), GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
+both default 60, ``off`` disables), plus the usual GC_DRIVER /
 GC_PROFILE / GC_MODES_FILE / provenance knobs.
 
 Run:  python -m graph_context.orchestrator.anytype_chat_bot
@@ -52,6 +54,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
     InboundChatMessage,
     SentMessages,
 )
+from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,7 @@ DEFAULT_CURSOR_PATH = "logs/chat_cursor.json"
 CATCHUP_WINDOW = 100  # the messages endpoint's recency window (C2)
 _RECONNECT_CAP_SECONDS = 60.0
 CHAT_RESCAN_SECONDS = 60  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
+GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
 
 
 def _cursor_path() -> str | None:
@@ -69,20 +73,30 @@ def _cursor_path() -> str | None:
     return raw
 
 
-def _rescan_seconds() -> float | None:
-    """Live-discovery interval; ``0``/``off`` disables discovery."""
-    raw = os.environ.get("GC_CHAT_RESCAN_SECONDS", str(CHAT_RESCAN_SECONDS)).strip()
+def _interval_seconds(env: str, default: float) -> float | None:
+    """A positive polling interval from ``env``; ``0``/``off`` disables."""
+    raw = os.environ.get(env, str(default)).strip()
     if raw.lower() in {"0", "false", "no", "off"}:
         return None
     try:
         seconds = float(raw)
     except ValueError:
         raise GraphContextError(
-            f"GC_CHAT_RESCAN_SECONDS must be a number or off, got {raw!r}"
+            f"{env} must be a number or off, got {raw!r}"
         ) from None
     if seconds <= 0:
-        raise GraphContextError("GC_CHAT_RESCAN_SECONDS must be positive or off")
+        raise GraphContextError(f"{env} must be positive or off")
     return seconds
+
+
+def _rescan_seconds() -> float | None:
+    """Live-discovery interval; ``0``/``off`` disables discovery."""
+    return _interval_seconds("GC_CHAT_RESCAN_SECONDS", CHAT_RESCAN_SECONDS)
+
+
+def _graph_resync_seconds() -> float | None:
+    """Out-of-band resync interval; ``0``/``off`` disables the poll."""
+    return _interval_seconds("GC_GRAPH_RESYNC_SECONDS", GRAPH_RESYNC_SECONDS)
 
 
 def _sent_path(cursor_path: str | None) -> str | None:
@@ -249,6 +263,34 @@ async def _watch_chats(
             )
 
 
+async def _watch_graph(
+    route: ChannelRoute, space_id: str, interval: float
+) -> None:
+    """Periodic resync (the graph-side sibling of :func:`_watch_chats`).
+
+    Humans edit the space in the Anytype UI while the bot runs; without a
+    poll the shared index only refreshes when a turn happens to resync
+    (a stale index once answered "no match" for a project created two
+    minutes earlier -- and minted a duplicate). Holds the route's turn
+    lock so a resync never interleaves with a turn on the same space.
+    Never raises -- a failed poll logs and retries -- so it is safe
+    inside the bot's TaskGroup.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with route.lock:
+                changed = await route.orchestrator.resync_graph()
+        except GraphContextError as err:
+            logger.warning("graph resync for space %s failed: %s", space_id, err)
+            continue
+        if changed:
+            logger.info(
+                "graph resync for space %s: %d node(s) changed out-of-band",
+                space_id, len(changed),
+            )
+
+
 async def run() -> None:
     """Serve every bound space's chats until cancelled.
 
@@ -294,6 +336,7 @@ async def run() -> None:
         ) if transport_clients else "",
     )
     rescan = _rescan_seconds()
+    graph_resync = _graph_resync_seconds()
     try:
         served = "; ".join(
             f"{chat_id}: {desc}"
@@ -318,6 +361,11 @@ async def run() -> None:
                         handler, client_for(space_id), binding,
                         runtimes, task_group, rescan,
                     ))
+            if graph_resync is not None:
+                for space_id, route in runtimes.space_routes.items():
+                    task_group.create_task(
+                        _watch_graph(route, space_id, graph_resync)
+                    )
     finally:
         await composition.run_teardown(teardown)
 

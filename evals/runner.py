@@ -239,6 +239,10 @@ async def _run_trial(
         for turn in case.turns:
             events = await orchestrator.handle_message(session_id, "eval", turn.user)
             record.replies.extend((e.kind, e.text) for e in events)
+        # Settle: graders judge the SPACE, not the index. An out_of_band
+        # seed the trial never resynced still exists out there -- pull it
+        # in so a duplicate of it is visible as the extra node it is.
+        await built.services.repository.resync()
         record.final_reply = next(
             (text for kind, text in reversed(record.replies) if kind == "reply"), ""
         )

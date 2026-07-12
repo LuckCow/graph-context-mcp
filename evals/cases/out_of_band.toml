@@ -1,0 +1,132 @@
+# Out-of-band edits: the space is the source of truth, the index a
+# projection -- a human keeps editing the space in the Anytype UI while
+# the bot runs. The failure these cases pin (turn e5245740e775,
+# 2026-07-11): the user created a "Garden" project in the UI ~100s before
+# asking the bot to add tasks to it; the stale index answered "no match"
+# and the bot minted a duplicate Garden, splitting the project in two.
+# The pair is balanced: found-not-duplicated vs. created-when-absent.
+
+[suite]
+name = "out_of_band"
+profile = "assistant"
+embedder = "off"
+
+# 1. The project exists -- it was just created in the UI. The tasks must
+# join it, not a duplicate of it. node_count_delta is the duplicate
+# detector: the out-of-band Garden is part of the baseline, so a clean
+# turn adds exactly the two tasks; a duplicate Garden shows as +3.
+[[case]]
+id = "tasks_join_the_project_created_in_the_ui"
+mode = "task_creation_mode"
+trials = 2
+
+[[case.modes]]
+name = "Task Creation Mode"
+goal = """
+Guideline for creating Task nodes in this space: assign each new task to
+whoever requested it (the "Assignee" property) unless the message names
+someone else, and try to infer which project it belongs to (the "Linked
+Project" property).
+"""
+mutating = true
+
+[[case.seed.node]]
+type = "Project"
+name = "Home Maintenance"
+summary = "General upkeep around the house."
+
+[[case.seed.node]]
+type = "Project"
+name = "Garden"
+summary = "Yard and garden work: planting, mowing, weeding."
+out_of_band = true
+
+[[case.turn]]
+user = "Add two tasks to my Garden project: \"Mow front lawn\" and \"Weed ramps\"."
+
+[case.expect.graph]
+node_count_delta = 2
+node_exists = [
+  { name = "Garden", type = "Project" },
+  { name = "Mow front lawn", type = "Task" },
+  { name = "Weed ramps", type = "Task" },
+]
+edge_exists = [
+  { source = "Mow front lawn", label = "", target = "Garden", directed = false },
+  { source = "Weed ramps", label = "", target = "Garden", directed = false },
+]
+
+[case.expect.tools]
+max_decisions = 8
+max_executed_calls = 6
+
+[case.expect.reply]
+must_mention = ["Garden"]
+
+[[case.script]]
+tool_calls = [{ name = "find_node", arguments = { name = "Garden", type = "Project" } }]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Mow front lawn", summary = "Mow the front lawn.", links = [{ edge_type = "linked_projects", other = "Garden" }] } }]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Weed ramps", summary = "Weed the ramps.", links = [{ edge_type = "linked_projects", other = "Garden" }] } }]
+
+[[case.script]]
+reply = "Added two tasks to the Garden project: Mow front lawn and Weed ramps."
+
+
+# 2. The balanced twin: no Garden exists anywhere, so creating the
+# project IS the right move -- the resync-on-miss behavior must not
+# overcorrect into refusing to create genuinely new projects.
+[[case]]
+id = "a_truly_absent_project_is_created_for_its_task"
+mode = "task_creation_mode"
+trials = 2
+
+[[case.modes]]
+name = "Task Creation Mode"
+goal = """
+Guideline for creating Task nodes in this space: assign each new task to
+whoever requested it (the "Assignee" property) unless the message names
+someone else, and try to infer which project it belongs to (the "Linked
+Project" property).
+"""
+mutating = true
+
+[[case.seed.node]]
+type = "Project"
+name = "Home Maintenance"
+summary = "General upkeep around the house."
+
+[[case.turn]]
+user = "Add a task to my Garden project: \"Mow front lawn\"."
+
+[case.expect.graph]
+node_count_delta = 2
+node_exists = [
+  { name = "Garden", type = "Project" },
+  { name = "Mow front lawn", type = "Task" },
+]
+edge_exists = [
+  { source = "Mow front lawn", label = "", target = "Garden", directed = false },
+]
+
+[case.expect.tools]
+max_decisions = 8
+max_executed_calls = 6
+
+[case.expect.reply]
+must_mention = ["Garden"]
+
+[[case.script]]
+tool_calls = [{ name = "find_node", arguments = { name = "Garden", type = "Project" } }]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Project", name = "Garden", summary = "Yard and garden work." } }]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Mow front lawn", summary = "Mow the front lawn.", links = [{ edge_type = "linked_projects", other = "Garden" }] } }]
+
+[[case.script]]
+reply = "Created the Garden project and added the task Mow front lawn to it."

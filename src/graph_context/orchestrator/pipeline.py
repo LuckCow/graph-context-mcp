@@ -44,7 +44,7 @@ from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
-from graph_context.interface.tools import Services
+from graph_context.interface.tools import Services, resync_out_of_band
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
 from graph_context.orchestrator.modes import ModeRegistry
@@ -187,6 +187,15 @@ class Orchestrator:
         """Non-creating peek: the mode a session IS in (default if unseen)."""
         state = self._sessions.get(session_id)
         return state.mode if state is not None else self.registry.default
+
+    async def resync_graph(self) -> frozenset[str]:
+        """Pull edits made directly in Anytype into the shared index.
+
+        The transports' periodic-refresh entry point (all sessions share
+        one repository); the same path as the context tool's resync
+        action, so the embedding cache stays in step with the graph.
+        """
+        return await resync_out_of_band(self.services)
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)

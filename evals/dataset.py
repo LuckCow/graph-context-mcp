@@ -66,13 +66,22 @@ class EdgeRef:
 class SeedNode:
     """``ref`` is the handle seed edges use to name this node; it defaults
     to ``name`` and only needs spelling out when two seeds share a display
-    name (a duplicate-name world is a legitimate fixture)."""
+    name (a duplicate-name world is a legitimate fixture).
+
+    ``out_of_band`` stages the node in the backend but NOT the index -- a
+    human created it in the Anytype UI after the bot's last sync; only a
+    resync surfaces it. Such a node cannot anchor seed edges (it has no
+    id until mid-trial) and cannot be ``stale``. It counts toward the
+    ``node_count_delta`` baseline: it exists in the space from the start,
+    so a trial that duplicates it shows up as an extra node.
+    """
 
     type: str
     name: str
     summary: str
     ref: str = ""
     stale: bool = False
+    out_of_band: bool = False
     story_time: float | str | None = None
     fields: Mapping[str, str] = field(default_factory=dict)
     body: str = ""
@@ -191,7 +200,8 @@ _CASE_KEYS = {
 _MODE_KEYS = {"name", "goal", "mutating"}  # no capture until a case needs it
 _SEED_KEYS = {"node", "edge"}
 _SEED_NODE_KEYS = {
-    "type", "name", "summary", "stale", "story_time", "fields", "body", "icon", "ref",
+    "type", "name", "summary", "stale", "out_of_band", "story_time",
+    "fields", "body", "icon", "ref",
 }
 _SEED_EDGE_KEYS = {"source", "label", "target"}
 _TURN_KEYS = {"user", "seed_memory"}
@@ -332,12 +342,20 @@ def _parse_seed_node(raw: Mapping[str, Any], origin: str) -> SeedNode:
     story_time = raw.get("story_time")
     if story_time is not None and not isinstance(story_time, int | float | str):
         raise DatasetError(f"{ctx}: story_time must be a number or string")
+    stale = _flag(raw.get("stale", False), f"{ctx}: stale")
+    out_of_band = _flag(raw.get("out_of_band", False), f"{ctx}: out_of_band")
+    if stale and out_of_band:
+        raise DatasetError(
+            f"{ctx}: out_of_band and stale cannot combine (staleness is "
+            "index state; an out-of-band node is not in the index yet)"
+        )
     return SeedNode(
         type=_required_str(raw, "type", ctx),
         name=_required_str(raw, "name", ctx),
         summary=_required_str(raw, "summary", ctx),
         ref=str(raw.get("ref", "")),
-        stale=_flag(raw.get("stale", False), f"{ctx}: stale"),
+        stale=stale,
+        out_of_band=out_of_band,
         story_time=story_time,
         fields={str(k): str(v) for k, v in fields.items()},
         body=str(raw.get("body", "")),

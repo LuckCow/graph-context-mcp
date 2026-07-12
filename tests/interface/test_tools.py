@@ -13,6 +13,9 @@ from __future__ import annotations
 import pytest
 
 from graph_context.application.capture_recorder import CaptureRecorder
+from graph_context.domain.models import NodeDraft
+from graph_context.domain.session import SessionState
+from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface import tools
 from tests.conftest import World
 
@@ -295,6 +298,54 @@ async def test_without_ranker_behavior_is_unchanged(
     assert "no match" in body             # the tier degrades away (off)
     out = await tools.get_node_tool(services, node_id="nobody here")
     assert "ERROR:" in out and "Closest by meaning" not in out
+
+
+# -- find_node: a name miss pulls out-of-band edits before answering --------
+
+
+class CountingRepository(InMemoryGraphRepository):
+    """The fake plus a resync call counter, to pin when the retry spends."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resync_calls = 0
+
+    async def resync(self) -> frozenset[str]:
+        self.resync_calls += 1
+        return await super().resync()
+
+
+class TestFindNodeResyncOnMiss:
+    """The duplicate-Garden failure (2026-07-12): a user creates a node in
+    the Anytype UI, immediately asks the bot to use it by name, and the
+    stale index answers "no match" -- one create later there are two."""
+
+    async def test_a_miss_resyncs_and_finds_the_just_created_node(self) -> None:
+        repo = CountingRepository()
+        repo.stage_out_of_band(
+            NodeDraft("Project", name="Garden", summary="Yard work.")
+        )
+        services = tools.build_services(repo, SessionState(project="Todo"))
+        out = await tools.find_node_tool(services, name="Garden")
+        assert "no match" not in out
+        assert "Garden" in out
+
+    async def test_a_hit_never_spends_a_resync(self) -> None:
+        repo = CountingRepository()
+        await repo.create_node(
+            NodeDraft("Project", name="Garden", summary="Yard work.")
+        )
+        services = tools.build_services(repo, SessionState(project="Todo"))
+        out = await tools.find_node_tool(services, name="Garden")
+        assert "Garden" in out
+        assert repo.resync_calls == 0
+
+    async def test_a_true_miss_answers_no_match_after_one_resync(self) -> None:
+        repo = CountingRepository()
+        services = tools.build_services(repo, SessionState(project="Todo"))
+        out = await tools.find_node_tool(services, name="Garden")
+        assert "no match" in out
+        assert repo.resync_calls == 1
 
 
 # -- query: the Set-style attribute scan (filter, order, cap) ---------------

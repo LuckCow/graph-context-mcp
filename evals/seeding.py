@@ -5,6 +5,11 @@ Seeding uses the same public write path as production code (``create_node``
 fails here with the repository's own error instead of producing a world the
 tools could never have built. The returned baseline counts are what
 ``node_count_delta`` graders measure against.
+
+The one step outside the port is ``out_of_band`` seeds, which use the
+in-memory fake's ``stage_out_of_band`` -- deliberately not a port method,
+because production code must never stage phantom nodes; only the eval
+fixture simulates a human editing the Anytype UI between syncs.
 """
 
 from __future__ import annotations
@@ -13,6 +18,9 @@ from dataclasses import dataclass
 
 from evals.dataset import EvalCase, SeedNode
 from graph_context.domain.models import LinkSpec, NodeDraft, NodeId
+from graph_context.infrastructure.memory.fake_repository import (
+    InMemoryGraphRepository,
+)
 from graph_context.ports.graph_repository import GraphRepository
 
 
@@ -31,12 +39,25 @@ class SeedResult:
 
 async def seed_world(repository: GraphRepository, case: EvalCase) -> SeedResult:
     ids: dict[str, NodeId] = {}
+    staged: set[str] = set()  # out-of-band handles: in the space, no id yet
     for spec in case.seed_nodes:
-        if spec.handle in ids:
+        if spec.handle in ids or spec.handle in staged:
             raise SeedError(
                 f"case {case.id!r}: duplicate seed node {spec.handle!r}"
                 " (same-named seeds must disambiguate with 'ref')"
             )
+        if spec.out_of_band:
+            # A human created this in the Anytype UI after the last sync:
+            # it must stay invisible until a resync. Only the in-memory
+            # fake can stage that; the eval runtime always builds one.
+            if not isinstance(repository, InMemoryGraphRepository):
+                raise SeedError(
+                    f"case {case.id!r}: out_of_band seed {spec.handle!r} "
+                    "requires the in-memory backend"
+                )
+            repository.stage_out_of_band(_draft(spec))
+            staged.add(spec.handle)
+            continue
         node = await repository.create_node(_draft(spec))
         ids[spec.handle] = node.id
         if spec.stale:
@@ -45,6 +66,11 @@ async def seed_world(repository: GraphRepository, case: EvalCase) -> SeedResult:
             await repository.update_node(node.id, summary_stale=True)
     for edge in case.seed_edges:
         for endpoint in (edge.source, edge.target):
+            if endpoint in staged:
+                raise SeedError(
+                    f"case {case.id!r}: seed edge references {endpoint!r}, "
+                    "which is out_of_band (no id until a resync mid-trial)"
+                )
             if endpoint not in ids:
                 raise SeedError(
                     f"case {case.id!r}: seed edge references {endpoint!r}, "
@@ -57,7 +83,10 @@ async def seed_world(repository: GraphRepository, case: EvalCase) -> SeedResult:
     graph = repository.graph
     return SeedResult(
         ids=ids,
-        node_count=graph.node_count(),
+        # Out-of-band nodes exist in the space from the start, so they
+        # belong to the baseline: a trial that duplicates one shows up in
+        # node_count_delta as the extra node it is.
+        node_count=graph.node_count() + len(staged),
         edge_count=graph.edge_count(),
     )
 
