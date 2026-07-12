@@ -136,15 +136,23 @@ class TurnLog:
     def llm_turn(
         self, turn_id: str, session_id: str, mode: str, turn: LLMTurn
     ) -> None:
+        """One driver decision, rationale included: ``thinking`` (the
+        model's reasoning stream) and ``reply`` (text bundled with tool
+        calls -- preamble, or the final answer) log whenever present, so
+        a reader can see WHY each call was made, not just that it was."""
         entry: dict[str, Any] = {
             "event": "llm_turn", "turn": turn_id, "session": session_id,
             "mode": mode,
         }
+        if turn.thinking:
+            entry["thinking"] = turn.thinking
         if turn.tool_calls:
             entry["tool_calls"] = [
                 {"name": call.name, "arguments": dict(call.arguments)}
                 for call in turn.tool_calls
             ]
+            if turn.reply:
+                entry["reply"] = turn.reply
         else:
             entry["reply"] = turn.reply
         self._append(entry)

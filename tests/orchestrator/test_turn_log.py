@@ -75,6 +75,31 @@ class TestTurnLogFile:
         assert result["arguments"] == {"type": "Character", "name": "Mira"}
         assert result["result"] == "created char-1 'Mira'"
         assert decision["turn"] == result["turn"] == "t0"  # one request
+        # A bare tool-call decision carries no rationale keys at all --
+        # absence means the model sent none, not that the diary dropped it.
+        assert "reply" not in decision
+        assert "thinking" not in decision
+
+    def test_rationale_travelling_with_tool_calls_is_logged(
+        self, tmp_path
+    ) -> None:
+        """Thinking and preamble text are the model's WHY: the diary keeps
+        them beside the calls instead of dropping them (a reader debugging
+        a repeated-call loop needs to see the reasoning, or its absence)."""
+        path = tmp_path / "turns.jsonl"
+        log = TurnLog(path, now=lambda: "T0")
+        call = ToolCall("find_node", {"name": "Tati"})
+        log.llm_turn("t0", "s1", "task_creation", LLMTurn(
+            reply="Looking up Tati to link her as assignee.",
+            tool_calls=(call,),
+            thinking="The task needs an assignee edge; find the node first.",
+        ))
+        (entry,) = _entries(path)
+        assert entry["tool_calls"][0]["name"] == "find_node"
+        assert entry["reply"] == "Looking up Tati to link her as assignee."
+        assert entry["thinking"] == (
+            "The task needs an assignee edge; find the node first."
+        )
 
     def test_oldest_entries_drop_once_the_budget_is_exceeded(
         self, tmp_path

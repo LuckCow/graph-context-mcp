@@ -56,6 +56,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SdkMcpTool,
     TextBlock,
+    ThinkingBlock,
     ToolPermissionContext,
     ToolUseBlock,
     create_sdk_mcp_server,
@@ -212,6 +213,7 @@ class ClaudeAgentDriver:
             cli_path=self._cli_path,
         )
         reply_parts: list[str] = []
+        thinking_parts: list[str] = []
         calls: list[ToolCall] = []
         last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
@@ -224,6 +226,8 @@ class ClaudeAgentDriver:
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         reply_parts.append(block.text)
+                    elif isinstance(block, ThinkingBlock):
+                        thinking_parts.append(block.thinking)
                     elif isinstance(block, ToolUseBlock):
                         calls.append(
                             ToolCall(
@@ -240,7 +244,10 @@ class ClaudeAgentDriver:
         # pipeline.LAST_TURN_WARNING). Which text counts is the
         # pipeline's rule, not this adapter's.
         reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
-        return LLMTurn(reply=reply, tool_calls=tuple(calls))
+        thinking = "\n\n".join(
+            part for part in thinking_parts if part.strip()
+        ).strip()
+        return LLMTurn(reply=reply, tool_calls=tuple(calls), thinking=thinking)
 
 
 def usage_from_result(result: ResultMessage) -> DecideUsage:

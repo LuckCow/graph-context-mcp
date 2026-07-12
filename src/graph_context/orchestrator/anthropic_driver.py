@@ -170,25 +170,30 @@ def turn_from_response(response: Any) -> LLMTurn:
 
     Text blocks join into the reply, ``tool_use`` blocks become
     ToolCalls (real API ids preserved -- the pipeline echoes them back on
-    the result events), ``thinking`` blocks are skipped (adaptive
-    thinking streams them with empty text by default). ``stop_reason``
-    outcomes the pipeline should see are folded into the reply text:
-    a refusal yields a harness-visible notice instead of silence, and a
-    ``max_tokens`` cut is annotated so truncation is not mistaken for a
-    complete answer."""
+    the result events), ``thinking`` blocks land in ``LLMTurn.thinking``
+    when non-empty (adaptive thinking streams them with empty text by
+    default) -- diagnostics for the turn diary, never reply text.
+    ``stop_reason`` outcomes the pipeline should see are folded into the
+    reply text: a refusal yields a harness-visible notice instead of
+    silence, and a ``max_tokens`` cut is annotated so truncation is not
+    mistaken for a complete answer."""
     reply_parts: list[str] = []
+    thinking_parts: list[str] = []
     calls: list[ToolCall] = []
     for block in response.content:
         if block.type == "text":
             reply_parts.append(block.text)
+        elif block.type == "thinking":
+            thinking_parts.append(block.thinking)
         elif block.type == "tool_use":
             calls.append(ToolCall(block.name, dict(block.input), id=block.id))
     reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
+    thinking = "\n\n".join(part for part in thinking_parts if part.strip()).strip()
     if response.stop_reason == "refusal":
         return LLMTurn(reply=_REFUSAL_NOTICE)
     if response.stop_reason == "max_tokens":
         reply = f"{reply}\n\n{_TRUNCATION_NOTE}".strip()
-    return LLMTurn(reply=reply, tool_calls=tuple(calls))
+    return LLMTurn(reply=reply, tool_calls=tuple(calls), thinking=thinking)
 
 
 def usage_from_response(response: Any, duration_ms: int) -> DecideUsage:

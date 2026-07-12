@@ -366,7 +366,10 @@ class Orchestrator:
                 for index, call in enumerate(turn.tool_calls)
             )
             transcript.append(
-                TranscriptEvent("assistant", turn.reply, tool_calls=tool_calls)
+                TranscriptEvent(
+                    "assistant", turn.reply, tool_calls=tool_calls,
+                    thinking=turn.thinking,
+                )
             )
             for call in tool_calls:
                 trace.append(ToolTrace(

@@ -229,10 +229,25 @@ class TestResponseHarvest:
         assert turn.tool_calls[0].name == "get_node"
         assert turn.tool_calls[0].arguments == {"node_id": "n1"}
 
-    def test_thinking_blocks_are_skipped(self):
+    def test_empty_thinking_blocks_leave_thinking_blank(self):
         thinking = SimpleNamespace(type="thinking", thinking="")
         turn = turn_from_response(_response([thinking, _text_block("Answer.")]))
         assert turn.reply == "Answer."
+        assert turn.thinking == ""
+
+    def test_thinking_text_is_harvested_as_the_rationale(self):
+        """Reasoning is diagnostics for the turn diary: it lands in
+        ``thinking``, never leaks into the reply."""
+        thinking = SimpleNamespace(
+            type="thinking", thinking="Tati must exist before linking."
+        )
+        turn = turn_from_response(_response([
+            thinking,
+            _tool_use_block("toolu_a", "find_node", {"name": "Tati"}),
+        ], stop_reason="tool_use"))
+        assert turn.thinking == "Tati must exist before linking."
+        assert turn.reply == ""
+        assert turn.tool_calls[0].name == "find_node"
 
     def test_a_refusal_yields_a_notice_and_no_calls(self):
         turn = turn_from_response(_response([], stop_reason="refusal"))

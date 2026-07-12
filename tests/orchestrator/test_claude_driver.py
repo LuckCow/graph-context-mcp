@@ -19,33 +19,13 @@ from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.claude_driver import (  # noqa: E402
     derive_schema,
     local_tool_name,
-    render_transcript,
     sdk_tools,
     session_options,
     usage_from_result,
 )
-from graph_context.orchestrator.drivers import TranscriptEvent  # noqa: E402
 
-
-class TestTranscriptRendering:
-    def test_the_user_message_renders_plain(self):
-        prompt = render_transcript([TranscriptEvent("user", "Who is Mira?")])
-        assert prompt == "Who is Mira?"
-
-    def test_tool_results_are_fenced_and_named(self):
-        prompt = render_transcript([
-            TranscriptEvent("user", "Who is Mira?"),
-            TranscriptEvent("tool", "Mira: exiled engineer.", tool_name="get_node"),
-        ])
-        assert prompt.startswith("Who is Mira?")
-        assert '<tool_result tool="get_node">' in prompt
-        assert "Mira: exiled engineer." in prompt
-
-    def test_prior_assistant_text_is_marked_as_earlier(self):
-        prompt = render_transcript([
-            TranscriptEvent("assistant", "I looked her up already."),
-        ])
-        assert "<assistant_earlier>" in prompt
+# Transcript rendering is SDK-free and pinned in test_driver_common (CI
+# runs it there; this module self-skips without claude-agent-sdk).
 
 
 class TestSchemaDerivation:

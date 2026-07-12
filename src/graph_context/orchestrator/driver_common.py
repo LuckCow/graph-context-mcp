@@ -11,19 +11,24 @@ neither).
 from __future__ import annotations
 
 import inspect
+import json
 import types
 from collections.abc import Callable, Sequence
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
-from graph_context.orchestrator.drivers import TranscriptEvent
+from graph_context.orchestrator.drivers import ToolCall, TranscriptEvent
 
 # The "[from <name>]" tag is written by pipeline.sender_attributed; the
 # description here and the format there must stay in lockstep.
 _GUIDANCE = (
     "Call tools with a flat JSON object of their documented parameters. "
     "The harness executes every call; results arrive as <tool_result> "
-    "blocks in the next message. Never repeat a call whose result is "
-    "already in the transcript. User messages may open with a "
+    "blocks in the next message. Your own earlier decisions this turn "
+    "are replayed as <assistant_earlier> blocks -- your reasoning plus "
+    "the <tool_call> lines you already issued, each followed by its "
+    "<tool_result>. Never repeat a call whose result is already in the "
+    "transcript: same tool, same arguments means the answer is already "
+    "there. User messages may open with a "
     'harness-added "[from <name>]" tag: that is the sender\'s display '
     "name, already resolved and authoritative -- use it as-is when a "
     "task needs the requester's name. Space members also exist as "
@@ -92,24 +97,43 @@ def fenced_tool_result(tool_name: str, text: str) -> str:
     return f'<tool_result tool="{tool_name}">\n{text}\n</tool_result>'
 
 
+def fenced_tool_call(call: ToolCall) -> str:
+    """A prior call rendered WITH its arguments: without them the model
+    cannot tell which searches it already tried, so a fruitless call gets
+    repeated verbatim until the tool budget runs out (turn 69f1a23b0d67).
+    Arguments render as the element body -- JSON stays quoting-safe there,
+    and the shape parallels ``<tool_result>``."""
+    arguments = json.dumps(dict(call.arguments), default=str)
+    return f'<tool_call tool="{call.name}">{arguments}</tool_call>'
+
+
 def render_transcript(events: Sequence[TranscriptEvent]) -> str:
     """The turn-local transcript as one prompt (fresh session per decide).
 
     Tool results are fenced and named so the model can tell its own
-    earlier calls' output from user text. Assistant events with no text
-    are skipped: the pipeline records the mid-turn tool-call decision as
-    a text-empty assistant event (for drivers that round-trip native
-    tool_use blocks), and an empty ``<assistant_earlier>`` fence would
-    only add noise here.
+    earlier calls' output from user text. A mid-turn assistant decision
+    replays everything the (stateless) next session needs to continue its
+    own train of thought: the reasoning that chose the calls, any bundled
+    text, and the calls themselves with their arguments -- each followed
+    in order by its ``<tool_result>``. An assistant event with nothing to
+    show (scripted decisions carry no text) is skipped rather than fenced
+    empty.
     """
     parts: list[str] = []
     for event in events:
         if event.kind == "tool":
             parts.append(fenced_tool_result(event.tool_name, event.text))
         elif event.kind == "assistant":
+            inner: list[str] = []
+            if event.thinking.strip():
+                inner.append(f"<thinking>\n{event.thinking}\n</thinking>")
             if event.text.strip():
+                inner.append(event.text)
+            inner.extend(fenced_tool_call(call) for call in event.tool_calls)
+            if inner:
+                joined = "\n\n".join(inner)
                 parts.append(
-                    f"<assistant_earlier>\n{event.text}\n</assistant_earlier>"
+                    f"<assistant_earlier>\n{joined}\n</assistant_earlier>"
                 )
         else:
             parts.append(event.text)

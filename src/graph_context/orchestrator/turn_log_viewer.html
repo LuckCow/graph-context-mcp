@@ -284,12 +284,23 @@
         return d;
       }
       case "llm_turn": {
-        // A tool-call decision renders nothing on its own -- each call is
-        // shown merged with its output by the matching tool_result below.
-        if (rec.tool_calls) return null;
+        // The calls themselves render merged with their outputs by the
+        // matching tool_result blocks below; what shows HERE is the
+        // decision's rationale -- thinking (collapsed) and any text that
+        // travelled with the calls -- or the final reply.
+        const hasCalls = !!rec.tool_calls;
+        if (hasCalls && !rec.thinking && !rec.reply) return null;
         const d = el("div", "ev reply");
         d.appendChild(el("span", "tag", "assistant"));
-        d.appendChild(el("div", "text", rec.reply || ""));
+        if (rec.thinking) {
+          const det = el("details", "result");
+          det.appendChild(el("summary", null,
+            "thinking (" + rec.thinking.length + " chars)"));
+          det.appendChild(el("pre", "longtext", rec.thinking));
+          d.appendChild(det);
+        }
+        if (!hasCalls || rec.reply)
+          d.appendChild(el("div", "text", rec.reply || ""));
         return d;
       }
       case "tool_result": {

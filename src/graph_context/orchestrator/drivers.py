@@ -43,8 +43,12 @@ class TranscriptEvent:
     ``tool_calls`` is set on the mid-turn ``assistant`` event (the calls
     that decision made); ``tool_use_id`` is set on ``tool`` result events
     and matches the originating call's id. Together they let a driver
-    reconstruct a native tool_use/tool_result conversation; drivers that
-    flatten to text ignore both.
+    reconstruct a native tool_use/tool_result conversation.
+
+    ``thinking`` is the reasoning that produced a mid-turn ``assistant``
+    decision. Stateless drivers (a fresh session per decide) replay it so
+    the model keeps its own train of thought across decisions; it stays
+    turn-local -- cross-turn memory keeps only the spoken halves.
     """
 
     kind: str
@@ -52,6 +56,7 @@ class TranscriptEvent:
     tool_name: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     tool_use_id: str = ""
+    thinking: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +66,16 @@ class LLMTurn:
     Text bundled with tool calls is normally preamble the pipeline
     ignores; on a turn's final decision (after ``LAST_TURN_WARNING``) it
     counts as the reply, so a warned driver can land one last update AND
-    answer."""
+    answer.
+
+    ``thinking`` is the model's reasoning text when the provider streams
+    extended-thinking blocks. Diagnostics only: the turn diary records it
+    so a human can see WHY a decision was made; it never re-enters the
+    transcript and never counts as reply text."""
 
     reply: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
+    thinking: str = ""
 
 
 @dataclass(frozen=True, slots=True)
