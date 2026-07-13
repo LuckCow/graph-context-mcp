@@ -13,36 +13,19 @@ import pytest
 
 pytest.importorskip("claude_agent_sdk")
 
+from claude_agent_sdk import ResultMessage  # noqa: E402
+
 from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.claude_driver import (  # noqa: E402
     derive_schema,
     local_tool_name,
-    render_transcript,
     sdk_tools,
     session_options,
+    usage_from_result,
 )
-from graph_context.orchestrator.drivers import TranscriptEvent  # noqa: E402
 
-
-class TestTranscriptRendering:
-    def test_the_user_message_renders_plain(self):
-        prompt = render_transcript([TranscriptEvent("user", "Who is Mira?")])
-        assert prompt == "Who is Mira?"
-
-    def test_tool_results_are_fenced_and_named(self):
-        prompt = render_transcript([
-            TranscriptEvent("user", "Who is Mira?"),
-            TranscriptEvent("tool", "Mira: exiled engineer.", tool_name="get_node"),
-        ])
-        assert prompt.startswith("Who is Mira?")
-        assert '<tool_result tool="get_node">' in prompt
-        assert "Mira: exiled engineer." in prompt
-
-    def test_prior_assistant_text_is_marked_as_earlier(self):
-        prompt = render_transcript([
-            TranscriptEvent("assistant", "I looked her up already."),
-        ])
-        assert "<assistant_earlier>" in prompt
+# Transcript rendering is SDK-free and pinned in test_driver_common (CI
+# runs it there; this module self-skips without claude-agent-sdk).
 
 
 class TestSchemaDerivation:
@@ -133,3 +116,39 @@ class TestSessionCapabilityBoundary:
         # None = load user+project+local settings (CLI default), which can
         # inject MCP servers, permission grants, and hooks. [] = isolation.
         assert self._options().setting_sources == []
+
+
+class TestUsageTranslation:
+    """ResultMessage -> DecideUsage: the eval harness's metrics tap."""
+
+    @staticmethod
+    def _result(**overrides):
+        base = dict(
+            subtype="success", duration_ms=4200, duration_api_ms=3100,
+            is_error=False, num_turns=2, session_id="s",
+            total_cost_usd=0.0123,
+            usage={
+                "input_tokens": 11, "output_tokens": 220,
+                "cache_read_input_tokens": 3000,
+                "cache_creation_input_tokens": 450,
+            },
+        )
+        base.update(overrides)
+        return ResultMessage(**base)
+
+    def test_the_usage_block_maps_field_for_field(self):
+        usage = usage_from_result(self._result())
+        assert usage.duration_ms == 4200
+        assert usage.duration_api_ms == 3100
+        assert usage.total_cost_usd == 0.0123
+        assert usage.input_tokens == 11
+        assert usage.output_tokens == 220
+        assert usage.cache_read_tokens == 3000
+        assert usage.cache_creation_tokens == 450
+        assert usage.num_turns == 2
+
+    def test_missing_usage_degrades_to_zeroes_never_raises(self):
+        usage = usage_from_result(self._result(usage=None, total_cost_usd=None))
+        assert usage.output_tokens == 0
+        assert usage.cache_read_tokens == 0
+        assert usage.total_cost_usd is None

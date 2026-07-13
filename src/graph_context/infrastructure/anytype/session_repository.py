@@ -2,16 +2,16 @@
 
 Each session (chat, channel, or client) owns ONE object of type
 ``gc_session_context``, discriminated by the ``gc_session_key`` text
-property (ADR 021); the snapshot JSON is stored in the ``gc_fields`` text
-property -- properties are patchable (unlike bodies, A6).
+property (ADR 021); the snapshot JSON is stored in the ``gc_chat_session``
+text property (ADR 028) -- properties are patchable (unlike bodies, A6).
 
 Find-or-create: a type-scoped ``POST /search`` locates candidates (spike
 S2 settled that ``GET /objects`` takes no filters), then the key match is
 client-side over each candidate's ``gc_session_key`` property. Nodes
-without the property are pre-WP8 leftovers: they match NO key and are
-reported once so the human can delete them (or hand-copy their
-``gc_fields`` into the keyed node). If several nodes carry one key (e.g.
-a human duplicated one in the UI), the first is used and a warning logged.
+without the property are strays (e.g. a human created one by hand): they
+match NO key and are reported once so the human can delete them. If
+several nodes carry one key (e.g. a human duplicated one in the UI), the
+first is used and a warning logged.
 
 Note: hydrate indexes session objects as nodes (they are real objects in
 the space). That is by design and harmless -- their role is in
@@ -48,14 +48,14 @@ class AnytypeSessionStore:
         self._client = client
         self._labels = labels if labels is not None else {}
         self._object_ids: dict[str, str] = {}  # key -> id, cached on find/create
-        self._reported_legacy: set[str] = set()
+        self._reported_strays: set[str] = set()
 
     async def load(self, key: str) -> dict[str, Any] | None:
         object_id = await self._find(require_session_key(key))
         if object_id is None:
             return None
         obj = await self._client.get_object(object_id)
-        raw = self._property_text(obj, mapping.PROP_FIELDS)
+        raw = self._property_text(obj, mapping.PROP_CHAT_SESSION)
         if not raw:
             return None
         try:
@@ -72,7 +72,7 @@ class AnytypeSessionStore:
         key = require_session_key(key)
         object_id = await self._find(key)
         payload_entry = mapping.property_entry(
-            mapping.PROP_FIELDS, "text", json.dumps(snapshot)
+            mapping.PROP_CHAT_SESSION, "text", json.dumps(snapshot)
         )
         if object_id is None:
             label = self._labels.get(key, key)
@@ -100,7 +100,7 @@ class AnytypeSessionStore:
         async for obj in self._client.search(types=[_SESSION_TYPE_KEY]):
             candidate_key = self._property_text(obj, mapping.PROP_SESSION_KEY)
             if not candidate_key:
-                self._report_legacy(obj)
+                self._report_stray(obj)
                 continue
             if candidate_key == key:
                 matches.append(obj)
@@ -113,14 +113,13 @@ class AnytypeSessionStore:
         self._object_ids[key] = str(matches[0]["id"])
         return self._object_ids[key]
 
-    def _report_legacy(self, obj: dict[str, Any]) -> None:
+    def _report_stray(self, obj: dict[str, Any]) -> None:
         object_id = str(obj.get("id", ""))
-        if object_id in self._reported_legacy:
+        if object_id in self._reported_strays:
             return
-        self._reported_legacy.add(object_id)
+        self._reported_strays.add(object_id)
         logger.warning(
-            "legacy unkeyed session node %s (%r); ignoring -- delete it, or "
-            "copy its gc_fields into the keyed node to keep its state",
+            "unkeyed session node %s (%r); ignoring -- delete it",
             object_id, obj.get("name", ""),
         )
 

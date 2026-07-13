@@ -41,38 +41,38 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
-from graph_context.application.capture_recorder import CaptureRecorder
-from graph_context.application.explorer import Explorer
-from graph_context.application.mutation_journal import MutationJournal, NullJournal
-from graph_context.application.node_reader import NodeReader
-from graph_context.application.node_writer import NodeWriter
-from graph_context.application.querier import Querier
-from graph_context.application.ranker import Ranker
-from graph_context.application.semantic_projector import SemanticProjector
-from graph_context.application.session_persister import SessionPersister
+from graph_context.application.scheduler import Scheduler
 from graph_context.domain import schema
-from graph_context.domain.models import Edge, LinkSpec, NodeDraft, NodeId
+from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
 from graph_context.domain.overview import build_overview
 from graph_context.domain.query import (
     NodeQuery,
-    Op,
-    Predicate,
-    SortKey,
-    normalize_value,
 )
 from graph_context.domain.schema import Role
-from graph_context.domain.session import SessionState
-from graph_context.domain.traversal import ExploreQuery, node_identifiers
-from graph_context.errors import GraphContextError, NodeNotFound, UnknownNodeType
+from graph_context.domain.session import SCRATCHPAD_MAX_CHARS
+from graph_context.domain.traversal import ExploreQuery
+from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
-from graph_context.ports.graph_repository import GraphRepository
-from graph_context.ports.view_catalog import ViewCatalog
+from graph_context.interface.services import Services
+from graph_context.interface.tool_args import (
+    _edge_type_set,
+    _node_type_set,
+    _parse_detail,
+    _parse_edge_type,
+    _parse_field_declarations,
+    _parse_hold_detail,
+    _parse_links,
+    _parse_node_type,
+    _parse_order_by,
+    _parse_predicates,
+    _resolve,
+    _validate_query_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,78 +82,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_EXPLORE_EXCLUDE_ROLES = frozenset(
     {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT}
 )
-
-
-@dataclass(slots=True)
-class Services:
-    """Everything a tool call needs, built once in the composition root."""
-
-    repository: GraphRepository
-    session: SessionState
-    writer: NodeWriter
-    reader: NodeReader
-    explorer: Explorer
-    querier: Querier
-    capture: CaptureRecorder
-    persister: SessionPersister | None = None  # wired in server lifespan
-    # WP7: the orchestrator passes a real MutationJournal and drains it per
-    # turn; the MCP server keeps the NullJournal (no turn boundary).
-    journal: MutationJournal = field(default_factory=NullJournal)
-    # WP11 (ADR 014): None when GC_EMBEDDER=off -- the semantic layer
-    # degrades away and tools fall back to name search alone.
-    projector: SemanticProjector | None = None
-    ranker: Ranker | None = None
-
-
-def build_services(
-    repository: GraphRepository,
-    session: SessionState,
-    persister: SessionPersister | None = None,
-    *,
-    journal: MutationJournal | None = None,
-    projector: SemanticProjector | None = None,
-    ranker: Ranker | None = None,
-    views: ViewCatalog | None = None,
-) -> Services:
-    journal = journal or NullJournal()
-    return Services(
-        repository=repository,
-        session=session,
-        writer=NodeWriter(repository, session, journal),
-        reader=NodeReader(repository, session),
-        explorer=Explorer(repository, session),
-        querier=Querier(repository, views),
-        capture=CaptureRecorder(repository, journal=journal),
-        persister=persister,
-        journal=journal,
-        projector=projector,
-        ranker=ranker,
-    )
-
-
-def derive_services(
-    base: Services, session: SessionState, persister: SessionPersister | None
-) -> Services:
-    """A per-session view of one runtime (WP8): rebind the three
-    session-bound services, share everything expensive by reference.
-
-    Repository (and its GraphIndex), querier, capture, journal, projector,
-    and ranker stay THE runtime's instances -- sessions are views over one
-    space, not runtimes of their own. Cheap: three thin wrappers, no I/O.
-    """
-    return Services(
-        repository=base.repository,
-        session=session,
-        writer=NodeWriter(base.repository, session, base.journal),
-        reader=NodeReader(base.repository, session),
-        explorer=Explorer(base.repository, session),
-        querier=base.querier,
-        capture=base.capture,
-        persister=persister,
-        journal=base.journal,
-        projector=base.projector,
-        ranker=base.ranker,
-    )
 
 
 # -- the one wrapper ------------------------------------------------------
@@ -198,183 +126,7 @@ async def _note_mutation(services: Services) -> None:
         await services.persister.note_mutation()
 
 
-# -- parsing helpers: error messages are written FOR the LLM ---------------
-
-
-async def _resolve(services: Services, identifier: str) -> NodeId:
-    """Translate a user-supplied id-or-name into a real node id.
-
-    Resolution is a tool-layer concern (the same boundary that does all
-    ``_parse_*`` normalization), so the application and domain layers keep
-    receiving canonical ids. Raises NodeNotFound/AmbiguousNodeName, both
-    actionable, when the string does not resolve to exactly one node.
-
-    ADR 016: on a miss, the Ranker (when wired) appends "closest by
-    meaning" candidates WITH evidence to the error -- a suggestion
-    surface, never silent resolution: exact resolves, fuzzy suggests,
-    and mutation targets are never guessed (ADR 014 non-feature).
-    """
-    try:
-        return services.repository.graph.resolve(identifier).id
-    except NodeNotFound:
-        if services.ranker is None:
-            raise
-        hits = await services.ranker.rank(identifier, limit=3)
-        if not hits:
-            raise
-        raise NodeNotFound(
-            identifier, suggestions=presenters.render_ranked_hits(hits)
-        ) from None
-
-
-def _parse_node_type(value: str) -> str:
-    """Normalize a requested node type. The vocabulary is OPEN: validation
-    (does this type exist in the space?) is the repository's job, which
-    raises an actionable ``UnknownNodeType`` listing the known types."""
-    normalized = value.strip()
-    if not normalized:
-        raise GraphContextError("node 'type' must be a non-empty string")
-    return normalized
-
-
-def _parse_edge_type(value: str) -> str:
-    """Normalize a relation label. OPEN vocabulary: an unknown label is
-    surfaced for approval by the repository, not rejected here."""
-    normalized = value.strip()
-    if not normalized:
-        raise GraphContextError("each link needs a non-empty 'edge_type' label")
-    return normalized
-
-
-def _parse_detail(value: str) -> Detail:
-    try:
-        return Detail(value)
-    except ValueError:
-        raise GraphContextError(
-            f"unknown detail level {value!r}; allowed: names, summaries, full"
-        ) from None
-
-
-async def _parse_links(
-    raw: Sequence[dict[str, Any]] | None, services: Services
-) -> list[LinkSpec]:
-    links: list[LinkSpec] = []
-    for item in raw or []:
-        if "edge_type" not in item or "other" not in item:
-            raise GraphContextError(
-                "each link needs 'edge_type' and 'other' (target node id or "
-                "name); optional 'outgoing' (default true; false means the "
-                "edge points FROM 'other' TO this node)"
-            )
-        links.append(
-            LinkSpec(
-                edge_type=_parse_edge_type(str(item["edge_type"])),
-                other=await _resolve(services, str(item["other"])),
-                outgoing=bool(item.get("outgoing", True)),
-            )
-        )
-    return links
-
-
-_OPS_LISTING = ", ".join(op.value for op in Op)
-
-
-def _parse_predicates(raw: Sequence[dict[str, Any]] | None) -> tuple[Predicate, ...]:
-    predicates = []
-    for item in raw or []:
-        field_name = str(item.get("field", "")).strip()
-        if not field_name or "op" not in item:
-            raise GraphContextError(
-                "each where item needs 'field' and 'op' (plus 'value' unless "
-                f"op is exists/missing); ops: {_OPS_LISTING}"
-            )
-        try:
-            op = Op(str(item["op"]).strip().casefold())
-        except ValueError:
-            raise GraphContextError(
-                f"unknown op {item['op']!r}; allowed: {_OPS_LISTING}"
-            ) from None
-        predicates.append(
-            Predicate(
-                field=field_name,
-                op=op,
-                value=normalize_value(item.get("value", "")),
-            )
-        )
-    return tuple(predicates)
-
-
-def _parse_order_by(raw: Sequence[str] | None) -> tuple[SortKey, ...]:
-    keys = []
-    for item in raw or []:
-        parts = str(item).split()
-        directions = {"asc": False, "desc": True}
-        if len(parts) == 1:
-            keys.append(SortKey(field=parts[0]))
-        elif len(parts) == 2 and parts[1].casefold() in directions:
-            keys.append(
-                SortKey(field=parts[0], descending=directions[parts[1].casefold()])
-            )
-        else:
-            raise GraphContextError(
-                f"bad order_by entry {item!r}; each entry is 'field', "
-                "'field asc', or 'field desc'"
-            )
-    return tuple(keys)
-
-
-def _validate_query_type(services: Services, requested: str) -> Role | None:
-    """Typo-check a query's type filter and resolve its role.
-
-    The vocabulary is open, so accept anything the space registry knows,
-    any role name, or any identifier a node in the graph actually carries;
-    reject the rest with the known-types listing (errors are prompts). A
-    known type with zero instances proceeds and honestly matches nothing.
-    """
-    wanted = requested.casefold()
-    role = services.repository.role_for(requested)
-    if role is None:
-        role = next((r for r in Role if r.value.casefold() == wanted), None)
-    known = {t.casefold() for t in services.repository.known_node_types()}
-    if wanted in known or role is not None:
-        return role
-    for node in services.repository.graph.nodes():
-        if any(i.casefold() == wanted for i in node_identifiers(node)):
-            return node.role
-    raise UnknownNodeType(requested, tuple(services.repository.known_node_types()))
-
-
-def _node_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
-    if values is None:
-        return None
-    return frozenset(_parse_node_type(v) for v in values)
-
-
-def _edge_type_set(values: Sequence[str] | None) -> frozenset[str] | None:
-    if values is None:
-        return None
-    return frozenset(_parse_edge_type(v) for v in values)
-
-
 # -- tools ------------------------------------------------------------------
-
-
-SCRATCHPAD_MAX_CHARS = 2000  # over-cap is an error that teaches condensing
-
-
-def _parse_hold_detail(value: str) -> Detail:
-    normalized = value.strip().casefold()
-    levels = {
-        "": Detail.SUMMARIES,  # default bucket
-        "summary": Detail.SUMMARIES,
-        "summaries": Detail.SUMMARIES,
-        "full": Detail.FULL,
-    }
-    if normalized not in levels:
-        raise GraphContextError(
-            f"unknown hold detail {value!r}; allowed: summaries (default), full"
-        )
-    return levels[normalized]
 
 
 def _render_session_echo(services: Services) -> list[str]:
@@ -418,6 +170,19 @@ def _render_session_echo(services: Services) -> list[str]:
     return lines
 
 
+async def resync_out_of_band(services: Services) -> frozenset[NodeId]:
+    """Pull edits made directly in Anytype into the index; return changed ids.
+
+    The single resync path -- the context tool's action, find_node's
+    miss retry, and the transports' periodic refresh all come through
+    here, so the embedding cache never falls out of step with the graph.
+    """
+    changed = await services.repository.resync()
+    if services.projector is not None and changed:
+        await services.projector.refresh(changed)
+    return changed
+
+
 @guarded
 async def context_tool(
     services: Services,
@@ -443,14 +208,15 @@ async def context_tool(
         return "\n".join(lines)
     if action in {"overview", "map"}:
         # Derived cold-start map: per-type counts + highest-degree hub nodes,
-        # each with an id to start exploring from. Empty graph -> guidance,
-        # not an error (a fresh session should get something actionable).
-        return presenters.render_overview(build_overview(graph))
+        # each with an id to start exploring from, plus the space's property
+        # catalog (ADR 023) so writes reuse existing properties as fields
+        # keys. Empty graph -> guidance, not an error (a fresh session
+        # should get something actionable).
+        return presenters.render_overview(
+            build_overview(graph), services.repository.field_catalog()
+        )
     if action == "resync":
-        changed = await services.repository.resync()
-        if services.projector is not None and changed:
-            # Keep the embedding cache in step with out-of-band edits.
-            await services.projector.refresh(changed)
+        changed = await resync_out_of_band(services)
         if not changed:
             return "resync: no out-of-band changes."
         names = sorted(
@@ -536,6 +302,74 @@ async def context_tool(
     )
 
 
+_PROMPT_EXCERPT_CHARS = 160  # list action: enough to recognize, not a wall
+
+
+def _clock_line(scheduler: Scheduler) -> str:
+    return (
+        "server local time: "
+        f"{scheduler.now().isoformat(sep=' ', timespec='minutes')}"
+    )
+
+
+@guarded
+async def schedule_tool(
+    services: Services,
+    action: str = "list",
+    name: str = "",
+    schedule: str = "",
+    prompt: str = "",
+    node_id: str = "",
+) -> str:
+    scheduler = services.scheduler
+    if action == "set":
+        node, next_at = await scheduler.set(
+            name, schedule, prompt, services.session_key
+        )
+        await _note_mutation(services)
+        when = (
+            next_at.isoformat(sep=" ", timespec="minutes")
+            if next_at is not None else "never"
+        )
+        return (
+            f"scheduled {node.name!r} (id={node.id}); next fire: {when}. "
+            f"{_clock_line(scheduler)}. Verify the next-fire time matches "
+            "what the user asked for; reschedule with action='cancel' + "
+            "'set' if not."
+        )
+    if action == "list":
+        views = scheduler.events()
+        if not views:
+            return (
+                "no scheduled events. Create one with action='set' "
+                f"(name, schedule, prompt). {_clock_line(scheduler)}."
+            )
+        lines = [_clock_line(scheduler), f"scheduled events ({len(views)}):"]
+        for view in views:
+            target = view.session_key or "(default chat)"
+            lines.append(
+                f"- {view.node.name} (id={view.node.id}, chat={target}) "
+                f"-- {view.status}"
+            )
+            excerpt = view.prompt.strip().replace("\n", " ")
+            if len(excerpt) > _PROMPT_EXCERPT_CHARS:
+                excerpt = excerpt[:_PROMPT_EXCERPT_CHARS] + "…"
+            lines.append(f"  prompt: {excerpt or '(none: fires with the name)'}")
+        return "\n".join(lines)
+    if action == "cancel":
+        node = await scheduler.cancel(node_id or name)
+        await _note_mutation(services)
+        return (
+            f"cancelled {node.name!r} (id={node.id}); it will not fire. "
+            "The object stays in Anytype with Schedule status 'Cancelled' "
+            "-- the user can re-enable it there by setting the status back "
+            "to Pending."
+        )
+    raise GraphContextError(
+        f"unknown action {action!r}; allowed: set, list, cancel"
+    )
+
+
 @guarded
 async def create_node_tool(
     services: Services,
@@ -548,6 +382,7 @@ async def create_node_tool(
     links: list[dict[str, Any]] | None = None,
     icon: str = "",
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     draft = NodeDraft(
         type=_parse_node_type(type),
@@ -563,6 +398,7 @@ async def create_node_tool(
         draft,
         await _parse_links(links, services),
         create_missing_relations=create_missing_relations,
+        create_missing_fields=_parse_field_declarations(create_missing_fields),
     )
     await _note_mutation(services)
     view = await services.reader.get_node(node.id)
@@ -581,6 +417,7 @@ async def update_node_tool(
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     node_id = await _resolve(services, node_id)
     removals = [
@@ -602,6 +439,7 @@ async def update_node_tool(
         add_links=await _parse_links(add_links, services),
         remove_links=removals,
         create_missing_relations=create_missing_relations,
+        create_missing_fields=_parse_field_declarations(create_missing_fields),
     )
     await _note_mutation(services)
     stale_note = (
@@ -775,9 +613,17 @@ async def find_node_tool(
     type: str = "",
     limit: int = 10,
 ) -> str:
-    matches = services.repository.graph.find_by_name(
-        name, node_type=type or None, limit=limit
-    )
+    def by_name() -> list[Node]:
+        return services.repository.graph.find_by_name(
+            name, node_type=type or None, limit=limit
+        )
+
+    matches = by_name()
+    if not matches and await resync_out_of_band(services):
+        # A miss may just mean the node was created in the Anytype UI
+        # after the last sync -- exactly the moment a stale index mints
+        # duplicates (find -> "no match" -> create).
+        matches = by_name()
     if matches or services.ranker is None:
         return presenters.render_node_matches(matches)
     # Tier 3 (ADRs 014/016): no name matched -- treat the input as a

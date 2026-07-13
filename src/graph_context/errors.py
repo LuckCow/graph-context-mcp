@@ -57,6 +57,65 @@ class UnknownRelationLabel(ApprovalRequired):
         )
 
 
+class UnknownFieldKey(ApprovalRequired):
+    """A ``fields`` key matched no existing scalar property (ADR 023).
+
+    Fields must land in real store properties -- never a hidden extras
+    blob (ADR 028) -- so an unmatched key stops the write. The message lists the
+    reusable properties (the requested type's own first) and the explicit
+    opt-in for creating a genuinely new one, mirroring
+    :class:`UnknownRelationLabel`'s approval gesture.
+
+    ``relation_label``: the key DID match an ``objects``-format relation --
+    in this system an edge, not a field (ADR 006). The message then
+    redirects to ``links`` instead of listing properties or offering
+    ``create_missing_fields`` (which would try to mint a scalar shadowing
+    the relation). Live-caught: a space's "Assignee" relation was invisible
+    to a model that only knew fields, and the old message sent it further
+    astray.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        type_name: str,
+        type_properties: tuple[str, ...] = (),
+        other_properties: tuple[str, ...] = (),
+        formats: tuple[str, ...] = (),
+        relation_label: str = "",
+    ) -> None:
+        self.key = key
+        self.type_name = type_name
+        self.type_properties = tuple(type_properties)
+        self.other_properties = tuple(other_properties)
+        self.relation_label = relation_label
+        if relation_label:
+            super().__init__(
+                f"{key!r} is an objects-format RELATION in this space -- "
+                f"an edge, not a scalar field. Drop the {key!r} fields key "
+                f"and pass links=[{{'edge_type': {relation_label!r}, "
+                "'other': '<target node id or name>'}] instead (the target "
+                "must be an existing node)."
+            )
+            return
+        parts = [f"no property in this space matches field {key!r}."]
+        if self.type_properties:
+            parts.append(
+                f"Properties on {type_name}: {', '.join(self.type_properties)}."
+            )
+        if self.other_properties:
+            parts.append(
+                f"Other properties in the space: {', '.join(self.other_properties)}."
+            )
+        parts.append(
+            "To reuse one, use its name as the fields key; to create a NEW "
+            f"property, resend with create_missing_fields={{{key!r}: '<format>'}}"
+        )
+        if formats:
+            parts.append(f"(formats: {', '.join(sorted(formats))}).")
+        super().__init__(" ".join(parts))
+
+
 class NodeNotFound(GraphContextError):
     """A referenced node id (or name) does not exist in the graph.
 

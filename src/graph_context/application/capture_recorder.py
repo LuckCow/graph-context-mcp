@@ -7,7 +7,8 @@ says), with:
 * ``body``     -- the text itself (write-once *by policy*; see
                   NodeDraft.body).
 * ``summary``  -- one-liner, required like every node.
-* ``fields``   -- generation metadata (generated_at).
+* ``fields``   -- generation metadata (the generated-at attribution
+                  property, ADR 028).
 * references edges to every source node that shaped it. Explicit only
   (settled in WP3): no auto-referencing of the session working set.
 
@@ -31,6 +32,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
+from graph_context.domain import attribution
 from graph_context.domain.models import LinkSpec, Node, NodeDraft, NodeId
 from graph_context.ports.graph_repository import GraphRepository
 
@@ -75,7 +77,7 @@ class CaptureRecorder:
             type=artifact_type,
             name=title or _derive_title(text),
             summary=summary,
-            fields={"generated_at": self._now()},
+            fields={attribution.FIELD_GENERATED_AT: self._now()},
             body=_capped(text),
         )
         links = [

@@ -1,10 +1,11 @@
 """Size-capped JSONL record of everything that crosses the turn seam.
 
 Every message the orchestrator handles is logged as it flows: the user's
-input, each driver decision (tool calls or the final reply), every
-executed tool call with its FULL rendered result, and the turn's final
-reply events. One JSON object per line so the file tails and greps
-cleanly; every entry carries an ISO-8601 UTC timestamp.
+input, the turn's assembled prompt exactly as the driver sends it, each
+driver decision (tool calls or the final reply), every executed tool call
+with its FULL rendered result, and the turn's final reply events. One
+JSON object per line so the file tails and greps cleanly; every entry
+carries an ISO-8601 UTC timestamp.
 
 The file is bounded, not rotated: once an append pushes it past
 ``max_bytes``, the OLDEST entries are dropped until the newest fit in
@@ -75,25 +76,83 @@ class TurnLog:
     # sessions interleave in the process-global file.
 
     def user_message(
-        self, turn_id: str, session_id: str, mode: str, user_id: str, text: str
+        self, turn_id: str, session_id: str, mode: str, user_id: str,
+        text: str, sender: str = "",
     ) -> None:
-        self._append({
+        entry: dict[str, Any] = {
             "event": "user", "turn": turn_id, "session": session_id,
             "mode": mode, "user": user_id, "text": text,
+        }
+        if sender:  # the display name shown to the model, when known
+            entry["sender"] = sender
+        self._append(entry)
+
+    def prompt(
+        self, turn_id: str, session_id: str, mode: str, goal: str,
+        system_prompt: str, tools: Mapping[str, str],
+    ) -> None:
+        """The model's standing inputs: mode goal, the exact assembled
+        system prompt, and the bound tool surface (name -> LLM-facing doc).
+
+        Logged by the pipeline only when the combination CHANGES for a
+        session (first turn, after a /mode switch) -- the content is
+        per-mode-stable, so per-decision logging would only burn the byte
+        budget repeating itself.
+        """
+        self._append({
+            "event": "prompt", "turn": turn_id, "session": session_id,
+            "mode": mode, "goal": goal, "system_prompt": system_prompt,
+            "tools": dict(tools),
+        })
+
+    def context(
+        self, turn_id: str, session_id: str, mode: str, text: str
+    ) -> None:
+        """The turn's rendered context block (scratchpad, working set,
+        recent trail) -- a model input the transcript would otherwise
+        hide from reviewers."""
+        self._append({
+            "event": "context", "turn": turn_id, "session": session_id,
+            "mode": mode, "text": text,
+        })
+
+    def llm_prompt(
+        self, turn_id: str, session_id: str, mode: str, text: str
+    ) -> None:
+        """The turn's assembled prompt exactly as the driver sends it --
+        replayed conversation memory, the context block, and the live
+        message, in the driver's own rendering (fences and all).
+
+        Logged once per turn, before the first decision: later decisions
+        within the turn send this same prompt plus the tool results
+        already logged in full, so re-logging the growing transcript per
+        decision would only burn the byte budget repeating itself.
+        """
+        self._append({
+            "event": "llm_prompt", "turn": turn_id, "session": session_id,
+            "mode": mode, "text": text,
         })
 
     def llm_turn(
         self, turn_id: str, session_id: str, mode: str, turn: LLMTurn
     ) -> None:
+        """One driver decision, rationale included: ``thinking`` (the
+        model's reasoning stream) and ``reply`` (text bundled with tool
+        calls -- preamble, or the final answer) log whenever present, so
+        a reader can see WHY each call was made, not just that it was."""
         entry: dict[str, Any] = {
             "event": "llm_turn", "turn": turn_id, "session": session_id,
             "mode": mode,
         }
+        if turn.thinking:
+            entry["thinking"] = turn.thinking
         if turn.tool_calls:
             entry["tool_calls"] = [
                 {"name": call.name, "arguments": dict(call.arguments)}
                 for call in turn.tool_calls
             ]
+            if turn.reply:
+                entry["reply"] = turn.reply
         else:
             entry["reply"] = turn.reply
         self._append(entry)

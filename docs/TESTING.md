@@ -20,6 +20,7 @@ Single file / test: `pytest tests/unit/test_traversal.py -k explore` (pythonpath
 | `tests/anytype` | Adapter specifics: mapping, registry, sync, client, mock-server fidelity |
 | `tests/application` / `tests/interface` / `tests/orchestrator` | Use-cases, tool surface + presenters, harness pipeline/transports |
 | `tests/semantic` | Embedders, semantic index, ranker; ranking eval golden at `tests/semantic/ranking_eval.toml` |
+| `tests/evals` | The eval harness's own plumbing, scripted (no model): dataset validation, grader honesty, every shipped case's reference script replayed |
 | `tests/e2e` | The contract suite against a **real** Anytype server; self-skips unless `ANYTYPE_E2E=1` |
 
 **Fakes are contracts:** any behavior added to the Anytype adapter must land in the in-memory fake too, with a test. If the fake can't express it, the port is wrong — fix the port.
@@ -45,6 +46,67 @@ Profile tool docstrings are prompts, and they are pinned by golden snapshots (`t
 ```bash
 GC_REGEN_GOLDENS=1 pytest tests/interface/test_profiles.py
 ```
+
+## Behavioral evals (WP16, ADR 024)
+
+Evals grade the LLM's actual tool-driving behavior — they are **runs, not
+tests**: live runs spend Claude subscription quota and are
+nondeterministic, so pytest never collects them and CI never runs them.
+
+```bash
+python -m evals run                          # all cases, real model
+python -m evals run --case who_is_mira --trials 1
+python -m evals run --driver scripted        # replay reference scripts, no model
+python -m evals run --judge --label candidate
+python -m evals compare evals/runs/A evals/runs/B
+```
+
+Each trial gets a **fresh in-memory runtime** (seeded through the
+repository port) and runs real `Orchestrator.handle_message` turns. Code
+graders check outcomes — graph end-state, session state, reply substrings,
+loose trajectory bounds — never a prescribed call sequence; `--judge` adds
+a rubric-scored LLM verdict (reasoning-first, reported alongside, never
+overruling the code grades — unless the case sets `[case.judge] required =
+true`, for judge-only expectations like fabricated success; required
+judges run on every live run and gate the trial). Runs land in
+`evals/runs/<ts>[-label]/`
+(gitignored): `results.json` (format 2 — per-trial grades, judge
+verdicts, the transcript session key, the exact system prompt and bound
+tools), `report.md`, and a `turns.jsonl` in the standard diary format,
+including the `prompt`/`context` events that record what the model was
+told (ADR 025).
+
+**Reviewing runs** happens in the inspection server (ADR 025), which
+also runs inside `serve`:
+
+```bash
+python -m graph_context.orchestrator.inspect_server   # http://127.0.0.1:8765/
+```
+
+The dashboard lists every case with its latest verdict and run history;
+run/case pages show grades, judge reasoning, and prompts, and link each
+trial to its transcript (the viewer opens pre-filtered to
+`<case>#t<n>`). `GC_EVAL_ROOT` / `--eval-root` point it at the
+artifacts (default `evals`).
+
+**Adding a case** (`evals/cases/*.toml`): give it an `id`, seed nodes,
+one or more `[[case.turn]]` user messages, `[case.expect.*]` graders, and
+a `[[case.script]]` — the reference solution. The scripted CI replay
+(`tests/evals/test_harness_smoke.py`) fails any case whose own script
+cannot satisfy its graders, so unsolvable cases die before they cost a
+live run. Keep the dataset balanced (behaviors that should AND shouldn't
+happen — the mode-boundary twins are the template), grow it from real
+dogfooding failures, and calibrate rubrics by reading run transcripts.
+The `/evals-add` skill drives this end-to-end from a failure report
+(evidence from `logs/turns.jsonl`, grader alignment, validation);
+`/evals-run` runs and compares. Node refs support `fields_truthy` /
+`fields_falsy` value checks, and `[[case.modes]]` stages custom in-space
+Activity Modes (e.g. a deliberately misconfigured read-only mode) into
+the trial's registry. A seed node with `out_of_band = true` exists in
+the space but not the index until a resync (a human editing the Anytype
+UI between syncs — the stale-index/duplicate-node class of failure); it
+counts toward the `node_count_delta` baseline, and the runner resyncs
+once after the turns so graders always judge the space, not the index.
 
 ## Demo scripts
 

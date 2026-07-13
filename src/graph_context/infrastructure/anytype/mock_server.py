@@ -21,6 +21,11 @@ something:
   list and search and cannot be enumerated (spike S4), so human deletions
   are only reconciled by a full hydrate -- there is deliberately no knob to
   make them visible.
+* Space members (S11, live-confirmed 2026-07-12): ``GET /members`` returns
+  member envelopes; each member's *participant object* answers the
+  single-object GET like any object but is invisible to **both** list and
+  search, and ``objects``-format relations accept participant ids as
+  targets (Anytype's own Assignee mechanism). Seed via ``seed_member``.
 * Bodies (A5/A7, ADR 010): created via the ``body`` key, echoed back as
   ``markdown``, updated via the ``markdown`` key in PATCH (wholesale
   replace; a ``body`` key in PATCH is silently ignored -- the documented
@@ -31,6 +36,12 @@ something:
   ``description`` property is prepended as the first line, while PATCH
   writes body blocks only -- so a raw GET -> PATCH round-trip duplicates
   the summary line. Reads must go through ``mapping.body_of``.
+* The PATCH ``markdown`` importer flattens a FIRST-line heading to plain
+  text (A9, live-confirmed 2026-07-11); headings on later lines survive.
+* Template objects are readable via the single-object GET, ``markdown``
+  carrying the template's body scaffold (live-confirmed by the templates
+  spike) -- how the repository detects scaffolded types (ADR 013
+  amendment).
 * Select/multi_select options are **tags** (ADR 012): ``GET/POST
   /properties/{propertyId}/tags`` (property ID, not key -- a key 404s
   "invalid property id"). A write referencing a tag that does not exist
@@ -118,6 +129,16 @@ def _without_markdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     bodies never ride the hydrate sweep or resync queries.
     """
     return [{k: v for k, v in o.items() if k != "markdown"} for o in items]
+
+
+_LEADING_HEADING = re.compile(r"^#{1,6}\s+")
+
+
+def _flatten_first_line_heading(markdown: str) -> str:
+    """A9 (live-confirmed 2026-07-11): the PATCH importer strips heading
+    markup from the body's first line; later headings survive."""
+    first, sep, rest = markdown.partition("\n")
+    return _LEADING_HEADING.sub("", first) + sep + rest
 
 
 class MockAnytype:
@@ -253,6 +274,47 @@ class MockAnytype:
         self._stamp(self._objects[object_id], PROP_CREATED)
         return object_id
 
+    def seed_member(
+        self,
+        name: str,
+        *,
+        identity: str = "",
+        role: str = "editor",
+        status: str = "active",
+    ) -> str:
+        """Add a space member as the live server represents one (S11).
+
+        The member envelope rides ``GET /members``; its participant OBJECT
+        answers the single-object GET like any object but is invisible to
+        list and search (the live blind spot member reflection works
+        around). Returns the participant/member id.
+        """
+        member_identity = identity or f"ident{self._new_id()}"
+        space_part = self.space_id.replace(".", "_")
+        member_id = f"_participant_{space_part}_{member_identity}"
+        self.members.append({
+            "object": "member", "id": member_id, "name": name,
+            "icon": None, "identity": member_identity, "global_name": "",
+            "status": status, "role": role,
+        })
+        self._types.setdefault("participant", {
+            "id": self._new_id(), "key": "participant",
+            "name": "Space member", "plural_name": "Space members",
+            "layout": "participant", "properties": [],
+        })
+        self._objects[member_id] = {
+            "id": member_id,
+            "name": name,
+            "type": {"key": "participant"},
+            "layout": "participant",
+            "archived": False,
+            "properties": [],
+            "snippet": "",
+            "markdown": "",
+        }
+        self._stamp(self._objects[member_id], PROP_CREATED)
+        return member_id
+
     def seed_template(
         self,
         type_key: str,
@@ -338,6 +400,12 @@ class MockAnytype:
         of ``edit_object_directly``. Live streams see ``message_added``."""
         return str(self._new_chat_message(chat_id, creator, text)["id"])
 
+    def chat_messages(self, chat_id: str) -> list[dict[str, Any]]:
+        """The chat's delivered messages, oldest first (assertion surface --
+        the read-side twin of ``post_chat_message_directly``). Copies, so
+        a test cannot accidentally mutate the store."""
+        return [dict(m) for m in self._chat_messages[chat_id]]
+
     def emit_chat_heartbeat(self, chat_id: str) -> None:
         """Push a ``: heartbeat`` comment to every open stream (C5)."""
         self._notify_chat(chat_id, {"kind": "heartbeat"})
@@ -384,7 +452,12 @@ class MockAnytype:
     def _handle_objects(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             # Hydrate sweep: unfiltered, archived hidden, large pages honored.
-            items = [o for o in self._objects.values() if not o["archived"]]
+            # Participants are hidden too (S11): the live list NEVER returns
+            # participant-layout objects; /members is their only enumeration.
+            items = [
+                o for o in self._objects.values()
+                if not o["archived"] and o.get("layout") != "participant"
+            ]
             return self._paginated(_without_markdown(items), request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
@@ -440,7 +513,12 @@ class MockAnytype:
         if request.method != "POST":
             return self._error(405, "method_not_allowed")
         body = json.loads(request.content) if request.content else {}
-        items = [o for o in self._objects.values() if not o["archived"]]
+        # Participants are invisible to search exactly like the live server
+        # (S11) -- a name query for a member returns nothing.
+        items = [
+            o for o in self._objects.values()
+            if not o["archived"] and o.get("layout") != "participant"
+        ]
         types = body.get("types")
         if types:
             items = [o for o in items if o["type"]["key"] in types]
@@ -457,6 +535,19 @@ class MockAnytype:
     def _handle_object(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         obj = self._objects.get(match.group("obj"))
         if obj is None:
+            template = self._templates_by_id.get(match.group("obj"))
+            if template is not None and request.method == "GET":
+                # Templates answer the single-object GET like any object,
+                # markdown carrying their body scaffold (live-confirmed).
+                return httpx.Response(200, json={"object": {
+                    "id": template["id"],
+                    "name": template["name"],
+                    "type": {"key": "template"},
+                    "archived": False,
+                    "properties": [],
+                    "snippet": "",
+                    "markdown": template["body"],
+                }})
             return self._error(404, "object_not_found")
         if request.method == "GET":
             return httpx.Response(200, json={"object": self._exported(obj)})
@@ -485,7 +576,7 @@ class MockAnytype:
             # unchanged) -- the create/update field-name mismatch is the
             # documented gotcha the original S6 spike tripped on.
             if "markdown" in body:
-                obj["markdown"] = body["markdown"]
+                obj["markdown"] = _flatten_first_line_heading(body["markdown"])
             self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":
@@ -596,7 +687,15 @@ class MockAnytype:
             return self._error(404, "message_not_found")
         if request.method == "PATCH":
             body = json.loads(request.content)
+            raw_attachments = body.get("attachments")
+            if raw_attachments is not None and any(
+                not isinstance(e, dict) for e in raw_attachments
+            ):
+                return self._error(400, "bad_request")  # C7: envelopes only
             message["content"]["text"] = str(body.get("text", ""))
+            # C8: an edit replaces content wholesale -- attachments absent
+            # from the body are removed (live-confirmed).
+            message["attachments"] = list(raw_attachments or [])
             message["modified_at"] = next(self._clock)
             self._notify_chat(
                 chat_id, {"kind": "message_updated", "message": message}
@@ -666,12 +765,20 @@ class MockAnytype:
             # The live API requires both (spike: a missing plural_name 400s).
             return self._error(400, "bad_request")
         # An inline ``properties`` list attaches the fields to the type AND
-        # creates them as space properties (live-confirmed 2026-07-06).
+        # creates them as space properties (live-confirmed 2026-07-06). The
+        # type's own ``properties`` carry the property ids, exactly like the
+        # live GET /types response (the templates spike reads them).
         for entry in body.get("properties", []):
             self._properties.setdefault(
                 entry["key"], {"id": self._new_id(), **entry}
             )
-        self._types[body["key"]] = {"id": self._new_id(), **body}
+        type_properties = [
+            {**entry, "id": self._properties[entry["key"]]["id"]}
+            for entry in body.get("properties", [])
+        ]
+        self._types[body["key"]] = {
+            "id": self._new_id(), **body, "properties": type_properties,
+        }
         return httpx.Response(201, json={"type": self._types[body["key"]]})
 
     def _handle_properties(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
@@ -680,6 +787,9 @@ class MockAnytype:
         body = json.loads(request.content)
         self._properties[body["key"]] = {"id": self._new_id(), **body}
         if self.property_settle_patches > 0 and body.get("format") == "objects":
+            # Only ``objects``-format relations have the settle window. A
+            # fresh SCALAR property is immediately usable in POST /objects
+            # and PATCH (live-confirmed 2026-07-10, ADR 023 spike).
             self._settling[body["key"]] = self.property_settle_patches
         return httpx.Response(201, json={"property": self._properties[body["key"]]})
 

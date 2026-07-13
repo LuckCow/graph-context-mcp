@@ -57,14 +57,18 @@ class NodeWriter:
         links: Sequence[LinkSpec] = (),
         *,
         create_missing_relations: bool = False,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         """Create a node and its initial links as one logical operation."""
         role = self._repository.role_for(draft.type)
         schema.validate_new_node(
             role, draft.name, draft.summary, draft.story_time
         )
+        schema.validate_field_declarations(draft.fields, create_missing_fields or {})
         node = await self._repository.create_node(
-            draft, links, create_missing_relations=create_missing_relations
+            draft, links,
+            create_missing_relations=create_missing_relations,
+            create_missing_fields=create_missing_fields,
         )
         self._journal.created(node.id)
         for link in links:
@@ -89,9 +93,11 @@ class NodeWriter:
         add_links: Sequence[LinkSpec] = (),
         remove_links: Sequence[Edge] = (),
         create_missing_relations: bool = False,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         """Apply field and link changes; flag staleness unless summary is fresh."""
         self._repository.graph.node(node_id)  # fail fast on bad id
+        schema.validate_field_declarations(fields or {}, create_missing_fields or {})
 
         await self._repository.update_node(
             node_id,
@@ -103,6 +109,7 @@ class NodeWriter:
             body=description,
             story_time=story_time,
             fields=fields,
+            create_missing_fields=create_missing_fields,
         )
         for link in add_links:
             await self._repository.add_link(

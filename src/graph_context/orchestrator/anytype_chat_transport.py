@@ -2,8 +2,9 @@
 
 The Anytype sibling of ``discord_transport``: everything the bot decides
 per message -- the echo/backlog/creator gate, the ``anytype:<id>``
-identity mapping, plain-text rendering + object attachments, chunked
-sends -- is plain logic
+identity mapping, plain-text rendering + object attachments, the
+"Processing" placeholder that the reply edits in place, chunked sends --
+is plain logic
 over primitives, so the whole policy tests without httpx or a server.
 Only the composition root (``anytype_chat_bot``) touches infrastructure;
 import-linter holds that line.
@@ -36,7 +37,13 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from graph_context.application.scheduler import DueEvent
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.pipeline import (
+    ReplyEvent,
+    scheduled_prompt,
+    sender_attributed,
+)
 from graph_context.orchestrator.rendering import chunk, render
 
 logger = logging.getLogger(__name__)
@@ -54,6 +61,14 @@ _HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _EMPHASIS = re.compile(r"(\*{1,3}|_{2,3}|`{1,3})(?=\S)(.+?)(?<=\S)\1")
 
 MAX_ATTACHMENTS = 8  # per message; the reader wants cards, not a wall
+
+# The placeholder a turn posts the moment it starts (edited into the real
+# reply by TurnReply); turns serialize per space and can run for a while,
+# so the user must see the bot working, not silence.
+PROCESSING_NOTICE = "Processing…"
+
+SendFn = Callable[[str, tuple[str, ...]], Awaitable[str]]
+EditFn = Callable[[str, str, tuple[str, ...]], Awaitable[None]]
 
 
 def object_references(text: str) -> tuple[str, ...]:
@@ -101,6 +116,10 @@ class InboundChatMessage:
     creator: str
     text: str
     order_id: str
+    # The sender's display name (the API returns it on every message);
+    # the pipeline shows it to the model so "assign this to me"-shaped
+    # requests are answerable. "" degrades to an unattributed message.
+    creator_name: str = ""
 
 
 class SentMessages:
@@ -209,13 +228,57 @@ class ChatCursor:
 
 
 @dataclass
+class TurnReply:
+    """One turn's outbound surface: a placeholder first, then the reply.
+
+    ``open`` posts :data:`PROCESSING_NOTICE` the moment the turn starts;
+    the FIRST delivered chunk EDITS that placeholder in place (quirk C8:
+    an edit replaces content wholesale, so the chunk's attachments ride
+    the edit body) and later chunks post as ordinary messages. Every
+    posted id -- the placeholder's included -- lands in the sent ledger
+    for echo suppression. The composition root's error paths deliver
+    through the same object, so a failed turn replaces its placeholder
+    instead of stranding "Processing…" in the chat; a delivery whose
+    placeholder is gone (edit failed, or ``open`` never ran) degrades to
+    a plain send.
+    """
+
+    send: SendFn
+    edit: EditFn
+    sent: SentMessages
+    _placeholder_id: str | None = None
+
+    async def open(self) -> None:
+        if self._placeholder_id is None:
+            self._placeholder_id = await self.send(PROCESSING_NOTICE, ())
+            self.sent.add(self._placeholder_id)
+
+    async def deliver(
+        self, text: str, attachments: tuple[str, ...] = ()
+    ) -> None:
+        placeholder, self._placeholder_id = self._placeholder_id, None
+        if placeholder is not None:
+            await self.edit(placeholder, text, attachments)
+        else:
+            self.sent.add(await self.send(text, attachments))
+
+    async def finish(self) -> None:
+        """A turn that delivered nothing must not strand the placeholder.
+        (The pipeline always yields at least one event; this is insurance.)"""
+        if self._placeholder_id is not None:
+            await self.deliver("(the turn produced no reply)")
+
+
+@dataclass
 class AnytypeChatTurnHandler:
-    """Gate -> turn -> plain-text chunked sends: the whole message policy.
+    """Gate -> turn -> plain-text chunked deliveries: the message policy.
 
     ``routes`` maps each served CHAT id to its runtime; ``spaces`` maps it
-    back to the space id. ``send`` is injected per message, takes
-    ``(text, attachment_object_ids)``, and must return the posted
-    message's id, which feeds the echo suppressor. ``bot_identity`` is
+    back to the space id. The send/edit primitives are injected per
+    message (via :meth:`reply`): ``send`` takes ``(text,
+    attachment_object_ids)`` and must return the posted message's id,
+    which feeds the echo suppressor; ``edit`` takes ``(message_id, text,
+    attachment_object_ids)``. ``bot_identity`` is
     the ACCOUNT identity (quirk C6: member ids are space-scoped but end
     with it, so the self-check is a suffix match); ``""`` -- e.g. on the
     desktop endpoint, where bot and human share an account -- leaves the
@@ -255,11 +318,15 @@ class AnytypeChatTurnHandler:
         events (WP15 startup catch-up).
 
         ``messages`` is the fetched recency window, oldest-first. Kept:
-        messages after the chat's ``/clear`` watermark and at or below the
-        cursor (anything newer is about to be answered as a real turn and
-        remembered there). Bot messages are recognised by the same two
-        signals the gate uses -- the sent ledger and the identity suffix;
-        ``/``-commands are dropped (they were never conversation).
+        messages after the chat's ``/clear`` watermark, minus unanswered
+        USER backlog above the cursor (the catch-up turn answers and
+        remembers those). Bot messages above the cursor stay: the reply to
+        the last answered message always posts after it, and the gate never
+        re-answers our own posts -- dropping it left every restart-seeded
+        prompt ending in an apparently-unanswered request. Bot messages are
+        recognised by the same two signals the gate uses -- the sent ledger
+        and the identity suffix; ``/``-commands are dropped (they were
+        never conversation).
         """
         seed: list[tuple[str, str]] = []
         for message in messages:
@@ -267,33 +334,46 @@ class AnytypeChatTurnHandler:
                 continue
             if not self.clear_marks.is_new(message):
                 continue  # at or before the last /clear
-            if self.cursor.is_new(message):
-                continue  # unanswered backlog: the catch-up turn owns it
-            text = message.text.strip()
-            if not text:
-                continue
             ours = message.message_id in self.sent or (
                 self.bot_identity != ""
                 and message.creator.endswith(self.bot_identity)
             )
+            if not ours and self.cursor.is_new(message):
+                continue  # unanswered backlog: the catch-up turn owns it
+            text = message.text.strip()
+            if not text:
+                continue
             if not ours and text.startswith("/"):
                 continue
-            seed.append(("assistant" if ours else "user", text))
+            if ours:
+                seed.append(("assistant", text))
+            else:
+                # Same attribution the live turn applies, so restart-seeded
+                # history reads identically to remembered history.
+                seed.append(
+                    ("user", sender_attributed(text, message.creator_name))
+                )
         return seed
 
+    def reply(self, send: SendFn, edit: EditFn) -> TurnReply:
+        """The outbound surface for one turn, wired to this handler's
+        echo ledger."""
+        return TurnReply(send=send, edit=edit, sent=self.sent)
+
     async def run_turn(
-        self,
-        message: InboundChatMessage,
-        send: Callable[[str, tuple[str, ...]], Awaitable[str]],
+        self, message: InboundChatMessage, reply: TurnReply
     ) -> None:
-        """One accepted message -> one orchestrator turn -> n sends.
+        """One accepted message -> placeholder -> turn -> n deliveries.
 
         The cursor advances BEFORE the turn: a failing turn must not make
-        the same message eligible again on the next stream event.
+        the same message eligible again on the next stream event. The
+        placeholder posts BEFORE the route lock, so a queued message
+        shows progress even while an earlier turn holds the space.
         Replies go out as plain text (quirk C7) with every referenced
         object attached to the first chunk as a card.
         """
         self.cursor.advance(message)
+        await reply.open()
         if message.text.strip() == "/clear":
             # The orchestrator empties the in-memory ring; the watermark
             # makes the clear survive a restart (seeding stops here).
@@ -306,10 +386,67 @@ class AnytypeChatTurnHandler:
                 text=message.text,
                 # Intent nodes point back at the triggering chat message.
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
+                sender=message.creator_name,
             )
+        await self.deliver_events(events, reply)
+
+    async def deliver_events(
+        self, events: Sequence[ReplyEvent], reply: TurnReply
+    ) -> None:
+        """A turn's reply events -> plain-text chunked chat deliveries,
+        every referenced object attached to the first chunk as a card."""
         for event in events:
             rendered = render(event)
             attachments = object_references(rendered)
             for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):
-                self.sent.add(await send(piece, attachments))
+                await reply.deliver(piece, attachments)
                 attachments = ()  # cards ride the first chunk only
+        await reply.finish()
+
+    def target_chat(self, space_id: str, session_key: str) -> str | None:
+        """Which served chat a fired Scheduled Event speaks into (ADR 027).
+
+        The event's stored session key wins when it names a chat this
+        handler serves IN that space; anything else -- an excluded or
+        deleted chat, an ``mcp``/``discord:*`` key, or no key (a
+        human-created event) -- falls back to the space's first served
+        chat (sorted: deterministic). ``None`` when the space serves no
+        chat yet; the caller retries next tick rather than dropping the
+        event.
+        """
+        if session_key.startswith("anytype:"):
+            chat_id = session_key.removeprefix("anytype:")
+            if self.spaces.get(chat_id) == space_id:
+                return chat_id
+        served = sorted(
+            chat_id for chat_id, space in self.spaces.items()
+            if space == space_id
+        )
+        return served[0] if served else None
+
+    async def run_scheduled(
+        self, chat_id: str, due: DueEvent, reply: TurnReply
+    ) -> None:
+        """One due Scheduled Event -> turn -> deliveries.
+
+        The system-initiated sibling of :meth:`run_turn`: no inbound
+        message, so no gate and no cursor -- and no "Processing"
+        placeholder either: nobody is waiting on a turn they didn't
+        start, so nothing posts until the reply is ready (``deliver``
+        without an open placeholder is a plain send). The event is
+        marked fired BEFORE the turn runs (at-most-once -- a crashing
+        turn must not re-fire every tick; its error still reaches the
+        chat through ``reply``), inside the route lock like the turn
+        itself.
+        """
+        route = self.routes[chat_id]
+        async with route.lock:
+            await route.orchestrator.mark_scheduled_fired(due.node_id)
+            events = await route.orchestrator.handle_message(
+                session_id=f"anytype:{chat_id}",
+                user_id="system:scheduler",
+                text=scheduled_prompt(due.name, due.prompt),
+                # Intent nodes point back at the event node that fired.
+                origin=f"schedule:{due.node_id}",
+            )
+        await self.deliver_events(events, reply)

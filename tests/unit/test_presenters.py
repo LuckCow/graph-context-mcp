@@ -1,6 +1,6 @@
 """Presenters: detail shaping and derived views."""
 
-from graph_context.domain.models import Node
+from graph_context.domain.models import FieldSpec, Node
 from graph_context.domain.overview import GraphOverview, HubNode, TypeCount
 from graph_context.domain.query import QueryResult, SortKey
 from graph_context.domain.traversal import ExploreQuery, explore
@@ -86,3 +86,33 @@ class TestOverview:
     def test_empty_overview_guides_to_create_node(self) -> None:
         overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
         assert "no nodes yet" in render_overview(overview)
+
+    def test_field_catalog_renders_per_type_properties(self) -> None:
+        mira = Node(id="n1", type="Character", name="Mira", summary="Engineer.")
+        overview = GraphOverview(
+            total_story_nodes=1,
+            type_counts=(TypeCount("Character", 1),),
+            hubs=(HubNode(mira, degree=1),),
+        )
+        text = render_overview(overview, {
+            "Task": (
+                FieldSpec(name="Due date", format="date", key="due_date"),
+                FieldSpec(name="Status", format="select", key="status"),
+            ),
+        })
+        assert "properties by type" in text
+        # Zero-instance types render too -- guidance matters most there.
+        assert "- Task: Due date (date), Status (select)" in text
+
+    def test_field_catalog_renders_on_empty_graph_too(self) -> None:
+        overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
+        text = render_overview(
+            overview,
+            {"Task": (FieldSpec(name="Due date", format="date", key="due_date"),)},
+        )
+        assert "no nodes yet" in text
+        assert "- Task: Due date (date)" in text
+
+    def test_absent_catalog_renders_nothing_extra(self) -> None:
+        overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
+        assert "properties by type" not in render_overview(overview, {})

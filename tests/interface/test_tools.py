@@ -13,7 +13,11 @@ from __future__ import annotations
 import pytest
 
 from graph_context.application.capture_recorder import CaptureRecorder
+from graph_context.domain.models import NodeDraft
+from graph_context.domain.session import SessionState
+from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface import tools
+from graph_context.interface.services import build_services
 from tests.conftest import World
 
 pytestmark = pytest.mark.usefixtures("world")
@@ -244,7 +248,7 @@ async def _semantic_services(world: World) -> tools.Services:
     index = InMemorySemanticIndex()
     projector = SemanticProjector(repository, embedder, index)
     await projector.refresh()
-    return tools.build_services(
+    return build_services(
         repository, SessionState(project="Ashfall"),
         projector=projector, ranker=Ranker(repository, embedder, index),
     )
@@ -295,6 +299,54 @@ async def test_without_ranker_behavior_is_unchanged(
     assert "no match" in body             # the tier degrades away (off)
     out = await tools.get_node_tool(services, node_id="nobody here")
     assert "ERROR:" in out and "Closest by meaning" not in out
+
+
+# -- find_node: a name miss pulls out-of-band edits before answering --------
+
+
+class CountingRepository(InMemoryGraphRepository):
+    """The fake plus a resync call counter, to pin when the retry spends."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resync_calls = 0
+
+    async def resync(self) -> frozenset[str]:
+        self.resync_calls += 1
+        return await super().resync()
+
+
+class TestFindNodeResyncOnMiss:
+    """The duplicate-Garden failure (2026-07-12): a user creates a node in
+    the Anytype UI, immediately asks the bot to use it by name, and the
+    stale index answers "no match" -- one create later there are two."""
+
+    async def test_a_miss_resyncs_and_finds_the_just_created_node(self) -> None:
+        repo = CountingRepository()
+        repo.stage_out_of_band(
+            NodeDraft("Project", name="Garden", summary="Yard work.")
+        )
+        services = build_services(repo, SessionState(project="Todo"))
+        out = await tools.find_node_tool(services, name="Garden")
+        assert "no match" not in out
+        assert "Garden" in out
+
+    async def test_a_hit_never_spends_a_resync(self) -> None:
+        repo = CountingRepository()
+        await repo.create_node(
+            NodeDraft("Project", name="Garden", summary="Yard work.")
+        )
+        services = build_services(repo, SessionState(project="Todo"))
+        out = await tools.find_node_tool(services, name="Garden")
+        assert "Garden" in out
+        assert repo.resync_calls == 0
+
+    async def test_a_true_miss_answers_no_match_after_one_resync(self) -> None:
+        repo = CountingRepository()
+        services = build_services(repo, SessionState(project="Todo"))
+        out = await tools.find_node_tool(services, name="Garden")
+        assert "no match" in out
+        assert repo.resync_calls == 1
 
 
 # -- query: the Set-style attribute scan (filter, order, cap) ---------------
@@ -428,7 +480,7 @@ class TestQueryViewParam:
                 order_by=(SortKey("due_date"),),
             ),
         )
-        return tools.build_services(
+        return build_services(
             InMemoryGraphRepository(), SessionState(project="x"),
             views=InMemoryViewCatalog([saved]),
         )
@@ -469,3 +521,186 @@ class TestQueryViewParam:
     ) -> None:
         out = await tools.query_tool(services, view="Open Tasks")
         assert out.startswith("ERROR:") and "(none)" in out
+
+
+# -- native-only fields end-to-end (ADR 023) ---------------------------------
+
+
+class TestFieldCatalogSurface:
+    """The tool layer over a catalog-strict fake: the overview teaches the
+    vocabulary, the unmatched-key error self-corrects, and the opt-in
+    creates a real property."""
+
+    def _services(self) -> tools.Services:
+        from graph_context.domain.models import FieldSpec
+        from graph_context.domain.session import SessionState
+        from graph_context.infrastructure.memory.fake_repository import (
+            InMemoryGraphRepository,
+        )
+
+        repository = InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Due date", format="date", key="due_date"),
+        ])
+        return build_services(repository, SessionState(project="t"))
+
+    async def test_overview_lists_each_types_properties(self) -> None:
+        services = self._services()
+        out = await tools.context_tool(services, action="overview")
+        assert "properties by type" in out
+        assert "Due date (date)" in out
+
+    async def test_unmatched_field_key_errors_with_guidance(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"due": "2026-08-01"},
+        )
+        assert out.startswith("ERROR:")
+        assert "Due date (date)" in out and "create_missing_fields" in out
+
+    async def test_matching_by_display_name_writes_the_property(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Due date": "2026-08-01"},
+        )
+        assert out.startswith("created:")
+        assert "due_date: 2026-08-01" in out
+
+    async def test_create_missing_fields_creates_and_writes(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"effort": "3"}, create_missing_fields={"effort": "Number"},
+        )
+        assert out.startswith("created:")
+        assert "effort: 3" in out
+
+    async def test_bad_declared_format_errors_with_the_menu(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"due": "soon"}, create_missing_fields={"due": "datetime"},
+        )
+        assert out.startswith("ERROR:") and "formats:" in out
+
+
+# -- the schedule tool (WP18, ADR 027) ---------------------------------------
+
+
+class TestScheduleTool:
+    """The tool surface over the Scheduler: echoes that let an LLM verify
+    its date math, errors that teach the schedule syntax, and the infra
+    hiding that keeps events out of story traversal."""
+
+    def _services(self, session_key: str = "anytype:chat-1") -> tools.Services:
+        return build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            session_key=session_key,
+        )
+
+    async def test_set_echoes_next_fire_and_server_time(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="Remind Nick.",
+        )
+        assert out.startswith("scheduled 'tax reminder'")
+        assert "next fire: 2199-04-08 09:00" in out
+        assert "server local time:" in out
+
+    async def test_set_stamps_the_sessions_key_on_the_node(self) -> None:
+        services = self._services(session_key="anytype:chat-1")
+        await tools.schedule_tool(
+            services, action="set", name="ping",
+            schedule="2199-01-01T09:00", prompt="p",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "chat=anytype:chat-1" in out
+
+    async def test_past_time_error_carries_the_current_time(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="late",
+            schedule="1999-01-01T09:00", prompt="p",
+        )
+        assert out.startswith("ERROR:") and "past" in out
+
+    async def test_bad_schedule_error_teaches_both_formats(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="whenever", prompt="p",
+        )
+        assert out.startswith("ERROR:")
+        assert "ISO" in out and "cron" in out
+
+    async def test_empty_list_guides_and_shows_the_clock(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(services, action="list")
+        assert "no scheduled events" in out
+        assert "server local time:" in out
+
+    async def test_list_shows_schedule_prompt_and_target(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="standup", schedule="0 9 * * 1",
+            prompt="Post the weekly summary.",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "scheduled events (1):" in out
+        assert "standup" in out and "repeating '0 9 * * 1'" in out
+        assert "prompt: Post the weekly summary." in out
+
+    async def test_cancel_by_name_reports_and_disables(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="p",
+        )
+        out = await tools.schedule_tool(
+            services, action="cancel", node_id="tax reminder",
+        )
+        assert out.startswith("cancelled 'tax reminder'")
+        assert "re-enable" in out  # the human's Pending flip is taught
+        assert "cancelled" in await tools.schedule_tool(services, action="list")
+
+    async def test_unknown_action_lists_the_allowed_ones(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(services, action="fire")
+        assert out.startswith("ERROR:")
+        assert "set, list, cancel" in out
+
+    async def test_events_hide_from_query_unless_named(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="p",
+        )
+        everything = await tools.query_tool(services)
+        assert "tax reminder" not in everything
+        named = await tools.query_tool(services, type="ScheduledEvent")
+        assert "tax reminder" in named
+
+    async def test_events_hide_from_find_node(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax reminder",
+            schedule="2199-04-08T09:00", prompt="p",
+        )
+        out = await tools.find_node_tool(services, name="tax reminder")
+        assert "tax reminder" not in out
+
+    async def test_build_services_pins_the_schedulers_timezone(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        services = build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            timezone="Pacific/Kiritimati",  # UTC+14: unmistakably not UTC
+        )
+        expected = datetime.now(
+            ZoneInfo("Pacific/Kiritimati")
+        ).replace(tzinfo=None)
+        assert abs(
+            (services.scheduler.now() - expected).total_seconds()
+        ) < 5

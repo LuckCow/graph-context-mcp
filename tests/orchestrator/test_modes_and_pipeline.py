@@ -13,6 +13,7 @@ import pytest
 
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
+from graph_context.domain import attribution
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
@@ -24,8 +25,9 @@ from graph_context.interface.profiles import (
     ModeSpec,
     get_profile,
 )
-from graph_context.interface.tools import Services, build_services
+from graph_context.interface.services import Services, build_services
 from graph_context.orchestrator import modes
+from graph_context.orchestrator.driver_common import assembled_system_prompt
 from graph_context.orchestrator.drivers import (
     LLMTurn,
     ScriptedDriver,
@@ -37,6 +39,7 @@ from graph_context.orchestrator.pipeline import (
     LAST_TURN_WARNING,
     ConversationMemory,
     Orchestrator,
+    sender_attributed,
 )
 
 FICTION = get_profile("fiction")
@@ -324,6 +327,34 @@ class TestPipeline:
         assert second[1] == ("assistant", "Hi there.")
         assert second[-1] == ("user", "and again")
 
+    async def test_sender_attribution_reaches_the_model_and_memory(
+        self, services: Services
+    ) -> None:
+        """A session can be a shared chat, so each message must say who
+        sent it (live-caught: Task Creation Mode could not fill
+        'Assignee = the requester' from a bare message)."""
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="Hi Nick."), LLMTurn(reply="Hi Sam."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "hello", sender="Nick")
+        assert driver.transcripts[0][-1].text == "[from Nick] hello"
+        await orchestrator.handle_message("s1", "u2", "me too", sender="Sam")
+        replayed = [(e.kind, e.text) for e in driver.transcripts[1]]
+        assert replayed[0] == ("user", "[from Nick] hello")
+        assert replayed[-1] == ("user", "[from Sam] me too")
+
+    def test_the_sender_tag_matches_its_system_prompt_description(self) -> None:
+        """The drivers' standing guidance tells the model the [from <name>]
+        tag is authoritative (live-caught: a model burned its whole tool
+        budget searching the graph for the sender instead); the tag format
+        and its description must stay in lockstep."""
+        assert sender_attributed("hello", "Nick") == "[from Nick] hello"
+        assert '"[from <name>]"' in assembled_system_prompt("any goal")
+
     async def test_memory_is_per_session(self, services: Services) -> None:
         driver = _TranscriptRecordingDriver([
             LLMTurn(reply="a"), LLMTurn(reply="b"),
@@ -587,7 +618,7 @@ def _keyed_orchestrator(
     one shared repository, a keyed session store, independent SessionState
     per session id -- the multi-chat shape."""
     from graph_context.application.session_registry import SessionRegistry
-    from graph_context.interface.tools import derive_services
+    from graph_context.interface.services import derive_services
 
     store = store or InMemorySessionStore()
     repository = InMemoryGraphRepository(role_overrides=FICTION.role_overrides)
@@ -618,11 +649,12 @@ class TestKeyedSessions:
         ])
         await orchestrator.handle_message("anytype:a", "u1", "note the siege")
         await orchestrator.handle_message("anytype:b", "u1", "note the exile")
-        state_a = orchestrator._sessions["anytype:a"]
-        state_b = orchestrator._sessions["anytype:b"]
-        assert state_a.services.session.scratchpad == "arc: the siege"
-        assert state_b.services.session.scratchpad == "arc: the exile"
-        assert state_a.services.session is not state_b.services.session
+        services_a = orchestrator.services_of("anytype:a")
+        services_b = orchestrator.services_of("anytype:b")
+        assert services_a is not None and services_b is not None
+        assert services_a.session.scratchpad == "arc: the siege"
+        assert services_b.session.scratchpad == "arc: the exile"
+        assert services_a.session is not services_b.session
 
     async def test_mode_switch_persists_per_chat_and_survives_restart(self) -> None:
         store = InMemorySessionStore()
@@ -669,8 +701,8 @@ class TestProvenanceTurns:
         await orchestrator.handle_message("s1", "cli:nick", "Add Mira.")
         (intent,) = _intent_nodes(services)
         assert intent.name.startswith("Intent: Add Mira.")
-        assert intent.fields["user_id"] == "cli:nick"
-        assert intent.fields["mode"] == "world_modeling"  # the active binding
+        assert intent.fields[attribution.FIELD_USER_ID] == "cli:nick"
+        assert intent.fields[attribution.FIELD_MODE] == "world_modeling"  # the active binding
         mira = services.repository.graph.resolve("Mira")
         assert {e.target for e in services.repository.graph.edges(intent.id)} == {
             mira.id
@@ -727,3 +759,74 @@ class TestProvenanceTurns:
         ])  # no provenance wired
         await orchestrator.handle_message("s1", "u", "Add Mira.")
         assert _intent_nodes(services) == []
+
+
+class TestToolRoundTripTranscript:
+    """The pipeline records each tool-call decision on the transcript,
+    paired to its results by id -- what a Messages-API driver needs to
+    round-trip native tool_use/tool_result blocks."""
+
+    async def test_the_decision_precedes_its_results_with_matching_ids(
+        self, services: Services
+    ) -> None:
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(reply="Checking.", tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Done."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        second = driver.transcripts[1]
+        decision = second[-2]
+        result = second[-1]
+        assert decision.kind == "assistant"
+        assert decision.text == "Checking."
+        assert len(decision.tool_calls) == 1
+        assert decision.tool_calls[0].name == "create_node"
+        assert decision.tool_calls[0].id  # synthesized when the driver sent none
+        assert result.kind == "tool"
+        assert result.tool_use_id == decision.tool_calls[0].id
+
+    async def test_driver_provided_ids_are_preserved(
+        self, services: Services
+    ) -> None:
+        call = ToolCall(
+            "create_node",
+            {"type": "Character", "name": "Mira", "summary": "Engineer."},
+            id="toolu_real_api_id",
+        )
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(tool_calls=(call,)),
+            LLMTurn(reply="Done."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        second = driver.transcripts[1]
+        assert second[-2].tool_calls[0].id == "toolu_real_api_id"
+        assert second[-1].tool_use_id == "toolu_real_api_id"
+
+    async def test_mid_turn_events_never_reach_conversation_memory(
+        self, services: Services
+    ) -> None:
+        driver = _TranscriptRecordingDriver([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira now exists."),
+            LLMTurn(reply="Second turn."),
+        ])
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "Add Mira.")
+        await orchestrator.handle_message("s1", "u1", "And now?")
+        replayed = driver.transcripts[2]  # the second turn's history
+        assert [(e.kind, e.text) for e in replayed[:2]] == [
+            ("user", "Add Mira."), ("assistant", "Mira now exists."),
+        ]
+        # The tool-call decision and its result stayed turn-local.
+        assert all(e.tool_calls == () and e.tool_use_id == "" for e in replayed)

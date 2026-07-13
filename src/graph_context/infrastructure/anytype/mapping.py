@@ -22,23 +22,37 @@ Representation (v2, space-reflecting):
   the mirror verbatim would double every edge (see :func:`to_edges`).
 * Scalar fields we own: the **summary** lives in Anytype's built-in
   ``description`` property (ADR 011 -- UI-featured, present in list/search
-  so it hydrates); ``gc_summary_stale`` (checkbox), ``gc_story_time``
-  (number), and the ``gc_fields`` JSON blob remain ``gc_`` properties
-  written onto the native object. Object name maps to Anytype's top-level
-  ``name``.
+  so it hydrates); ``gc_summary_stale`` (checkbox) and ``gc_story_time``
+  (number) remain ``gc_`` properties written onto the native object.
+  Everything else is a REAL native property (ADR 028) -- there is no JSON
+  side-channel. Object name maps to Anytype's top-level ``name``.
 * The node's long-form **description is the object body** (ADR 010).
   Created via the ``body`` key, read back as ``markdown``, updated via the
   ``markdown`` key in PATCH (**A7**: a wholesale replace, combinable with
   name/properties in one PATCH; a ``body`` key in PATCH is silently
   ignored -- the documented create/update field-name mismatch). Bodies are
   absent from list/search responses, so they never enter the index;
-  :func:`body_of` is the single read. Pre-ADR-010 spaces are converted by
-  ``scripts/migrate_descriptions_to_body.py``.
+  :func:`body_of` is the single read.
 * **A8:** the markdown export *prepends* the built-in ``description``
   property (the summary, ADR 011) as its first line, but PATCH writes
   body blocks only -- GET -> PATCH round-trips would duplicate the
   summary line. :func:`body_of` strips the prefix; write-backs must
   write its output, never the raw ``markdown`` field.
+* **A10 (spike S11, 2026-07-12):** space members' *participant objects*
+  (layout ``participant``, type key ``participant``) are ordinary object
+  envelopes on the single-object GET -- :func:`to_node` maps them like
+  anything else -- but they NEVER appear in list or search; ``GET
+  /members`` is their only enumeration (``sync.fetch_member_objects``).
+  ``objects``-format relations accept participant ids as targets, which
+  is how Anytype's own Assignee works.
+* **A9 (live-confirmed 2026-07-11):** the PATCH ``markdown`` importer
+  strips heading markup from the FIRST line of the body (``## Details``
+  comes back as plain ``Details``); the same heading on any later line
+  survives. Import-side mirror of A8's export prefix. Together with A7's
+  wholesale replace (which destroys body blocks markdown cannot express,
+  e.g. a template's property widgets) this is why the connections footer
+  is suppressed on types whose template carries a body scaffold (ADR 013
+  amendment; ``AnytypeGraphRepository._writes_footer``).
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -55,13 +69,14 @@ has".
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from graph_context.domain import attribution, scheduling
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
+from graph_context.domain.schema import FIELD_FORMATS
 
 if TYPE_CHECKING:
     from graph_context.infrastructure.anytype.registry import SpaceRegistry
@@ -79,19 +94,11 @@ GC_EDGE_PREFIX = "gc_edge_"
 PROP_SUMMARY = "description"
 PROP_SUMMARY_STALE = "gc_summary_stale"
 PROP_STORY_TIME = "gc_story_time"  # the DEFAULT timeline property (ADR 015)
-PROP_FIELDS = "gc_fields"
 
 # The timeline source is profile-declared (ADR 015): fiction keeps the
 # gc_story_time number; a date-axis profile names a native date property
 # (ISO strings order lexicographically). One representation per space.
 DEFAULT_TIMELINE: tuple[str, str] = (PROP_STORY_TIME, "number")
-
-# Retired keys. Each survives only for its migration script under
-# scripts/; nothing in the server reads or writes them.
-# - gc_description (ADR 010): long-form text moved to the object body.
-# - gc_summary (ADR 011): the one-liner moved to the built-in description.
-PROP_LEGACY_DESCRIPTION = "gc_description"
-PROP_LEGACY_SUMMARY = "gc_summary"
 
 # Anytype built-in timestamp properties (date format), used by sync. Read-only.
 PROP_LAST_MODIFIED = "last_modified_date"
@@ -102,8 +109,13 @@ SCALAR_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     # exists in every space (ADR 011) -- nothing to mint.
     PROP_SUMMARY_STALE: "checkbox",
     PROP_STORY_TIME: "number",
-    PROP_FIELDS: "text",
 }
+
+# Attribution properties (ADR 028): the recorders' provenance stamps
+# (intent + capture nodes), written as REAL properties -- there is no
+# ``gc_fields`` blob anymore. Keys live in the domain
+# (attribution.FIELD_*); this is the adapter-local alias for bootstrap.
+ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 
 # Activity Mode config objects (ADR 015 amendment): the human-editable
 # fields of a gc_activity_mode object. Kept OUT of SCALAR_PROPERTIES --
@@ -124,11 +136,78 @@ MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # Session discriminator (WP8, ADR 021): every gc_session_context node
 # carries the transport-scoped session key it belongs to (e.g.
 # "anytype:<chat_id>", "mcp"). Kept OUT of SCALAR_PROPERTIES -- it lives
-# only on session nodes, never on ordinary nodes.
+# only on session nodes, never on ordinary nodes. Scheduled Event nodes
+# reuse it (ADR 027) to say which chat a fired event's turn belongs to.
 PROP_SESSION_KEY = "gc_session_key"
 SESSION_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_SESSION_KEY: "text",
 }
+
+# The session snapshot slot (ADR 028, superseding the gc_fields blob for
+# ADR 021's per-chat state): server-managed JSON on the SessionContext
+# node. A real property like everything else, but deliberately NOT in
+# GC_REFLECTED_FIELD_KEYS -- it must never surface in Node.fields.
+PROP_CHAT_SESSION = "gc_chat_session"
+SESSION_STATE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints
+    PROP_CHAT_SESSION: "text",
+}
+
+# Scheduled Event fields (WP18, ADR 027): the human-editable properties of
+# a gc_scheduled_event object. Kept OUT of SCALAR_PROPERTIES -- they live
+# only on scheduled events, never on ordinary nodes. The schedule is a
+# one-shot ISO datetime OR a cron line (domain/scheduling.py parses),
+# gc_last_fired is a local ISO stamp the scheduler owns, and the status
+# select is the lifecycle switch (Pending fires; Completed/Cancelled is
+# inert; its option tags auto-create as values are first written, ADR
+# 012). The keys live in the domain (scheduling.py) -- these are the
+# adapter-local aliases.
+PROP_SCHEDULE = scheduling.FIELD_SCHEDULE
+PROP_SCHEDULE_PROMPT = scheduling.FIELD_PROMPT
+PROP_LAST_FIRED = scheduling.FIELD_LAST_FIRED
+PROP_SCHEDULE_STATUS = scheduling.FIELD_STATUS
+SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
+    PROP_SCHEDULE: "text",
+    PROP_SCHEDULE_PROMPT: "text",
+    PROP_SCHEDULE_STATUS: "select",
+    PROP_LAST_FIRED: "text",
+}
+
+# Human-facing display names for minted properties (people create and
+# edit Scheduled Events directly in the Anytype editor, so the fields
+# must read as fields, not wire keys). Consulted by bootstrap at mint
+# time only; keys stay gc_ for wire stability, and names remain
+# human-owned afterwards -- a rename in the UI sticks. Names are
+# "Schedule …"-prefixed to stay clear of common user properties like
+# "Status". Properties absent here mint under their raw key, as before.
+PROPERTY_DISPLAY_NAMES: dict[str, str] = {
+    PROP_SCHEDULE: "Schedule",
+    PROP_SCHEDULE_PROMPT: "Schedule prompt",
+    PROP_SCHEDULE_STATUS: "Schedule status",
+    PROP_LAST_FIRED: "Last fired",
+    PROP_SESSION_KEY: "Session key",
+    PROP_CHAT_SESSION: "Chat session",
+    # Attribution stamps (ADR 028): named to read as provenance on an
+    # Intent/Capture object AND to stay clear of common user property
+    # names ("Model", "Mode", "Origin" are plausible space vocabulary,
+    # and field_property matches display names on write).
+    attribution.FIELD_GENERATED_AT: "Generated at",
+    attribution.FIELD_USER_ID: "Generated for user",
+    attribution.FIELD_MODEL: "Generated by model",
+    attribution.FIELD_MODE: "Generated in mode",
+    attribution.FIELD_ORIGIN: "Origin message",
+}
+
+# gc_ keys that DO surface in Node.fields and match as fields keys,
+# overriding the blanket gc_ exclusion in ``SpaceRegistry.reflects_field``.
+# The Scheduled Event surface is deliberately human-facing (ADR 027), and
+# the attribution stamps joined it in ADR 028: these live in REAL
+# properties -- visible, filterable, editable in the Anytype UI -- on the
+# write side AND the read side (both route through reflects_field).
+GC_REFLECTED_FIELD_KEYS: frozenset[str] = (
+    frozenset(SCHEDULED_PROPERTIES)
+    | frozenset(SESSION_PROPERTIES)
+    | frozenset(ATTRIBUTION_PROPERTIES)
+)
 
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``
 # body links are mirrored here, so reading it surfaces inline links as edges.
@@ -138,10 +217,9 @@ GENERIC_LINK_KEY = "links"
 
 # Property formats that surface in Node.fields (and are writable through
 # the ``fields`` parameter). ``objects`` is edges; everything else scalar.
-REFLECTED_FIELD_FORMATS: frozenset[str] = frozenset(
-    {"text", "number", "select", "multi_select", "date", "checkbox",
-     "url", "email", "phone"}
-)
+# Since ADR 023 the vocabulary is domain-owned (the LLM declares one of
+# these in create_missing_fields); this alias keeps the adapter-local name.
+REFLECTED_FIELD_FORMATS: frozenset[str] = FIELD_FORMATS
 
 # System properties that would be pure context-window noise if reflected.
 # Census-based (real space, 2026-07-02): every object carries these. A
@@ -202,7 +280,6 @@ def to_create_payload(
     *,
     type_key: str,
     native_properties: Sequence[dict[str, Any]] = (),
-    fields_blob: Mapping[str, str] | None = None,
     timeline: tuple[str, str] = DEFAULT_TIMELINE,
     template_id: str = "",
 ) -> dict[str, Any]:
@@ -214,24 +291,22 @@ def to_create_payload(
     key``. The repository writes outgoing relations via a follow-up PATCH (which
     tolerates any space-level property), mirroring the update path.
 
-    ADR 012 field routing: ``native_properties`` carries the already-resolved
-    entries for ``fields`` keys that matched native scalar properties (select
-    values resolved to existing tags -- inline select entries are validated
-    by POST, so resolution must precede it); ``fields_blob`` is the residual
-    written to ``gc_fields`` (defaults to all of ``draft.fields``).
-    ``timeline`` is the profile-declared (key, format) the story_time value
-    writes to (ADR 015).
+    Field routing (ADR 012/023/028): ``native_properties`` carries the
+    already-resolved entries for ``fields`` keys, each matched to a native
+    scalar property (select values resolved to existing tags -- inline
+    select entries are validated by POST, so resolution must precede it).
+    Every write is native-only; there is no blob channel. ``timeline`` is
+    the profile-declared (key, format) the story_time value writes to
+    (ADR 015).
 
     ``template_id`` (when set) applies a type template: Anytype fills the
     template's default property values and layout, then our inline
     ``properties`` override those keys and our ``body`` is appended below the
     template's body (both verified live -- see the templates spike/ADR).
     """
-    blob = dict(draft.fields) if fields_blob is None else dict(fields_blob)
     properties = [
         property_entry(PROP_SUMMARY, "text", draft.summary),
         property_entry(PROP_SUMMARY_STALE, "checkbox", False),
-        property_entry(PROP_FIELDS, "text", json.dumps(blob)),
         *native_properties,
     ]
     if draft.story_time is not None:
@@ -259,7 +334,6 @@ def to_update_payload(
     summary_stale: bool | None = None,
     body: str | None = None,
     story_time: float | str | None = None,
-    fields: Mapping[str, str] | None = None,
     native_properties: Sequence[dict[str, Any]] = (),
     timeline: tuple[str, str] = DEFAULT_TIMELINE,
 ) -> dict[str, Any]:
@@ -267,9 +341,8 @@ def to_update_payload(
 
     A body change rides the same PATCH as name/properties under the
     ``markdown`` key (A7) -- one throttled write, wholesale replace, and an
-    empty string clears the body. ``fields`` here is the residual blob after
-    the repository routed native-matching keys into ``native_properties``
-    (ADR 012).
+    empty string clears the body. ``native_properties`` carries the
+    already-resolved entries for changed ``fields`` keys (ADR 012/028).
     """
     properties: list[dict[str, Any]] = [*native_properties]
     if summary is not None:
@@ -278,8 +351,6 @@ def to_update_payload(
         properties.append(property_entry(PROP_SUMMARY_STALE, "checkbox", summary_stale))
     if story_time is not None:
         properties.append(property_entry(timeline[0], timeline[1], story_time))
-    if fields is not None:
-        properties.append(property_entry(PROP_FIELDS, "text", json.dumps(dict(fields))))
     payload: dict[str, Any] = {}
     if name is not None:
         payload["name"] = name
@@ -353,23 +424,16 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
     Every other object is a first-class node -- the space-reflecting model
     sees the user's native objects, not just a ``gc_`` subset.
 
-    ``fields`` merges two channels (ADR 012): the ``gc_fields`` blob (the
-    bot's channel for keys with no native property) and every reflectable
-    native scalar property, normalized to strings. Native wins on a key
-    collision -- the human-visible surface is authoritative. Empty values
-    and false checkboxes are skipped; noise is filtered by
+    ``fields`` carries every reflectable native scalar property, normalized
+    to strings (ADR 012/028 -- native properties are the only channel).
+    Empty values and false checkboxes are skipped; noise is filtered by
     ``registry.reflects_field`` (system denylist + GC_FIELD_DENYLIST).
     """
     type_key = (obj.get("type") or {}).get("key", "")
     if obj.get("archived") or not type_key:
         return None
     props = _property_map(obj)
-    raw_fields = props.get(PROP_FIELDS) or "{}"
-    try:
-        fields = {str(k): str(v) for k, v in json.loads(raw_fields).items()}
-    except (ValueError, AttributeError):
-        logger.warning("unparseable gc_fields on %s; ignoring", obj.get("id"))
-        fields = {}
+    fields: dict[str, str] = {}
     for entry in obj.get("properties", []):
         key, fmt = entry.get("key", ""), entry.get("format", "")
         if not key or not registry.reflects_field(key, fmt):
@@ -397,10 +461,7 @@ def to_node(obj: Mapping[str, Any], registry: SpaceRegistry) -> Node | None:
 def body_of(obj: Mapping[str, Any]) -> str:
     """A fetched object's long-form body (its description; ADR 010).
 
-    ``markdown`` is present only on single-object GET responses (A7). A
-    space written before ADR 010 must run the migration script
-    (``scripts/migrate_descriptions_to_body.py``) -- the retired
-    ``gc_description`` property is not read here.
+    ``markdown`` is present only on single-object GET responses (A7).
 
     **A8 (live-confirmed 2026-07-02):** the markdown *export* prepends the
     built-in ``description`` property (the summary channel, ADR 011) as

@@ -42,7 +42,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from graph_context import composition
 from graph_context.interface import profiles, tools
-from graph_context.interface.tools import Services
+from graph_context.interface.services import Services
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,7 @@ async def create_node(
     links: list[dict[str, Any]] | None = None,
     icon: str = "",
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.create_node_tool(
@@ -121,6 +122,7 @@ async def create_node(
         description=description, story_time=story_time, fields=fields, links=links,
         icon=icon,
         create_missing_relations=create_missing_relations,
+        create_missing_fields=create_missing_fields,
     )
 
 
@@ -136,6 +138,7 @@ async def update_node(
     add_links: list[dict[str, Any]] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_relations: bool = False,
+    create_missing_fields: dict[str, str] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.update_node_tool(
@@ -143,6 +146,7 @@ async def update_node(
         description=description, story_time=story_time, fields=fields,
         add_links=add_links, remove_links=remove_links,
         create_missing_relations=create_missing_relations,
+        create_missing_fields=create_missing_fields,
     )
 
 
@@ -214,6 +218,22 @@ async def find_path(
     return await tools.find_path_tool(
         _services(ctx), target=target, start=start, edge_types=edge_types,
         max_length=max_length,
+    )
+
+
+@mcp.tool(description=_PROFILE.tool_docs["schedule"])
+async def schedule(
+    ctx: Context[Any, Any, Any],
+    action: str = "list",
+    name: str = "",
+    schedule: str = "",
+    prompt: str = "",
+    node_id: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.schedule_tool(
+        _services(ctx), action=action, name=name, schedule=schedule,
+        prompt=prompt, node_id=node_id,
     )
 
 

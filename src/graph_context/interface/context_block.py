@@ -29,7 +29,7 @@ from graph_context.domain import schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Detail, Node, NodeId
 from graph_context.domain.session import WorkingSetEntry
-from graph_context.interface.tools import Services
+from graph_context.interface.services import Services
 
 DEFAULT_BUDGET_CHARS = 3500
 _MAX_EDGES_PER_ENTRY = 12  # a hub node must not flood the block

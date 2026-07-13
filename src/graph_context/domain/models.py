@@ -44,6 +44,31 @@ and must be mutually comparable."""
 
 
 @dataclass(frozen=True, slots=True)
+class FieldSpec:
+    """One reflectable scalar property, as guidance for writes (ADR 023).
+
+    The property-catalog shape returned by ``GraphRepository.field_catalog``
+    and rendered into the overview / unmatched-key errors so the LLM reuses
+    existing properties (by ``name`` or ``key``) instead of inventing new
+    field keys. ``key`` is the raw store key (``""`` for the in-memory
+    backend); ``options`` carries select/multi_select option names when the
+    backend knows them cheaply (may be empty even for selects).
+    """
+
+    name: str
+    format: str
+    key: str = ""
+    options: tuple[str, ...] = ()
+
+    def render_hint(self) -> str:
+        """The one property-hint line format both backends render into
+        ``UnknownFieldKey`` messages: ``Name (format: options)``."""
+        if self.options:
+            return f"{self.name} ({self.format}: {', '.join(self.options)})"
+        return f"{self.name} ({self.format})"
+
+
+@dataclass(frozen=True, slots=True)
 class Edge:
     """A directed, labelled link between two nodes.
 

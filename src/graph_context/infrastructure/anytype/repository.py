@@ -34,12 +34,14 @@ import re
 import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, NoReturn
 
+from graph_context.domain import fields as domain_fields
 from graph_context.domain import schema
 from graph_context.domain.graph import Direction, GraphIndex
 from graph_context.domain.models import (
     Edge,
+    FieldSpec,
     LinkSpec,
     Node,
     NodeDraft,
@@ -49,6 +51,7 @@ from graph_context.domain.models import (
 from graph_context.domain.schema import Role
 from graph_context.errors import (
     GraphContextError,
+    UnknownFieldKey,
     UnknownNodeType,
     UnknownRelationLabel,
 )
@@ -145,6 +148,13 @@ class AnytypeGraphRepository:
         # cleared whenever the registry rebuilds so a newly UI-authored
         # template appears.
         self._templates: dict[str, str | None] = {}
+        # type_key -> the type's template carries a body scaffold, which a
+        # markdown write would destroy (A7/A9) -- such types never get a
+        # connections footer (ADR 013 amendment). Same lifetime as above.
+        self._scaffolded: dict[str, bool] = {}
+        # property id -> select option names, for rendering the ADR 023
+        # unmatched-field error; same lifetime as the template cache.
+        self._tag_names: dict[str, tuple[str, ...]] = {}
 
     @property
     def graph(self) -> GraphIndex:
@@ -173,6 +183,43 @@ class AnytypeGraphRepository:
     def known_edge_labels(self) -> frozenset[str]:
         return self._registry.known_edge_labels()
 
+    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+        """Reflectable scalar properties per non-infra type (ADR 023).
+
+        Properties no type claims (space-level ones, including any the bot
+        minted via ``create_missing_fields`` -- POST /properties does not
+        attach to a type) are still reusable ``fields`` keys, so they are
+        offered under an ``"(any type)"`` bucket rather than hidden.
+        Options are deliberately absent -- listing them would cost one GET
+        per select property on every overview; the unmatched-key error
+        fetches them lazily instead.
+        """
+        catalog: dict[str, tuple[FieldSpec, ...]] = {}
+        claimed: set[str] = set()
+        for type_key, info in self._registry.types_by_key.items():
+            if self._registry.role_for(type_key) in schema.INFRA_ROLES:
+                continue
+            type_props = self._registry.reflectable_type_properties(type_key)
+            claimed.update(prop.key for prop in type_props)
+            specs = tuple(
+                FieldSpec(name=prop.name, format=prop.format, key=prop.key)
+                for prop in type_props
+            )
+            if specs:
+                catalog[info.name] = specs
+        unclaimed = tuple(
+            FieldSpec(name=prop.name, format=prop.format, key=prop.key)
+            for prop in self._registry.reflectable_properties()
+            if prop.key not in claimed
+            # Reflected gc_ keys (schedule/session/attribution) belong to
+            # dedicated surfaces -- the schedule tool and the recorders --
+            # not the generic fields vocabulary offered for story writes.
+            and not prop.key.startswith(mapping.GC_PREFIX)
+        )
+        if unclaimed:
+            catalog["(any type)"] = unclaimed
+        return catalog
+
     # -- sync -------------------------------------------------------------
 
     async def hydrate(self) -> None:
@@ -182,6 +229,8 @@ class AnytypeGraphRepository:
             timeline_key=self._timeline[0],
         )
         self._templates.clear()  # registry rebuilt: re-resolve templates lazily
+        self._scaffolded.clear()
+        self._tag_names.clear()
         self._graph, watermark, stamps = await sync.load_index(
             self._client, self._registry
         )
@@ -200,7 +249,13 @@ class AnytypeGraphRepository:
             timeline_key=self._timeline[0],
         )
         self._templates.clear()  # registry rebuilt: re-resolve templates lazily
+        self._scaffolded.clear()
+        self._tag_names.clear()
         fetched = await sync.fetch_changes(self._client, self._watermark)
+        # Members never appear in search (S11): refetch them every resync;
+        # the stamp filter below drops the unchanged ones, so a new member
+        # is the only thing this usually adds.
+        fetched.extend(await sync.fetch_member_objects(self._client))
         unseen = [
             obj for obj in fetched
             if mapping.effective_modified(obj)
@@ -254,16 +309,18 @@ class AnytypeGraphRepository:
         links: Sequence[LinkSpec] = (),
         *,
         create_missing_relations: bool = False,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         type_key = self._registry.type_key_for(draft.type)
         if type_key is None:
             raise UnknownNodeType(draft.type, tuple(self._registry.known_node_types()))
+        role = self._registry.role_for(type_key)
 
         # Apply the type's template on create (default property values + layout),
         # except for infra roles -- bot-owned bookkeeping whose bodies are
         # write-once and must not carry a human's UI scaffold.
         template_id: str | None = None
-        if self._registry.role_for(type_key) not in schema.INFRA_ROLES:
+        if role not in schema.INFRA_ROLES:
             template_id = await self._template_for(type_key)
 
         # Pre-validate endpoints (index-only) before any API call.
@@ -286,15 +343,18 @@ class AnytypeGraphRepository:
                 else:
                     incoming.append((link, key))
 
-            # Field routing (ADR 012): native-matching keys become property
-            # entries (select tags resolved-or-created first -- POST
-            # validates them inline); the residual goes to the blob.
-            native_fields, blob = await self._resolve_field_entries(draft.fields)
+            # Field routing (ADR 012/023/028): every key becomes a native
+            # property entry (select tags resolved-or-created first --
+            # POST validates them inline); unmatched keys error.
+            native_fields = await self._resolve_field_entries(
+                draft.fields, type_key=type_key,
+                create_missing=create_missing_fields,
+            )
             created = await self._send_tolerating_fresh_tags(
                 lambda: self._client.create_object(
                     mapping.to_create_payload(
                         draft, type_key=type_key,
-                        native_properties=native_fields, fields_blob=blob,
+                        native_properties=native_fields,
                         timeline=self._timeline,
                         template_id=template_id or "",
                     )
@@ -314,7 +374,7 @@ class AnytypeGraphRepository:
                 # the rollback, which archives the node (and with it these edges).
                 if outgoing:
                     payload = mapping.relations_patch_payload(outgoing)
-                    markdown = self._footer_markdown(
+                    markdown = await self._footer_markdown(
                         created, node,
                         [link.to_edge(anchor=node.id, property_key=key)
                          for link, key in resolved if link.outgoing],
@@ -330,7 +390,7 @@ class AnytypeGraphRepository:
                     # restore what the store really held, not an index view.
                     obj, previous = await self._current_state(link.other, key)
                     payload = mapping.relation_patch_payload(key, [*previous, node.id])
-                    markdown = self._footer_markdown(
+                    markdown = await self._footer_markdown(
                         obj, self._graph.node(link.other),
                         [*self._graph.edges(link.other, Direction.OUT),
                          link.to_edge(anchor=node.id, property_key=key)],
@@ -369,13 +429,16 @@ class AnytypeGraphRepository:
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         existing = self._graph.node(node_id)  # NodeNotFound before any API call
         native_fields: list[dict[str, Any]] = []
-        blob: Mapping[str, str] | None = None
         if fields is not None:
-            native_fields, blob = await self._resolve_field_entries(fields)
-        if body is not None and existing.role not in schema.INFRA_ROLES:
+            native_fields = await self._resolve_field_entries(
+                fields, type_key=existing.type_key,
+                create_missing=create_missing_fields,
+            )
+        if body is not None and await self._writes_footer(existing):
             # ADR 013: re-render the footer around the new text (index edges;
             # link changes maintain it on their own writes).
             footer = mapping.render_connections_footer(
@@ -389,7 +452,6 @@ class AnytypeGraphRepository:
             summary_stale=summary_stale,
             body=body,
             story_time=story_time,
-            fields=blob,
             native_properties=native_fields,
             timeline=self._timeline,
         )
@@ -415,7 +477,7 @@ class AnytypeGraphRepository:
             obj, targets = await self._current_state(edge.source, key)
             if edge.target not in targets:
                 payload = mapping.relation_patch_payload(key, [*targets, edge.target])
-                markdown = self._footer_markdown(
+                markdown = await self._footer_markdown(
                     obj, source,
                     [*self._graph.edges(edge.source, Direction.OUT), edge],
                 )
@@ -435,7 +497,7 @@ class AnytypeGraphRepository:
             obj, current = await self._current_state(edge.source, key)
             targets = [t for t in current if t != edge.target]
             payload = mapping.relation_patch_payload(key, targets)
-            markdown = self._footer_markdown(
+            markdown = await self._footer_markdown(
                 obj, self._graph.node(edge.source),
                 [e for e in self._graph.edges(edge.source, Direction.OUT) if e != edge],
             )
@@ -571,7 +633,34 @@ class AnytypeGraphRepository:
         rows.sort(key=lambda row: (row[0], row[1].lower(), row[2]))
         return rows
 
-    def _footer_markdown(
+    async def _writes_footer(self, node: Node) -> bool:
+        """Whether this node's body takes a connections footer at all.
+
+        THE footer-eligibility rule (ADR 013, amended): infra-role bodies are
+        write-once by policy, and types whose template carries a body
+        scaffold ("property header") are hands-off -- a ``markdown`` PATCH
+        is a wholesale block replace (A7) that would destroy template blocks
+        markdown cannot express, and it flattens a first-line heading (A9).
+        """
+        if node.role in schema.INFRA_ROLES:
+            return False
+        return not await self._has_scaffold(node.type_key)
+
+    async def _has_scaffold(self, type_key: str) -> bool:
+        """True when the type's template carries a non-empty body scaffold.
+
+        Cached per type_key alongside :meth:`_template_for`; the template
+        object answers the single-object GET with its scaffold as
+        ``markdown`` (reads are unthrottled, S7)."""
+        if type_key not in self._scaffolded:
+            template_id = await self._template_for(type_key)
+            scaffold = ""
+            if template_id is not None:
+                scaffold = mapping.body_of(await self._client.get_object(template_id))
+            self._scaffolded[type_key] = bool(scaffold.strip())
+        return self._scaffolded[type_key]
+
+    async def _footer_markdown(
         self,
         obj: Mapping[str, Any],
         node: Node,
@@ -580,12 +669,13 @@ class AnytypeGraphRepository:
     ) -> str | None:
         """The ``markdown`` value to ride an existing PATCH, or ``None``.
 
-        ``None`` means don't touch the body: infra-role nodes never get a
-        footer (write-once by policy), and an unchanged footer is a no-op
-        (every skipped rewrite is a mention-pill spared, WP10c caveat).
-        Composed from ``body_of`` output -- never the raw export (A8).
+        ``None`` means don't touch the body: footer-ineligible nodes
+        (:meth:`_writes_footer`) keep their bodies untouched, and an
+        unchanged footer is a no-op (every skipped rewrite is a mention-pill
+        spared, WP10c caveat). Composed from ``body_of`` output -- never the
+        raw export (A8).
         """
-        if node.role in schema.INFRA_ROLES:
+        if not await self._writes_footer(node):
             return None
         footer = mapping.render_connections_footer(
             self._connections(edges, extra_names), self._client.space_id
@@ -595,30 +685,126 @@ class AnytypeGraphRepository:
             return None
         return mapping.compose_body(clean_body, footer)
 
-    # -- field routing (ADR 012) -------------------------------------------
+    # -- field routing (ADR 012, amended by ADR 023) -------------------------
 
     async def _resolve_field_entries(
-        self, fields: Mapping[str, str]
-    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-        """Split ``fields`` into native property entries + the residual blob.
+        self,
+        fields: Mapping[str, str],
+        *,
+        type_key: str,
+        create_missing: Mapping[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Resolve ``fields`` into native property entries.
 
         A key matching a reflectable native property (by key or display
         name) writes that property -- where humans filter and sort; select
         values are resolved against the property's tags *before* the object
         write (POST validates inline select entries, so resolution cannot
-        wait). Unmatched keys fall through to the ``gc_fields`` blob.
+        wait).
+
+        Writes are native-only for every role (ADR 023/028 -- infra
+        bookkeeping lands in bootstrap-minted attribution properties, not
+        a blob): an unmatched key raises :class:`UnknownFieldKey` --
+        listing the type's reusable properties -- unless declared in
+        ``create_missing`` (key -> format), in which case the property is
+        created (immediately usable; live-confirmed 2026-07-10, unlike
+        ``objects`` relations there is no settle window). All keys are
+        checked before anything is created, so an approval error never
+        leaves a half-minted vocabulary.
         """
-        native: list[dict[str, Any]] = []
-        residual: dict[str, str] = {}
+        declared = {k: v.strip().lower() for k, v in (create_missing or {}).items()}
+        resolved: list[tuple[PropertyInfo | None, str, str]] = []
         for key, value in fields.items():
             info = self._registry.field_property(key)
+            if info is None and (
+                self._registry.key_for_label(key) is not None  # a relation
+                or key not in declared
+            ):
+                await self._raise_unknown_field(key, type_key)
+            resolved.append((info, key, value))
+        entries: list[dict[str, Any]] = []
+        for info, key, value in resolved:
             if info is None:
-                residual[key] = value
-                continue
-            native.append(await self._native_entry(info, value))
-        return native, residual
+                info = await self._create_field_property(key, declared[key])
+            entries.append(await self._native_entry(info, value))
+        return entries
+
+    async def _create_field_property(self, key: str, fmt: str) -> PropertyInfo:
+        """Mint a new scalar property (explicitly requested via
+        ``create_missing_fields``) and register it for reuse."""
+        created = await self._client.create_property(
+            {"key": _slugify(key), "name": key, "format": fmt}
+        )
+        info = PropertyInfo(
+            key=created.get("key", _slugify(key)),
+            name=created.get("name", key),
+            format=fmt,
+            id=created.get("id", ""),
+        )
+        self._registry.register_property(info)
+        logger.info("created %s property %r (ADR 023 opt-in)", fmt, info.key)
+        return info
+
+    async def _raise_unknown_field(self, key: str, type_key: str) -> NoReturn:
+        """Build and raise the unmatched-key approval error (errors are
+        prompts: the type's own properties first, with select options,
+        then the rest of the space's without them). A key that names an
+        ``objects``-format relation redirects to ``links`` instead --
+        relations are edges here (ADR 006), and minting a scalar shadow
+        of one must stay impossible."""
+        relation = self._registry.key_for_label(key)
+        if relation is not None:
+            raise UnknownFieldKey(
+                key,
+                self._registry.type_name(type_key),
+                relation_label=self._registry.label_for(relation),
+            )
+        type_props = self._registry.reflectable_type_properties(type_key)
+        type_prop_keys = {prop.key for prop in type_props}
+        others = tuple(
+            prop for prop in self._registry.reflectable_properties()
+            if prop.key not in type_prop_keys
+        )
+        raise UnknownFieldKey(
+            key,
+            self._registry.type_name(type_key),
+            type_properties=await self._render_property_lines(type_props, options=True),
+            other_properties=await self._render_property_lines(others, options=False),
+            formats=tuple(schema.FIELD_FORMATS),
+        )
+
+    async def _render_property_lines(
+        self, props: Iterable[PropertyInfo], *, options: bool
+    ) -> tuple[str, ...]:
+        lines = []
+        for prop in props:
+            names: tuple[str, ...] = ()
+            if options and prop.format in {"select", "multi_select"} and prop.id:
+                names = await self._tag_names_for(prop)
+            lines.append(
+                FieldSpec(
+                    name=prop.name, format=prop.format, key=prop.key,
+                    options=names,
+                ).render_hint()
+            )
+        return tuple(lines)
+
+    async def _tag_names_for(self, prop: PropertyInfo) -> tuple[str, ...]:
+        """Option names of one select property, memoized until the next
+        registry rebuild (errors may render several selects; tags rarely
+        change under us and a stale name in a hint is harmless)."""
+        cached = self._tag_names.get(prop.id)
+        if cached is None:
+            cached = tuple(
+                [str(tag.get("name", "")) async for tag in self._client.list_tags(prop.id)]
+            )
+            self._tag_names[prop.id] = cached
+        return cached
 
     async def _native_entry(self, info: PropertyInfo, value: str) -> dict[str, Any]:
+        """One field value -> one wire property entry. Acceptance rules
+        (and their LLM-facing errors) live in ``domain.fields`` -- the
+        fake normalizes with the same functions, so both backends agree."""
         fmt = info.format
         if fmt == "select":
             return mapping.property_entry(
@@ -626,27 +812,17 @@ class AnytypeGraphRepository:
             )
         if fmt == "multi_select":
             keys = [
-                await self._resolve_tag(info, part.strip())
-                for part in value.split(",") if part.strip()
+                await self._resolve_tag(info, part)
+                for part in domain_fields.split_multi_select(value)
             ]
             return mapping.property_entry(info.key, fmt, keys)
         if fmt == "number":
-            try:
-                return mapping.property_entry(info.key, fmt, float(value))
-            except ValueError:
-                raise GraphContextError(
-                    f"field {info.key!r} is a number property; got {value!r} "
-                    "(pass a plain number, e.g. \"42\")"
-                ) from None
-        if fmt == "checkbox":
-            lowered = value.strip().lower()
-            if lowered not in {"true", "false", "yes", "no", "1", "0"}:
-                raise GraphContextError(
-                    f"field {info.key!r} is a checkbox property; got {value!r} "
-                    "(pass \"true\" or \"false\")"
-                )
             return mapping.property_entry(
-                info.key, fmt, lowered in {"true", "yes", "1"}
+                info.key, fmt, domain_fields.parse_number(info.key, value)
+            )
+        if fmt == "checkbox":
+            return mapping.property_entry(
+                info.key, fmt, domain_fields.parse_checkbox(info.key, value)
             )
         # text / date / url / email / phone: pass the string through.
         return mapping.property_entry(info.key, fmt, value)

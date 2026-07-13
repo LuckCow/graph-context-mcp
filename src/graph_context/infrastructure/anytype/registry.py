@@ -42,21 +42,11 @@ class TypeInfo:
     # (GET /types/{typeId}/templates), which is keyed by id, not key. "" for
     # entries built before ids mattered.
     id: str = ""
-
-
-# Read-compat with pre-pivot data (ADR 006): the old bootstrap minted a
-# closed gc_ type per node kind; spaces it touched still contain objects of
-# these types. Seeded into every registry's role_overrides so those objects
-# keep their semantic role. Adapter knowledge -- deliberately NOT in
-# ``schema.DEFAULT_TYPE_ROLES``.
-LEGACY_TYPE_ROLES: dict[str, Role] = {
-    "gc_character": Role.CHARACTER,
-    "gc_event": Role.EVENT,
-    "gc_location": Role.LOCATION,
-    "gc_technology": Role.TECHNOLOGY,
-    "gc_faction": Role.ORGANIZATION,
-    "gc_item": Role.ITEM,
-}
+    # The type's own properties as GET /types returns them (ADR 023) --
+    # the per-type half of the catalog shown to the LLM. Space-level
+    # properties never attached to a type are not in here; writes still
+    # match space-wide via field_property.
+    properties: tuple[PropertyInfo, ...] = ()
 
 
 @dataclass
@@ -125,15 +115,22 @@ class SpaceRegistry:
     def key_for_label(self, label: str) -> str | None:
         """Resolve a relation *label* to an existing ``objects`` property key.
 
-        Case-insensitive match on the cleaned label or the raw key. Returns
-        ``None`` when no existing relation matches (the writer then surfaces
-        it for approval).
+        Case-insensitive match on the cleaned label, the raw key, or the
+        property's display name -- the display name is what the space's
+        human (and therefore the LLM) sees, and ``field_property`` already
+        matches it for scalars ("Linked Projects" must resolve as well as
+        ``linked_projects``). Returns ``None`` when no existing relation
+        matches (the writer then surfaces it for approval).
         """
         target = label.strip().lower()
         for key, info in self.properties_by_key.items():
             if info.format != "objects" or key in mapping.SYSTEM_RELATION_DENYLIST:
                 continue
-            if mapping.clean_label(key).lower() == target or key.lower() == target:
+            if (
+                mapping.clean_label(key).lower() == target
+                or key.lower() == target
+                or info.name.strip().lower() == target
+            ):
                 return key
         return None
 
@@ -154,26 +151,51 @@ class SpaceRegistry:
     def reflects_field(self, key: str, fmt: str) -> bool:
         """Should this property surface in ``Node.fields``?
 
-        Scalar formats only; excludes ``gc_`` keys (first-class or retired),
-        the built-in ``description`` (the summary channel, ADR 011), the
-        census-based system-noise denylist, and any space-specific keys the
-        user silenced via ``GC_FIELD_DENYLIST``.
+        Scalar formats only; excludes ``gc_`` keys (first-class or
+        server-managed) -- except the deliberately reflected surface
+        (``GC_REFLECTED_FIELD_KEYS``: Scheduled Events per ADR 027,
+        attribution stamps per ADR 028), which reads from and writes to
+        real properties like any native field -- the built-in
+        ``description`` (the summary channel, ADR 011), the census-based
+        system-noise denylist, and any space-specific keys the user
+        silenced via ``GC_FIELD_DENYLIST``.
         """
         return (
             fmt in mapping.REFLECTED_FIELD_FORMATS
-            and not key.startswith(mapping.GC_PREFIX)
+            and (
+                not key.startswith(mapping.GC_PREFIX)
+                or key in mapping.GC_REFLECTED_FIELD_KEYS
+            )
             and key != mapping.PROP_SUMMARY
             and key != self.timeline_key  # surfaced as story_time (ADR 015)
             and key not in mapping.SYSTEM_PROPERTY_DENYLIST
             and key not in self.hidden_field_keys
         )
 
+    def reflectable_type_properties(self, type_key: str) -> tuple[PropertyInfo, ...]:
+        """The type's own properties that are usable as ``fields`` keys."""
+        info = self.types_by_key.get(type_key)
+        if info is None:
+            return ()
+        return tuple(
+            prop for prop in info.properties
+            if self.reflects_field(prop.key, prop.format)
+        )
+
+    def reflectable_properties(self) -> tuple[PropertyInfo, ...]:
+        """Every space property usable as a ``fields`` key (the write-match
+        universe of :meth:`field_property`)."""
+        return tuple(
+            info for key, info in sorted(self.properties_by_key.items())
+            if self.reflects_field(key, info.format)
+        )
+
     def field_property(self, identifier: str) -> PropertyInfo | None:
         """Resolve a ``fields`` key to a reflectable scalar property.
 
         Case-insensitive match on key or display name -- the write-side
-        mirror of :meth:`reflects_field` (an unmatched key falls through to
-        the ``gc_fields`` blob).
+        mirror of :meth:`reflects_field` (an unmatched key is surfaced for
+        approval by the repository).
         """
         target = identifier.strip().lower()
         for key, info in self.properties_by_key.items():
@@ -193,15 +215,24 @@ async def load_registry(
     """Build a registry from the space's live types and properties.
 
     ``extra_role_overrides`` carries the active DomainProfile's type-key ->
-    Role additions (WP5); they win over the legacy read-compat seeds.
-    ``hidden_field_keys`` carries GC_FIELD_DENYLIST (ADR 012).
+    Role additions (WP5). ``hidden_field_keys`` carries GC_FIELD_DENYLIST
+    (ADR 012).
     """
     types_by_key: dict[str, TypeInfo] = {}
     async for type_obj in client.list_types():
         key = type_obj.get("key")
         if key:
+            type_properties = tuple(
+                PropertyInfo(
+                    key=prop["key"], name=prop.get("name", prop["key"]),
+                    format=prop.get("format", ""), id=prop.get("id", ""),
+                )
+                for prop in type_obj.get("properties", [])
+                if prop.get("key")
+            )
             types_by_key[key] = TypeInfo(
                 key=key, name=type_obj.get("name", key), id=type_obj.get("id", ""),
+                properties=type_properties,
             )
     properties_by_key: dict[str, PropertyInfo] = {}
     async for prop in client.list_properties():
@@ -214,7 +245,7 @@ async def load_registry(
     return SpaceRegistry(
         properties_by_key=properties_by_key,
         types_by_key=types_by_key,
-        role_overrides={**LEGACY_TYPE_ROLES, **(extra_role_overrides or {})},
+        role_overrides=dict(extra_role_overrides or {}),
         hidden_field_keys=hidden_field_keys,
         timeline_key=timeline_key,
     )

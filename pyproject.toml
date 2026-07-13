@@ -17,8 +17,14 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10", "import-l
 # claude-agent-sdk is the driver's model access: it runs the (bundled)
 # Claude Code CLI, which authenticates with the user's Claude SUBSCRIPTION
 # (~/.claude OAuth login or CLAUDE_CODE_OAUTH_TOKEN) — the sanctioned
-# per-plan path; the raw `anthropic` SDK would bill API credits instead.
-orchestrator = ["langgraph>=0.2", "claude-agent-sdk>=0.2"]
+# per-plan path. (langgraph was declared here since ADR 007 but never
+# imported — the pipeline is the agentic harness; removed 2026-07-12.)
+orchestrator = ["claude-agent-sdk>=0.2"]
+# The raw Messages-API driver (anthropic_driver.py). A SEPARATE extra on
+# purpose: the anthropic SDK bills API credits, not the subscription, so
+# even installing it stays an explicit opt-in (GC_DRIVER=anthropic_api +
+# ANTHROPIC_API_KEY activate it).
+anthropic = ["anthropic>=0.116"]
 # WP8 chat-bot transports. Discord's Gateway is outbound-only (websocket), so
 # the bot runs inside the firewalled devcontainer; egress rules live in
 # init-firewall.sh (discord.com, gateway.discord.gg + the 162.159.128.0/20
@@ -53,6 +59,11 @@ mypy_path = "src"
 # devcontainer-image-only (egress firewall). Typed normally where installed.
 [[tool.mypy.overrides]]
 module = "claude_agent_sdk.*"
+ignore_missing_imports = true
+
+# Same story for the [anthropic] extra (raw Messages-API driver).
+[[tool.mypy.overrides]]
+module = "anthropic.*"
 ignore_missing_imports = true
 
 # Same story for the [bot] extra (discord.py).
@@ -122,9 +133,13 @@ type = "forbidden"
 source_modules = [
     "graph_context.orchestrator.modes",
     "graph_context.orchestrator.drivers",
+    "graph_context.orchestrator.driver_common",
+    "graph_context.orchestrator.anthropic_driver",
     "graph_context.orchestrator.pipeline",
     "graph_context.orchestrator.turn_log",
     "graph_context.orchestrator.turn_log_server",
+    "graph_context.orchestrator.inspect_server",
+    "graph_context.orchestrator.eval_index",
     "graph_context.orchestrator.channels",
     "graph_context.orchestrator.spaces",
     "graph_context.orchestrator.discord_transport",
@@ -145,8 +160,12 @@ source_modules = [
     "graph_context.orchestrator.pipeline",
     "graph_context.orchestrator.turn_log",
     "graph_context.orchestrator.turn_log_server",
+    "graph_context.orchestrator.inspect_server",
+    "graph_context.orchestrator.eval_index",
     "graph_context.orchestrator.capture",
     "graph_context.orchestrator.claude_driver",
+    "graph_context.orchestrator.driver_common",
+    "graph_context.orchestrator.anthropic_driver",
     "graph_context.orchestrator.bootstrap",
     "graph_context.orchestrator.channels",
     "graph_context.orchestrator.spaces",
@@ -189,5 +208,6 @@ forbidden_modules = [
     "langchain",
     "langchain_core",
     "claude_agent_sdk",
+    "anthropic",
     "discord",
 ]

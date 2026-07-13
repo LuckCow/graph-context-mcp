@@ -22,10 +22,12 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any
 
-from graph_context.domain import schema
+from graph_context.domain import attribution, schema
+from graph_context.domain import fields as domain_fields
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import (
     Edge,
+    FieldSpec,
     LinkSpec,
     Node,
     NodeDraft,
@@ -33,6 +35,7 @@ from graph_context.domain.models import (
     TimelineValue,
 )
 from graph_context.domain.schema import Role
+from graph_context.errors import UnknownFieldKey
 
 
 @dataclass(frozen=True)
@@ -52,16 +55,52 @@ class InMemoryGraphRepository:
         *,
         role_overrides: Mapping[str, Role] | None = None,
         templates: Mapping[str, FakeTemplate] | None = None,
+        field_catalog: Sequence[FieldSpec] | None = None,
+        members: Sequence[str] = (),
     ) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
         self._bodies: dict[NodeId, str] = {}
+        self._out_of_band: list[NodeDraft] = []
         # Profile-supplied type-key -> Role additions (WP5); same contract
         # as the Anytype adapter's registry overrides.
         self._role_overrides: dict[str, Role] = dict(role_overrides or {})
         # Type-identifier -> template, mirroring the Anytype adapter applying a
         # type's template on create (default field values + scaffold body).
         self._templates: dict[str, FakeTemplate] = dict(templates or {})
+        # The space's scalar-property catalog (ADR 023). None keeps the
+        # historical open behavior -- any field key, stored verbatim -- so
+        # the memory backend and demos need no vocabulary. A catalog turns
+        # on the strict contract: story-node field keys must match a spec
+        # (by key or name) or be declared via create_missing_fields. An
+        # ``objects``-format spec models a RELATION (an edge, ADR 006):
+        # never a fields target, and a fields key naming one redirects to
+        # ``links`` -- mirroring the adapter's registry.
+        self._field_specs: list[FieldSpec] | None = (
+            list(field_catalog) if field_catalog is not None else None
+        )
+        if self._field_specs is not None:
+            # Bootstrap parity (ADR 028): the Anytype adapter's
+            # ensure_schema guarantees the attribution properties exist,
+            # so recorder writes resolve without an opt-in. The fake's
+            # catalog carries the same guarantee.
+            existing_keys = {spec.key for spec in self._field_specs}
+            self._field_specs.extend(
+                FieldSpec(name=key, format=fmt, key=key)
+                for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
+                if key not in existing_keys
+            )
+        # Space members reflected as read-only nodes (S11), mirroring the
+        # Anytype adapter's member fetch: first-class, linkable (an
+        # assignee-style edge needs a target IN the index), no role.
+        for name in members:
+            self._graph.upsert_node(Node(
+                id=f"member-{next(self._ids):04d}",
+                type="Space member",
+                type_key="participant",
+                name=name,
+                summary="",
+            ))
 
     @property
     def graph(self) -> GraphIndex:
@@ -73,6 +112,7 @@ class InMemoryGraphRepository:
         links: Sequence[LinkSpec] = (),
         *,
         create_missing_relations: bool = False,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         role = schema.resolve_role(draft.type, self._role_overrides)
         # Apply the type's template (default field values + scaffold body),
@@ -80,7 +120,10 @@ class InMemoryGraphRepository:
         # override template defaults; the caller body is appended below the
         # scaffold (template first).
         template = None if role in schema.INFRA_ROLES else self._templates.get(draft.type)
-        fields = dict(draft.fields)
+        fields = self._resolve_fields(
+            draft.fields, type_name=draft.type,
+            create_missing=create_missing_fields,
+        )
         body = draft.body
         if template is not None:
             fields = {**template.default_fields, **fields}
@@ -124,7 +167,14 @@ class InMemoryGraphRepository:
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
+        existing = self._graph.node(node_id)
+        if fields is not None:
+            fields = self._resolve_fields(
+                fields, type_name=existing.type,
+                create_missing=create_missing_fields,
+            )
         changes: dict[str, Any] = {
             key: value
             for key, value in {
@@ -136,7 +186,7 @@ class InMemoryGraphRepository:
             }.items()
             if value is not None
         }
-        updated = replace(self._graph.node(node_id), **changes)
+        updated = replace(existing, **changes)
         self._graph.upsert_node(updated)
         if body is not None:
             # A7 semantics: wholesale replace; empty string clears.
@@ -165,12 +215,129 @@ class InMemoryGraphRepository:
         # No predefined relation vocabulary off a live space.
         return frozenset()
 
+    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+        if not self._field_specs:
+            return {}
+        # No per-type property attachment in the fake: the whole catalog is
+        # offered under every known (non-infra) type name. Relations
+        # (objects format) are edges, not fields-key vocabulary; the
+        # attribution stamps are recorder-owned (ADR 028), not offered.
+        specs = tuple(
+            s for s in self._field_specs
+            if s.format != "objects" and s.key not in attribution.ATTRIBUTION_FIELDS
+        )
+        return {name: specs for name in sorted(self.known_node_types())}
+
+    # -- field routing (ADR 023) -------------------------------------------
+
+    def _resolve_fields(
+        self,
+        fields: Mapping[str, str],
+        *,
+        type_name: str,
+        create_missing: Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        """The fake's half of the ADR 023/028 contract.
+
+        Open mode (no catalog): fields pass through verbatim. Catalog
+        mode (every role -- infra writes are native-only too, ADR 028):
+        each key must match a spec by key or display name
+        (case-insensitive) and is stored under the spec's canonical key --
+        mirroring the adapter, where a display-name write reads back under
+        the raw property key -- or be declared in ``create_missing``, which
+        registers a new spec. Values normalize like the adapter round-trip
+        (checkbox -> "true"/"false", numbers untrailed, multi_select
+        comma-spacing).
+        """
+        if self._field_specs is None:
+            return dict(fields)
+        declared = {k: v.strip().lower() for k, v in (create_missing or {}).items()}
+        # All-keys-first check: an approval error never half-extends the
+        # catalog (same discipline as the adapter).
+        matched: dict[str, FieldSpec | None] = {}
+        for key in fields:
+            spec = self._spec_for(key)
+            if spec is not None and spec.format == "objects":
+                # The key names a relation: an edge, never a field --
+                # redirect (even when declared; a scalar must not shadow it).
+                raise UnknownFieldKey(
+                    key, type_name, relation_label=spec.name,
+                )
+            if spec is None and key not in declared:
+                raise UnknownFieldKey(
+                    key,
+                    type_name,
+                    type_properties=tuple(
+                        s.render_hint()
+                        for s in self._field_specs
+                        if s.format != "objects"
+                    ),
+                    formats=tuple(schema.FIELD_FORMATS),
+                )
+            matched[key] = spec
+        resolved: dict[str, str] = {}
+        for key, value in fields.items():
+            spec = matched[key]
+            if spec is None:
+                spec = FieldSpec(name=key, format=declared[key], key=key)
+                self._field_specs.append(spec)
+            store_key = spec.key or spec.name
+            resolved[store_key] = self._normalize_value(spec, value)
+        return resolved
+
+    def _spec_for(self, key: str) -> FieldSpec | None:
+        target = key.strip().lower()
+        assert self._field_specs is not None
+        for spec in self._field_specs:
+            if target in (spec.key.strip().lower(), spec.name.strip().lower()):
+                return spec
+        return None
+
+    def _normalize_value(self, spec: FieldSpec, value: str) -> str:
+        """Match what the adapter reads back after a write (ADR 012's
+        ``field_value`` normalization), so round-trips agree across repos.
+        Acceptance rules and errors are the shared ``domain.fields`` ones."""
+        field = spec.key or spec.name
+        if spec.format == "checkbox":
+            return "true" if domain_fields.parse_checkbox(field, value) else "false"
+        if spec.format == "number":
+            return domain_fields.render_number(
+                domain_fields.parse_number(field, value)
+            )
+        if spec.format in {"select", "multi_select"}:
+            names = domain_fields.split_multi_select(value)
+            self._register_options(spec, names)
+            return ", ".join(names) if spec.format == "multi_select" else value.strip()
+        return value
+
+    def _register_options(self, spec: FieldSpec, names: list[str]) -> None:
+        """Unseen select values become options (the adapter auto-creates
+        tags, ADR 012); recorded so error hints can list them."""
+        assert self._field_specs is not None
+        known = {opt.strip().lower() for opt in spec.options}
+        new = [n for n in names if n.strip().lower() not in known]
+        if new:
+            updated = replace(spec, options=(*spec.options, *new))
+            self._field_specs[self._field_specs.index(spec)] = updated
+
+    def stage_out_of_band(self, draft: NodeDraft) -> None:
+        """Queue a node that exists in the space but not the index yet.
+
+        Simulates a human creating an object in the Anytype UI while the
+        server runs: invisible to every read until :meth:`resync` pulls it
+        in -- the same contract as the real adapter's modified-since
+        fetch. Test/eval surface only; not part of the port.
+        """
+        self._out_of_band.append(draft)
+
     async def hydrate(self) -> None:
         """No backing store: the index is already authoritative here."""
 
     async def resync(self) -> frozenset[NodeId]:
-        """No out-of-band editors can exist for an in-memory store."""
-        return frozenset()
+        """Materialize whatever was staged out-of-band (usually nothing)."""
+        staged, self._out_of_band = self._out_of_band, []
+        created = [await self.create_node(draft) for draft in staged]
+        return frozenset(node.id for node in created)
 
     async def fetch_body(self, node_id: NodeId) -> str:
         self._graph.node(node_id)  # NodeNotFound on bad id

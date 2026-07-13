@@ -23,6 +23,7 @@ from typing import Protocol
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import (
     Edge,
+    FieldSpec,
     LinkSpec,
     Node,
     NodeDraft,
@@ -72,6 +73,7 @@ class GraphRepository(Protocol):
         links: Sequence[LinkSpec] = (),
         *,
         create_missing_relations: bool = False,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node:
         """Create a node and its links.
 
@@ -81,6 +83,14 @@ class GraphRepository(Protocol):
         :class:`graph_context.errors.UnknownRelationLabel` unless
         ``create_missing_relations`` is set, in which case the relation is
         created. Either approval error is raised *before* any persistence.
+
+        Story-node ``fields`` keys must resolve to existing scalar properties
+        (ADR 023); an unmatched key raises
+        :class:`graph_context.errors.UnknownFieldKey` before any persistence
+        unless declared in ``create_missing_fields`` (key -> format from
+        :data:`graph_context.domain.schema.FIELD_FORMATS`), in which case the
+        property is created. Infra-role drafts are exempt: their fields are
+        bookkeeping, not space vocabulary.
         """
         ...
 
@@ -94,6 +104,7 @@ class GraphRepository(Protocol):
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
+        create_missing_fields: Mapping[str, str] | None = None,
     ) -> Node: ...
 
     async def add_link(
@@ -112,6 +123,15 @@ class GraphRepository(Protocol):
 
     def known_edge_labels(self) -> frozenset[str]:
         """Relation labels available to reuse (for error suggestions)."""
+        ...
+
+    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+        """Reflectable scalar properties per type display name (ADR 023).
+
+        Guidance for the LLM (overview rendering, unmatched-key errors):
+        which properties already exist as ``fields`` targets on each
+        non-infra type. May be empty for backends without a space schema.
+        """
         ...
 
     async def hydrate(self) -> None: ...

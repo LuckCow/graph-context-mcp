@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(python -m evals run*)"
+    ]
+  }
+}

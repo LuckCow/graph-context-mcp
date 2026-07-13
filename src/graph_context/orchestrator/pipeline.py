@@ -4,8 +4,9 @@ One message = one turn: the pipeline runs the driver/tool loop until the
 driver replies (or the tool budget runs out) and returns the turn's reply
 events. Transports (CLI now; Telegram/Slack in WP8) stay thin adapters
 over this function -- ``session_id`` is the transport's thread/channel,
-``user_id`` its user handle (unused until WP8's authz/attribution, logged
-today).
+``user_id`` its user handle (provenance attribution + logs), ``sender``
+the human-readable display name the model gets to see (see
+:func:`sender_attributed`).
 
 Mode switching is an EXPLICIT user command (settled in WP6): ``/mode
 <name>`` over whatever specs the deployment loaded (ADR 015), handled here
@@ -32,6 +33,7 @@ can prime the ring after a restart via :meth:`Orchestrator.seed_memory`.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import uuid
@@ -40,10 +42,12 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.application.scheduler import SchedulerTick
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
-from graph_context.interface.tools import Services
+from graph_context.interface.services import Services
+from graph_context.interface.tools import resync_out_of_band
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
 from graph_context.orchestrator.modes import ModeRegistry
@@ -75,6 +79,37 @@ class ReplyEvent:
 
     text: str
     kind: str = "reply"
+
+
+def scheduled_prompt(name: str, prompt: str) -> str:
+    """The transcript form of a fired Scheduled Event (WP18, ADR 027).
+
+    The consumer is the LLM waking up with no triggering user message: the
+    framing says why the turn exists and that the stored instructions --
+    written by its past self or the user -- are to be acted on now, in
+    chat. The single format rule lives here (like ``sender_attributed``)
+    so every transport fires events identically.
+    """
+    return (
+        f"[scheduled event {name!r} fired] This turn was started by the "
+        "scheduler, not by a user message. Follow these stored "
+        f"instructions now, replying in the chat as usual: {prompt}"
+    )
+
+
+def sender_attributed(text: str, sender: str) -> str:
+    """The transcript form of a user message with a known sender.
+
+    A session can be a shared surface (an Anytype space chat, a Discord
+    channel), so "assign this to me"-shaped requests are unanswerable
+    unless each message says who sent it -- the model otherwise sees only
+    bare text (live-caught: Task Creation Mode could not fill Assignee =
+    the requester). The prefix rides into conversation memory and startup
+    seeding too, so replayed history keeps its attribution; the single
+    format rule lives here. An empty sender (CLI, MCP, name unknown)
+    leaves the message bare.
+    """
+    return f"[from {sender}] {text}" if sender else text
 
 
 DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
@@ -140,6 +175,10 @@ class _SessionState:
     mode: str  # a loaded ModeSpec name; authoritative in-memory (WP8)
     services: Services  # this session's view: own SessionState, shared space
     memory: ConversationMemory = field(default_factory=ConversationMemory)
+    # The last (mode, goal, bound tools) logged as a `prompt` diary event;
+    # a change (first turn, /mode switch, registry edit) re-logs so the
+    # diary always holds the prompt the NEXT decisions actually run with.
+    logged_prompt: tuple[str, str, tuple[str, ...]] | None = None
 
 
 @dataclass(slots=True)
@@ -154,9 +193,10 @@ class Orchestrator:
     switches the whole subsystem off.
 
     ``turn_log`` is the same shape of toggle for the full-fidelity turn
-    diary: when wired, every message logs its input, each driver
-    decision, each tool call with its complete output, and the final
-    reply events (see ``turn_log.py``). ``None`` logs nothing.
+    diary: when wired, every message logs its input, the assembled
+    prompt the driver sends, each driver decision, each tool call with
+    its complete output, and the final reply events (see
+    ``turn_log.py``). ``None`` logs nothing.
     """
 
     services: Services
@@ -182,6 +222,38 @@ class Orchestrator:
         state = self._sessions.get(session_id)
         return state.mode if state is not None else self.registry.default
 
+    def services_of(self, session_id: str) -> Services | None:
+        """Non-creating peek: the Services view a session runs on, or
+        ``None`` for a session no turn has touched yet (ADR 021)."""
+        state = self._sessions.get(session_id)
+        return state.services if state is not None else None
+
+    async def resync_graph(self) -> frozenset[str]:
+        """Pull edits made directly in Anytype into the shared index.
+
+        The transports' periodic-refresh entry point (all sessions share
+        one repository); the same path as the context tool's resync
+        action, so the embedding cache stays in step with the graph.
+        """
+        return await resync_out_of_band(self.services)
+
+    # -- scheduled events (WP18, ADR 027): the transports' scheduler
+    # loop calls these; the rules live in application.scheduler. The
+    # shared bundle is correct here (like resync_graph): scheduled
+    # events belong to the space, not to any one session. --------------
+
+    def scheduled_tick(self) -> SchedulerTick:
+        """One due-scan over the shared graph (pure read)."""
+        return self.services.scheduler.tick()
+
+    async def arm_scheduled(self, node_id: str) -> None:
+        """Anchor a UI-created recurring event without firing it."""
+        await self.services.scheduler.arm(node_id)
+
+    async def mark_scheduled_fired(self, node_id: str) -> None:
+        """Stamp an event as fired (call BEFORE its turn runs)."""
+        await self.services.scheduler.mark_fired(node_id)
+
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
         if spec is None:
@@ -198,7 +270,8 @@ class Orchestrator:
         return spec
 
     async def handle_message(
-        self, session_id: str, user_id: str, text: str, origin: str = ""
+        self, session_id: str, user_id: str, text: str, origin: str = "",
+        sender: str = "",
     ) -> list[ReplyEvent]:
         state = await self._session(session_id)
         stripped = text.strip()
@@ -208,7 +281,8 @@ class Orchestrator:
         turn_id = uuid.uuid4().hex[:12]
         if self.turn_log:
             self.turn_log.user_message(
-                turn_id, session_id, state.mode, user_id, stripped
+                turn_id, session_id, state.mode, user_id, stripped,
+                sender=sender,
             )
         if stripped.startswith("/mode"):
             mode_events = await self._switch_mode(state, stripped)
@@ -237,13 +311,34 @@ class Orchestrator:
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
         tools = modes.tool_docs(spec, self.profile)
+        if self.turn_log:
+            fingerprint = (spec.name, spec.goal, tuple(sorted(tools)))
+            if state.logged_prompt != fingerprint:
+                self.turn_log.prompt(
+                    turn_id, session_id, spec.name, spec.goal,
+                    self.driver.system_prompt(spec.goal), tools,
+                )
+                state.logged_prompt = fingerprint
         # [prior conversation..., context block, the live message]: history
         # reads as conversation; the block stays adjacent to the message.
         transcript: list[TranscriptEvent] = list(state.memory.events())
         context_block = await build_turn_context(state.services)
         if context_block:
             transcript.append(TranscriptEvent("user", context_block))
-        transcript.append(TranscriptEvent("user", stripped))
+            if self.turn_log:
+                self.turn_log.context(
+                    turn_id, session_id, spec.name, context_block
+                )
+        spoken = sender_attributed(stripped, sender)
+        transcript.append(TranscriptEvent("user", spoken))
+        if self.turn_log:
+            # The assembled prompt as the driver will render it for the
+            # FIRST decision; later decisions add only tool results, which
+            # the diary already records in full.
+            self.turn_log.llm_prompt(
+                turn_id, session_id, spec.name,
+                self.driver.render_prompt(transcript),
+            )
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
         reply_text = ""
@@ -258,7 +353,25 @@ class Orchestrator:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
                 break
-            for call in turn.tool_calls:
+            # Record the decision itself before executing: drivers that
+            # round-trip native tool_use/tool_result blocks need to see
+            # their own calls in the transcript, paired to results by id.
+            # Ids are guaranteed here (deterministic -- no clocks/random)
+            # so downstream events always carry one even for drivers that
+            # report none (scripted playback).
+            tool_calls = tuple(
+                call if call.id else dataclasses.replace(
+                    call, id=f"toolu_gc_{decisions_left}_{index}"
+                )
+                for index, call in enumerate(turn.tool_calls)
+            )
+            transcript.append(
+                TranscriptEvent(
+                    "assistant", turn.reply, tool_calls=tool_calls,
+                    thinking=turn.thinking,
+                )
+            )
+            for call in tool_calls:
                 trace.append(ToolTrace(
                     call.name, json.dumps(dict(call.arguments), default=str)
                 ))
@@ -278,7 +391,11 @@ class Orchestrator:
                     self.turn_log.tool_result(
                         turn_id, session_id, spec.name, call, result
                     )
-                transcript.append(TranscriptEvent("tool", result, tool_name=call.name))
+                transcript.append(
+                    TranscriptEvent(
+                        "tool", result, tool_name=call.name, tool_use_id=call.id
+                    )
+                )
             if final_decision and turn.reply.strip():
                 # The warned driver bundled its answer with a last update:
                 # the calls just ran, the text is the reply.
@@ -297,7 +414,8 @@ class Orchestrator:
         )
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
-            state.memory.remember_turn(stripped, reply_text)
+            # The attributed form: replayed history must keep who spoke.
+            state.memory.remember_turn(spoken, reply_text)
         if self.turn_log:
             self.turn_log.turn_end(turn_id, session_id, spec.name, events)
         return events

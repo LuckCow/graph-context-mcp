@@ -43,12 +43,16 @@ class Role(StrEnum):
     # In-space activity-mode config objects (ADR 015 amendment): humans
     # browse and edit them in Anytype; the LLM's traversal never sees them.
     MODE = "ActivityMode"
+    # Scheduled Event nodes (WP18, ADR 027): a fire time/cron rule plus a
+    # prompt the orchestrator hands the LLM when it comes due. Humans edit
+    # them in Anytype; the LLM manages them through the `schedule` tool.
+    SCHEDULED = "ScheduledEvent"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
 INFRA_ROLES: frozenset[Role] = frozenset(
-    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE}
+    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE, Role.SCHEDULED}
 )
 
 
@@ -71,6 +75,14 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_session_context": Role.SESSION_CONTEXT,
     "gc_intent": Role.INTENT,
     "gc_activity_mode": Role.MODE,
+    "gc_scheduled_event": Role.SCHEDULED,
+    # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
+    # the gc_ keys above; backends without a key registry (the in-memory
+    # repository, eval worlds) see the display name as the type, and these
+    # objects must be infra-hidden there too or the two backends disagree
+    # about what find_node can see.
+    "activity mode": Role.MODE,
+    "scheduled event": Role.SCHEDULED,
 }
 
 
@@ -97,6 +109,50 @@ def resolve_role(
         if candidate.value.lower() == key:
             return candidate
     return None
+
+
+# Scalar property formats a ``fields`` value can live in (ADR 023). This is
+# tool-surface vocabulary -- the LLM declares one of these when it asks for a
+# new property via ``create_missing_fields`` -- so it lives in the domain, not
+# the adapter (the adapter's REFLECTED_FIELD_FORMATS aliases it).
+FIELD_FORMATS: frozenset[str] = frozenset(
+    {
+        "text",
+        "number",
+        "select",
+        "multi_select",
+        "date",
+        "checkbox",
+        "url",
+        "email",
+        "phone",
+    }
+)
+
+
+def validate_field_declarations(
+    fields: Mapping[str, str],
+    create_missing_fields: Mapping[str, str],
+) -> None:
+    """Well-formedness of a write's new-property declarations (ADR 023).
+
+    Every declared key must also carry a value in ``fields`` (a declaration
+    without a value writes nothing), and every declared format must be one
+    of :data:`FIELD_FORMATS`. Whether a key *needs* declaring -- i.e. whether
+    it matches an existing property -- is the repository's call, not ours.
+    """
+    allowed = ", ".join(sorted(FIELD_FORMATS))
+    for key, fmt in create_missing_fields.items():
+        if key not in fields:
+            raise SchemaViolation(
+                f"create_missing_fields declares {key!r} but 'fields' carries "
+                "no value for it; every declared key needs a value in 'fields'"
+            )
+        if fmt.strip().lower() not in FIELD_FORMATS:
+            raise SchemaViolation(
+                f"unknown format {fmt!r} for new field {key!r}; "
+                f"formats: {allowed}"
+            )
 
 
 def validate_new_node(

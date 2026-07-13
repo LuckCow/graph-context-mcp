@@ -54,15 +54,57 @@ class TestTypes:
         assert "Character" in known and "Realization" in known
         assert "Capture" not in known  # infra role hidden
 
-    def test_legacy_gc_entity_types_resolve_via_overrides(self) -> None:
-        # Pre-pivot read-compat (ADR 006): load_registry seeds these.
-        from graph_context.infrastructure.anytype.registry import LEGACY_TYPE_ROLES
-
+    def test_role_overrides_resolve_arbitrary_type_keys(self) -> None:
+        # Profile-supplied overrides (WP5) map any type key to a role.
         reg = SpaceRegistry(
-            types_by_key={"gc_character": TypeInfo("gc_character", "gc_character")},
-            role_overrides=dict(LEGACY_TYPE_ROLES),
+            types_by_key={"persona": TypeInfo("persona", "Persona")},
+            role_overrides={"persona": Role.CHARACTER},
         )
-        assert reg.role_for("gc_character") is Role.CHARACTER
+        assert reg.role_for("persona") is Role.CHARACTER
+
+
+class TestFieldCatalog:
+    """ADR 023: per-type property lists and the reflectable views."""
+
+    def _registry_with_type_props(self) -> SpaceRegistry:
+        return SpaceRegistry(
+            types_by_key={
+                "task": TypeInfo(
+                    "task", "Task", id="type-task",
+                    properties=(
+                        PropertyInfo("due_date", "Due date", "date", id="p-due"),
+                        PropertyInfo("status", "Status", "select", id="p-status"),
+                        PropertyInfo("assignee", "Assignee", "objects", id="p-a"),
+                        PropertyInfo("created_date", "Created", "date", id="p-c"),
+                    ),
+                ),
+            },
+            properties_by_key={
+                "due_date": PropertyInfo("due_date", "Due date", "date", id="p-due"),
+                "status": PropertyInfo("status", "Status", "select", id="p-status"),
+                "fuel": PropertyInfo("fuel", "fuel", "text", id="p-fuel"),
+            },
+        )
+
+    def test_reflectable_type_properties_filter_edges_and_noise(self) -> None:
+        reg = self._registry_with_type_props()
+        assert [p.key for p in reg.reflectable_type_properties("task")] == [
+            "due_date", "status",
+        ]
+
+    def test_reflectable_type_properties_of_unknown_type_is_empty(self) -> None:
+        assert self._registry_with_type_props().reflectable_type_properties("x") == ()
+
+    def test_reflectable_properties_is_the_write_match_universe(self) -> None:
+        reg = self._registry_with_type_props()
+        assert [p.key for p in reg.reflectable_properties()] == [
+            "due_date", "fuel", "status",
+        ]
+
+    def test_types_without_properties_key_tolerated(self) -> None:
+        # load_registry builds TypeInfo with properties=() when GET /types
+        # items carry no list; the helpers must not blow up on those.
+        assert _registry().reflectable_type_properties("character") == ()
 
 
 class TestRelations:
@@ -78,6 +120,12 @@ class TestRelations:
         assert reg.key_for_label("triggered_by") == "triggered_by"
         assert reg.key_for_label("boss") == "boss"
         assert reg.key_for_label("Boss") == "boss"  # case-insensitive
+
+    def test_key_for_label_matches_the_display_name(self) -> None:
+        """The human-visible name resolves too (like field_property):
+        'Triggered By' must find triggered_by even though the cleaned
+        key spells it with an underscore."""
+        assert _registry().key_for_label("Triggered By") == "triggered_by"
 
     def test_key_for_label_misses_unknown_and_denylisted(self) -> None:
         reg = _registry()

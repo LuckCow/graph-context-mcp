@@ -5,8 +5,8 @@ Shows the three behaviors the WP promises, against the mock server:
 1. create_node's `description` lands in the page body and comes back
    from get_node (fetched on demand -- never hydrated into the index).
 2. A HUMAN rewriting the body in the Anytype editor is visible to the
-   very next get_node, with NO resync -- fresher than the old
-   gc_description property ever was.
+   very next get_node, with NO resync -- bodies are read on demand,
+   never cached in the index.
 3. explore(detail="full") assembles a scene with every hit's full
    description in one call (the body fan-out).
 
@@ -25,6 +25,7 @@ from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
 from graph_context.interface import tools
+from graph_context.interface.services import build_services
 
 
 async def main() -> None:
@@ -38,7 +39,7 @@ async def main() -> None:
         )
     repo = AnytypeGraphRepository(client)
     await repo.hydrate()
-    svc = tools.build_services(repo, SessionState(project="Ashfall"))
+    svc = build_services(repo, SessionState(project="Ashfall"))
 
     def show(label: str, out: str) -> None:
         print(f"\n### {label}\n{out}")

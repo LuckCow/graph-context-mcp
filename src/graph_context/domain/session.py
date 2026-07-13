@@ -42,6 +42,7 @@ from graph_context.domain.models import Detail, NodeId
 DEFAULT_FULL_SLOTS = 2
 DEFAULT_SUMMARY_SLOTS = 6
 DEFAULT_RECENT_SIZE = 12
+SCRATCHPAD_MAX_CHARS = 2000  # over-cap is an error that teaches condensing
 
 _HOLD_LEVELS = (Detail.SUMMARIES, Detail.FULL)
 

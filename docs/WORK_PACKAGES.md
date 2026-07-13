@@ -330,8 +330,18 @@ wrappers' Python signatures** (`derive_schema`; one source of truth,
 transcript; cross-turn memory is deliberately still absent — the SDK's
 session-resume machinery is the lever when dogfooding wants it, which
 also means **langgraph sits installed but unused**; whether it ever
-earns its place is now an open question, not a plan. CLI selection:
-`GC_DRIVER=claude` (default; `manual` keeps the keyboard stand-in),
+earns its place is now an open question, not a plan. *(Resolved
+2026-07-12: langgraph removed from pyproject — the pipeline IS the
+agentic harness; drivers stay single-decision. A second real driver,
+`anthropic_driver.py`, landed the same day: the raw Messages API as an
+explicit opt-in — `GC_DRIVER=anthropic_api` + `ANTHROPIC_API_KEY`, billing
+API credits, `[anthropic]` extra — sending the transcript as a native
+messages list with tool_use/tool_result round-tripping; the pipeline now
+records each mid-turn tool-call decision on the transcript, paired to
+results by id.)* CLI selection — vendor-namespaced values name WHO PAYS:
+`GC_DRIVER=anthropic_subscription` (default; `anthropic_api` = Messages
+API on credits; `manual` keeps the keyboard stand-in; legacy
+`claude`/`subscription` and `anthropic`/`api` resolve as aliases),
 `GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune the model. Verified live:
 unit tests (self-skip without the SDK — CI installs only `[dev]`), the
 gated `GC_CLAUDE_E2E=1` e2e (tool-call capture + reply path), and
@@ -790,6 +800,20 @@ The spurious-property filter shipped as specified:
   write path.
 - Charts the retirement path for `gc_fields` (the last human-invisible
   blob), but does NOT retire it in this WP — existing worlds use it.
+- **Retirement landed 2026-07-10 (ADR 023):** story-node writes are
+  native-only — an unmatched `fields` key errors with the type's property
+  catalog (per-type lists now read from `GET /types`, surfaced in the
+  overview), and `create_missing_fields={"key": "format"}` explicitly
+  mints a real scalar property (spike: no settle window for scalars).
+  `gc_fields` is written for infra-role nodes only; the read merge keeps
+  legacy story blobs visible, no migration.
+- **Blob fully retired 2026-07-12 (ADR 028):** the last two uses moved to
+  minted native properties — session snapshots to `gc_chat_session`,
+  recorder attribution to `gc_generated_at`/`gc_user_id`/`gc_model`/
+  `gc_mode`/`gc_origin` (inline on `gc_intent`/`gc_prose`, reflected into
+  `Node.fields`). The infra fall-through, the read merge, the migration
+  scripts, and `LEGACY_TYPE_ROLES` are deleted; native-only is now the
+  rule for every role.
 
 ### WP10b — Summary moves to the built-in `description` property — **shipped 2026-07-02**
 
@@ -1478,6 +1502,164 @@ Verification fallout (2026-07-08), both live-caught:
 
 ---
 
+## WP16 — Behavioral eval harness (ADR 024) — **shipped 2026-07-10**
+
+**Status:** complete. `python -m evals run` drives real end-to-end turns
+(pipeline + mode registry + live `ClaudeAgentDriver`) against a fresh
+in-memory runtime per trial and grades outcomes; the risk register's
+"dogfooding transcripts" answer to *LLM misuses tools* now has a
+repeatable, comparable form.
+
+What shipped:
+
+* **The `evals/` package** (outside the import-linter root; never
+  pytest-collected). `dataset.py` loads `evals/cases/*.toml` with the
+  ranking-golden validation posture; `runner.py` isolates each trial in
+  its own `composition.build_runtime` (memory backend, provenance off
+  unless the case opts in), seeds the world through the repository
+  port, and runs the conversation through `Orchestrator.handle_message`;
+  `graders.py` asserts on graph end-state, session state (working set /
+  scratchpad), final reply substrings, and loose trajectory bounds —
+  executed vs rejected calls decided by the mode's binding table, never
+  by prescribed sequences.
+* **Two drivers, one control flow.** `--driver anthropic_subscription`
+  (default; formerly `claude`) is the real model on the subscription;
+  `--driver anthropic_api` (added 2026-07-12) runs it over the Messages
+  API on credits; `--driver scripted` replays each
+  case's `[[case.script]]` — its reference solution. CI
+  (`tests/evals/`) replays every shipped script and fails on unsolvable
+  cases, plus a `must_fail` fixture that keeps the graders honest; the
+  scripted path never imports claude-agent-sdk.
+* **Metrics at the driver seam.** `ClaudeAgentDriver` gained an
+  `on_result` callback (SDK `ResultMessage` → pure `DecideUsage`), so
+  runs report cost/latency/tokens per trial without touching the
+  pipeline.
+* **Artifacts per run** (`evals/runs/<ts>[-label]/`, gitignored):
+  `turns.jsonl` written by the production `TurnLog` — the existing
+  viewer replays eval transcripts unchanged — plus `results.json` and
+  `report.md` with pass@k / pass^k per case. `python -m evals compare
+  A B` diffs two runs and exits nonzero on pass-rate regressions.
+* **Optional judge** (`--judge`): rubric-bearing cases get a
+  reasoning-first JSON verdict from a tool-less, settings-less
+  claude-agent-sdk session; judge verdicts report alongside code grades
+  and never overrule them.
+* **Candidate follow-up** (from eval calibration 2026-07-10): mirror the
+  active profile's mode specs into the space as Activity Mode objects at
+  bootstrap (`ensure_schema` currently seeds only the "Example Mode"
+  template). Real spaces would then always contain referenceable,
+  editable mode exemplars — the `mode_management` eval suite seeds its
+  worlds this way already.
+* **The starter dataset**: 14 live cases across five suites
+  (world-building creates/links/duplicate-trap/stale-sweep; lookups
+  with mutation bans and call ceilings; the mode-boundary pair plus
+  authoring self-correction; context curation into working set and
+  scratchpad; multi-turn pronoun continuity and seeded-history restart),
+  plus 3 scripted smoke fixtures. Grown from dogfooding; calibrate by
+  reading run transcripts in the viewer.
+* **Inspection server follow-up (ADR 025, shipped 2026-07-11):** the
+  turn-log viewer grew into `orchestrator/inspect_server.py` — an eval
+  dashboard at `/` (case-centric latest results + history, per-run
+  grade/judge detail, per-trial transcript links), the live viewer at
+  `/logs`, per-run replay at `/runs/<id>/log`. `results.json` moved to
+  format 2 (per-trial `session`/`system_prompt`/`bound_tools`/
+  `harness_error`, per-case `mode`/`judge_rubric`), and the turn diary
+  gained `prompt`/`context` events so transcripts record the mode goal,
+  the exact assembled system prompt, the bound tool surface, and the
+  per-turn context block the model actually received.
+
+---
+
+## WP17 — Sender attribution + space members as nodes (ADR 026) — **shipped 2026-07-12**
+
+**Status:** complete. "Assign the task to the requester" works
+end-to-end; both halves were live-caught failures (turns `2fb75badc8ca`
+and `3543a613ff3e`).
+
+What shipped:
+
+* **Sender attribution.** Transports pass the sender's display name
+  (`creator_name` rides every Anytype chat message; Discord uses
+  `author.display_name`); the pipeline prepends `[from <name>]` to the
+  live message, conversation memory, and startup seeding
+  (`pipeline.sender_attributed` is the single format rule), and the
+  drivers' system prompt tells the model the tag is authoritative. The
+  turn diary logs `sender` on `user` events.
+* **Member reflection (spike S11, quirk A10).** Participants never
+  appear in list/search; hydrate and resync now fetch active members via
+  `/members` + per-member GETs and feed the ordinary object envelopes
+  through `mapping.to_node`. Members are first-class read-only nodes:
+  findable by name, listed in overview type counts, and valid link
+  targets — an `objects` relation accepts a participant id (Anytype's
+  own Assignee mechanism, certified live).
+* **Relation-shaped `fields` keys redirect.** A `fields` key naming an
+  `objects`-format relation (e.g. `Assignee`) errors with a `links=`
+  redirect instead of listing scalar properties or offering
+  `create_missing_fields` (which could never mint a scalar shadow of a
+  relation). `SpaceRegistry.key_for_label` also matches relation display
+  names now ("Linked Projects" resolves like `linked_projects`).
+
+---
+
+## WP18 — Scheduled Events (ADR 027) — **shipped 2026-07-12**
+
+**Status:** complete. "Remind me a week before to pay taxes" works
+end-to-end: the model stores a timed prompt, and at fire time the bot
+opens a turn in the same chat and the model acts on it.
+
+What shipped:
+
+* **A new infra node type** `gc_scheduled_event` ("Scheduled Event",
+  role `ScheduledEvent`, in `INFRA_ROLES`) with minted properties under
+  human display names: `gc_schedule` "Schedule" (one-shot ISO local
+  datetime OR five-field cron), `gc_schedule_prompt` "Schedule prompt",
+  `gc_schedule_status` "Schedule status" (select: Pending fires;
+  Completed/Cancelled inert; empty = Pending; the scheduler completes a
+  fired one-shot, cancel preserves the schedule so a human re-enables by
+  flipping back to Pending), `gc_last_fired` "Last fired", plus the
+  ADR 021 `gc_session_key` "Session key" as the delivery target. The
+  values live in the REAL properties, never the `gc_fields` blob
+  (`GC_REFLECTED_FIELD_KEYS` punches the registry's `gc_` exclusion for
+  this surface on both the write and read paths — contract-pinned).
+  Properties attach inline at type creation so humans get real fields
+  in the Anytype editor, an "Example Scheduled Event" explainer is
+  seeded alongside the type (empty schedule: can never fire), and
+  `_watch_graph`'s resync makes UI-created/edited events schedulable.
+* **Pure domain timing** (`domain/scheduling.py`): dependency-free cron
+  (ranges/steps/lists, vixie day-OR-weekday, 0/7=Sunday), `next_fire`,
+  `due_at`. Semantics: one-shots re-arm when rescheduled later;
+  recurring events fire only once ARMED (anchored by a first
+  `gc_last_fired` — the tool arms at creation, the watcher stamps
+  UI-created strays without firing); downtime collapses to ONE late
+  fire. All times naive server-local; offsets rejected with guidance.
+  "Local" is the USER's region: the devcontainer pins `TZ`
+  (America/New_York), and `GC_TIMEZONE` (IANA name, validated at
+  startup) pins the scheduler's clock independently of the container's.
+* **A ninth tool, `schedule`** (set/list/cancel), bound like `context`
+  in every mode (bookkeeping, not graph authorship — read-only modes
+  keep it). Echoes next-fire AND current server time so the LLM can
+  check its own date math; errors teach both syntaxes.
+  `application/scheduler.py` is the service (repository-direct like
+  CaptureRecorder, journalled); `Services` now carries its
+  `session_key` so the tool stamps the creating chat.
+* **The firing loop**: `_watch_schedule` in the Anytype bot
+  (`GC_SCHEDULE_TICK_SECONDS`, default 30, `off` disables), third
+  sibling of the chat/graph watchers. Due event → mark `gc_last_fired`
+  (at-most-once), then `handle_message(user_id="system:scheduler",
+  text=scheduled_prompt(...))` under the route lock
+  (`AnytypeChatTurnHandler.run_scheduled`); no "Processing…"
+  placeholder — nothing posts until the reply is ready (nobody is
+  waiting on a turn they didn't start). Targeting: the event's own chat
+  if served, else the space's first served chat; no chat → retry next
+  tick.
+
+Known limits (deliberate): only the Anytype bot fires (the MCP server
+and CLI can manage events but have no clock loop; Discord-keyed events
+deliver to the bound space's default Anytype chat until a Discord loop
+exists); firing is at-most-once — a crash between marking and replying
+surfaces as an in-chat `[error]`, never a re-fire loop.
+
+---
+
 ## Sequencing
 
 ```
@@ -1536,7 +1718,7 @@ WP11 and WP12 are independent of each other.
 | Hydration too slow at scale (S2) | Spike timing | Persisted index snapshot + delta resync |
 | Human deletions invisible to resync (S4) | Spike | Periodic full reconciliation; document staleness window |
 | Tool surface churn after release | Param-naming review skipped | WP2's scheduled naming review before first external use |
-| LLM misuses tools | Dogfooding transcripts | Docstrings-as-prompts discipline; iterate on descriptions, not new tools |
+| LLM misuses tools | Eval-run regressions (WP16) + dogfooding transcripts | Docstrings-as-prompts discipline; iterate on descriptions, verify with `python -m evals compare` |
 | Anytype API version drift | Changelog page | Pin `Anytype-Version`; subscribe to the changelog; bump deliberately |
 | LangGraph abstractions leak into core layers | import-linter CI failure | ADR 007 quarantine; a framework swap must stay orchestrator-internal |
 | Intent nodes clutter the human editing surface | dogfooding in the Anytype UI | Naming convention + infra-role hiding + subsystem toggle (ADR 008) |

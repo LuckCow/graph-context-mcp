@@ -17,14 +17,20 @@ class TestResolveRole:
         assert schema.resolve_role("gc_session_context") is Role.SESSION_CONTEXT
         assert schema.resolve_role("gc_activity_mode") is Role.MODE
 
+    def test_mode_display_name_resolves_like_the_key(self) -> None:
+        # Backends without a key registry (in-memory, eval worlds) carry
+        # the display name as the type; a mode object must be infra-hidden
+        # there too, or find_node sees different worlds per backend.
+        assert schema.resolve_role("Activity Mode") is Role.MODE
+
     def test_mode_role_is_infra_hidden(self) -> None:
         # ADR 015 amendment: mode config objects are the human's editing
         # surface, never the LLM's traversal data.
         assert Role.MODE in schema.INFRA_ROLES
 
     def test_legacy_gc_entity_keys_are_not_domain_knowledge(self) -> None:
-        # Pre-pivot read-compat lives in the Anytype adapter's registry
-        # overrides (registry.LEGACY_TYPE_ROLES), not the domain map.
+        # The pre-pivot closed gc_ entity types are gone (ADR 006/028);
+        # the domain map never knew them.
         assert schema.resolve_role("gc_character") is None
 
     def test_matching_is_case_insensitive_and_accepts_role_name(self) -> None:
@@ -37,6 +43,29 @@ class TestResolveRole:
     def test_overrides_win(self) -> None:
         role = schema.resolve_role("realization", {"realization": Role.EVENT})
         assert role is Role.EVENT
+
+
+class TestValidateFieldDeclarations:
+    def test_empty_declarations_are_a_noop(self) -> None:
+        schema.validate_field_declarations({"due": "2026-08-01"}, {})
+
+    def test_valid_declaration_passes(self) -> None:
+        schema.validate_field_declarations(
+            {"due": "2026-08-01"}, {"due": "date"}
+        )
+
+    def test_unknown_format_errors_listing_the_menu(self) -> None:
+        with pytest.raises(SchemaViolation, match="formats: .*date.*text"):
+            schema.validate_field_declarations(
+                {"due": "2026-08-01"}, {"due": "datetime"}
+            )
+
+    def test_declared_key_missing_from_fields_errors(self) -> None:
+        with pytest.raises(SchemaViolation, match="no value"):
+            schema.validate_field_declarations({}, {"due": "date"})
+
+    def test_format_matching_is_case_and_space_insensitive(self) -> None:
+        schema.validate_field_declarations({"due": "x"}, {"due": " Date "})
 
 
 class TestValidateNewNode:

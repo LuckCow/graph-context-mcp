@@ -1,0 +1,141 @@
+# Harness plumbing smoke cases: fully scripted, run in CI via
+# tests/evals/test_harness_smoke.py. Each [[case.script]] is also the
+# case's reference solution -- if playback can't satisfy the graders, the
+# case is unsolvable and this file is what catches it.
+
+[suite]
+name = "smoke"
+profile = "fiction"
+embedder = "off"
+
+# The happy path: a scripted create satisfies outcome + trajectory graders.
+[[case]]
+id = "smoke_scripted_create"
+
+[[case.turn]]
+user = "Add Vex, a knife-grinning smuggler, to the world."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [{ name = "Vex", type = "Character" }]
+
+[case.expect.tools]
+called_any = ["create_node"]
+max_decisions = 2
+
+[case.expect.reply]
+must_mention = ["Vex"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Vex", summary = "A knife-grinning smuggler." } }]
+
+[[case.script]]
+reply = "Vex the smuggler now exists in the world."
+
+
+# The mode boundary: in authoring mode a scripted mutation attempt is
+# rejected by the binding (never executed), and reads still work.
+[[case]]
+id = "smoke_mode_boundary"
+mode = "authoring"
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer of Brakk."
+
+[[case.turn]]
+user = "Rewrite Mira's summary, then remind me who she is."
+
+[case.expect.graph]
+node_count_delta = 0
+
+[case.expect.tools]
+called_any = ["get_node"]
+not_executed = ["update_node", "create_node"]
+
+[case.expect.reply]
+must_mention = ["Mira"]
+
+[[case.script]]
+tool_calls = [{ name = "update_node", arguments = { node_id = "Mira", summary = "Rewritten!" } }]
+
+[[case.script]]
+tool_calls = [{ name = "get_node", arguments = { node_id = "Mira" } }]
+
+[[case.script]]
+reply = "I could not modify Mira's record in this mode; she is the exiled siege engineer of Brakk."
+
+
+# Grader honesty: this case MUST fail (the script creates nothing, the
+# grader demands a node). If it ever passes, a grader stopped grading.
+[[case]]
+id = "smoke_must_fail"
+must_fail = true
+
+[[case.turn]]
+user = "Do nothing at all."
+
+[case.expect.graph]
+node_exists = [{ name = "Nonexistent Node" }]
+
+[[case.script]]
+reply = "I did nothing, as instructed."
+
+
+# Field assertions: truthy/falsy checks on both seeded and script-created
+# fields, on exists AND absent refs (absent-with-fields reads "no node
+# named X in this field state exists").
+[[case]]
+id = "smoke_field_assertions"
+
+[[case.seed.node]]
+type = "Character"
+name = "Mira"
+summary = "Exiled siege engineer."
+fields = { rank = "captain" }
+
+[[case.turn]]
+user = "Record a read-only mode object named Task Creation."
+
+[case.expect.graph]
+node_count_delta = 1
+node_exists = [
+  { name = "Mira", fields_truthy = ["rank"] },
+  { name = "Task Creation", fields_truthy = ["gc_mode_goal"], fields_falsy = ["gc_mode_mutating"] },
+]
+node_absent = [{ name = "Task Creation", fields_truthy = ["gc_mode_mutating"] }]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Task Creation", summary = "A staged mode object.", fields = { gc_mode_goal = "Turn requests into tasks.", gc_mode_mutating = "false" } } }]
+
+[[case.script]]
+reply = "Task Creation is recorded as a read-only mode object."
+
+
+# Per-case in-space mode: a misconfigured (non-mutating) custom mode must
+# reject a scripted create at the binding, exactly like authoring does.
+[[case]]
+id = "smoke_case_mode_read_only"
+mode = "task_creation_mode"
+
+[[case.modes]]
+name = "Task Creation Mode"
+goal = "Turn every request into a task node. (Misconfigured: not mutating.)"
+mutating = false
+
+[[case.turn]]
+user = "Create a task called Fix the door."
+
+[case.expect.graph]
+node_count_delta = 0
+node_absent = [{ name = "Fix the door" }]
+
+[case.expect.tools]
+not_executed = ["create_node"]
+
+[[case.script]]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Fix the door", summary = "A task." } }]
+
+[[case.script]]
+reply = "I can't create anything in task_creation_mode -- it binds only the read surface."

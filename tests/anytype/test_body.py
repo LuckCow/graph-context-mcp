@@ -49,12 +49,11 @@ async def test_body_survives_an_update_that_does_not_name_it(
     assert await repo.fetch_body(prose.id) == "original prose"
 
 
-async def test_fetch_body_ignores_the_retired_description_property(
+async def test_fetch_body_ignores_stray_gc_description_property(
     repo: AnytypeGraphRepository, mock: MockAnytype
 ) -> None:
-    """Only the body is the description (ADR 010). An unmigrated object's
-    gc_description is invisible to the server -- the migration script
-    (scripts/migrate_descriptions_to_body.py) is the one converter."""
+    """Only the body is the description (ADR 010). A stray gc_description
+    property (pre-pivot artifact) is invisible to the server."""
     legacy_id = mock.seed_object(
         "location", "Old Keep",
         properties=[
@@ -150,3 +149,29 @@ class TestA7BodyEditing:
             assert "markdown" not in obj
         results = [obj async for obj in client.search()]
         assert results and all("markdown" not in obj for obj in results)
+
+
+class TestA9FirstLineHeadingFlattening:
+    """A9 (live-confirmed 2026-07-11): the PATCH markdown importer strips
+    heading markup from the body's FIRST line; later headings survive.
+    Import-side mirror of the A8 export prefix."""
+
+    async def test_patch_flattens_only_the_first_line_heading(
+        self, repo: AnytypeGraphRepository
+    ) -> None:
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="s")
+        )
+        await repo.update_node(node.id, body="## Log\ntext\n## Later")
+        assert await repo.fetch_body(node.id) == "Log\ntext\n## Later"
+
+    async def test_create_keeps_a_first_line_heading(
+        self, repo: AnytypeGraphRepository
+    ) -> None:
+        """The quirk is PATCH-only: bodies supplied at create keep their
+        heading (how template scaffolds get their headings in the first
+        place)."""
+        node = await repo.create_node(
+            NodeDraft("Character", name="Mira", summary="s", body="## Log\ntext")
+        )
+        assert await repo.fetch_body(node.id) == "## Log\ntext"

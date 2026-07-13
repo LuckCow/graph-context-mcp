@@ -3,7 +3,9 @@
 Model access is the user's Claude SUBSCRIPTION: ``claude-agent-sdk`` runs
 the Claude Code CLI, which authenticates with the persisted ``claude
 login`` OAuth credential (or ``CLAUDE_CODE_OAUTH_TOKEN``) -- never an API
-key, which would bill credits instead of the plan.
+key, which would bill credits instead of the plan. (The API-key path
+exists as ``anthropic_driver.py``, an explicit opt-in via
+``GC_DRIVER=anthropic_api``.)
 
 The SDK ships its own agentic loop; this adapter fits it behind
 ``LLMDriver.decide`` (one decision in, tool calls OR a reply out -- the
@@ -38,11 +40,9 @@ when dogfooding asks for it.
 
 from __future__ import annotations
 
-import inspect
 import logging
-import types
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -53,100 +53,43 @@ from claude_agent_sdk import (
     McpSdkServerConfig,
     PermissionResultAllow,
     PermissionResultDeny,
+    ResultMessage,
     SdkMcpTool,
     TextBlock,
+    ThinkingBlock,
     ToolPermissionContext,
     ToolUseBlock,
     create_sdk_mcp_server,
     tool,
 )
 
-from graph_context.orchestrator.drivers import LLMTurn, ToolCall, TranscriptEvent
+from graph_context.orchestrator.driver_common import (
+    assembled_system_prompt,
+    derive_schema,
+    render_transcript,
+)
+from graph_context.orchestrator.drivers import (
+    DecideUsage,
+    LLMTurn,
+    ToolCall,
+    TranscriptEvent,
+)
+
+__all__ = [
+    "ClaudeAgentDriver",
+    "assembled_system_prompt",
+    "derive_schema",
+    "local_tool_name",
+    "render_transcript",
+    "sdk_tools",
+    "session_options",
+    "usage_from_result",
+]
 
 logger = logging.getLogger(__name__)
 
 _SERVER_NAME = "gc"
 _TOOL_PREFIX = f"mcp__{_SERVER_NAME}__"
-
-_GUIDANCE = (
-    "Call tools with a flat JSON object of their documented parameters. "
-    "The harness executes every call; results arrive as <tool_result> "
-    "blocks in the next message. Never repeat a call whose result is "
-    "already in the transcript."
-)
-
-
-def _json_type(annotation: Any) -> dict[str, Any]:
-    """One Python annotation -> a JSON-schema fragment (best effort;
-    an unknown shape degrades to unconstrained, never to wrong)."""
-    if annotation is bool:
-        return {"type": "boolean"}
-    if annotation is str:
-        return {"type": "string"}
-    if annotation is int:
-        return {"type": "integer"}
-    if annotation is float:
-        return {"type": "number"}
-    origin = get_origin(annotation)
-    if origin is list:
-        args = get_args(annotation)
-        items = _json_type(args[0]) if args else {}
-        return {"type": "array", "items": items} if items else {"type": "array"}
-    if origin is dict:
-        return {"type": "object"}
-    if origin in (types.UnionType, Union):
-        members = [a for a in get_args(annotation) if a is not type(None)]
-        fragments = [_json_type(m) for m in members]
-        if len(fragments) == 1:
-            return fragments[0]
-        if all(list(f) == ["type"] for f in fragments):
-            return {"type": [f["type"] for f in fragments]}
-        return {"anyOf": fragments}
-    return {}
-
-
-def derive_schema(fn: Callable[..., Any]) -> dict[str, Any]:
-    """A tool wrapper's signature as a JSON schema.
-
-    Everything after the ``services`` parameter is a model-facing
-    argument; no default means required. ``additionalProperties: false``
-    is load-bearing -- it is what stops the model inventing keys.
-    """
-    hints = get_type_hints(fn)
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for name, parameter in inspect.signature(fn).parameters.items():
-        if name == "services":
-            continue
-        properties[name] = _json_type(hints.get(name, Any))
-        if parameter.default is inspect.Parameter.empty:
-            required.append(name)
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
-
-
-def render_transcript(events: Sequence[TranscriptEvent]) -> str:
-    """The turn-local transcript as one prompt (fresh session per decide).
-
-    Tool results are fenced and named so the model can tell its own
-    earlier calls' output from user text.
-    """
-    parts: list[str] = []
-    for event in events:
-        if event.kind == "tool":
-            parts.append(
-                f'<tool_result tool="{event.tool_name}">\n{event.text}\n'
-                "</tool_result>"
-            )
-        elif event.kind == "assistant":
-            parts.append(f"<assistant_earlier>\n{event.text}\n</assistant_earlier>")
-        else:
-            parts.append(event.text)
-    return "\n\n".join(parts)
 
 
 def local_tool_name(sdk_name: str) -> str:
@@ -197,7 +140,7 @@ def session_options(
         mcp_servers={_SERVER_NAME: server},
         tools=[],
         setting_sources=[],
-        system_prompt=f"{goal}\n\n{_GUIDANCE}".strip(),
+        system_prompt=assembled_system_prompt(goal),
         model=model,
         effort=effort,
         can_use_tool=can_use_tool,
@@ -218,10 +161,15 @@ class ClaudeAgentDriver:
         effort: EffortLevel | None = None,
         cli_path: str | None = None,
         schemas: Mapping[str, Mapping[str, Any]] | None = None,
+        on_result: Callable[[DecideUsage], None] | None = None,
     ) -> None:
         self._model = model
         self._effort = effort
         self._cli_path = cli_path
+        # Cost/usage observer (the eval harness's metrics tap): called once
+        # per decide with the session's translated ResultMessage. The
+        # pipeline never sees usage -- it is diagnostics, not a decision.
+        self._on_result = on_result
         if schemas is None:
             # Derived once from the full tool surface; decide() registers
             # only the names the active mode's binding hands it.
@@ -231,6 +179,12 @@ class ClaudeAgentDriver:
                 name: derive_schema(fn) for name, fn in modes.full_surface().items()
             }
         self._schemas = schemas
+
+    def system_prompt(self, goal: str) -> str:
+        return assembled_system_prompt(goal)
+
+    def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
+        return render_transcript(transcript)  # what decide() queries with
 
     async def decide(
         self,
@@ -259,23 +213,58 @@ class ClaudeAgentDriver:
             cli_path=self._cli_path,
         )
         reply_parts: list[str] = []
+        thinking_parts: list[str] = []
         calls: list[ToolCall] = []
+        last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query(render_transcript(transcript))
             async for message in client.receive_response():
+                if isinstance(message, ResultMessage):
+                    last_result = message
                 if not isinstance(message, AssistantMessage):
                     continue
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         reply_parts.append(block.text)
+                    elif isinstance(block, ThinkingBlock):
+                        thinking_parts.append(block.thinking)
                     elif isinstance(block, ToolUseBlock):
                         calls.append(
-                            ToolCall(local_tool_name(block.name), dict(block.input))
+                            ToolCall(
+                                local_tool_name(block.name),
+                                dict(block.input),
+                                id=block.id,
+                            )
                         )
+        if self._on_result is not None and last_result is not None:
+            self._on_result(usage_from_result(last_result))
         # Text alongside tool calls is usually preamble ("I'll look that
         # up"), but it travels with the calls anyway: on a turn's FINAL
         # decision the pipeline treats it as the bundled reply (see
         # pipeline.LAST_TURN_WARNING). Which text counts is the
         # pipeline's rule, not this adapter's.
         reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
-        return LLMTurn(reply=reply, tool_calls=tuple(calls))
+        thinking = "\n\n".join(
+            part for part in thinking_parts if part.strip()
+        ).strip()
+        return LLMTurn(reply=reply, tool_calls=tuple(calls), thinking=thinking)
+
+
+def usage_from_result(result: ResultMessage) -> DecideUsage:
+    """SDK ResultMessage -> the pure DecideUsage value.
+
+    The ``usage`` dict is the CLI's passthrough of the API usage block;
+    absent keys read as zero rather than failing -- usage is diagnostics
+    and must never take a decision down.
+    """
+    usage = result.usage or {}
+    return DecideUsage(
+        duration_ms=result.duration_ms,
+        duration_api_ms=result.duration_api_ms,
+        total_cost_usd=result.total_cost_usd,
+        input_tokens=int(usage.get("input_tokens", 0)),
+        output_tokens=int(usage.get("output_tokens", 0)),
+        cache_read_tokens=int(usage.get("cache_read_input_tokens", 0)),
+        cache_creation_tokens=int(usage.get("cache_creation_input_tokens", 0)),
+        num_turns=result.num_turns,
+    )

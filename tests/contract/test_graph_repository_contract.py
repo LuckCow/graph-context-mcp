@@ -12,10 +12,11 @@ import asyncio
 
 import pytest
 
-from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.domain import attribution
+from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
-from graph_context.errors import NodeNotFound
+from graph_context.errors import NodeNotFound, UnknownFieldKey
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
@@ -117,9 +118,13 @@ class GraphRepositoryContract:
         assert list(repo.graph.edges(mira.id)) == []
 
     async def test_fields_round_trip(self, repo):
+        # "fuel" is not a property anywhere; the declaration mints it as a
+        # real one (ADR 023). In the live run this exercises scalar
+        # create_property for real; reruns reuse the surviving property.
         node = await repo.create_node(
             NodeDraft("Technology", name="Ashforge", summary="A forge.",
-                      fields={"fuel": "bonemeal"})
+                      fields={"fuel": "bonemeal"}),
+            create_missing_fields={"fuel": "text"},
         )
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
 
@@ -132,7 +137,8 @@ class GraphRepositoryContract:
         whichever repository populated the index."""
         ticked = await repo.create_node(
             NodeDraft("Item", name="Ticked", summary="s.",
-                      fields={"done": "true"})
+                      fields={"done": "true"}),
+            create_missing_fields={"done": "checkbox"},
         )
         unticked = await repo.create_node(
             NodeDraft("Item", name="Unticked", summary="s.")
@@ -239,6 +245,126 @@ class TemplateContract:
         assert body.index("Template header") < body.index("Caller body.")
 
 
+class FieldCatalogContract:
+    """ADR 023: story-node ``fields`` keys resolve against the space's
+    scalar properties identically in every implementation. Seeded with
+    "Due date" (date), "Status" (select: To Do, In Progress), and an
+    "Assignee" objects-format RELATION (an edge, never a fields key)."""
+
+    async def test_relation_named_as_a_field_redirects_to_links(
+        self, catalog_repo
+    ):
+        """Live-caught: a model wrote fields={'Assignee': ...} because the
+        relation is invisible in the scalar catalog; the error must point
+        at links, not at minting a shadowing scalar property."""
+        with pytest.raises(UnknownFieldKey) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Assignee": "Nick"})
+            )
+        message = str(err.value)
+        assert "RELATION" in message and "'edge_type'" in message
+        assert "create_missing_fields" not in message
+
+    async def test_a_relation_key_cannot_be_shadowed_by_declaration(
+        self, catalog_repo
+    ):
+        """create_missing_fields must not mint a scalar over a relation."""
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Assignee": "Nick"}),
+                create_missing_fields={"Assignee": "text"},
+            )
+
+    async def test_relations_stay_out_of_the_fields_catalog(
+        self, catalog_repo
+    ):
+        rendered = {
+            spec.name
+            for specs in catalog_repo.field_catalog().values()
+            for spec in specs
+        }
+        assert "Assignee" not in rendered
+
+    async def test_unmatched_key_on_create_errors_with_guidance(self, catalog_repo):
+        with pytest.raises(UnknownFieldKey) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"due": "2026-08-01"})
+            )
+        message = str(err.value)
+        assert "Due date" in message and "(date)" in message
+        assert "create_missing_fields" in message
+
+    async def test_unmatched_key_on_update_errors_with_guidance(self, catalog_repo):
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.")
+        )
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.update_node(node.id, fields={"due": "2026-08-01"})
+
+    async def test_display_name_key_writes_the_property(self, catalog_repo):
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Due date": "2026-08-01"})
+        )
+        # Read-back is under the property's raw key, both backends alike.
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
+
+    async def test_declared_key_mints_a_reusable_property(self, catalog_repo):
+        first = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"effort": "3"}),
+            create_missing_fields={"effort": "number"},
+        )
+        assert first.fields["effort"] == "3"
+        # Now part of the space's vocabulary: reusable without the opt-in.
+        second = await catalog_repo.create_node(
+            NodeDraft("Item", name="Land it", summary="s.",
+                      fields={"effort": "5"})
+        )
+        assert second.fields["effort"] == "5"
+
+    async def test_catalog_is_exposed_for_guidance(self, catalog_repo):
+        catalog = catalog_repo.field_catalog()
+        rendered = {
+            (spec.name, spec.format)
+            for specs in catalog.values() for spec in specs
+        }
+        assert ("Due date", "date") in rendered
+        assert ("Status", "select") in rendered
+
+    async def test_infra_attribution_fields_resolve_natively(self, catalog_repo):
+        """ADR 028: recorder stamps write the bootstrap-guaranteed
+        attribution properties -- no infra exemption, no blob."""
+        node = await catalog_repo.create_node(
+            NodeDraft("gc_prose", name="Scene 1", summary="A capture.",
+                      fields={attribution.FIELD_USER_ID: "u-1"})
+        )
+        stored = catalog_repo.graph.node(node.id).fields
+        assert stored[attribution.FIELD_USER_ID] == "u-1"
+
+    async def test_infra_unmatched_field_errors_like_any_other(self, catalog_repo):
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.create_node(
+                NodeDraft("gc_prose", name="Scene 1", summary="A capture.",
+                          fields={"free_form": "nope"})
+            )
+
+    async def test_attribution_keys_stay_out_of_the_offered_catalog(
+        self, catalog_repo
+    ):
+        """The stamps are recorder-owned (ADR 028): writable, but never
+        offered as story-field vocabulary."""
+        rendered = {
+            spec.key
+            for specs in catalog_repo.field_catalog().values()
+            for spec in specs
+        }
+        assert not rendered & set(attribution.ATTRIBUTION_FIELDS)
+
+
 class TestInMemoryRoleOverrides(RoleOverrideContract):
     @pytest.fixture
     def meeting_repo(self):
@@ -261,6 +387,95 @@ class TestAnytypeRoleOverrides(RoleOverrideContract):
         repository = AnytypeGraphRepository(
             client, role_overrides={"meeting": Role.EVENT}
         )
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class TestInMemoryFieldCatalog(FieldCatalogContract):
+    @pytest.fixture
+    def catalog_repo(self):
+        return InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Due date", format="date", key="due_date"),
+            FieldSpec(name="Status", format="select", key="status",
+                      options=("To Do", "In Progress")),
+            FieldSpec(name="Assignee", format="objects", key="assignee"),
+        ])
+
+
+class TestAnytypeFieldCatalog(FieldCatalogContract):
+    @pytest.fixture
+    async def catalog_repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        await client.create_property(
+            {"key": "due_date", "name": "Due date", "format": "date"}
+        )
+        status = await client.create_property(
+            {"key": "status", "name": "Status", "format": "select"}
+        )
+        await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
+        await client.create_tag(status["id"], {"name": "In Progress", "color": "lime"})
+        await client.create_property(
+            {"key": "assignee", "name": "Assignee", "format": "objects"}
+        )
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class MembersContract:
+    """S11: space members are first-class, linkable nodes in every
+    implementation -- seeded with one member named "Luckcow". Search/list
+    never return participants live, so reflection is what makes an
+    assignee-style edge possible at all."""
+
+    def _member(self, repo):
+        return next(
+            n for n in repo.graph.nodes() if n.type == "Space member"
+        )
+
+    async def test_members_are_reflected_as_nodes(self, members_repo):
+        member = self._member(members_repo)
+        assert member.name == "Luckcow"
+        assert member.type_key == "participant"
+
+    async def test_a_created_node_can_link_to_a_member(self, members_repo):
+        """The whole point (live-caught): 'assign the task to the
+        requester' needs the member as an edge target."""
+        member = self._member(members_repo)
+        task = await members_repo.create_node(
+            NodeDraft("Item", name="Take a shower", summary="s."),
+            links=[LinkSpec("assignee", other=member.id)],
+        )
+        assert {n.id for _, n in members_repo.graph.neighbors(task.id)} == {
+            member.id
+        }
+
+
+class TestInMemoryMembers(MembersContract):
+    @pytest.fixture
+    def members_repo(self):
+        return InMemoryGraphRepository(members=["Luckcow"])
+
+
+class TestAnytypeMembers(MembersContract):
+    @pytest.fixture
+    async def members_repo(self):
+        mock = MockAnytype()
+        mock.seed_member("Luckcow", role="owner")
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        await client.create_property(
+            {"key": "assignee", "name": "Assignee", "format": "objects"}
+        )
+        repository = AnytypeGraphRepository(client)
         await repository.hydrate()
         yield repository
         await client.aclose()
@@ -297,3 +512,101 @@ class TestAnytypeTemplates(TemplateContract):
         await repository.hydrate()
         yield repository
         await client.aclose()
+
+
+class ScheduledEventContract:
+    """ADR 027: Scheduled Event nodes round-trip identically on both
+    backends -- infra-hidden from name search, schedule fields readable
+    from the index, and partial field rewrites keep the rest."""
+
+    async def _create(self, repo):
+        from graph_context.domain import scheduling
+
+        return await repo.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="tax reminder",
+            summary="fires once at 2027-04-08 09:00",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2027-04-08T09:00",
+                scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
+                scheduling.FIELD_STATUS: scheduling.STATUS_PENDING,
+                scheduling.FIELD_SESSION_KEY: "anytype:chat-1",
+            },
+        ))
+
+    async def test_fields_round_trip_and_the_role_resolves(self, repo):
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        stored = repo.graph.node(node.id)
+        assert stored.role is Role.SCHEDULED
+        assert stored.fields[scheduling.FIELD_SCHEDULE] == "2027-04-08T09:00"
+        assert stored.fields[scheduling.FIELD_PROMPT] == "Remind Nick about taxes."
+        assert stored.fields[scheduling.FIELD_SESSION_KEY] == "anytype:chat-1"
+        # The status is a SELECT on the Anytype backend: the write
+        # auto-creates the option tag (ADR 012) and reads back as its
+        # display name -- identical to the fake's verbatim round-trip.
+        assert stored.fields[scheduling.FIELD_STATUS] == "Pending"
+
+    async def test_status_select_transitions_round_trip(self, repo):
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        stored = repo.graph.node(node.id)
+        await repo.update_node(node.id, fields={
+            **dict(stored.fields),
+            scheduling.FIELD_STATUS: scheduling.STATUS_CANCELLED,
+        })
+        after = repo.graph.node(node.id)
+        assert after.fields[scheduling.FIELD_STATUS] == "Cancelled"
+
+    async def test_a_bare_name_never_resolves_to_a_scheduled_event(self, repo):
+        await self._create(repo)
+        assert repo.graph.find_by_name("tax reminder") == []
+
+    async def test_merged_field_update_keeps_the_other_fields(self, repo):
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        stored = repo.graph.node(node.id)
+        merged = {**dict(stored.fields),
+                  scheduling.FIELD_LAST_FIRED: "2027-04-08 09:00:30"}
+        await repo.update_node(node.id, fields=merged)
+        after = repo.graph.node(node.id)
+        assert after.fields[scheduling.FIELD_LAST_FIRED] == "2027-04-08 09:00:30"
+        assert after.fields[scheduling.FIELD_PROMPT] == "Remind Nick about taxes."
+        assert after.fields[scheduling.FIELD_SCHEDULE] == "2027-04-08T09:00"
+
+
+class TestInMemoryScheduledEvents(ScheduledEventContract):
+    @pytest.fixture
+    def repo(self):
+        return InMemoryGraphRepository()
+
+
+class TestAnytypeScheduledEvents(ScheduledEventContract):
+    @pytest.fixture
+    async def repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+    async def test_values_land_in_native_properties_not_the_blob(self, repo):
+        """The whole point of the human-facing surface (ADR 027 amendment):
+        a person opening the object in Anytype sees real, editable fields
+        -- never a JSON side-channel (the blob is retired, ADR 028)."""
+        from graph_context.domain import scheduling
+
+        node = await self._create(repo)
+        raw = await repo._client.get_object(node.id)
+        properties = {
+            entry["key"]: entry for entry in raw.get("properties", [])
+        }
+        assert properties[scheduling.FIELD_SCHEDULE]["text"] == "2027-04-08T09:00"
+        assert properties[scheduling.FIELD_STATUS]["format"] == "select"
+        assert "gc_fields" not in properties  # nothing fell through

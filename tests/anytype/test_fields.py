@@ -11,8 +11,9 @@ from typing import Any
 
 import pytest
 
+from graph_context.domain import attribution
 from graph_context.domain.models import NodeDraft
-from graph_context.errors import GraphContextError
+from graph_context.errors import GraphContextError, UnknownFieldKey
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
@@ -107,19 +108,18 @@ async def test_gc_field_denylist_silences_space_specific_noise(
     await client.aclose()
 
 
-async def test_native_wins_over_the_gc_fields_blob(
+async def test_stray_gc_fields_blob_is_never_read(
     repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
 ) -> None:
+    """ADR 028 retired the gc_fields JSON blob: a stray one on a pre-pivot
+    object is just another unreflected gc_ property, not a fields channel."""
     await _seed_scalar_properties(client)
     node_id = mock.seed_object("character", "Autumn", properties=[
         _entry("role", "select", TAG_HERO),
         _entry("gc_fields", "text", '{"role": "stale blob value", "quirk": "hums"}'),
     ])
     await repo.hydrate()
-    assert repo.graph.node(node_id).fields == {
-        "role": "Hero",   # native outranks the blob
-        "quirk": "hums",  # blob remains the channel for unmatched keys
-    }
+    assert repo.graph.node(node_id).fields == {"role": "Hero"}
 
 
 async def test_human_select_edit_reaches_fields_on_resync(
@@ -138,9 +138,11 @@ async def test_human_select_edit_reaches_fields_on_resync(
 
 
 class TestFieldWriteRouting:
-    """ADR 012 write side: `fields` keys matching native properties write
-    those properties (select values resolved-or-created as tags BEFORE the
-    object write); unmatched keys fall through to the gc_fields blob."""
+    """ADR 012/023/028 write side: `fields` keys matching native properties
+    write those properties (select values resolved-or-created as tags
+    BEFORE the object write); every write is native-only -- an unmatched
+    key errors unless declared via create_missing_fields, and no gc_fields
+    blob is written at all."""
 
     async def _seed_role_property(self, client: AnytypeClient) -> str:
         prop = await client.create_property(
@@ -149,7 +151,7 @@ class TestFieldWriteRouting:
         await client.create_tag(prop["id"], {"name": "Everyperson", "color": "blue"})
         return str(prop["id"])
 
-    async def test_create_routes_native_keys_and_blob_residual(
+    async def test_create_writes_natives_and_no_blob(
         self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
     ) -> None:
         await self._seed_role_property(client)
@@ -157,15 +159,141 @@ class TestFieldWriteRouting:
         await repo.hydrate()  # registry must know the new properties
         node = await repo.create_node(NodeDraft(
             "Character", name="Autumn", summary="Worker.",
-            fields={"role": "everyperson", "notes": "arc 1", "quirk": "hums"},
+            fields={"role": "everyperson", "notes": "arc 1"},
         ))
         stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
         assert stored["role"]["select"]["name"] == "Everyperson"  # matched by name
         assert stored["notes"]["text"] == "arc 1"
-        assert '"quirk": "hums"' in stored["gc_fields"]["text"]
-        assert "role" not in stored["gc_fields"]["text"]
-        # And the read-back view merges the channels seamlessly.
-        assert node.fields == {"role": "Everyperson", "notes": "arc 1", "quirk": "hums"}
+        assert "gc_fields" not in stored  # story nodes carry no blob (ADR 023)
+        assert node.fields == {"role": "Everyperson", "notes": "arc 1"}
+
+    async def test_unmatched_key_errors_listing_reusable_properties(
+        self, repo: AnytypeGraphRepository, client: AnytypeClient
+    ) -> None:
+        await self._seed_role_property(client)
+        await repo.hydrate()
+        with pytest.raises(UnknownFieldKey) as err:
+            await repo.create_node(NodeDraft(
+                "Character", name="Autumn", summary="Worker.",
+                fields={"quirk": "hums"},
+            ))
+        message = str(err.value)
+        assert "'quirk'" in message
+        assert "Role (select)" in message
+        assert "create_missing_fields" in message
+        assert "date" in message  # the format menu is echoed
+
+    async def test_error_lists_type_properties_with_select_options(
+        self, mock: MockAnytype
+    ) -> None:
+        """A type created WITH inline properties (the live GET /types shape)
+        surfaces them first in the error, options included."""
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id, page_limit=10)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await client.create_type({
+            "key": "task", "name": "Task", "plural_name": "Tasks",
+            "layout": "action",
+            "properties": [
+                {"key": "due_date", "name": "Due date", "format": "date"},
+                {"key": "status", "name": "Status", "format": "select"},
+            ],
+        })
+        repo = AnytypeGraphRepository(client)
+        await repo.hydrate()
+        status_id = next(
+            p["id"] for p in [p async for p in client.list_properties()]
+            if p["key"] == "status"
+        )
+        await client.create_tag(status_id, {"name": "To Do", "color": "grey"})
+        with pytest.raises(UnknownFieldKey) as err:
+            await repo.create_node(NodeDraft(
+                "Task", name="Ship it", summary="A task.", fields={"due": "2026-08-01"},
+            ))
+        message = str(err.value)
+        assert "Properties on Task: Due date (date), Status (select: To Do)" in message
+        await client.aclose()
+
+    async def test_create_missing_fields_mints_a_reusable_native_property(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await repo.hydrate()
+        node = await repo.create_node(
+            NodeDraft(
+                "Character", name="Autumn", summary="Worker.",
+                fields={"quirk": "hums"},
+            ),
+            create_missing_fields={"quirk": "text"},
+        )
+        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
+        assert stored["quirk"]["text"] == "hums"
+        assert "gc_fields" not in stored
+        # The property now exists in the space: the next write reuses it
+        # without the opt-in.
+        second = await repo.create_node(NodeDraft(
+            "Character", name="Renata", summary="Exec.", fields={"quirk": "whistles"},
+        ))
+        assert second.fields["quirk"] == "whistles"
+
+    async def test_update_writes_natives_and_ignores_stray_blob(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await self._seed_role_property(client)
+        # A pre-pivot object with stray blob data, edited by the bot now.
+        node_id = mock.seed_object("character", "Autumn", properties=[
+            _entry("gc_fields", "text", '{"quirk": "hums"}'),
+        ])
+        await repo.hydrate()
+        updated = await repo.update_node(node_id, fields={"role": "Everyperson"})
+        stored = {p["key"]: p for p in mock.object(node_id)["properties"]}
+        assert stored["role"]["select"]["name"] == "Everyperson"
+        assert stored["gc_fields"]["text"] == '{"quirk": "hums"}'  # untouched
+        # No read merge (ADR 028): stray blob data never reaches fields.
+        assert updated.fields == {"role": "Everyperson"}
+
+    async def test_update_unmatched_key_errors_before_any_write(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        await repo.hydrate()
+        node = await repo.create_node(
+            NodeDraft("Character", name="Autumn", summary="Worker.")
+        )
+        with pytest.raises(UnknownFieldKey):
+            await repo.update_node(node.id, fields={"tic": "taps twice"})
+        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
+        assert "gc_fields" not in stored
+
+    async def test_infra_nodes_write_native_attribution_properties(
+        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        """Recorders (gc_prose / gc_intent) stamp provenance into the
+        bootstrap-minted attribution properties (ADR 028) -- real,
+        human-visible fields; no gc_fields blob exists anymore."""
+        node = await repo.create_node(NodeDraft(
+            "gc_prose", name="Scene 1", summary="A captured scene.",
+            fields={
+                attribution.FIELD_USER_ID: "u-1",
+                attribution.FIELD_GENERATED_AT: "2026-07-10",
+            },
+        ))
+        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
+        assert stored[attribution.FIELD_USER_ID]["text"] == "u-1"
+        assert stored[attribution.FIELD_GENERATED_AT]["text"] == "2026-07-10"
+        assert "gc_fields" not in stored
+        # And they reflect back into Node.fields for consumers like the
+        # provenance sort in NodeReader.
+        assert node.fields[attribution.FIELD_GENERATED_AT] == "2026-07-10"
+
+    async def test_infra_unmatched_key_errors_like_any_other(
+        self, repo: AnytypeGraphRepository, client: AnytypeClient
+    ) -> None:
+        """ADR 028 removed the infra fall-through: one native-only rule for
+        every role."""
+        with pytest.raises(UnknownFieldKey):
+            await repo.create_node(NodeDraft(
+                "gc_prose", name="Scene 1", summary="A captured scene.",
+                fields={"free_form_bookkeeping": "nope"},
+            ))
 
     async def test_unknown_select_value_creates_the_tag(
         self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
@@ -178,22 +306,6 @@ class TestFieldWriteRouting:
         assert node.fields["role"] == "Antagonist"
         tags = [t async for t in client.list_tags(prop_id)]
         assert "Antagonist" in {t["name"] for t in tags}
-
-    async def test_update_routes_native_and_replaces_blob(
-        self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
-    ) -> None:
-        await self._seed_role_property(client)
-        await repo.hydrate()
-        node = await repo.create_node(NodeDraft(
-            "Character", name="Autumn", summary="Worker.", fields={"quirk": "hums"},
-        ))
-        updated = await repo.update_node(
-            node.id, fields={"role": "Everyperson", "tic": "taps twice"}
-        )
-        assert updated.fields == {"role": "Everyperson", "tic": "taps twice"}
-        stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
-        assert '"tic"' in stored["gc_fields"]["text"]
-        assert '"quirk"' not in stored["gc_fields"]["text"]  # blob replaced
 
     async def test_multi_select_splits_on_commas(
         self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient

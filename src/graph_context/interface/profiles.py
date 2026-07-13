@@ -22,7 +22,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from graph_context.application.ranker import RankingWeights
-from graph_context.domain.schema import Role
+from graph_context.domain.schema import FIELD_FORMATS, Role
+from graph_context.domain.session import (
+    DEFAULT_FULL_SLOTS,
+    DEFAULT_SUMMARY_SLOTS,
+    SCRATCHPAD_MAX_CHARS,
+)
 from graph_context.errors import GraphContextError
 
 TOOL_NAMES: tuple[str, ...] = (
@@ -34,6 +39,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "find_path",
     "find_node",
     "query",
+    "schedule",
 )
 
 
@@ -132,7 +138,11 @@ def get_profile(name: str | None) -> DomainProfile:
 # means the profiles have actually diverged.
 # ---------------------------------------------------------------------------
 
-_UPDATE_NODE_DOC = """\
+# The one source for the mintable-format menu (domain-owned, ADR 023):
+# adding a format updates every prompt that lists it.
+_FORMAT_MENU = ", ".join(sorted(FIELD_FORMATS))
+
+_UPDATE_NODE_DOC = f"""\
 Modify a node's fields and/or links. Only provided arguments change.
 
 node_id accepts a node NAME as well as an id (resolved for you).
@@ -149,19 +159,38 @@ saw it. An empty string clears it. Never list the node's links in the
 description: a Connections section is maintained automatically at the
 bottom of the page (you never see or write it).
 
-fields: {"key": "value"} attributes. A key matching one of the space's
-own properties (by key or display name -- get_node shows what a node
-already carries) updates THAT property, visible and filterable in
+fields: {{"key": "value"}} attributes. Every key MUST match one of the
+space's own properties, by key or display name -- get_node shows what a
+node already carries, and context action='overview' lists each type's
+properties. The value updates THAT property, visible and filterable in
 Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful").
-Unmatched keys land in a bot-only extras store, which this parameter
-replaces wholesale -- resend extras you want kept.
+multi-select values are comma-separated names ("Dark, Hopeful"). An
+unmatched key ERRORS, listing the properties you can reuse -- prefer
+reusing one. Only when none fits, resend with
+create_missing_fields={{"key": "format"}} to create a real new property
+(formats: {_FORMAT_MENU}).
 
 add_links: same shape as create_node's links (set create_missing_relations
 to create a brand-new relation label rather than reuse an existing one).
-remove_links: list of {"source", "edge_type", "target"} exactly as shown
+remove_links: list of {{"source", "edge_type", "target"}} exactly as shown
 by get_node.
 """
+
+def _fields_doc(examples: str) -> str:
+    """The create_node ``fields`` parameter doc (ADR 023): shared semantics,
+    profile-specific example property names. Lives here exactly once."""
+    return f"""\
+fields: {{"key": "value"}} attributes. Every key MUST match one of the
+  space's own properties, by key or display name (e.g. {examples});
+  context action='overview' lists each type's properties, and get_node
+  shows what a node already carries. The value writes THAT property,
+  visible and filterable in Anytype; select options match by name and
+  are created when new; multi-select values are comma-separated names.
+  An unmatched key ERRORS, listing the properties you can reuse --
+  prefer reusing one. Only when none fits, resend with
+  create_missing_fields={{"key": "format"}} to create a real new property
+  (formats: {_FORMAT_MENU})."""
+
 
 def _query_doc(examples: str) -> str:
     """Assemble the ``query`` doc: shared grammar + profile-specific
@@ -206,12 +235,58 @@ detail: names | summaries (default) | full.
 {examples}"""
 
 
+_SCHEDULE_DOC = """\
+Schedule a future or recurring check-in (WHEN to act, not world data).
+At the scheduled time the system starts a turn in this same chat and
+hands you your stored prompt -- use it for reminders ("remind me a week
+before taxes are due"), follow-ups ("ask on Friday whether the draft
+shipped"), or recurring reviews ("every Monday 09:00, list stale
+summaries").
+
+Actions:
+  set    -- create one. Requires all three:
+            name     -- a short label (e.g. "tax reminder").
+            schedule -- WHEN, in the server's LOCAL time, two forms:
+                        * one-shot ISO date-time "2027-04-08T09:00"
+                          (fires once; must be in the future; no UTC
+                          offset)
+                        * cron, 5 fields "minute hour day month weekday"
+                          e.g. "0 9 * * 1" = Mondays 09:00 (ranges a-b,
+                          steps */n, lists a,b; weekday 0 and 7 = Sunday)
+            prompt   -- the instructions your future self receives when
+                        it fires, with NO other context -- write them
+                        self-contained: who/what/why and what to do
+                        (e.g. "Remind Nick that taxes are due April 15
+                        and ask whether he has filed yet.").
+            The response echoes the computed next-fire time and the
+            current server time -- CHECK the math against what the user
+            asked for ("a week before April 15" -> April 8).
+  list   -- every scheduled event: id, schedule and next fire, target
+            chat, prompt, status. Also shows the current server time --
+            call this when you need today's date.
+  cancel -- stop one; node_id is the id shown by list, or the exact
+            event name. Sets its "Schedule status" to Cancelled; the
+            object and its schedule stay in Anytype, and the user can
+            re-enable it there by setting the status back to Pending.
+
+A recurring event fires at most once per occurrence; occurrences missed
+while the system was down collapse into ONE late fire. Events live as
+"Scheduled Event" objects in Anytype (fields: Schedule, Schedule
+prompt, Schedule status, Last fired), so the user can view, edit, or
+create them there too -- an empty status counts as Pending, and a fired
+one-shot is marked Completed automatically.
+"""
+
+
 _FIND_NODE_DOC = """\
 Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
 Matching is tiered: exact name first, then substring, and if nothing
 matches by name the input is treated as a description and matched by
-MEANING (when semantic search is enabled). Semantic hits are labelled
+MEANING (when semantic search is enabled). A name miss automatically
+pulls in edits made directly in Anytype and retries, so a no-match
+answer already accounts for just-created objects -- trust it before
+creating anything new. Semantic hits are labelled
 and each carries a "why" line (what matched, what it is linked to) so
 you can verify before using an id. Each result line carries the node
 id, ready to paste into any other tool.
@@ -229,12 +304,17 @@ For a cold start with no name in mind, use context action='overview'.
 """
 
 
-# ---------------------------------------------------------------------------
-# Fiction: the original surface, verbatim. The default profile.
-# ---------------------------------------------------------------------------
+def _context_doc(
+    *, resync: str, overview_note: str, held_noun: str, bound_to: str
+) -> str:
+    """The ``context`` doc: shared curation semantics assembled once.
 
-_FICTION_DOCS: dict[str, str] = {
-    "context": """\
+    Profile-specific bits arrive as parameters (resync advice, framing
+    nouns); the working-set slot counts and the scratchpad cap
+    interpolate from their owning modules so the prompt can never lie
+    about a budget.
+    """
+    return f"""\
 Inspect or curate your cross-turn context: scratchpad, working set, resync.
 
 Your scratchpad and working set are echoed to you at the start of every
@@ -244,29 +324,114 @@ Actions:
   get          -- session snapshot: graph statistics plus your current
                   scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
-                  counts plus the highest-degree "hub" nodes with name,
-                  type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / hold. The map
-                  is rebuilt from the graph each call -- nothing to
-                  maintain. (alias: map)
-  resync       -- pull in edits a human made directly in Anytype; reports
-                  which nodes changed. Use before a long writing session.
+                  counts, each type's properties (reuse these as create/
+                  update `fields` keys), plus the highest-degree "hub"
+                  nodes with name, type, id and summary. START HERE in a
+                  fresh session to obtain node ids for explore /
+                  get_node / hold. {overview_note}(alias: map)
+  resync       -- {resync}
   note         -- REPLACE your scratchpad with `text` (empty text clears
-                  it; max 2000 chars). Keep cross-turn intentions and open
+                  it; max {SCRATCHPAD_MAX_CHARS} chars). Keep cross-turn intentions and open
                   threads here -- durable facts belong in the graph as
                   nodes, not in the scratchpad.
   hold         -- keep node_id in your working set at `detail`:
                   "summaries" (default; one-liner each turn) or "full"
-                  (body + connections each turn -- for the 1-2 nodes you
-                  are actively working from). 2 full slots, 6 summary
+                  (body + connections each turn -- for the 1-2 {held_noun} you
+                  are actively working from). {DEFAULT_FULL_SLOTS} full slots, \
+{DEFAULT_SUMMARY_SLOTS} summary
                   slots; overflow demotes/releases the oldest, and the
                   response says so. explore/find_path default to the most
                   recently held node when no start is given.
   release      -- drop node_id from the working set.
   clear        -- empty the working set (the scratchpad is kept).
   set_project  -- relabel the session's project (cosmetic; one server is
-                  bound to one story world).
-""",
+                  bound to {bound_to}).
+"""
+
+
+def _get_node_doc(
+    *, entity_noun: str, editor: str, multi_read: str, edge_example: str
+) -> str:
+    """The ``get_node`` doc: one body, profile-specific example nouns and
+    the optional read-several-at-once tip."""
+    return f"""\
+Read ONE node in depth: all fields plus every edge grouped by type,
+with neighbor names and ids. Use when you need the full picture of a
+single {entity_noun}; use `explore` to see a neighborhood instead. The full
+description (the node's Anytype page body) is fetched fresh on every
+call, so {editor} latest edits are always included.{multi_read}
+
+node_id accepts a node NAME as well as an id (resolved for you; an
+ambiguous name reports its candidates so you can pick one).
+edge_types: optional filter, e.g. {edge_example}.
+include_provenance: how many intent records that touched this node to
+  attach (default 0; most-recent first, with excerpts) -- the "who
+  changed this, and why?" audit lookup. The response notes when such
+  records exist.
+"""
+
+
+def _explore_doc(
+    *, as_of: str, scenario: str, deep: str, sweep_label: str
+) -> str:
+    """The ``explore`` doc: shared walk semantics; the timeline cutoff,
+    the worked scenario, and the full-detail recipe arrive whole (their
+    wording AND wrapping are profile voice)."""
+    return f"""\
+Walk the graph outward from a node. THE general retrieval primitive.
+
+In a fresh session nothing is held or recently touched; call context
+action="overview" first to get a starting node id (or pass a node name
+as `start` -- it is resolved for you).
+
+start: node id OR name; empty = the most recently held node (falling
+back to the most recently touched). depth: 1-3 (default 1).
+detail: names | summaries (default) | full.
+{as_of}
+
+{scenario}
+
+{deep}
+Caution: "full" emits complete, untruncated descriptions; keep
+depth=1 and use `limit`.
+
+STALE-SUMMARY SWEEP ({sweep_label}):
+  explore(depth=3, limit=50, only_stale=true, detail="names")
+  ...then update_node each with a fresh summary.
+
+Captured passages and session bookkeeping are hidden unless explicitly
+named in include_types (e.g. include_types=["Capture"]).
+"""
+
+
+def _find_path_doc(*, intro: str, edge_example: str) -> str:
+    """The ``find_path`` doc: the example question (and its wrapping) is
+    profile voice; the semantics lines are shared."""
+    return f"""\
+{intro}start: empty = the most recently held (or touched) node. Edge direction is ignored for
+reachability but shown in the result. Restrict edge_types to make the
+path more meaningful (e.g. only {edge_example}).
+"""
+
+
+# ---------------------------------------------------------------------------
+# Fiction: the original surface, verbatim. The default profile.
+# ---------------------------------------------------------------------------
+
+_FICTION_DOCS: dict[str, str] = {
+    "context": _context_doc(
+        resync=(
+            "pull in edits a human made directly in Anytype; reports\n"
+            "                  which nodes changed. Use before a long "
+            "writing session."
+        ),
+        overview_note=(
+            "The map is rebuilt from the graph\n"
+            "                  each call -- nothing to maintain. "
+        ),
+        held_noun="nodes",
+        bound_to="one story world",
+    ),
     "create_node": """\
 Create a story-world node and its initial links in ONE call.
 
@@ -279,12 +444,7 @@ description: long-form text (a portrait, a place's atmosphere, an
   user reads and edits it directly; returned by get_node and
   explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
-fields: {"key": "value"} attributes. A key matching one of the space's
-  own properties (e.g. role, tech_type -- by key or display name) writes
-  THAT property, visible and filterable in Anytype; select options match
-  by name and are created when new; multi-select values are
-  comma-separated names. Unmatched keys are kept in a bot-only extras
-  store.
+""" + _fields_doc("role, tech_type") + """
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you (ambiguous names report the candidates).
@@ -305,65 +465,42 @@ the node's links in the description -- a Connections section is
 maintained automatically at the bottom of the page.
 """,
     "update_node": _UPDATE_NODE_DOC,
-    "get_node": """\
-Read ONE node in depth: all fields plus every edge grouped by type,
-with neighbor names and ids. Use when you need the full picture of a
-single entity; use `explore` to see a neighborhood instead. The full
-description (the node's Anytype page body) is fetched fresh on every
-call, so a human's latest edits are always included. To read several
-related nodes at once (e.g. all participants of a scene), prefer
-explore(depth=1, detail="full") over repeated get_node calls.
-
-node_id accepts a node NAME as well as an id (resolved for you; an
-ambiguous name reports its candidates so you can pick one).
-edge_types: optional filter, e.g. ["participated_in", "knows"].
-include_provenance: how many intent records that touched this node to
-  attach (default 0; most-recent first, with excerpts) -- the "who
-  changed this, and why?" audit lookup. The response notes when such
-  records exist.
-""",
-    "explore": """\
-Walk the graph outward from a node. THE general retrieval primitive.
-
-In a fresh session nothing is held or recently touched; call context
-action="overview" first to get a starting node id (or pass a node name
-as `start` -- it is resolved for you).
-
-start: node id OR name; empty = the most recently held node (falling
-back to the most recently touched). depth: 1-3 (default 1).
-detail: names | summaries (default) | full.
+    "get_node": _get_node_doc(
+        entity_noun="entity",
+        editor="a human's",
+        multi_read=(
+            " To read several\n"
+            "related nodes at once (e.g. all participants of a scene), prefer\n"
+            'explore(depth=1, detail="full") over repeated get_node calls.'
+        ),
+        edge_example='["participated_in", "knows"]',
+    ),
+    "explore": _explore_doc(
+        as_of="""\
 as_of: story-time cutoff -- Events after it are hidden (a character's
 view of the world at that moment); include_future=true restores them
 (foreshadowing/direction). limit caps results (default 25; the response
-says when it truncated).
-
+says when it truncated).""",
+        scenario="""\
 SCENE ASSEMBLY is an explore configuration, not a separate tool:
   explore(start="<event id>", depth=2,
           include_types=["Character", "Location", "Item"],
-          detail="summaries", as_of=<event time>)
-
+          detail="summaries", as_of=<event time>)""",
+        deep="""\
 RENDERING PREP (about to write prose about a scene):
   explore(start="<event id>", depth=1, detail="full")
 returns the FULL descriptions of the event and every participant in
-ONE call -- do not fetch participants one-by-one with get_node.
-Caution: "full" emits complete, untruncated descriptions; keep
-depth=1 and use `limit`.
-
-STALE-SUMMARY SWEEP (before a big writing session):
-  explore(depth=3, limit=50, only_stale=true, detail="names")
-  ...then update_node each with a fresh summary.
-
-Captured passages and session bookkeeping are hidden unless explicitly
-named in include_types (e.g. include_types=["Capture"]).
-""",
-    "find_path": """\
+ONE call -- do not fetch participants one-by-one with get_node.""",
+        sweep_label="before a big writing session",
+    ),
+    "find_path": _find_path_doc(
+        intro="""\
 Find the shortest meaningful connection between two nodes -- "how is
 Mira related to the Fall of Brakk?" Surfaces non-obvious links for plot
 work. `target` and `start` each accept a node id OR name (resolved for
-you). start: empty = the most recently held (or touched) node. Edge direction is ignored for
-reachability but shown in the result. Restrict edge_types to make the
-path more meaningful (e.g. only social edges: ["knows", "member_of"]).
-""",
+you). """,
+        edge_example='social edges: ["knows", "member_of"]',
+    ),
     "find_node": _FIND_NODE_DOC,
     "query": _query_doc("""\
 EXAMPLES -- the census tool (explore walks outward; query scans the world):
@@ -375,6 +512,7 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
   the most recently edited nodes, any type:
     query(order_by=["modified_at desc"], limit=10)
 """),
+    "schedule": _SCHEDULE_DOC,
 }
 
 _FICTION_MODES = (
@@ -419,39 +557,19 @@ FICTION = DomainProfile(
 # ---------------------------------------------------------------------------
 
 _WORKSPACE_DOCS: dict[str, str] = {
-    "context": """\
-Inspect or curate your cross-turn context: scratchpad, working set, resync.
-
-Your scratchpad and working set are echoed to you at the start of every
-turn -- they are how you remember across turns. Curate them deliberately.
-
-Actions:
-  get          -- session snapshot: graph statistics plus your current
-                  scratchpad, working set, and recent trail.
-  overview     -- DERIVED entry-point map for a cold start: per-type
-                  counts plus the highest-degree "hub" nodes with name,
-                  type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / hold. The map
-                  is rebuilt from the graph each call -- nothing to
-                  maintain. (alias: map)
-  resync       -- pull in edits a human made directly in Anytype; reports
-                  which nodes changed. Use before a long working session.
-  note         -- REPLACE your scratchpad with `text` (empty text clears
-                  it; max 2000 chars). Keep cross-turn intentions and open
-                  threads here -- durable facts belong in the graph as
-                  nodes, not in the scratchpad.
-  hold         -- keep node_id in your working set at `detail`:
-                  "summaries" (default; one-liner each turn) or "full"
-                  (body + connections each turn -- for the 1-2 nodes you
-                  are actively working from). 2 full slots, 6 summary
-                  slots; overflow demotes/releases the oldest, and the
-                  response says so. explore/find_path default to the most
-                  recently held node when no start is given.
-  release      -- drop node_id from the working set.
-  clear        -- empty the working set (the scratchpad is kept).
-  set_project  -- relabel the session's project (cosmetic; one server is
-                  bound to one Anytype space).
-""",
+    "context": _context_doc(
+        resync=(
+            "pull in edits a human made directly in Anytype; reports\n"
+            "                  which nodes changed. Use before a long "
+            "working session."
+        ),
+        overview_note=(
+            "The map is rebuilt from the graph\n"
+            "                  each call -- nothing to maintain. "
+        ),
+        held_noun="nodes",
+        bound_to="one Anytype space",
+    ),
     "create_node": """\
 Create a knowledge-base node and its initial links in ONE call.
 
@@ -467,12 +585,7 @@ story_time: REQUIRED for an Event-role node (meetings, decisions,
   milestones): its position on the timeline as a sortable number -- use
   epoch seconds or YYYYMMDD (e.g. 20260702). The parameter name is
   historical; read it as "time".
-fields: {"key": "value"} attributes. A key matching one of the space's
-  own properties (e.g. status, priority -- by key or display name)
-  writes THAT property, visible and filterable in Anytype; select
-  options match by name and are created when new; multi-select values
-  are comma-separated names. Unmatched keys are kept in a bot-only
-  extras store.
+""" + _fields_doc("status, priority") + """
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you (ambiguous names report the candidates).
@@ -492,66 +605,43 @@ the node's links in the description -- a Connections section is
 maintained automatically at the bottom of the page.
 """,
     "update_node": _UPDATE_NODE_DOC,
-    "get_node": """\
-Read ONE node in depth: all fields plus every edge grouped by type,
-with neighbor names and ids. Use when you need the full picture of a
-single entity; use `explore` to see a neighborhood instead. The full
-description (the node's Anytype page body) is fetched fresh on every
-call, so a human's latest edits are always included. To read several
-related nodes at once (e.g. everyone in a meeting), prefer
-explore(depth=1, detail="full") over repeated get_node calls.
-
-node_id accepts a node NAME as well as an id (resolved for you; an
-ambiguous name reports its candidates so you can pick one).
-edge_types: optional filter, e.g. ["works_on", "member_of"].
-include_provenance: how many intent records that touched this node to
-  attach (default 0; most-recent first, with excerpts) -- the "who
-  changed this, and why?" audit lookup. The response notes when such
-  records exist.
-""",
-    "explore": """\
-Walk the graph outward from a node. THE general retrieval primitive.
-
-In a fresh session nothing is held or recently touched; call context
-action="overview" first to get a starting node id (or pass a node name
-as `start` -- it is resolved for you).
-
-start: node id OR name; empty = the most recently held node (falling
-back to the most recently touched). depth: 1-3 (default 1).
-detail: names | summaries (default) | full.
+    "get_node": _get_node_doc(
+        entity_noun="entity",
+        editor="a human's",
+        multi_read=(
+            " To read several\n"
+            "related nodes at once (e.g. everyone in a meeting), prefer\n"
+            'explore(depth=1, detail="full") over repeated get_node calls.'
+        ),
+        edge_example='["works_on", "member_of"]',
+    ),
+    "explore": _explore_doc(
+        as_of="""\
 as_of: time cutoff -- Event-role nodes (meetings, decisions, milestones)
 after it are hidden (the state of the world as of that moment);
 include_future=true restores them (planned/upcoming work). limit caps
-results (default 25; the response says when it truncated).
-
+results (default 25; the response says when it truncated).""",
+        scenario="""\
 A MEETING or DECISION BRIEF is an explore configuration, not a separate
 tool:
   explore(start="<meeting id>", depth=2,
           include_types=["Person", "Team", "Project"],
-          detail="summaries", as_of=<meeting time>)
-
+          detail="summaries", as_of=<meeting time>)""",
+        deep="""\
 DEEP CONTEXT (about to write a summary, brief, or report):
   explore(start="<node id>", depth=1, detail="full")
 returns the FULL descriptions of the node and every neighbor in ONE
-call -- do not fetch neighbors one-by-one with get_node.
-Caution: "full" emits complete, untruncated descriptions; keep
-depth=1 and use `limit`.
-
-STALE-SUMMARY SWEEP (before a big update session):
-  explore(depth=3, limit=50, only_stale=true, detail="names")
-  ...then update_node each with a fresh summary.
-
-Captured passages and session bookkeeping are hidden unless explicitly
-named in include_types (e.g. include_types=["Capture"]).
-""",
-    "find_path": """\
+call -- do not fetch neighbors one-by-one with get_node.""",
+        sweep_label="before a big update session",
+    ),
+    "find_path": _find_path_doc(
+        intro="""\
 Find the shortest meaningful connection between two nodes -- "how is
 Alice related to the Q3 replatform decision?" Surfaces non-obvious
 links. `target` and `start` each accept a node id OR name (resolved for
-you). start: empty = the most recently held (or touched) node. Edge direction is ignored for
-reachability but shown in the result. Restrict edge_types to make the
-path more meaningful (e.g. only org edges: ["member_of", "works_on"]).
-""",
+you). """,
+        edge_example='org edges: ["member_of", "works_on"]',
+    ),
     "find_node": _FIND_NODE_DOC,
     "query": _query_doc("""\
 EXAMPLES:
@@ -563,6 +653,7 @@ EXAMPLES:
     query(type="Decision", linked_to="Q3 Replatform",
           order_by=["story_time"])
 """),
+    "schedule": _SCHEDULE_DOC,
 }
 
 _WORKSPACE_MODES = (
@@ -617,37 +708,16 @@ WORKSPACE = DomainProfile(
 # ---------------------------------------------------------------------------
 
 _ASSISTANT_DOCS: dict[str, str] = {
-    "context": """\
-Inspect or curate your cross-turn context: scratchpad, working set, resync.
-
-Your scratchpad and working set are echoed to you at the start of every
-turn -- they are how you remember across turns. Curate them deliberately.
-
-Actions:
-  get          -- session snapshot: graph statistics plus your current
-                  scratchpad, working set, and recent trail.
-  overview     -- DERIVED entry-point map for a cold start: per-type
-                  counts plus the highest-degree "hub" nodes with name,
-                  type, id and summary. START HERE in a fresh session to
-                  obtain node ids for explore / get_node / hold. (alias: map)
-  resync       -- pull in edits made directly in Anytype; reports which
-                  nodes changed. Use at the start of a work session.
-  note         -- REPLACE your scratchpad with `text` (empty text clears
-                  it; max 2000 chars). Keep cross-turn intentions and open
-                  threads here -- durable facts belong in the graph as
-                  nodes, not in the scratchpad.
-  hold         -- keep node_id in your working set at `detail`:
-                  "summaries" (default; one-liner each turn) or "full"
-                  (body + connections each turn -- for the 1-2 items you
-                  are actively working from). 2 full slots, 6 summary
-                  slots; overflow demotes/releases the oldest, and the
-                  response says so. explore/find_path default to the most
-                  recently held node when no start is given.
-  release      -- drop node_id from the working set.
-  clear        -- empty the working set (the scratchpad is kept).
-  set_project  -- relabel the session's project (cosmetic; one server is
-                  bound to one Anytype space).
-""",
+    "context": _context_doc(
+        resync=(
+            "pull in edits made directly in Anytype; reports which\n"
+            "                  nodes changed. Use at the start of a work "
+            "session."
+        ),
+        overview_note="",
+        held_noun="items",
+        bound_to="one Anytype space",
+    ),
     "create_node": """\
 Create a node in the user's workspace and its initial links in ONE call.
 
@@ -662,12 +732,7 @@ description: long-form text (a task's context, a procedure's overview, a
 story_time: REQUIRED for an Event-role node (meetings, milestones): an
   ISO date like "2026-07-04". The parameter name is historical; read it
   as "when".
-fields: {"key": "value"} attributes. A key matching one of the space's
-  own properties (e.g. status, priority, due -- by key or display name)
-  writes THAT property, visible and filterable in Anytype; select
-  options match by name and are created when new; multi-select values
-  are comma-separated names. Unmatched keys are kept in a bot-only
-  extras store.
+""" + _fields_doc('status, priority, "Due date"') + """
 links: list of {"edge_type", "other" (target node id OR name),
   "outgoing" (default true)}. `other` accepts a node name -- it is
   resolved for you. Reuse an existing relation (e.g. part_of, assigned_to,
@@ -683,63 +748,38 @@ the node's links in the description -- a Connections section is
 maintained automatically at the bottom of the page.
 """,
     "update_node": _UPDATE_NODE_DOC,
-    "get_node": """\
-Read ONE node in depth: all fields plus every edge grouped by type,
-with neighbor names and ids. Use when you need the full picture of a
-single item; use `explore` to see a neighborhood instead. The full
-description (the node's Anytype page body) is fetched fresh on every
-call, so the user's latest edits are always included.
-
-node_id accepts a node NAME as well as an id (resolved for you; an
-ambiguous name reports its candidates so you can pick one).
-edge_types: optional filter, e.g. ["part_of", "assigned_to"].
-include_provenance: how many intent records that touched this node to
-  attach (default 0; most-recent first, with excerpts) -- the "who
-  changed this, and why?" audit lookup. The response notes when such
-  records exist.
-""",
-    "explore": """\
-Walk the graph outward from a node. THE general retrieval primitive.
-
-In a fresh session nothing is held or recently touched; call context
-action="overview" first to get a starting node id (or pass a node name
-as `start` -- it is resolved for you).
-
-start: node id OR name; empty = the most recently held node (falling
-back to the most recently touched). depth: 1-3 (default 1).
-detail: names | summaries (default) | full.
+    "get_node": _get_node_doc(
+        entity_noun="item",
+        editor="the user's",
+        multi_read="",
+        edge_example='["part_of", "assigned_to"]',
+    ),
+    "explore": _explore_doc(
+        as_of="""\
 as_of: an ISO date cutoff -- Event-role nodes (meetings, milestones)
 after it are hidden (the state of things as of that date);
 include_future=true restores them (planned/upcoming work). limit caps
-results (default 25; the response says when it truncated).
-
+results (default 25; the response says when it truncated).""",
+        scenario="""\
 A TASK or PROJECT BRIEF is an explore configuration, not a separate tool:
   explore(start="<project id>", depth=2,
           include_types=["Task", "Person", "Procedure"],
-          detail="summaries")
-
+          detail="summaries")""",
+        deep="""\
 DEEP CONTEXT (about to write a summary or repeat a procedure):
   explore(start="<node id>", depth=1, detail="full")
 returns the FULL descriptions of the node and every neighbor in ONE
-call -- do not fetch neighbors one-by-one with get_node.
-Caution: "full" emits complete, untruncated descriptions; keep
-depth=1 and use `limit`.
-
-STALE-SUMMARY SWEEP (before a review session):
-  explore(depth=3, limit=50, only_stale=true, detail="names")
-  ...then update_node each with a fresh summary.
-
-Captured passages and session bookkeeping are hidden unless explicitly
-named in include_types (e.g. include_types=["Capture"]).
-""",
-    "find_path": """\
+call -- do not fetch neighbors one-by-one with get_node.""",
+        sweep_label="before a review session",
+    ),
+    "find_path": _find_path_doc(
+        intro="""\
 Find the shortest meaningful connection between two nodes -- "how does
 this task relate to that decision?" Surfaces non-obvious links.
 `target` and `start` each accept a node id OR name (resolved for you).
-start: empty = the most recently held (or touched) node. Edge direction is ignored for
-reachability but shown in the result. Restrict edge_types to make the
-path more meaningful (e.g. only org edges: ["part_of", "assigned_to"]).
 """,
+        edge_example='org edges: ["part_of", "assigned_to"]',
+    ),
     "find_node": _FIND_NODE_DOC,
     "query": _query_doc("""\
 EXAMPLES:
@@ -754,6 +794,7 @@ EXAMPLES:
   a person's meeting history, most recent first:
     query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
 """),
+    "schedule": _SCHEDULE_DOC,
 }
 
 _ASSISTANT_MODES = (

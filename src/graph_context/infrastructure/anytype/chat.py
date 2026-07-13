@@ -31,6 +31,11 @@ version header) lives here, pinned by spike S10 and mirrored by
         The transport then self-filters by identity SUFFIX match on
         ``creator``. Posted-message-id suppression remains as the belt
         to this suspender.
+    C8. ``PATCH .../messages/<id>`` replaces the message's content
+        WHOLESALE: ``text`` and ``attachments`` both take the body's
+        value, and attachments ABSENT from the body are removed
+        (live-confirmed 2026-07-11 against the sidecar). An edit that
+        wants to keep or add cards must re-send their envelopes.
 """
 
 from __future__ import annotations
@@ -148,6 +153,16 @@ async def discover_bot_identity(client: AnytypeClient) -> str:
     return ""
 
 
+def _message_body(text: str, attachments: Sequence[str]) -> dict[str, Any]:
+    """The create/edit payload: object ids become C7 link envelopes."""
+    body: dict[str, Any] = {"text": text}
+    if attachments:
+        body["attachments"] = [
+            {"target": object_id, "type": "link"} for object_id in attachments
+        ]
+    return body
+
+
 class AnytypeChatClient:
     """Chat operations for the client's bound space."""
 
@@ -182,12 +197,19 @@ class AnytypeChatClient:
     ) -> str:
         """Post a message; ``attachments`` are object ids, sent in the
         envelope quirk C7 requires so clients render them as cards."""
-        body: dict[str, Any] = {"text": text}
-        if attachments:
-            body["attachments"] = [
-                {"target": object_id, "type": "link"} for object_id in attachments
-            ]
-        return await self._client.create_chat_message(chat_id, body)
+        return await self._client.create_chat_message(
+            chat_id, _message_body(text, attachments)
+        )
+
+    async def edit(
+        self, chat_id: str, message_id: str, text: str,
+        attachments: Sequence[str] = (),
+    ) -> None:
+        """Replace a message's content (quirk C8: the edit is wholesale,
+        so any attachments the message should keep must ride along)."""
+        await self._client.edit_chat_message(
+            chat_id, message_id, _message_body(text, attachments)
+        )
 
     async def stream(
         self, chat_id: str, *, heartbeat_seconds: int = 30

@@ -62,3 +62,29 @@ footer needs regenerating.
 - `fetch_body`, `get_node`, `explore full`, prose excerpts, and both
   migration scripts all read through `body_of`, so none of them ever
   surface footer text to the model.
+
+## Amendment (2026-07-11): suppressed on template-scaffolded types
+
+Dogfooding the assistant profile surfaced a clobber: a task created *with
+links* came back with its type template's scaffold mangled ("Buy paint
+that matches stairs"), while an identical create without links was fine.
+Two store behaviors stack against the footer's wholesale `markdown` write:
+
+- **A7 replaces the whole block tree.** Anything the template put in the
+  body that markdown cannot express — property/relation widgets at the
+  top, the "property header" — is silently destroyed by any body write.
+- **A9 (live-confirmed 2026-07-11):** the PATCH markdown importer flattens
+  a heading on the body's *first line* to plain text (`## Details` →
+  `Details`); the same heading on later lines survives. So even the
+  scaffold's pure-markdown part degrades on a faithful round-trip.
+
+Decision: **types whose applied template carries a non-empty body scaffold
+never get a connections footer** — on create-with-links, `add_link` /
+`remove_link`, or `update_node(description=…)` (a footer link writes would
+not maintain is worse than none). Eligibility lives in one place,
+`AnytypeGraphRepository._writes_footer`, backed by a per-type cache with
+the same lifetime as template resolution; the scaffold check reads the
+template object's body via the single-object GET (templates answer it like
+any object). Property-only templates (defaults, no body) keep the footer.
+For scaffolded types the relations panel is the only in-app surface of the
+graph — accepted: it is always truth, and the scaffold is human-owned.

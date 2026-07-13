@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from graph_context.domain import attribution
 from graph_context.domain.graph import Direction
 from graph_context.domain.models import Edge, Node, NodeId
 from graph_context.domain.schema import INFRA_ROLES, Role
@@ -100,7 +101,10 @@ class NodeReader:
             )
             if neighbor.role is Role.INTENT
         ]
-        intents.sort(key=lambda n: n.fields.get("generated_at", ""), reverse=True)
+        intents.sort(
+            key=lambda n: n.fields.get(attribution.FIELD_GENERATED_AT, ""),
+            reverse=True,
+        )
         return intents
 
     async def _excerpts(

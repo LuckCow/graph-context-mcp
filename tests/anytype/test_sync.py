@@ -42,8 +42,13 @@ class TestHydrate:
         mock.request_log.clear()
         await repo.hydrate()
         get_calls = [p for m, p in mock.request_log if m == "GET"]
-        # paged sweeps only (objects + types + properties) -- no N+1 per-object GETs
-        assert len(get_calls) <= 8
+        # paged sweeps only (objects + types + properties + members) -- no
+        # N+1 per-OBJECT GETs. Members are the one per-item exception
+        # (S11: fetchable only individually), and there are none here.
+        # (The cap moves only when bootstrap grows enough properties for
+        # another page at page_limit=10 -- ADR 027 added the third.)
+        assert len(get_calls) <= 10
+        assert not any("/objects/" in p for p in get_calls)
 
     async def test_hydrate_keeps_open_edges_but_skips_dangling(self, mock, client, repo):
         mira = await repo.create_node(CHAR)
@@ -57,6 +62,29 @@ class TestHydrate:
         # the open edge survives; only the dangling target is dropped
         assert repo.graph.edge_count() == 1
         assert {n.id for _, n in repo.graph.neighbors(place.id)} == {mira.id}
+
+
+class TestMemberReflection:
+    """S11: participants are invisible to list/search; the member fetch is
+    what puts them in the index (and keeps them there across resyncs)."""
+
+    async def test_hydrate_reflects_members(self, mock, repo):
+        member_id = mock.seed_member("Luckcow", role="owner")
+        await repo.hydrate()
+        member = repo.graph.node(member_id)
+        assert member.name == "Luckcow"
+        assert member.type == "Space member"
+
+    async def test_resync_picks_up_a_newly_joined_member(self, mock, repo):
+        member_id = mock.seed_member("Luckcow")
+        changed = await repo.resync()
+        assert member_id in changed
+        assert repo.graph.node(member_id).name == "Luckcow"
+
+    async def test_unchanged_members_do_not_churn_resync(self, mock, repo):
+        mock.seed_member("Luckcow")
+        await repo.resync()  # reflects the member
+        assert await repo.resync() == frozenset()  # then never again
 
 
 class TestResync:

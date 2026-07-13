@@ -12,6 +12,10 @@ from graph_context.orchestrator.pipeline import ReplyEvent
 
 DEFAULT_MESSAGE_LIMIT = 2000
 
+# The one in-chat notice for an unexpected turn crash (both bots): the
+# details go to the log, never the chat.
+TURN_FAILED_NOTICE = "[error] the turn failed; see the bot log for the traceback"
+
 _PREFIXES = {"reply": "", "notice": "[notice] ", "error": "[error] "}
 
 

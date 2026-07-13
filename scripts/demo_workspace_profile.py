@@ -21,6 +21,7 @@ from graph_context.infrastructure.anytype.repository import AnytypeGraphReposito
 from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
 from graph_context.interface import tools
 from graph_context.interface.profiles import get_profile
+from graph_context.interface.services import build_services
 
 
 async def main() -> None:
@@ -38,7 +39,7 @@ async def main() -> None:
         )
     repo = AnytypeGraphRepository(client, role_overrides=profile.role_overrides)
     await repo.hydrate()
-    svc = tools.build_services(repo, SessionState(project="Platform Team"))
+    svc = build_services(repo, SessionState(project="Platform Team"))
 
     def show(label, out):
         print(f"\n### {label}\n{out}")

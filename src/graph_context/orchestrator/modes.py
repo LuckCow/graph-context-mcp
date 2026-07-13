@@ -41,7 +41,7 @@ from typing import Any
 from graph_context.errors import GraphContextError
 from graph_context.interface import tools
 from graph_context.interface.profiles import CapturePolicy, DomainProfile, ModeSpec
-from graph_context.interface.tools import Services
+from graph_context.interface.services import Services
 
 ToolFn = Callable[..., Awaitable[str]]
 
@@ -54,6 +54,10 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     "find_path": tools.find_path_tool,
     "find_node": tools.find_node_tool,
     "query": tools.query_tool,
+    # ADR 027: like `context`, session bookkeeping rather than graph
+    # authorship -- deliberately NOT a mutation tool, so read-only modes
+    # can still take "remind me" requests (the node it mints is infra).
+    "schedule": tools.schedule_tool,
 }
 
 MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})
