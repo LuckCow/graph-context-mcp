@@ -1,7 +1,11 @@
 # ADR 019: Anytype in-space chat as a transport; headless CLI sidecar
 
 Date: 2026-07-07
-Status: accepted (transport shipped; sidecar prepared, cutover deferred)
+Status: accepted (transport shipped; sidecar prepared, cutover deferred).
+Amended by ADR 029 (WP19): the "Processing…" placeholder is now claimed
+as a live activity message while the turn streams and the reply posts as
+a fresh message; a mode whose `activity_detail` is `off` keeps this
+ADR's original edit-into-reply lifecycle.
 
 ## Context
 

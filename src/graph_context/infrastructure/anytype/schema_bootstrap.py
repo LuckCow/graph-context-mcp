@@ -98,6 +98,11 @@ How Activity Mode objects work:
 - This page body is the goal prompt handed to the model.
 - Tick gc_mode_mutating to let the mode create and update nodes; unticked \
 means read-only.
+- Pick a gc_mode_activity_detail option to control how much live \
+progress the assistant streams into the chat while this mode works a \
+turn: Off (just "Processing..." until the reply), Minimal (tool tally; \
+the default when empty), Tools (each tool call), or Full (thinking and \
+results too).
 - Fill gc_capture_type (and optionally gc_capture_references, \
 gc_capture_min_chars) to auto-capture the assistant's substantial replies \
 as objects of that type.
@@ -167,8 +172,9 @@ async def ensure_schema(
     a native date key an assistant profile names may not exist yet in a
     fresh space, and an inline create naming an unknown property 400s.
     """
-    existing_types = {t["key"] async for t in client.list_types()}
-    existing_properties = {p["key"] async for p in client.list_properties()}
+    existing_types = {t["key"]: t async for t in client.list_types()}
+    existing_properties = {p["key"]: p async for p in client.list_properties()}
+    await _heal_select_formats(client, existing_properties)
     for key, name in INFRA_TYPES.items():
         if key not in existing_types:
             logger.info("bootstrap: creating infra type %s", key)
@@ -188,21 +194,30 @@ async def ensure_schema(
             ]
             if inline:
                 payload["properties"] = inline
-                existing_properties.update(entry["key"] for entry in inline)
+                existing_properties.update(
+                    {entry["key"]: entry for entry in inline}
+                )
             await client.create_type(payload)
             if key == MODE_TYPE_KEY:
                 await _seed_example_mode(client)
             if key == SCHEDULED_TYPE_KEY:
                 await _seed_example_event(client)
+        else:
+            # Upgraded-space path: the type predates a field added to its
+            # inline set (e.g. WP19's gc_mode_activity_detail) -- attach
+            # the missing ones so humans see the field in the editor.
+            await _retrofit_type_fields(
+                client, existing_types[key],
+                _INLINE_TYPE_PROPERTIES.get(key, {}), existing_properties,
+            )
 
     timeline_key, timeline_format = timeline
     if timeline_key not in existing_properties:
         logger.info("bootstrap: creating timeline property %s (%s)",
                     timeline_key, timeline_format)
-        await client.create_property(
+        existing_properties[timeline_key] = await client.create_property(
             {"key": timeline_key, "name": timeline_key, "format": timeline_format}
         )
-        existing_properties.add(timeline_key)
     for key, fmt in mapping.SCALAR_PROPERTIES.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
@@ -240,6 +255,62 @@ async def ensure_schema(
         if key not in existing_properties:
             logger.info("bootstrap: creating relation property %s", key)
             await client.create_property({"key": key, "name": name, "format": "objects"})
+    await _seed_select_options(client)
+
+
+async def _heal_select_formats(
+    client: AnytypeClient, existing_properties: dict[str, dict[str, Any]]
+) -> None:
+    """Re-mint infra selects that were born under an older format.
+
+    Quirk A12: a property's format is immutable (PATCH silently keeps the
+    old one), so the only migration is delete + re-create under the same
+    key -- deleting detaches the field from its types, and the retrofit /
+    mint steps that follow re-attach it as a select. Values set under the
+    old format are lost with it (acceptable: they were about to become
+    unreadable anyway; this ran once, for gc_mode_activity_detail's
+    one-day life as a text property).
+    """
+    for key in mapping.SELECT_OPTIONS:
+        entry = existing_properties.get(key)
+        if entry is None or entry.get("format") == "select":
+            continue
+        logger.info(
+            "bootstrap: property %s exists as %r but must be a select; "
+            "re-minting (A12)", key, entry.get("format"),
+        )
+        await client.delete_property(str(entry["id"]))
+        del existing_properties[key]
+
+
+async def _seed_select_options(client: AnytypeClient) -> None:
+    """Pre-seed the dropdown options of select-format infra properties,
+    so humans pick a value instead of typing the enum (WP19 amendment).
+
+    Find-or-create by case-insensitive name, create-only: renames and
+    recolors made in the UI are human-owned and never clobbered. Options
+    someone added beyond ours are left alone (the loader rejects unknown
+    values naming the object, so a stray option fails loudly when used).
+    """
+    if not mapping.SELECT_OPTIONS:
+        return
+    by_key = {p["key"]: p async for p in client.list_properties()}
+    for key, options in mapping.SELECT_OPTIONS.items():
+        info = by_key.get(key)
+        if info is None:
+            continue  # never minted: nothing to decorate
+        have = {
+            str(tag.get("name", "")).lower()
+            async for tag in client.list_tags(str(info["id"]))
+        }
+        for name in options:
+            if name.lower() in have:
+                continue
+            logger.info("bootstrap: seeding option %r on %s", name, key)
+            await client.create_tag(
+                str(info["id"]),
+                {"name": name, "color": mapping.tag_color(name)},
+            )
 
 
 def _display_name(key: str) -> str:
@@ -247,6 +318,47 @@ def _display_name(key: str) -> str:
     the Anytype editor); keys without one mint under the raw key. Mint
     time only -- names are human-owned afterwards."""
     return mapping.PROPERTY_DISPLAY_NAMES.get(key, key)
+
+
+async def _retrofit_type_fields(
+    client: AnytypeClient,
+    listed: dict[str, Any],
+    expected: dict[str, str],
+    existing_properties: dict[str, dict[str, Any]],
+) -> None:
+    """Attach newly-added infra fields to a type that predates them.
+
+    Quirk A11 (spike_type_update, 2026-07-15): the type-update's
+    ``properties`` list replaces the human-managed fields WHOLESALE, so
+    the type's full fetched list rides along with the additions; name,
+    plural_name, and layout are resent verbatim (human-owned). No-ops
+    when nothing is missing, so a normal startup makes one extra GET per
+    infra type and zero writes.
+    """
+    fetched = await client.get_type(listed["id"])
+    current = fetched.get("properties", [])
+    have = {entry.get("key") for entry in current}
+    missing = [key for key in expected if key not in have]
+    if not missing:
+        return
+    logger.info(
+        "bootstrap: attaching %s to existing type %s",
+        ", ".join(missing), fetched.get("key", listed["id"]),
+    )
+    added = [
+        {"key": key, "name": _display_name(key), "format": expected[key]}
+        for key in missing
+    ]
+    await client.update_type(listed["id"], {
+        "name": fetched["name"],
+        "plural_name": fetched.get("plural_name") or f"{fetched['name']}s",
+        "layout": fetched.get("layout", "basic"),
+        "properties": [
+            {"key": e["key"], "name": e["name"], "format": e["format"]}
+            for e in current
+        ] + added,
+    })
+    existing_properties.update({entry["key"]: entry for entry in added})
 
 
 async def _seed_example_event(client: AnytypeClient) -> None:

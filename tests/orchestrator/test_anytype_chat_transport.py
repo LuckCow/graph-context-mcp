@@ -32,9 +32,11 @@ from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import (
     LLMTurn,
     ScriptedDriver,
+    ToolCall,
     TranscriptEvent,
 )
 from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.turn_activity import ChatActivity
 
 FICTION = get_profile("fiction")
 SPACE = "bafyspacealphaalphaalphaalpha"
@@ -237,7 +239,12 @@ class TestTurn:
 class TestProcessingPlaceholder:
     """The turn posts a visible placeholder at once, then EDITS it into
     the real reply -- the user sees progress instead of silence while
-    turns (which serialize per space) run."""
+    turns (which serialize per space) run.
+
+    Since WP19 this lifecycle is the NO-ACTIVITY contract: it is what a
+    turn without a live-activity sink (and, via the sink's inertness, a
+    mode whose ``activity_detail`` is ``off``) must keep doing
+    bit-for-bit."""
 
     async def test_the_placeholder_posts_first_and_becomes_the_reply(
         self,
@@ -277,6 +284,74 @@ class TestProcessingPlaceholder:
         await reply.finish()
         assert recorder.texts() == ["(the turn produced no reply)"]
         assert recorder.edited == ["sent-1"]
+
+
+async def _run_streaming(
+    handler: AnytypeChatTurnHandler, message: InboundChatMessage
+) -> _ChatRecorder:
+    """run_turn with a live-activity sink, edits uncoalesced for testing."""
+    recorder = _ChatRecorder()
+    reply = handler.reply(recorder.send, recorder.edit)
+    activity = ChatActivity(reply=reply, edit=recorder.edit, min_interval=0.0)
+    await handler.run_turn(message, reply, activity)
+    return recorder
+
+
+class TestActivityStreaming:
+    """WP19 (ADR 029): with a sink attached, the placeholder becomes a
+    live activity message edited as the turn runs, the reply posts as a
+    fresh message, and a final edit collapses the activity message into
+    a done-summary."""
+
+    async def test_activity_streams_then_collapses_and_the_reply_posts_fresh(
+        self,
+    ) -> None:
+        probe = ToolCall("context", {"action": "get"})
+        handler = _handler([
+            LLMTurn(tool_calls=(probe,)), LLMTurn(reply="the answer"),
+        ])
+        recorder = await _run_streaming(handler, _message())
+        assert recorder.posted[0] == PROCESSING_NOTICE
+        # Live edits landed on the placeholder while the turn ran, and the
+        # last one is the collapse; the reply is its own fresh message.
+        assert set(recorder.edited) == {"sent-1"}
+        assert len(recorder.edited) > 2
+        assert recorder.texts() == [
+            "✓ 1 tool call · 2 decisions", "the answer",
+        ]
+
+    async def test_every_message_id_is_echo_suppressed(self) -> None:
+        probe = ToolCall("context", {"action": "get"})
+        handler = _handler([
+            LLMTurn(tool_calls=(probe,)), LLMTurn(reply="done"),
+        ])
+        recorder = await _run_streaming(handler, _message())
+        for message in recorder.messages:  # the activity message included
+            assert str(message["id"]) in handler.sent
+
+    async def test_command_turns_keep_the_placeholder_lifecycle(self) -> None:
+        # /mode returns before the pipeline's turn_started: the sink never
+        # claims, so the placeholder is edited into the notice as always.
+        handler = _handler([])
+        recorder = await _run_streaming(
+            handler, _message(text="/mode authoring")
+        )
+        assert recorder.edited == ["sent-1"]
+        assert len(recorder.messages) == 1
+        assert "mode switched to authoring" in recorder.texts()[0]
+
+    async def test_a_replyless_streamed_turn_leaves_the_summary(self) -> None:
+        # The driver script runs dry -> budget notice; the activity
+        # message still collapses and nothing strands as "Processing…".
+        probe = ToolCall("context", {"action": "get"})
+        route = _route([LLMTurn(tool_calls=(probe,))] * 99)
+        route.orchestrator.max_tool_calls = 3
+        handler = AnytypeChatTurnHandler(
+            routes={CHAT: route}, spaces={CHAT: SPACE}
+        )
+        recorder = await _run_streaming(handler, _message())
+        assert recorder.texts()[0] == "✓ 3 tool calls · 3 decisions"
+        assert PROCESSING_NOTICE not in recorder.texts()
 
 
 class TestReplyPreparation:

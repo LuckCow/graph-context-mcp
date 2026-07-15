@@ -53,6 +53,23 @@ Representation (v2, space-reflecting):
   e.g. a template's property widgets) this is why the connections footer
   is suppressed on types whose template carries a body scaffold (ADR 013
   amendment; ``AnytypeGraphRepository._writes_footer``).
+* **A11 (spike_type_update, 2026-07-15):** ``PATCH /types/{id}`` with a
+  ``properties`` list REPLACES the type's human-managed fields wholesale
+  (an omitted ``gc_`` entry is stripped; server-owned entries like
+  ``tag``/``backlinks`` survive omission, and resending them verbatim is
+  harmless). Entries naming not-yet-minted OR already-minted space
+  properties both attach cleanly; omitting ``properties`` altogether
+  leaves the fields untouched. This is how ``ensure_schema`` retrofits
+  newly-added infra fields onto types that predate them (WP19's
+  ``gc_mode_activity_detail``): fetch, resend everything, append the
+  missing entries.
+* **A12 (live-confirmed 2026-07-15):** a property's FORMAT is immutable
+  -- ``PATCH /properties/{id}`` with a new ``format`` returns 200 and
+  silently keeps the old one. The only migration is DELETE + re-create:
+  deleting detaches the field from every type (an A11 update re-attaches
+  it), and the same key is immediately reusable with the new format (a
+  fresh property id). ``ensure_schema`` uses this to heal infra
+  properties minted under a since-changed format.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -71,10 +88,12 @@ from __future__ import annotations
 
 import logging
 import re
+import zlib
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from graph_context.domain import attribution, scheduling
+from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
 from graph_context.domain.schema import FIELD_FORMATS
 
@@ -122,15 +141,27 @@ ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 # these live only on mode objects, never on ordinary nodes. The goal is
 # the object BODY (read via body_of), so it needs no property.
 PROP_MODE_MUTATING = "gc_mode_mutating"
+PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
 PROP_CAPTURE_TYPE = "gc_capture_type"
 PROP_CAPTURE_REFERENCES = "gc_capture_references"
 PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
 
 MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_MODE_MUTATING: "checkbox",
+    PROP_MODE_ACTIVITY_DETAIL: "select",
     PROP_CAPTURE_TYPE: "text",
     PROP_CAPTURE_REFERENCES: "text",
     PROP_CAPTURE_MIN_CHARS: "number",
+}
+
+# Select-format infra properties whose options bootstrap PRE-SEEDS, so the
+# human picks from a dropdown instead of typing the enum (WP19 amendment).
+# Display names are Title-Case derivations of the canonical levels; the
+# mode loader lowercases on read, so the round trip is exact.
+SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
+    PROP_MODE_ACTIVITY_DETAIL: tuple(
+        level.capitalize() for level in ACTIVITY_DETAIL_LEVELS
+    ),
 }
 
 # Session discriminator (WP8, ADR 021): every gc_session_context node
@@ -395,6 +426,17 @@ def _property_map(obj: Mapping[str, Any]) -> dict[str, Any]:
         if field is not None:
             out[entry["key"]] = entry.get(field)
     return out
+
+
+# Anytype's tag palette. CreateTagRequest requires a color (live-confirmed);
+# picking by name hash is deterministic without maintaining a mapping, and a
+# human can recolor in the UI without us ever clobbering it (create-only).
+_TAG_COLORS = ("grey", "yellow", "orange", "red", "pink",
+               "purple", "blue", "ice", "teal", "lime")
+
+
+def tag_color(name: str) -> str:
+    return _TAG_COLORS[zlib.crc32(name.strip().lower().encode()) % len(_TAG_COLORS)]
 
 
 def field_value(fmt: str, raw: Any) -> str:

@@ -228,12 +228,36 @@ class AnytypeClient:
         payload = await self.request("POST", f"{self._space}/types", json=body)
         return _unwrap(payload, "type")
 
+    async def get_type(self, type_id: str) -> dict[str, Any]:
+        """One type by object ID (not key), properties included."""
+        payload = await self.request("GET", f"{self._space}/types/{type_id}")
+        return _unwrap(payload, "type")
+
+    async def update_type(
+        self, type_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """PATCH a type. Quirk A11: a ``properties`` list REPLACES the
+        type's human-managed fields wholesale (omitted ``gc_`` entries are
+        stripped; server-owned ones like ``tag``/``backlinks`` survive
+        either way), so callers resend the full fetched list alongside any
+        additions; omitting ``properties`` leaves the fields untouched."""
+        payload = await self.request(
+            "PATCH", f"{self._space}/types/{type_id}", json=body
+        )
+        return _unwrap(payload, "type")
+
     def list_properties(self) -> AsyncIterator[dict[str, Any]]:
         return self.paginate(f"{self._space}/properties")
 
     async def create_property(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/properties", json=body)
         return _unwrap(payload, "property")
+
+    async def delete_property(self, property_id: str) -> None:
+        """Delete a property (by object ID). Quirk A12: formats are
+        immutable, so delete + re-create under the same key is the only
+        format migration; deleting detaches the field from every type."""
+        await self.request("DELETE", f"{self._space}/properties/{property_id}")
 
     def list_tags(self, property_id: str) -> AsyncIterator[dict[str, Any]]:
         """Select/multi_select options ("tags", ADR 012). Property ID, not key."""

@@ -62,7 +62,7 @@ class AnytypeModeStore:
             min_chars = props.get(mapping.PROP_CAPTURE_MIN_CHARS)
             if min_chars is not None:
                 capture["min_chars"] = min_chars
-        return {
+        payload = {
             "name": name,
             # Stripped: the live markdown export pads the body with
             # trailing whitespace/newline (observed 2026-07-06), and a
@@ -72,3 +72,13 @@ class AnytypeModeStore:
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
         }
+        # A select: the value is a tag envelope, normalized to the option's
+        # display name. Empty means "not set" -- the loader applies the
+        # default; a set value is validated there (lowercased, so the
+        # Title-Case options match) and a typo names this object (WP19).
+        detail = mapping.field_value(
+            "select", props.get(mapping.PROP_MODE_ACTIVITY_DETAIL)
+        ).strip()
+        if detail:
+            payload["activity_detail"] = detail
+        return payload

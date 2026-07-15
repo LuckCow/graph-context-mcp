@@ -61,6 +61,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
+from graph_context.orchestrator.turn_activity import ChatActivity
 from graph_context.orchestrator.turn_log import OFF_VALUES
 
 logger = logging.getLogger(__name__)
@@ -174,16 +175,22 @@ async def _maybe_turn(
     send, edit = _reply_primitives(chat_client, chat_id)
 
     # Errors deliver through the same reply, so they replace the turn's
-    # "Processing…" placeholder instead of stranding it in the chat.
+    # "Processing…" placeholder instead of stranding it in the chat --
+    # and when the turn streamed activity (WP19), the error posts fresh
+    # (the sink claimed the placeholder) and the activity message
+    # collapses to its failed-turn summary.
     reply = handler.reply(send, edit)
+    activity = ChatActivity(reply=reply, edit=edit)
     try:
-        await handler.run_turn(inbound, reply)
+        await handler.run_turn(inbound, reply, activity)
     except GraphContextError as err:
         # Config-shaped errors are actionable; show them in-chat.
         await reply.deliver(f"[error] {err}")
+        await activity.close(ok=False)
     except Exception:  # a turn must never take the serve loop down
         logger.exception("turn failed (chat=%s)", chat_id)
         await reply.deliver(TURN_FAILED_NOTICE)
+        await activity.close(ok=False)
 
 
 async def _catch_up(

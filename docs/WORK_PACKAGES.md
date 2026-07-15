@@ -1658,6 +1658,66 @@ deliver to the bound space's default Anytype chat until a Discord loop
 exists); firing is at-most-once — a crash between marking and replying
 surfaces as an in-chat `[error]`, never a re-fire loop.
 
+## WP19 — Live turn activity streaming (ADR 029) — **shipped 2026-07-14**
+
+**Status:** complete. Instead of staring at `Processing…` for a whole
+multi-tool turn, the user watches the turn happen: the placeholder
+becomes a live **activity message** edited in place as the pipeline
+works (Anytype has no write-side streaming API, but every PATCH reaches
+watching clients instantly over their SSE subscription — edit-in-place
+IS the streaming mechanism), the final reply posts as a **fresh
+message**, and a last edit collapses the activity message into a
+done-summary (`✓ 4 tool calls · 3 decisions`).
+
+What shipped:
+
+* **The mid-turn seam**: `Orchestrator.handle_message` takes an optional
+  per-call `observer: TurnObserver | None` (async protocol:
+  `turn_started` / `decision` / `tool_result`), fired beside the
+  existing `turn_log` taps. A parameter, not a field — its identity is
+  per-turn — and `None` (CLI, Discord, MCP, scheduled turns, every
+  existing caller) costs nothing. Observers must not raise; command
+  turns return before `turn_started` and never stream. The `ok` reading
+  of a tool result asks `interface.tools.is_error_result` (the
+  `ERROR: ` rule stays single-homed with `guarded`).
+* **Mode-owned detail levels** `off | minimal | tools | full` (amended
+  2026-07-15): the level is a `ModeSpec` property (`activity_detail`,
+  default `minimal`), so picking a mode picks its verbosity. Settable in
+  all three mode-config sources — profile specs, `GC_MODES_FILE`
+  (`activity_detail = "tools"`), and in-space Activity Mode objects via
+  the new `gc_mode_activity_detail` SELECT property, its dropdown
+  options (Off/Minimal/Tools/Full) pre-seeded by bootstrap so humans
+  pick instead of type (minted inline with the other mode fields on a
+  fresh space; existing spaces are RETROFITTED -- ensure_schema attaches
+  missing inline fields to a pre-existing type via the type-update
+  endpoint, quirk A11: the update's `properties` list is wholesale, so
+  the full fetched list is resent with the additions, live-verified by
+  `scripts/spike_type_update.py`; a property minted under an older
+  format is healed by delete + re-create, quirk A12: formats are
+  immutable; empty = default; unknown values fail at load naming the
+  source). Bare `/mode` reports the active mode's level; the
+  pipeline persists nothing and hands `spec.activity_detail` to the
+  observer. What each level shows lives in ONE place, the renderer.
+  `off` = the WP14 lifecycle bit-for-bit (`TestProcessingPlaceholder`
+  now pins the no-activity contract).
+* **`orchestrator/turn_activity.py`** (pure, like the transport):
+  `ActivityLog` folds events into the message text per level and
+  degrades deterministically under the 2000-char budget (excerpts drop
+  from all but the newest decision, then oldest decisions collapse into
+  one `… n earlier steps` line); `ChatActivity` (the sink) claims the
+  placeholder via `TurnReply.claim_placeholder` — once claimed,
+  `deliver` posts fresh and `finish` no-ops — and coalesces edits on
+  the leading edge (≥2s apart, `ACTIVITY_EDIT_SECONDS`; the closing
+  collapse is unconditional), keeping worst-case traffic under half the
+  API's ~1 req/s sustained budget. Activity edit failures degrade to a
+  warning, never the turn.
+* **Wiring**: `run_turn(message, reply, activity=None)` forwards the
+  sink and closes it after delivery; `_maybe_turn` builds it and closes
+  `ok=False` on the error paths (a crashed turn posts its error fresh
+  and collapses to `✗ turn failed · …`). Echo suppression is free — the
+  activity message IS the placeholder whose id was already recorded.
+  Scheduled turns (ADR 027) stay silent; Discord unchanged.
+
 ---
 
 ## Sequencing

@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NoReturn
@@ -83,17 +82,6 @@ _INVALID_OPTION_MARKERS = ("invalid select option", "invalid multi_select option
 def _slugify(label: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
     return slug or "relation"
-
-
-# Anytype's tag palette. CreateTagRequest requires a color (live-confirmed);
-# picking by name hash is deterministic without maintaining a mapping, and a
-# human can recolor in the UI without us ever clobbering it (create-only).
-_TAG_COLORS = ("grey", "yellow", "orange", "red", "pink",
-               "purple", "blue", "ice", "teal", "lime")
-
-
-def _tag_color(name: str) -> str:
-    return _TAG_COLORS[zlib.crc32(name.strip().lower().encode()) % len(_TAG_COLORS)]
 
 
 class AnytypeGraphRepository:
@@ -870,7 +858,7 @@ class AnytypeGraphRepository:
             info.id,
             # `color` is REQUIRED by CreateTagRequest (live-confirmed);
             # derived from the name so it is stable and human-recolorable.
-            {"name": value.strip(), "color": _tag_color(value)},
+            {"name": value.strip(), "color": mapping.tag_color(value)},
         )
         logger.info("created tag %r on property %s", value.strip(), info.key)
         self._unsettled_tags.add(str(created["key"]))

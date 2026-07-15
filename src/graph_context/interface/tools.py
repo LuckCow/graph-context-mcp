@@ -121,6 +121,15 @@ def guarded(
     return wrapper
 
 
+def is_error_result(result: str) -> bool:
+    """Whether a rendered tool result is :func:`guarded`'s error form.
+
+    The ``ERROR: `` prefix rule lives in this file; consumers (the
+    pipeline's activity observer, WP19) ask instead of re-spelling it.
+    """
+    return result.startswith("ERROR: ")
+
+
 async def _note_mutation(services: Services) -> None:
     if services.persister is not None:
         await services.persister.note_mutation()

@@ -81,10 +81,12 @@ _OBJECTS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects$")
 _OBJECT = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/objects/(?P<obj>[^/]+)$")
 _SEARCH = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/search$")
 _TYPES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types$")
+_TYPE = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/types/(?P<type>[^/]+)$")
 _TEMPLATES = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/types/(?P<type>[^/]+)/templates$"
 )
 _PROPERTIES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties$")
+_PROPERTY = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties/(?P<prop>[^/]+)$")
 _TAGS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/properties/(?P<prop>[^/]+)/tags$")
 _LIST_VIEWS = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/lists/(?P<list>[^/]+)/views$"
@@ -232,8 +234,10 @@ class MockAnytype:
             (_OBJECTS, self._handle_objects),
             (_SEARCH, self._handle_search),
             (_TEMPLATES, self._handle_templates),  # before _TYPES (more specific)
+            (_TYPE, self._handle_type),
             (_TYPES, self._handle_types),
-            (_TAGS, self._handle_tags),
+            (_TAGS, self._handle_tags),  # before _PROPERTY (more specific)
+            (_PROPERTY, self._handle_property),
             (_PROPERTIES, self._handle_properties),
             (_SPACE, self._handle_space),
         ):
@@ -781,6 +785,37 @@ class MockAnytype:
         }
         return httpx.Response(201, json={"type": self._types[body["key"]]})
 
+    def _handle_type(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        """Single type by object ID: GET, and PATCH with quirk A11 --
+        an updated ``properties`` list replaces the type's fields
+        WHOLESALE (live-confirmed 2026-07-15, spike_type_update); new
+        keys mint space-wide exactly like an inline create; omitting
+        ``properties`` leaves the fields untouched."""
+        type_id = match.group("type")
+        entry = next(
+            (t for t in self._types.values() if t["id"] == type_id), None
+        )
+        if entry is None:
+            return self._error(404, "object_not_found")
+        if request.method == "GET":
+            return httpx.Response(200, json={"type": entry})
+        if request.method != "PATCH":
+            return self._error(405, "method_not_allowed")
+        body = json.loads(request.content)
+        for field in ("name", "plural_name", "layout"):
+            if field in body:
+                entry[field] = body[field]
+        if "properties" in body:
+            for prop in body["properties"]:
+                self._properties.setdefault(
+                    prop["key"], {"id": self._new_id(), **prop}
+                )
+            entry["properties"] = [
+                {**prop, "id": self._properties[prop["key"]]["id"]}
+                for prop in body["properties"]
+            ]
+        return httpx.Response(200, json={"type": entry})
+
     def _handle_properties(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             return self._paginated(list(self._properties.values()), request.url.params)
@@ -792,6 +827,30 @@ class MockAnytype:
             # and PATCH (live-confirmed 2026-07-10, ADR 023 spike).
             self._settling[body["key"]] = self.property_settle_patches
         return httpx.Response(201, json={"property": self._properties[body["key"]]})
+
+    def _handle_property(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        """Single property by object ID. DELETE detaches the field from
+        every type that carries it (live-confirmed 2026-07-15) and frees
+        the key for re-creation under a new format (quirk A12)."""
+        prop = next(
+            (p for p in self._properties.values()
+             if p["id"] == match.group("prop")),
+            None,
+        )
+        if prop is None:
+            return self._error(404, "object_not_found")
+        if request.method == "GET":
+            return httpx.Response(200, json={"property": prop})
+        if request.method != "DELETE":
+            return self._error(405, "method_not_allowed")
+        del self._properties[prop["key"]]
+        self._tags.pop(prop["id"], None)
+        for entry in self._types.values():
+            entry["properties"] = [
+                p for p in entry.get("properties", [])
+                if p.get("key") != prop["key"]
+            ]
+        return httpx.Response(200, json={"property": prop})
 
     def _handle_tags(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         """Select/multi_select options (ADR 012). Addressed by property ID --

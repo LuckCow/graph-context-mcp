@@ -40,6 +40,7 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.application.scheduler import SchedulerTick
@@ -47,9 +48,14 @@ from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.services import Services
-from graph_context.interface.tools import resync_out_of_band
+from graph_context.interface.tools import is_error_result, resync_out_of_band
 from graph_context.orchestrator import capture, modes
-from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
+from graph_context.orchestrator.drivers import (
+    LLMDriver,
+    LLMTurn,
+    ToolCall,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.modes import ModeRegistry
 from graph_context.orchestrator.turn_log import TurnLog
 
@@ -79,6 +85,29 @@ class ReplyEvent:
 
     text: str
     kind: str = "reply"
+
+
+class TurnObserver(Protocol):
+    """Async per-turn event tap for live activity surfaces (WP19, ADR 029).
+
+    Passed per ``handle_message`` call (its identity is per-turn -- a chat
+    transport binds it to one chat's activity message), unlike the
+    process-lifetime ``turn_log`` field. ``None`` observers cost nothing.
+    ``turn_started``'s ``detail`` is the ACTIVE MODE's ``activity_detail``
+    (a ModeSpec property: picking a mode picks its verbosity; the renderer
+    alone interprets the levels). Contract: implementations MUST NOT raise
+    -- delivery failures degrade internally (the TurnLog posture: a
+    diagnostic never takes a turn down). Command turns (``/mode``,
+    ``/clear``) return before ``turn_started``, so they never stream.
+    """
+
+    async def turn_started(self, mode: str, detail: str) -> None: ...
+
+    async def decision(self, turn: LLMTurn) -> None: ...
+
+    async def tool_result(
+        self, call: ToolCall, result: str, ok: bool
+    ) -> None: ...
 
 
 def scheduled_prompt(name: str, prompt: str) -> str:
@@ -271,7 +300,7 @@ class Orchestrator:
 
     async def handle_message(
         self, session_id: str, user_id: str, text: str, origin: str = "",
-        sender: str = "",
+        sender: str = "", observer: TurnObserver | None = None,
     ) -> list[ReplyEvent]:
         state = await self._session(session_id)
         stripped = text.strip()
@@ -310,6 +339,8 @@ class Orchestrator:
         logger.info(
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
+        if observer:
+            await observer.turn_started(spec.name, spec.activity_detail)
         tools = modes.tool_docs(spec, self.profile)
         if self.turn_log:
             fingerprint = (spec.name, spec.goal, tuple(sorted(tools)))
@@ -349,6 +380,8 @@ class Orchestrator:
             turn = await self.driver.decide(transcript, tools, spec.goal)
             if self.turn_log:
                 self.turn_log.llm_turn(turn_id, session_id, spec.name, turn)
+            if observer:
+                await observer.decision(turn)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -378,6 +411,7 @@ class Orchestrator:
                 result = await modes.invoke(
                     spec, call.name, state.services, call.arguments
                 )
+                unavailable = result is None
                 if result is None:
                     # The binding boundary's runtime face: actionable for a
                     # driver, visible to the user as a notice.
@@ -390,6 +424,11 @@ class Orchestrator:
                 if self.turn_log:
                     self.turn_log.tool_result(
                         turn_id, session_id, spec.name, call, result
+                    )
+                if observer:
+                    await observer.tool_result(
+                        call, result,
+                        ok=not (unavailable or is_error_result(result)),
                     )
                 transcript.append(
                     TranscriptEvent(
@@ -520,9 +559,11 @@ class Orchestrator:
             state.mode = self.registry.default
         argument = command.removeprefix("/mode").strip().lower()
         if not argument:
+            current = self.registry.get(state.mode)
+            detail = current.activity_detail if current else ""
             events.append(ReplyEvent(
-                f"mode: {state.mode}; switch with /mode "
-                f"{{{' | '.join(self.registry.names())}}}",
+                f"mode: {state.mode} (activity detail: {detail}); "
+                f"switch with /mode {{{' | '.join(self.registry.names())}}}",
                 kind="notice",
             ))
             return events

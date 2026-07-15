@@ -13,6 +13,8 @@ order) by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
     [modes.record_procedure]
     goal = "Notate each step the user takes so it can be repeated later..."
     # mutating defaults to false
+    # activity_detail = "tools"  # live-activity verbosity (ADR 029);
+    #                              off | minimal (default) | tools | full
 
     [modes.record_procedure.capture]
     artifact_type = "procedure"
@@ -143,7 +145,7 @@ def load_registry(
     return ModeRegistry(specs=specs, default=default)
 
 
-_SPEC_KEYS = {"goal", "mutating", "capture"}
+_SPEC_KEYS = {"goal", "mutating", "capture", "activity_detail"}
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
 
 
@@ -179,12 +181,16 @@ def _spec_from_mapping(
                 kwargs["min_chars"], f"{origin}: min_chars"
             )
         capture = CapturePolicy(**kwargs)
+    # Humans type the level (TOML or the Anytype UI): normalize case and
+    # padding; empty means "not set" and takes the default.
+    detail = str(body.get("activity_detail") or "").strip().lower()
     try:
         return ModeSpec(
             name=name,
             goal=str(body.get("goal", "")),
             mutating=bool(body.get("mutating", False)),
             capture=capture,
+            **({"activity_detail": detail} if detail else {}),
         )
     except ValueError as err:
         raise GraphContextError(f"{origin}: {err}") from None
@@ -264,7 +270,7 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             )
         body = {
             key: payload[key]
-            for key in ("goal", "mutating", "capture")
+            for key in ("goal", "mutating", "capture", "activity_detail")
             if key in payload
         }
         specs.append(_spec_from_mapping(name, body, origin))

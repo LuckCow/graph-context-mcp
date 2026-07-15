@@ -37,6 +37,7 @@ from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
 from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding
 
 FICTION = get_profile("fiction")
@@ -197,7 +198,9 @@ class TestLiveDiscovery:
                             break
                         await asyncio.sleep(0.01)
                 assert runtimes.spaces[chat_id] == mock.space_id
-                assert replies[0]["content"]["text"] == "served the new thread"
+                # WP19: the placeholder became the activity message, so
+                # the reply is the SECOND bot post (a fresh message).
+                assert replies[1]["content"]["text"] == "served the new thread"
                 raise _Done
         except* _Done:
             pass
@@ -244,8 +247,9 @@ class TestServeLoop:
         try:
             await asyncio.sleep(0.05)  # catch-up done, stream open
             mock.post_chat_message_directly(chat_id, "human", "hi bot")
-            # The first bot post is the "Processing…" placeholder; wait for
-            # the edit that turns it into the reply.
+            # The first bot post is the "Processing…" placeholder; WP19
+            # claims it as the activity message and posts the reply fresh,
+            # then collapses the activity message into a done-summary.
             async with asyncio.timeout(5):
                 while True:
                     texts = [
@@ -256,11 +260,13 @@ class TestServeLoop:
                     if "hello from the graph" in texts:
                         break
                     await asyncio.sleep(0.01)
-            assert texts == ["hello from the graph"]  # edited in place
-            # The bot's own reply echoed back on the stream but ran no turn
+            assert texts == [
+                "✓ 0 tool calls · 1 decision", "hello from the graph",
+            ]
+            # The bot's own posts echoed back on the stream but ran no turn
             # (echo suppression) -- give it a beat to prove it.
             await asyncio.sleep(0.05)
-            assert len(mock.chat_messages(chat_id)) == 2  # hi + one reply
+            assert len(mock.chat_messages(chat_id)) == 3  # hi + trace + reply
         finally:
             serve.cancel()
             await asyncio.gather(serve, return_exceptions=True)
@@ -287,7 +293,8 @@ class TestServeLoop:
             for m in mock.chat_messages(chat_id)
             if m["creator"] == mock.api_member_id
         ]
-        assert replies == ["caught up"]  # one turn: the offline message only
+        # One turn (the offline message only): its activity trace + reply.
+        assert replies == ["✓ 0 tool calls · 1 decision", "caught up"]
         assert seen_id  # the pre-cursor message ran no turn
 
     async def test_a_first_run_chat_skips_its_history(self) -> None:
@@ -303,6 +310,31 @@ class TestServeLoop:
         ]
         assert replies == []
         assert handler.cursor.has(chat_id)  # positioned past the history
+
+    async def test_a_mid_turn_crash_collapses_the_activity_message(self) -> None:
+        """WP19: once the sink claimed the placeholder, a crashed turn
+        must post its error fresh AND collapse the activity message into
+        the failed-turn summary -- nothing strands as "Processing…"."""
+
+        class _Explodes(ScriptedDriver):
+            async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+                raise RuntimeError("driver fell over")
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        handler.cursor.fast_forward(chat_id, "o0")  # not a first-run chat
+        handler.routes[chat_id].orchestrator.driver = _Explodes([])
+        mock.post_chat_message_directly(chat_id, "human", "crash please")
+        await _catch_up(handler, chat_client, chat_id, handler.cursor)
+        texts = [
+            m["content"]["text"]
+            for m in mock.chat_messages(chat_id)
+            if m["creator"] == mock.api_member_id
+        ]
+        assert texts == [
+            "✗ turn failed · 0 tool calls · 0 decisions",
+            TURN_FAILED_NOTICE,
+        ]
 
 
 class TestScheduledEventWatcher:

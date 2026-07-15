@@ -20,6 +20,7 @@ from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.infrastructure.memory.fake_session_store import InMemorySessionStore
 from graph_context.interface.profiles import (
+    DEFAULT_ACTIVITY_DETAIL,
     TOOL_NAMES,
     CapturePolicy,
     ModeSpec,
@@ -34,7 +35,12 @@ from graph_context.orchestrator.drivers import (
     ToolCall,
     TranscriptEvent,
 )
-from graph_context.orchestrator.modes import MUTATION_TOOLS, binding_for, load_registry
+from graph_context.orchestrator.modes import (
+    MUTATION_TOOLS,
+    ModeRegistry,
+    binding_for,
+    load_registry,
+)
 from graph_context.orchestrator.pipeline import (
     LAST_TURN_WARNING,
     ConversationMemory,
@@ -688,6 +694,159 @@ class TestKeyedSessions:
         # The switch still happened in memory; a notice explains it won't persist.
         assert orchestrator.mode_of("anytype:a") == "authoring"
         assert any("could not be saved" in e.text for e in events)
+
+
+class _RecordingObserver:
+    """A TurnObserver that just remembers what it was told (WP19)."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    async def turn_started(self, mode: str, detail: str) -> None:
+        self.events.append(("turn_started", mode, detail))
+
+    async def decision(self, turn: LLMTurn) -> None:
+        self.events.append(
+            ("decision", tuple(c.name for c in turn.tool_calls))
+        )
+
+    async def tool_result(self, call: ToolCall, result: str, ok: bool) -> None:
+        self.events.append(("tool_result", call.name, ok))
+
+
+class TestTurnObserver:
+    """WP19 (ADR 029): the per-turn event tap for live activity surfaces."""
+
+    async def test_observer_sees_the_whole_turn(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira now exists."),
+        ])
+        observer = _RecordingObserver()
+        await orchestrator.handle_message(
+            "s1", "u1", "create Mira", observer=observer
+        )
+        assert observer.events == [
+            ("turn_started", "world_modeling", DEFAULT_ACTIVITY_DETAIL),
+            ("decision", ("create_node",)),
+            ("tool_result", "create_node", True),
+            ("decision", ()),
+        ]
+
+    async def test_a_failing_tool_reports_ok_false(
+        self, services: Services
+    ) -> None:
+        bad = ToolCall("context", {"action": "bogus"})
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(bad,)), LLMTurn(reply="oops"),
+        ])
+        observer = _RecordingObserver()
+        await orchestrator.handle_message(
+            "s1", "u1", "make it", observer=observer
+        )
+        assert ("tool_result", "context", False) in observer.events
+
+    async def test_an_unavailable_tool_reports_ok_false(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)), LLMTurn(reply="denied"),
+        ])
+        observer = _RecordingObserver()
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        await orchestrator.handle_message(
+            "s1", "u1", "create Mira", observer=observer
+        )
+        assert ("tool_result", "create_node", False) in observer.events
+
+    async def test_command_turns_never_stream(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        observer = _RecordingObserver()
+        await orchestrator.handle_message(
+            "s1", "u1", "/mode authoring", observer=observer
+        )
+        await orchestrator.handle_message(
+            "s1", "u1", "/clear", observer=observer
+        )
+        assert observer.events == []
+
+
+class TestActivityDetailFromTheMode:
+    """WP19 (ADR 029 amendment): the detail level is a MODE property --
+    picking a mode picks its live-activity verbosity."""
+
+    async def test_bare_mode_reports_the_active_modes_detail(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/mode")
+        assert (
+            f"(activity detail: {DEFAULT_ACTIVITY_DETAIL})" in events[-1].text
+        )
+
+    async def test_switching_modes_switches_the_streamed_detail(
+        self, services: Services
+    ) -> None:
+        chatty = ModeSpec(
+            name="narrator", goal="Narrate.", activity_detail="full"
+        )
+        registry = load_registry(FICTION)
+        specs = dict(registry.specs) | {chatty.name: chatty}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver([LLMTurn(reply="ok"), LLMTurn(reply="ok")]),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        observer = _RecordingObserver()
+        await orchestrator.handle_message("s1", "u1", "hi", observer=observer)
+        assert observer.events[0] == (
+            "turn_started", "world_modeling", DEFAULT_ACTIVITY_DETAIL,
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode narrator")
+        observer.events.clear()
+        await orchestrator.handle_message("s1", "u1", "hi", observer=observer)
+        assert observer.events[0] == ("turn_started", "narrator", "full")
+
+    def test_a_modes_file_can_set_the_detail(self, tmp_path) -> None:
+        path = tmp_path / "modes.toml"
+        path.write_text(
+            '[modes.quiet]\ngoal = "Work silently."\n'
+            'activity_detail = "off"\n'
+        )
+        registry = load_registry(FICTION, modes_file=str(path))
+        spec = registry.get("quiet")
+        assert spec is not None and spec.activity_detail == "off"
+
+    def test_an_in_space_mode_object_can_set_the_detail(self) -> None:
+        registry = load_registry(
+            FICTION,
+            in_space=[_mode_payload(activity_detail="Tools ")],  # UI-typed
+        )
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.activity_detail == "tools"
+
+    def test_an_unset_detail_takes_the_default(self) -> None:
+        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        spec = registry.get("faithful_scribe")
+        assert spec is not None
+        assert spec.activity_detail == DEFAULT_ACTIVITY_DETAIL
+
+    def test_an_unknown_detail_fails_loudly_naming_the_source(
+        self, tmp_path
+    ) -> None:
+        path = tmp_path / "modes.toml"
+        path.write_text(
+            '[modes.loud]\ngoal = "g"\nactivity_detail = "verbose"\n'
+        )
+        with pytest.raises(GraphContextError) as err:
+            load_registry(FICTION, modes_file=str(path))
+        assert "[modes.loud]" in str(err.value)
+        assert "off, minimal, tools, full" in str(err.value)
 
 
 class TestProvenanceTurns:

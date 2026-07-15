@@ -84,12 +84,16 @@ def _seed_mode(
     capture_type: str = "",
     references: str = "",
     min_chars: float | None = None,
+    activity_detail: str = "",
 ) -> str:
     properties: list[dict[str, Any]] = [
         {"key": mapping.PROP_MODE_MUTATING, "format": "checkbox",
          "checkbox": mutating},
         {"key": mapping.PROP_CAPTURE_TYPE, "format": "text",
          "text": capture_type},
+        # A select: the read side sees the picked option as a tag envelope.
+        {"key": mapping.PROP_MODE_ACTIVITY_DETAIL, "format": "select",
+         "select": {"name": activity_detail} if activity_detail else None},
     ]
     if references:
         properties.append({"key": mapping.PROP_CAPTURE_REFERENCES,
@@ -147,6 +151,77 @@ async def test_anytype_store_skips_archived_objects(
     assert "Disabled" not in await _load_by_name(anytype_client)
 
 
+async def test_activity_detail_rides_the_payload_when_set(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """WP19 (ADR 029): the picked gc_mode_activity_detail option's NAME
+    reaches the loader (validation lives there, naming the object; the
+    loader lowercases, so Title-Case options match); an unpicked select
+    leaves the key out, so the loader applies the default."""
+    _seed_mode(mock, "Chatty", "A goal.", activity_detail="Full")
+    _seed_mode(mock, "Unset", "A goal.")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Chatty"]["activity_detail"] == "Full"
+    assert "activity_detail" not in payloads["Unset"]
+
+
+async def test_bootstrap_seeds_the_detail_dropdown_options(
+    anytype_client: AnytypeClient,
+) -> None:
+    """WP19 amendment: gc_mode_activity_detail is a SELECT whose options
+    bootstrap pre-seeds -- the human picks Off/Minimal/Tools/Full from a
+    dropdown instead of typing the enum. Idempotent: a re-run adds no
+    duplicates."""
+    await ensure_schema(anytype_client)  # second run
+    prop = {
+        p["key"]: p async for p in anytype_client.list_properties()
+    }[mapping.PROP_MODE_ACTIVITY_DETAIL]
+    assert prop["format"] == "select"
+    names = [
+        t["name"] async for t in anytype_client.list_tags(prop["id"])
+    ]
+    assert sorted(names) == ["Full", "Minimal", "Off", "Tools"]
+
+
+async def test_bootstrap_heals_a_text_minted_detail_property(
+    mock: MockAnytype,
+) -> None:
+    """Quirk A12: the one-day-old TEXT variant of gc_mode_activity_detail
+    cannot change format in place -- bootstrap deletes it and re-mints a
+    select, re-attaching the field to the type with options seeded."""
+    client = AnytypeClient(
+        AnytypeConfig(api_key="t", space_id=mock.space_id),
+        transport=mock.transport,
+    )
+    await client.create_property({
+        "key": mapping.PROP_MODE_ACTIVITY_DETAIL,
+        "name": mapping.PROP_MODE_ACTIVITY_DETAIL, "format": "text",
+    })
+    await client.create_type({
+        "key": MODE_TYPE_KEY, "name": "Activity Mode",
+        "plural_name": "Activity Modes", "layout": "basic",
+        "properties": [
+            {"key": key, "name": key,
+             "format": "text" if key == mapping.PROP_MODE_ACTIVITY_DETAIL
+             else fmt}
+            for key, fmt in mapping.MODE_PROPERTIES.items()
+        ],
+    })
+    await ensure_schema(client)
+    prop = {
+        p["key"]: p async for p in client.list_properties()
+    }[mapping.PROP_MODE_ACTIVITY_DETAIL]
+    assert prop["format"] == "select"
+    names = [t["name"] async for t in client.list_tags(prop["id"])]
+    assert sorted(names) == ["Full", "Minimal", "Off", "Tools"]
+    mode_type = {t["key"]: t async for t in client.list_types()}[MODE_TYPE_KEY]
+    attached = {
+        e["key"]: e["format"] for e in mode_type.get("properties", [])
+    }
+    assert attached[mapping.PROP_MODE_ACTIVITY_DETAIL] == "select"
+    assert set(mapping.MODE_PROPERTIES) <= set(attached)  # nothing lost
+
+
 async def test_capture_absent_when_capture_type_empty(
     anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
@@ -173,3 +248,35 @@ async def test_bootstrap_attaches_mode_fields_to_the_type(
         p["key"] async for p in anytype_client.list_properties()
     }
     assert set(mapping.MODE_PROPERTIES) <= space_properties
+
+
+async def test_bootstrap_retrofits_new_fields_onto_an_existing_type(
+    mock: MockAnytype,
+) -> None:
+    """The upgraded-space story (WP19): a type minted BEFORE a field was
+    added to its inline set gains that field on the next ensure_schema
+    (quirk A11 update: full list resent + the missing entry), keeping
+    everything it already had -- and without re-seeding the example."""
+    client = AnytypeClient(
+        AnytypeConfig(api_key="t", space_id=mock.space_id),
+        transport=mock.transport,
+    )
+    pre_wp19 = {
+        key: fmt for key, fmt in mapping.MODE_PROPERTIES.items()
+        if key != mapping.PROP_MODE_ACTIVITY_DETAIL
+    }
+    await client.create_type({
+        "key": MODE_TYPE_KEY, "name": "Activity Mode",
+        "plural_name": "Activity Modes", "layout": "basic",
+        "properties": [
+            {"key": key, "name": key, "format": fmt}
+            for key, fmt in pre_wp19.items()
+        ],
+    })
+    await ensure_schema(client)
+    mode_type = {t["key"]: t async for t in client.list_types()}[MODE_TYPE_KEY]
+    type_properties = {e["key"] for e in mode_type.get("properties", [])}
+    assert set(mapping.MODE_PROPERTIES) <= type_properties  # retrofitted
+    assert set(pre_wp19) <= type_properties                 # nothing lost
+    hits = [o async for o in client.search(types=[MODE_TYPE_KEY])]
+    assert hits == []  # the example seeds only when the TYPE is minted

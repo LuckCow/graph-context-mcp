@@ -3,9 +3,11 @@
 The Anytype sibling of ``discord_transport``: everything the bot decides
 per message -- the echo/backlog/creator gate, the ``anytype:<id>``
 identity mapping, plain-text rendering + object attachments, the
-"Processing" placeholder that the reply edits in place, chunked sends --
-is plain logic
+"Processing" placeholder, chunked sends -- is plain logic
 over primitives, so the whole policy tests without httpx or a server.
+The placeholder is edited into the first reply chunk UNLESS a
+live-activity sink claims it first (WP19, ADR 029: ``turn_activity``
+streams the turn into it and the reply posts fresh).
 Only the composition root (``anytype_chat_bot``) touches infrastructure;
 import-linter holds that line.
 
@@ -36,11 +38,13 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from graph_context.application.scheduler import DueEvent
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.pipeline import (
     ReplyEvent,
+    TurnObserver,
     scheduled_prompt,
     sender_attributed,
 )
@@ -69,6 +73,17 @@ PROCESSING_NOTICE = "Processing…"
 
 SendFn = Callable[[str, tuple[str, ...]], Awaitable[str]]
 EditFn = Callable[[str, str, tuple[str, ...]], Awaitable[None]]
+
+
+class ActivityObserver(TurnObserver, Protocol):
+    """What ``run_turn`` needs from a live-activity sink (WP19): the
+    pipeline's per-turn observer, plus the transport-sequenced collapse
+    ("after the reply posts" is a fact only the transport knows). The
+    concrete sink is ``turn_activity.ChatActivity``, built by the
+    composition root -- named here as a protocol so the policy module
+    never imports it."""
+
+    async def close(self, ok: bool) -> None: ...
 
 
 def object_references(text: str) -> tuple[str, ...]:
@@ -253,6 +268,19 @@ class TurnReply:
             self._placeholder_id = await self.send(PROCESSING_NOTICE, ())
             self.sent.add(self._placeholder_id)
 
+    def claim_placeholder(self) -> str | None:
+        """Hand the placeholder to a live-activity sink (WP19, ADR 029).
+
+        Once claimed, the placeholder is the sink's activity message and
+        no longer this reply's: ``deliver`` posts every chunk fresh and
+        ``finish`` no-ops. ``None`` when there is nothing to claim
+        (``open`` failed or never ran) -- the caller stays inert. The id
+        is already in the sent ledger; claiming transfers ownership, not
+        identity.
+        """
+        claimed, self._placeholder_id = self._placeholder_id, None
+        return claimed
+
     async def deliver(
         self, text: str, attachments: tuple[str, ...] = ()
     ) -> None:
@@ -361,7 +389,10 @@ class AnytypeChatTurnHandler:
         return TurnReply(send=send, edit=edit, sent=self.sent)
 
     async def run_turn(
-        self, message: InboundChatMessage, reply: TurnReply
+        self,
+        message: InboundChatMessage,
+        reply: TurnReply,
+        activity: ActivityObserver | None = None,
     ) -> None:
         """One accepted message -> placeholder -> turn -> n deliveries.
 
@@ -371,6 +402,12 @@ class AnytypeChatTurnHandler:
         shows progress even while an earlier turn holds the space.
         Replies go out as plain text (quirk C7) with every referenced
         object attached to the first chunk as a card.
+
+        ``activity`` (WP19, ADR 029) streams the turn into the chat: the
+        pipeline feeds it each decision and tool result, it claims the
+        placeholder as its live activity message, and after the reply is
+        delivered it collapses that message into a done-summary. ``None``
+        (and detail ``off``) keeps the pre-WP19 placeholder lifecycle.
         """
         self.cursor.advance(message)
         await reply.open()
@@ -387,8 +424,11 @@ class AnytypeChatTurnHandler:
                 # Intent nodes point back at the triggering chat message.
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
                 sender=message.creator_name,
+                observer=activity,
             )
         await self.deliver_events(events, reply)
+        if activity is not None:
+            await activity.close(ok=True)
 
     async def deliver_events(
         self, events: Sequence[ReplyEvent], reply: TurnReply

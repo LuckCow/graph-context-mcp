@@ -22,6 +22,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from graph_context.application.ranker import RankingWeights
+from graph_context.domain.activity import (
+    ACTIVITY_DETAIL_LEVELS,
+    DEFAULT_ACTIVITY_DETAIL,
+)
 from graph_context.domain.schema import FIELD_FORMATS, Role
 from graph_context.domain.session import (
     DEFAULT_FULL_SLOTS,
@@ -58,6 +62,13 @@ class CapturePolicy:
     min_chars: int = 200
 
 
+# WP19 (ADR 029): ACTIVITY_DETAIL_LEVELS / DEFAULT_ACTIVITY_DETAIL come
+# from domain.activity (imported above) -- how much live turn activity a
+# mode streams into the chat. A MODE property (not a session setting):
+# picking a mode picks its verbosity; the vocabulary is domain-homed so
+# the Anytype adapter can mint the select options from it.
+
+
 @dataclass(frozen=True, slots=True)
 class ModeSpec:
     """One activity mode: data, not an enum member (ADR 015).
@@ -65,19 +76,28 @@ class ModeSpec:
     ``goal`` is the system-prompt fragment handed to the LLM driver --
     specs are prompts and get the golden-test review bar. ``mutating``
     picks the tool binding (full surface vs read-only + context);
-    ``capture`` enables harness-side auto-capture of substantial replies.
+    ``capture`` enables harness-side auto-capture of substantial replies;
+    ``activity_detail`` sets how much live progress a turn streams into
+    the chat (WP19, ADR 029).
     """
 
     name: str
     goal: str
     mutating: bool = False
     capture: CapturePolicy | None = None
+    activity_detail: str = DEFAULT_ACTIVITY_DETAIL
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.name.replace("_", "").isalnum():
             raise ValueError(f"mode name must be a slug, got {self.name!r}")
         if not self.goal.strip():
             raise ValueError(f"mode {self.name!r} needs a non-empty goal prompt")
+        if self.activity_detail not in ACTIVITY_DETAIL_LEVELS:
+            raise ValueError(
+                f"mode {self.name!r} has unknown activity_detail "
+                f"{self.activity_detail!r}; allowed: "
+                f"{', '.join(ACTIVITY_DETAIL_LEVELS)}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
