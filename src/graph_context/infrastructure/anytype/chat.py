@@ -42,6 +42,18 @@ version header) lives here, pinned by spike S10 and mirrored by
         it and the new name shows in the next ``/chats`` re-list. A chat
         created without a name is born with ``name: ""`` (what a fresh
         UI-created chat looks like to discovery).
+    C10. Files (spike S13): ``POST /files`` uploads (multipart field
+        ``file``; FLAT response -- object_id/name/media/extension/
+        size_in_bytes, no envelope; the client's default JSON
+        Content-Type must be overridden or the server sees no file);
+        ``GET /files/<id>`` serves the raw bytes directly with the
+        Content-Type header as the read-side media source (no
+        ``/content`` sub-route; no list route). The upload is a REAL
+        object (type key ``image`` for images, ``file`` otherwise;
+        ``size_in_bytes``/``file_ext`` properties, but NOT the MIME
+        type). Chat messages reference files through the same
+        ``attachments`` envelopes as C7 (``{"target", "type"}``), and
+        inbound messages EXPOSE their attachments.
 """
 
 from __future__ import annotations
@@ -62,6 +74,16 @@ MESSAGE_EVENT_KINDS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class ChatAttachment:
+    """One message attachment envelope (C7/C10): an object id plus the
+    sender's envelope type (``link`` for object cards, ``file`` for
+    files -- advisory only; the TARGET object's type is authoritative)."""
+
+    target: str
+    type: str = "link"
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """One chat message, reduced to what the transport needs (C3/C4)."""
 
@@ -71,6 +93,7 @@ class ChatMessage:
     order_id: str
     created_at: int = 0
     creator_name: str = ""
+    attachments: tuple[ChatAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +113,14 @@ def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
         order_id=str(raw.get("order_id", "")),
         created_at=int(raw.get("created_at") or 0),
         creator_name=str(raw.get("creator_name", "")),
+        attachments=tuple(
+            ChatAttachment(
+                target=str(entry.get("target", "")),
+                type=str(entry.get("type", "link")),
+            )
+            for entry in raw.get("attachments") or []
+            if isinstance(entry, dict) and entry.get("target")
+        ),
     )
 
 
@@ -194,6 +225,43 @@ class AnytypeChatClient:
         """Set a chat's title (C9: via the generic object PATCH -- the
         chat namespace has no update route). WP21's auto-titling caller."""
         await self._client.rename_chat(chat_id, name)
+
+    async def attachment_facts(self, target: str) -> dict[str, Any]:
+        """What the transport needs to CLASSIFY an attachment before
+        deciding to fetch it (WP23): the target object's name, type key,
+        size, and extension. The MIME type is absent on the read side
+        (C10) -- it arrives with the bytes."""
+        obj = await self._client.get_object(target)
+        props: dict[str, Any] = {}
+        for entry in obj.get("properties", []):
+            fmt = entry.get("format", "")
+            props[entry.get("key", "")] = entry.get(fmt)
+        return {
+            "name": str(obj.get("name") or ""),
+            "type_key": str((obj.get("type") or {}).get("key") or ""),
+            "size_in_bytes": int(props.get("size_in_bytes") or 0),
+            "extension": str(props.get("file_ext") or ""),
+        }
+
+    async def fetch_file(self, file_id: str) -> tuple[bytes, str]:
+        """A file object's raw bytes + media type (C10)."""
+        return await self._client.download_file(file_id)
+
+    async def upload_file(self, filename: str, content: bytes) -> str:
+        """Upload a file into the space; answers the new file OBJECT id,
+        attachable to a message like any object (C7/C10 envelopes)."""
+        uploaded = await self._client.upload_file(filename, content)
+        return str(uploaded["object_id"])
+
+    async def send_file_message(
+        self, chat_id: str, text: str, file_id: str
+    ) -> str:
+        """Post a message carrying one uploaded file (C10: same envelope
+        family as C7, ``type: "file"`` so clients render a file card)."""
+        return await self._client.create_chat_message(chat_id, {
+            "text": text,
+            "attachments": [{"target": file_id, "type": "file"}],
+        })
 
     async def recent_messages(
         self, chat_id: str, *, limit: int = 100

@@ -21,6 +21,10 @@ _PREFIXES = {"reply": "", "notice": "[notice] ", "error": "[error] "}
 
 def render(event: ReplyEvent) -> str:
     """Transport-neutral event -> chat text (plain prefixes, like the CLI)."""
+    if event.kind == "file":
+        # WP23 degrade path for surfaces without native file posting
+        # (Discord, the CLI): the content arrives fenced under its name.
+        return f"[file: {event.file_name}]\n```\n{event.text}\n```"
     return f"{_PREFIXES[event.kind]}{event.text}"
 
 

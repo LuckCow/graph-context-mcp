@@ -199,7 +199,18 @@ def render_transcript(events: Sequence[TranscriptEvent]) -> str:
                     f"<assistant_earlier>\n{joined}\n</assistant_earlier>"
                 )
         else:
-            parts.append(event.text)
+            text = event.text
+            if event.images:
+                # WP23: the pixels travel as native blocks (each driver's
+                # concern); the transcript notes their presence so replays
+                # and the diary stay legible.
+                notes = "\n".join(
+                    f'[image attached: {image.name or "(unnamed)"} '
+                    f"({image.media_type})]"
+                    for image in event.images
+                )
+                text = f"{text}\n\n{notes}".strip()
+            parts.append(text)
     return "\n\n".join(parts)
 
 

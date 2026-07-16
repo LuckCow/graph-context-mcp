@@ -219,3 +219,52 @@ class TestChatDiscovery:
 
     async def test_no_chats_lists_empty(self, chat: AnytypeChatClient) -> None:
         assert await chat.list_chats() == []
+
+
+class TestFiles:
+    """WP23 (quirk C10): upload/download through the chat client, and the
+    attachment surfaces the transport builds on."""
+
+    async def test_upload_download_round_trip(
+        self, chat: AnytypeChatClient
+    ) -> None:
+        file_id = await chat.upload_file("notes.txt", b"hello file world")
+        content, media = await chat.fetch_file(file_id)
+        assert content == b"hello file world"
+        assert media.startswith("text/plain")
+
+    async def test_attachment_facts_classify_ready(
+        self, chat: AnytypeChatClient
+    ) -> None:
+        file_id = await chat.upload_file("data.csv", b"a,b\n1,2\n")
+        facts = await chat.attachment_facts(file_id)
+        assert facts == {
+            "name": "data", "type_key": "file",
+            "size_in_bytes": 8, "extension": "csv",
+        }
+        image_id = await chat.upload_file("pic.png", b"\x89PNGfake")
+        assert (await chat.attachment_facts(image_id))["type_key"] == "image"
+
+    async def test_send_file_message_attaches_a_file_envelope(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        file_id = await chat.upload_file("report.md", b"# Report")
+        await chat.send_file_message(chat_id, "\N{PAPERCLIP} report.md", file_id)
+        (stored,) = mock.chat_messages(chat_id)
+        assert stored["attachments"] == [{"target": file_id, "type": "file"}]
+
+    async def test_inbound_attachments_are_parsed(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        file_id = mock.seed_file("photo", b"png-bytes", media="image/png",
+                                 extension="png")
+        mock.post_chat_message_directly(
+            chat_id, "human", "look at this",
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (message,) = await chat.recent_messages(chat_id)
+        (attachment,) = message.attachments
+        assert attachment.target == file_id
+        assert attachment.type == "file"

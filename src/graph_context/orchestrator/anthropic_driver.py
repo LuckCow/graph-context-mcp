@@ -220,6 +220,24 @@ def messages_from_transcript(
             if results:
                 messages.append({"role": "user", "content": results})
             continue
+        if event.images:
+            # WP23: inbound images ride the user turn as native blocks,
+            # ahead of the text (the API's recommended order).
+            blocks: list[dict[str, Any]] = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type,
+                        "data": image.data_base64,
+                    },
+                }
+                for image in event.images
+            ]
+            blocks.append({"type": "text", "text": event.text})
+            messages.append({"role": "user", "content": blocks})
+            index += 1
+            continue
         append_user_text(event.text)
         index += 1
     return messages
@@ -411,8 +429,21 @@ class AnthropicDriver:
 
     def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
         # The diary shows the true wire shape: the same mapping decide()
-        # sends, serialized.
-        return json.dumps(messages_from_transcript(transcript), indent=2)
+        # sends, serialized -- except image data (WP23), which is redacted
+        # to a size note; megabytes of base64 are noise the diary's budget
+        # would immediately evict everything else for.
+        messages = messages_from_transcript(transcript)
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                source = block.get("source") if isinstance(block, dict) else None
+                if isinstance(source, dict) and "data" in source:
+                    source = dict(source)
+                    source["data"] = f"<{len(source['data'])} base64 chars>"
+                    block["source"] = source
+        return json.dumps(messages, indent=2)
 
     async def decide(
         self,

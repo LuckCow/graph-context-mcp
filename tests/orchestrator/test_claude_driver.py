@@ -277,3 +277,37 @@ class TestBlockHarvest:
         assert turn.server_tool_calls == ()
         (call,) = turn.tool_calls
         assert call.name == "find_node"  # prefix stripped
+
+
+class TestQueryPayload:
+    """WP23: text turns query as a plain string; image-carrying turns
+    take the message-dict form with native image blocks."""
+
+    async def test_text_only_stays_a_string(self) -> None:
+        from graph_context.orchestrator.claude_driver import query_payload
+        from graph_context.orchestrator.drivers import TranscriptEvent
+
+        payload = query_payload([TranscriptEvent("user", "hello")])
+        assert isinstance(payload, str) and "hello" in payload
+
+    async def test_images_take_the_message_dict_form(self) -> None:
+        from graph_context.orchestrator.claude_driver import query_payload
+        from graph_context.orchestrator.drivers import (
+            ImageAttachment,
+            TranscriptEvent,
+        )
+
+        payload = query_payload([TranscriptEvent(
+            "user", "what is this?",
+            images=(ImageAttachment(
+                name="p.png", media_type="image/png", data_base64="QUJD",
+            ),),
+        )])
+        assert not isinstance(payload, str)
+        (message,) = [m async for m in payload]
+        content = message["message"]["content"]
+        assert content[0]["type"] == "image"
+        assert content[0]["source"]["data"] == "QUJD"
+        assert content[-1]["type"] == "text"
+        assert "what is this?" in content[-1]["text"]
+        assert "[image attached: p.png" in content[-1]["text"]

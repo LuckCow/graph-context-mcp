@@ -32,6 +32,21 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageAttachment:
+    """An inbound image riding a user event (WP23).
+
+    ``media_type`` is the exact provider-required MIME type (png / jpeg /
+    gif / webp -- the transport's classification enforces the set);
+    ``data_base64`` is the encoded bytes. Turn-local: cross-turn
+    conversation memory keeps only the spoken text, so a follow-up turn
+    no longer sees the pixels (like ``thinking``)."""
+
+    name: str
+    media_type: str
+    data_base64: str
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptEvent:
     """One entry of a turn's working transcript.
 
@@ -67,6 +82,10 @@ class TranscriptEvent:
     thinking: str = ""
     server_tool_calls: tuple[ToolCall, ...] = ()
     server_tool_results: tuple[str, ...] = ()
+    # Inbound images on a user event (WP23); drivers turn them into
+    # provider image blocks. Text-file attachments need no field -- they
+    # arrive folded into the text as fenced blocks.
+    images: tuple[ImageAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

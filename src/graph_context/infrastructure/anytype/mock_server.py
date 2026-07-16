@@ -66,7 +66,10 @@ as strings.
 from __future__ import annotations
 
 import asyncio
+import email.parser
+import email.policy
 import json
+import mimetypes
 import re
 from collections.abc import Callable
 from itertools import count
@@ -94,6 +97,8 @@ _LIST_VIEWS = re.compile(
 _LIST_VIEW_OBJECTS = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/lists/(?P<list>[^/]+)/views/(?P<view>[^/]+)/objects$"
 )
+_FILES = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/files$")
+_FILE = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/files/(?P<file>[^/]+)$")
 _CHATS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/chats$")
 _CHAT_MESSAGES = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages$"
@@ -116,6 +121,26 @@ _CONDITIONS: dict[str, Callable[[str, str], bool]] = {
     "less": lambda a, b: a < b,
     "equal": lambda a, b: a == b,
 }
+
+
+def _parse_multipart_file(
+    request: httpx.Request,
+) -> tuple[str | None, bytes | None]:
+    """The ``file`` field of a multipart upload (C10), or ``(None, None)``
+    when the request carries none -- the live server's 400 case."""
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        return None, None
+    parser = email.parser.BytesParser(policy=email.policy.HTTP)
+    message = parser.parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + request.content
+    )
+    for part in message.iter_parts():
+        if 'name="file"' in str(part.get("Content-Disposition", "")):
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                return part.get_filename() or "", payload
+    return None, None
 
 
 def _sse_frame(kind: str, message: dict[str, Any]) -> bytes:
@@ -190,6 +215,9 @@ class MockAnytype:
         self._set_sources: dict[str, str | None] = {}
         self._chats: dict[str, dict[str, Any]] = {}
         self._chat_messages: dict[str, list[dict[str, Any]]] = {}
+        # File contents by object id (WP23, quirk C10): the object half
+        # lives in self._objects like the live server's real file objects.
+        self._file_bytes: dict[str, tuple[bytes, str]] = {}  # id -> (bytes, media)
         self._chat_listeners: dict[str, list[asyncio.Queue[dict[str, Any] | None]]] = {}
         self._chat_order = count(1)
         # Select/multi_select options ("tags", ADR 012), keyed by property ID
@@ -227,6 +255,8 @@ class MockAnytype:
             (_CHAT_MESSAGE, self._handle_chat_message),
             (_CHAT_MESSAGES, self._handle_chat_messages),
             (_CHATS, self._handle_chats),
+            (_FILE, self._handle_file),  # before _FILES (more specific)
+            (_FILES, self._handle_files),
             (_LIST_VIEW_OBJECTS, self._handle_list_view_objects),
             (_LIST_VIEWS, self._handle_list_views),
             (_MEMBERS, self._handle_members),
@@ -398,11 +428,15 @@ class MockAnytype:
         return chat_id
 
     def post_chat_message_directly(
-        self, chat_id: str, creator: str, text: str
+        self, chat_id: str, creator: str, text: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> str:
         """A message from another member -- the 'human is typing' analogue
-        of ``edit_object_directly``. Live streams see ``message_added``."""
-        return str(self._new_chat_message(chat_id, creator, text)["id"])
+        of ``edit_object_directly``. Live streams see ``message_added``.
+        ``attachments`` are C7/C10 envelopes (a human dropping a file)."""
+        return str(self._new_chat_message(
+            chat_id, creator, text, attachments=attachments
+        )["id"])
 
     def chat_messages(self, chat_id: str) -> list[dict[str, Any]]:
         """The chat's delivered messages, oldest first (assertion surface --
@@ -652,6 +686,57 @@ class MockAnytype:
         # NOTE: filters/sorts are NOT executed here — the compile path
         # (ADR 018) only samples this endpoint for the source type.
         return self._paginated(_without_markdown(items), request.url.params)
+
+    # -- file routes (WP23; quirk C10, pinned by spike S13) ------------------
+
+    def _handle_files(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
+        # C10: no list route -- GET /files 404s live.
+        if request.method != "POST":
+            return self._error(404, "not_found")
+        filename, content = _parse_multipart_file(request)
+        if filename is None or content is None:
+            return httpx.Response(400, json={
+                "object": "error", "status": 400, "code": "bad_request",
+                "message": "missing file in request",
+            })
+        media = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        stem, _dot, extension = filename.rpartition(".")
+        file_id = self.seed_file(
+            stem or filename, content, media=media, extension=extension
+        )
+        # C10: FLAT response, no envelope.
+        return httpx.Response(200, json={
+            "object_id": file_id, "name": stem or filename, "media": media,
+            "extension": extension, "size_in_bytes": len(content),
+        })
+
+    def _handle_file(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        if request.method != "GET":
+            return self._error(404, "not_found")
+        stored = self._file_bytes.get(match.group("file"))
+        if stored is None:
+            return self._error(404, "file_not_found")
+        content, media = stored
+        # C10: the raw bytes directly, Content-Type as the media source.
+        return httpx.Response(200, content=content,
+                              headers={"Content-Type": media})
+
+    def seed_file(
+        self, name: str, content: bytes, *,
+        media: str = "application/octet-stream", extension: str = "",
+    ) -> str:
+        """A file in the space, as the live upload leaves one (C10): the
+        bytes behind GET /files/:id plus a REAL object (type ``image``
+        for images, ``file`` otherwise; size/extension properties, no
+        MIME type)."""
+        type_key = "image" if media.startswith("image/") else "file"
+        file_id = self.seed_object(type_key, name, [
+            {"key": "size_in_bytes", "format": "number",
+             "number": len(content)},
+            {"key": "file_ext", "format": "text", "text": extension},
+        ])
+        self._file_bytes[file_id] = (content, media)
+        return file_id
 
     # -- chat routes (WP14; quirks C1-C5 in chat.py, pinned by spike S10) ----
 

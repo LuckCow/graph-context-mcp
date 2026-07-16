@@ -25,6 +25,14 @@ from graph_context.ports.graph_repository import GraphRepository
 from graph_context.ports.view_catalog import ViewCatalog
 
 
+@dataclass(frozen=True, slots=True)
+class OutboundFile:
+    """One file the model queued for delivery this turn (WP23)."""
+
+    name: str
+    content: str
+
+
 @dataclass(slots=True)
 class Services:
     """Everything a tool call needs, built once in the composition root."""
@@ -50,6 +58,11 @@ class Services:
     # degrades away and tools fall back to name search alone.
     projector: SemanticProjector | None = None
     ranker: Ranker | None = None
+    # WP23 (ADR 032): files the model queued with the send_file tool this
+    # turn. TURN-scoped: the pipeline clears it as a turn starts and
+    # drains it into file reply events after the last decision; the
+    # transport turns those into real chat uploads (or a fenced fallback).
+    outbox: list[OutboundFile] = field(default_factory=list)
 
 
 def build_services(

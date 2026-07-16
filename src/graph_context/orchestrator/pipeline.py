@@ -51,6 +51,7 @@ from graph_context.interface.services import Services
 from graph_context.interface.tools import is_error_result, resync_out_of_band
 from graph_context.orchestrator import capture, modes
 from graph_context.orchestrator.drivers import (
+    ImageAttachment,
     LLMDriver,
     LLMTurn,
     ToolCall,
@@ -80,11 +81,14 @@ class ReplyEvent:
 
     ``kind``: ``reply`` (the model's answer), ``notice`` (harness-produced
     -- mode switches, budget exhaustion), ``error`` (harness-produced,
-    actionable).
+    actionable), ``file`` (WP23: ``text`` is the file's CONTENT and
+    ``file_name`` its name -- transports with a file surface upload it;
+    the rest render it fenced).
     """
 
     text: str
     kind: str = "reply"
+    file_name: str = ""
 
 
 class TurnObserver(Protocol):
@@ -314,7 +318,11 @@ class Orchestrator:
     async def handle_message(
         self, session_id: str, user_id: str, text: str, origin: str = "",
         sender: str = "", observer: TurnObserver | None = None,
+        images: Sequence[ImageAttachment] = (),
     ) -> list[ReplyEvent]:
+        """``images`` (WP23) are inbound image attachments riding this
+        turn's user message; the driver shows them to the model as native
+        image blocks. Turn-local: conversation memory keeps only text."""
         state = await self._session(session_id)
         stripped = text.strip()
         # One id per handle_message call ties this turn's diary records --
@@ -345,6 +353,9 @@ class Orchestrator:
             return command_events
 
         spec = self._spec(state)
+        # WP23: the outbox is TURN-scoped -- files a crashed earlier turn
+        # left behind must not ride out with this one's reply.
+        state.services.outbox.clear()
         logger.info(
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
@@ -370,7 +381,7 @@ class Orchestrator:
                     turn_id, session_id, spec.name, context_block
                 )
         spoken = sender_attributed(stripped, sender)
-        transcript.append(TranscriptEvent("user", spoken))
+        transcript.append(TranscriptEvent("user", spoken, images=tuple(images)))
         if self.turn_log:
             # The assembled prompt as the driver will render it for the
             # FIRST decision; later decisions add only tool results, which
@@ -465,6 +476,13 @@ class Orchestrator:
                 "text despite the warning; the turn was cut short.",
                 kind="notice",
             ))
+        # WP23: files the model queued with send_file ride out AFTER the
+        # reply text, as file events the transport turns into uploads.
+        for outbound in state.services.outbox:
+            events.append(ReplyEvent(
+                outbound.content, kind="file", file_name=outbound.name
+            ))
+        state.services.outbox.clear()
         await self._finish_turn(
             state.services, spec, user_id, stripped, reply_text, trace, origin
         )

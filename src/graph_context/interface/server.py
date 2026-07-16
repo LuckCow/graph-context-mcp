@@ -237,6 +237,16 @@ async def schedule(
     )
 
 
+@mcp.tool(description=_PROFILE.tool_docs["send_file"])
+async def send_file(
+    ctx: Context[Any, Any, Any],
+    name: str,
+    content: str,
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.send_file_tool(_services(ctx), name=name, content=content)
+
+
 @mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
     ctx: Context[Any, Any, Any],

@@ -36,13 +36,33 @@ from graph_context.orchestrator.anytype_chat_transport import (
     ChatTitler,
 )
 from graph_context.orchestrator.channels import ChannelRoute
-from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
+from graph_context.orchestrator.drivers import (
+    LLMTurn,
+    ScriptedDriver,
+    ToolCall,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding
 
 FICTION = get_profile("fiction")
+
+
+class _SpyDriver(ScriptedDriver):
+    """Scripted-empty, but keeps what the pipeline showed it."""
+
+    def __init__(self) -> None:
+        super().__init__([LLMTurn(reply="seen")])
+        self.transcripts: list[tuple[TranscriptEvent, ...]] = []
+
+    async def decide(
+        self, transcript, tools, goal: str = "", *, web_search: bool = False
+    ) -> LLMTurn:
+        self.transcripts.append(tuple(transcript))
+        return await super().decide(transcript, tools, goal)
+
 
 
 async def _noop_lister(binding: object) -> list[tuple[str, str]]:
@@ -544,3 +564,123 @@ class TestAutoTitling:
         texts = [m["content"]["text"] for m in mock.chat_messages(chat_id)]
         assert any("answer" in t for t in texts)
         assert not titler.needs_title(chat_id)
+
+
+class TestInboundFiles:
+    """WP23 end-to-end over MockAnytype: a human's file drop reaches the
+    model -- text inlined as a fence, images as native attachments."""
+
+    async def test_a_text_file_folds_into_the_user_message(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        driver = _SpyDriver()
+        handler.routes[chat_id].orchestrator.driver = driver
+        file_id = mock.seed_file("data", b"a,b\n1,2\n", media="text/csv",
+                                 extension="csv")
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "what does this say?",
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        (transcript,) = driver.transcripts
+        user_event = transcript[-1]
+        assert "what does this say?" in user_event.text
+        assert '<file name="data.csv">' in user_event.text
+        assert "a,b" in user_event.text
+        assert user_event.images == ()
+
+    async def test_an_image_rides_as_a_native_attachment(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        driver = _SpyDriver()
+        handler.routes[chat_id].orchestrator.driver = driver
+        file_id = mock.seed_file("photo", b"\x89PNG-bytes", media="image/png",
+                                 extension="png")
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "",  # bare file drop: still a turn
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        (transcript,) = driver.transcripts
+        user_event = transcript[-1]
+        (image,) = user_event.images
+        assert image.name == "photo.png"
+        assert image.media_type == "image/png"
+        import base64 as b64
+
+        assert b64.b64decode(image.data_base64) == b"\x89PNG-bytes"
+        assert "image" in user_event.text  # the fallback caption
+
+    async def test_an_oversized_file_degrades_to_a_note(self) -> None:
+        from graph_context.orchestrator.anytype_chat_transport import (
+            MAX_TEXT_BYTES,
+        )
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        driver = _SpyDriver()
+        handler.routes[chat_id].orchestrator.driver = driver
+        file_id = mock.seed_file(
+            "big", b"x" * (MAX_TEXT_BYTES + 1), media="text/csv",
+            extension="csv",
+        )
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "read this",
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        (transcript,) = driver.transcripts
+        user_event = transcript[-1]
+        assert "[attached file: big.csv" in user_event.text
+        assert "xxx" not in user_event.text  # content never inlined
+
+
+class TestOutboundFiles:
+    """WP23: the send_file tool's queued files become real chat uploads
+    attached to the reply."""
+
+    async def test_a_queued_file_posts_as_an_upload(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock,
+            [LLMTurn(tool_calls=(
+                ToolCall("send_file",
+                         {"name": "table.csv", "content": "a,b\n1,2\n"}),
+            ),),
+             LLMTurn(reply="sent you the table")],
+            ChatCursor(),
+        )
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "export that as csv"
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        bot_messages = [
+            m for m in mock.chat_messages(chat_id)
+            if m["creator"] == mock.api_member_id and m["attachments"]
+        ]
+        (file_message,) = bot_messages
+        (envelope,) = file_message["attachments"]
+        assert envelope["type"] == "file"
+        content, media = await chat_client.fetch_file(envelope["target"])
+        assert content == b"a,b\n1,2\n"
+        assert "table.csv" in file_message["content"]["text"]

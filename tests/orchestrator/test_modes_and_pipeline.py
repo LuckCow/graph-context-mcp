@@ -1119,3 +1119,33 @@ class TestToolRoundTripTranscript:
         ]
         # The tool-call decision and its result stayed turn-local.
         assert all(e.tool_calls == () and e.tool_use_id == "" for e in replayed)
+
+
+class TestOutboundFileEvents:
+    """WP23: the send_file tool's queue drains into ``file`` reply events
+    after the reply, and never leaks across turns."""
+
+    async def test_queued_files_ride_out_after_the_reply(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(
+                ToolCall("send_file", {"name": "a.csv", "content": "a,b"}),
+            )),
+            LLMTurn(reply="here you go"),
+        ])
+        events = await orchestrator.handle_message("s1", "u1", "export it")
+        assert [(e.kind, e.text) for e in events] == [
+            ("reply", "here you go"), ("file", "a,b"),
+        ]
+        assert events[-1].file_name == "a.csv"
+
+    async def test_the_outbox_is_turn_scoped(self, services: Services) -> None:
+        # A file left behind (e.g. the turn crashed after queueing) must
+        # not ride out with the NEXT turn's reply.
+        from graph_context.interface.services import OutboundFile
+
+        services.outbox.append(OutboundFile(name="stale.md", content="old"))
+        orchestrator = _orchestrator(services, [LLMTurn(reply="fresh turn")])
+        events = await orchestrator.handle_message("s1", "u1", "hi")
+        assert [e.kind for e in events] == ["reply"]

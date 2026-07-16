@@ -19,14 +19,20 @@ from graph_context.interface.profiles import get_profile
 from graph_context.interface.services import build_services
 from graph_context.orchestrator.anytype_chat_transport import (
     MAX_ATTACHMENTS,
+    MAX_IMAGE_BYTES,
+    MAX_TEXT_BYTES,
     MAX_TITLE_CHARS,
     PROCESSING_NOTICE,
     AnytypeChatTurnHandler,
     ChatCursor,
     ChatTitler,
+    InboundAttachment,
     InboundChatMessage,
     SentMessages,
     TurnReply,
+    attachment_note,
+    classify_attachment,
+    fenced_file,
     object_references,
     plainify,
 )
@@ -37,7 +43,7 @@ from graph_context.orchestrator.drivers import (
     ToolCall,
     TranscriptEvent,
 )
-from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
 from graph_context.orchestrator.turn_activity import ChatActivity
 
 FICTION = get_profile("fiction")
@@ -744,3 +750,102 @@ class TestChatTitler:
         assert event.kind == "user"
         assert len(event.text) < 1200  # both sides snipped
         assert "…" in event.text
+
+
+class TestAttachmentClassification:
+    """WP23: the pure inbound policy -- what to do with an attachment,
+    from pre-download facts alone."""
+
+    def test_images_within_the_cap_are_images(self) -> None:
+        assert classify_attachment("image", 1024, "png") == "image"
+        assert classify_attachment("image", MAX_IMAGE_BYTES + 1, "png") == "stub"
+
+    def test_text_files_go_by_extension_and_size(self) -> None:
+        assert classify_attachment("file", 100, "csv") == "text"
+        assert classify_attachment("file", 100, ".MD") == "text"  # normalized
+        assert classify_attachment("file", MAX_TEXT_BYTES + 1, "csv") == "stub"
+        assert classify_attachment("file", 100, "pdf") == "stub"
+        assert classify_attachment("file", 100, "") == "stub"
+
+    def test_media_and_plain_objects_split(self) -> None:
+        assert classify_attachment("video", 100, "mp4") == "stub"
+        assert classify_attachment("audio", 100, "mp3") == "stub"
+        assert classify_attachment("page", 0, "") == "object"
+        assert classify_attachment("task", 0, "") == "object"
+
+    def test_fences_and_notes_shape(self) -> None:
+        assert fenced_file("a.csv", "x,y") == '<file name="a.csv">\nx,y\n</file>'
+        note = attachment_note("big.csv", 999, "too large to read here")
+        assert "big.csv" in note and "999" in note and "too large" in note
+
+
+class TestAttachmentGate:
+    def test_a_bare_file_drop_is_a_turn(self) -> None:
+        handler = AnytypeChatTurnHandler(
+            routes={"c1": ChannelRoute(orchestrator=None)},  # type: ignore[arg-type]
+            spaces={"c1": "s1"},
+        )
+        with_file = InboundChatMessage(
+            space_id="s1", chat_id="c1", message_id="m1", creator="human",
+            text="", order_id="!!a",
+            attachments=(InboundAttachment(target="f1", type="file"),),
+        )
+        empty = InboundChatMessage(
+            space_id="s1", chat_id="c1", message_id="m2", creator="human",
+            text="  ", order_id="!!b",
+        )
+        assert handler.accepts(with_file)
+        assert not handler.accepts(empty)
+
+
+class TestFileDelivery:
+    """WP23: file reply events post as real uploads when the reply has a
+    send_file primitive, and degrade to fenced text without one."""
+
+    @staticmethod
+    def _reply(sent_files: list, sent_texts: list, with_primitive: bool):
+        async def send(text, attachments=()):
+            sent_texts.append(text)
+            return f"m{len(sent_texts)}"
+
+        async def edit(message_id, text, attachments=()):
+            sent_texts.append(f"edit:{text}")
+
+        async def send_file(name, content):
+            sent_files.append((name, content))
+            return f"f{len(sent_files)}"
+
+        return TurnReply(
+            send=send, edit=edit, sent=SentMessages(),
+            send_file=send_file if with_primitive else None,
+        )
+
+    async def test_a_file_event_uses_the_primitive(self) -> None:
+        files: list = []
+        texts: list = []
+        reply = self._reply(files, texts, with_primitive=True)
+        handler = AnytypeChatTurnHandler(routes={}, spaces={})
+        await handler.deliver_events(
+            [ReplyEvent("the answer"),
+             ReplyEvent("a,b\n1,2", kind="file", file_name="data.csv")],
+            reply,
+        )
+        assert files == [("data.csv", "a,b\n1,2")]
+        assert texts == ["the answer"]  # content never doubles as text
+
+    async def test_without_the_primitive_files_degrade_to_fences(self) -> None:
+        files: list = []
+        texts: list = []
+        reply = self._reply(files, texts, with_primitive=False)
+        handler = AnytypeChatTurnHandler(routes={}, spaces={})
+        await handler.deliver_events(
+            [ReplyEvent("a,b", kind="file", file_name="data.csv")], reply
+        )
+        assert files == []
+        assert texts and "data.csv" in texts[0] and "a,b" in texts[0]
+
+    async def test_delivered_file_messages_join_the_echo_ledger(self) -> None:
+        files: list = []
+        reply = self._reply(files, [], with_primitive=True)
+        await reply.deliver_file("x.md", "hi")
+        assert "f1" in reply.sent

@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,6 +102,7 @@ __all__ = [
     "harvest_result_blocks",
     "local_tool_name",
     "permission_gate",
+    "query_payload",
     "render_transcript",
     "sdk_tools",
     "session_options",
@@ -227,6 +228,44 @@ def harvest_result_blocks(
             harvest.server_results[block.tool_use_id] = _result_payload(
                 block.tool_use_id, block.content
             )
+
+
+def query_payload(
+    transcript: Sequence[TranscriptEvent],
+) -> str | AsyncIterator[dict[str, Any]]:
+    """What ``client.query`` sends for this transcript.
+
+    Text-only turns stay the plain rendered string. A turn carrying
+    inbound images (WP23) takes the SDK's message-dict form instead --
+    the one shape that can carry native image content blocks into the
+    CLI -- with the images ahead of the rendered text (which already
+    notes each image by name, so the text half stays self-describing).
+    """
+    rendered = render_transcript(transcript)
+    images = [image for event in transcript for image in event.images]
+    if not images:
+        return rendered
+    content: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": image.data_base64,
+            },
+        }
+        for image in images
+    ]
+    content.append({"type": "text", "text": rendered})
+
+    async def _messages() -> AsyncIterator[dict[str, Any]]:
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": content},
+            "parent_tool_use_id": None,
+        }
+
+    return _messages()
 
 
 def permission_gate(web_search: bool) -> CanUseTool:
@@ -363,7 +402,7 @@ class ClaudeAgentDriver:
         harvest = BlockHarvest()
         last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(render_transcript(transcript))
+            await client.query(query_payload(transcript))
             async for message in client.receive_response():
                 if isinstance(message, ResultMessage):
                     last_result = message

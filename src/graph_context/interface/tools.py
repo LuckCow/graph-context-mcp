@@ -58,7 +58,7 @@ from graph_context.domain.traversal import ExploreQuery
 from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
-from graph_context.interface.services import Services
+from graph_context.interface.services import OutboundFile, Services
 from graph_context.interface.tool_args import (
     _edge_type_set,
     _node_type_set,
@@ -376,6 +376,50 @@ async def schedule_tool(
         )
     raise GraphContextError(
         f"unknown action {action!r}; allowed: set, list, cancel"
+    )
+
+
+# WP23 (ADR 032): send_file queues into the turn-scoped outbox; the
+# transport does the actual upload after the reply is composed.
+MAX_OUTBOUND_FILE_CHARS = 200_000
+MAX_OUTBOUND_FILES_PER_TURN = 4
+
+
+@guarded
+async def send_file_tool(
+    services: Services,
+    name: str,
+    content: str,
+) -> str:
+    filename = name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if not filename:
+        raise GraphContextError(
+            "name must be a filename like 'report.md' or 'data.csv'"
+        )
+    if "." not in filename:
+        raise GraphContextError(
+            f"name {filename!r} needs an extension (e.g. {filename}.md) so "
+            "the chat knows what kind of file it is"
+        )
+    if not content:
+        raise GraphContextError(
+            "content is empty -- pass the file's complete text"
+        )
+    if len(content) > MAX_OUTBOUND_FILE_CHARS:
+        raise GraphContextError(
+            f"content is {len(content)} characters; the cap is "
+            f"{MAX_OUTBOUND_FILE_CHARS}. Split it into smaller files."
+        )
+    if len(services.outbox) >= MAX_OUTBOUND_FILES_PER_TURN:
+        raise GraphContextError(
+            f"already {MAX_OUTBOUND_FILES_PER_TURN} files queued this turn "
+            "-- deliver these first and send more next turn"
+        )
+    services.outbox.append(OutboundFile(name=filename, content=content))
+    return (
+        f"queued {filename!r} ({len(content)} characters); it will be "
+        "attached to your reply when the turn ends. Do NOT repeat the "
+        "file's content in your reply text."
     )
 
 

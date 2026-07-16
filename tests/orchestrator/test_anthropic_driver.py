@@ -39,6 +39,7 @@ from graph_context.orchestrator.driver_common import (  # noqa: E402
     derive_schema,
 )
 from graph_context.orchestrator.drivers import (  # noqa: E402
+    ImageAttachment,
     ToolCall,
     TranscriptEvent,
 )
@@ -641,3 +642,35 @@ class TestServerResultReplay:
             TranscriptEvent("user", "Hi"), event,
         ])
         assert [m["role"] for m in messages] == ["user"]
+
+
+class TestImageAttachments:
+    """WP23: inbound images ride the user turn as native blocks."""
+
+    def test_a_user_event_with_images_becomes_blocks(self) -> None:
+        event = TranscriptEvent(
+            "user", "what is in this picture?",
+            images=(ImageAttachment(
+                name="photo.png", media_type="image/png", data_base64="QUJD",
+            ),),
+        )
+        (message,) = messages_from_transcript([event])
+        image_block, text_block = message["content"]
+        assert image_block == {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png",
+                       "data": "QUJD"},
+        }
+        assert text_block == {"type": "text",
+                              "text": "what is in this picture?"}
+
+    def test_render_prompt_redacts_image_data(self) -> None:
+        driver = AnthropicDriver(schemas={}, client=_StubClient(_response([])))
+        rendered = driver.render_prompt([TranscriptEvent(
+            "user", "look",
+            images=(ImageAttachment(
+                name="p.png", media_type="image/png", data_base64="A" * 5000,
+            ),),
+        )])
+        assert "AAAA" not in rendered
+        assert "5000 base64 chars" in rendered

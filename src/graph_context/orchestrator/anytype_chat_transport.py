@@ -42,7 +42,7 @@ from typing import Protocol
 
 from graph_context.application.scheduler import DueEvent
 from graph_context.orchestrator.channels import ChannelRoute
-from graph_context.orchestrator.drivers import TranscriptEvent
+from graph_context.orchestrator.drivers import ImageAttachment, TranscriptEvent
 from graph_context.orchestrator.pipeline import (
     ReplyEvent,
     TurnObserver,
@@ -75,6 +75,9 @@ PROCESSING_NOTICE = "Processing…"
 
 SendFn = Callable[[str, tuple[str, ...]], Awaitable[str]]
 EditFn = Callable[[str, str, tuple[str, ...]], Awaitable[None]]
+# WP23: (filename, text content) -> the posted message's id. The bot's
+# primitive uploads the file and posts a message carrying it as a card.
+SendFileFn = Callable[[str, str], Awaitable[str]]
 
 
 class ActivityObserver(TurnObserver, Protocol):
@@ -124,6 +127,17 @@ def plainify(text: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class InboundAttachment:
+    """One attachment envelope on an inbound message (WP23): the target
+    object id plus the sender's advisory envelope type. Transport-level
+    data -- the infrastructure ChatAttachment maps onto it at the
+    composition root, keeping this module infrastructure-free."""
+
+    target: str
+    type: str = "link"
+
+
+@dataclass(frozen=True, slots=True)
 class InboundChatMessage:
     """The slice of a chat message the policy needs."""
 
@@ -137,6 +151,7 @@ class InboundChatMessage:
     # the pipeline shows it to the model so "assign this to me"-shaped
     # requests are answerable. "" degrades to an unattributed message.
     creator_name: str = ""
+    attachments: tuple[InboundAttachment, ...] = ()
 
 
 class SentMessages:
@@ -244,6 +259,55 @@ class ChatCursor:
             )
 
 
+# -- inbound file attachments (WP23, ADR 032) ------------------------------
+
+# The provider-required image MIME set: anything else (tiff, bmp, svg...)
+# degrades to a stub note even when Anytype types it as an image.
+IMAGE_MEDIA_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_TEXT_BYTES = 200 * 1024
+# Extensions read as text and inlined (fenced) into the user message.
+# Anytype types non-image uploads as plain `file`, so the extension is
+# the only text/binary signal available before downloading.
+TEXT_FILE_EXTENSIONS = frozenset({
+    "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "yaml", "yml",
+    "toml", "xml", "html", "css", "js", "ts", "py", "sh", "sql", "log",
+    "ini", "cfg", "rst",
+})
+
+
+def classify_attachment(
+    type_key: str, size_in_bytes: int, extension: str
+) -> str:
+    """What to DO with an attachment, from pre-download facts alone.
+
+    ``image``/``text`` -> fetch and hand to the model; ``stub`` -> a
+    file the model should know exists but cannot read (wrong type or
+    over budget); ``object`` -> an ordinary graph-object card, not a
+    file at all (mentioned by name so the model can look it up).
+    """
+    if type_key == "image":
+        return "image" if size_in_bytes <= MAX_IMAGE_BYTES else "stub"
+    if type_key == "file":
+        readable = extension.lower().lstrip(".") in TEXT_FILE_EXTENSIONS
+        return "text" if readable and size_in_bytes <= MAX_TEXT_BYTES else "stub"
+    if type_key in ("video", "audio"):
+        return "stub"
+    return "object"
+
+
+def fenced_file(name: str, text: str) -> str:
+    """An inlined text attachment, fenced and named for the model."""
+    return f'<file name="{name}">\n{text}\n</file>'
+
+
+def attachment_note(name: str, size_in_bytes: int, reason: str) -> str:
+    """The stub line for a file the model gets no content for."""
+    return f"[attached file: {name} ({size_in_bytes} bytes) -- {reason}]"
+
+
 # Chat names that read as "untitled" to the auto-titler (WP21): the API
 # births a nameless chat with "" (quirk C9 / spike S12); "Chat" is the
 # generic default the UI-created chats have shown. A human's deliberate
@@ -340,6 +404,9 @@ class TurnReply:
     send: SendFn
     edit: EditFn
     sent: SentMessages
+    # WP23: native file posting; None (Discord-less surfaces, tests)
+    # degrades file events to fenced text through the ordinary path.
+    send_file: SendFileFn | None = None
     _placeholder_id: str | None = None
 
     async def open(self) -> None:
@@ -368,6 +435,13 @@ class TurnReply:
             await self.edit(placeholder, text, attachments)
         else:
             self.sent.add(await self.send(text, attachments))
+
+    async def deliver_file(self, name: str, content: str) -> None:
+        """Upload + post one queued file (WP23). Never consumes the
+        placeholder -- a file is an addition to the reply, not the reply."""
+        if self.send_file is None:
+            raise RuntimeError("deliver_file needs a send_file primitive")
+        self.sent.add(await self.send_file(name, content))
 
     async def finish(self) -> None:
         """A turn that delivered nothing must not strand the placeholder.
@@ -414,7 +488,8 @@ class AnytypeChatTurnHandler:
             return False  # ours even if the send's id was never recorded
         if not self.cursor.is_new(message):  # backlog replay / reconnect
             return False
-        if not message.text.strip():  # noqa: SIM103 -- gate reads as a checklist
+        # A bare file drop (WP23) is a turn; a truly empty message is not.
+        if not message.text.strip() and not message.attachments:  # noqa: SIM103 -- gate reads as a checklist
             return False
         return True
 
@@ -462,20 +537,28 @@ class AnytypeChatTurnHandler:
                 )
         return seed
 
-    def reply(self, send: SendFn, edit: EditFn) -> TurnReply:
+    def reply(
+        self, send: SendFn, edit: EditFn,
+        send_file: SendFileFn | None = None,
+    ) -> TurnReply:
         """The outbound surface for one turn, wired to this handler's
         echo ledger."""
-        return TurnReply(send=send, edit=edit, sent=self.sent)
+        return TurnReply(
+            send=send, edit=edit, sent=self.sent, send_file=send_file
+        )
 
     async def run_turn(
         self,
         message: InboundChatMessage,
         reply: TurnReply,
         activity: ActivityObserver | None = None,
+        images: Sequence[ImageAttachment] = (),
     ) -> list[ReplyEvent]:
         """One accepted message -> placeholder -> turn -> n deliveries.
         Returns the turn's reply events (the auto-titler reads the first
-        exchange off them; delivery already happened).
+        exchange off them; delivery already happened). ``images`` (WP23)
+        are the message's resolved inbound images -- the composition root
+        fetched and classified them; here they just ride to the pipeline.
 
         The cursor advances BEFORE the turn: a failing turn must not make
         the same message eligible again on the next stream event. The
@@ -511,6 +594,7 @@ class AnytypeChatTurnHandler:
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
                 sender=message.creator_name,
                 observer=activity,
+                images=images,
             )
         await self.deliver_events(events, reply)
         if activity is not None:
@@ -521,8 +605,14 @@ class AnytypeChatTurnHandler:
         self, events: Sequence[ReplyEvent], reply: TurnReply
     ) -> None:
         """A turn's reply events -> plain-text chunked chat deliveries,
-        every referenced object attached to the first chunk as a card."""
+        every referenced object attached to the first chunk as a card.
+        File events (WP23) post as real uploads when the reply carries a
+        ``send_file`` primitive; without one they degrade to the fenced
+        rendering like any other surface."""
         for event in events:
+            if event.kind == "file" and reply.send_file is not None:
+                await reply.deliver_file(event.file_name, event.text)
+                continue
             rendered = render(event)
             attachments = object_references(rendered)
             for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):

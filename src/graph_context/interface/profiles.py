@@ -44,6 +44,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "find_node",
     "query",
     "schedule",
+    "send_file",
 )
 
 
@@ -306,6 +307,18 @@ one-shot is marked Completed automatically.
 """
 
 
+_SEND_FILE_DOC = """\
+Send a FILE to the user, attached to your reply in this chat (use it
+when the deliverable is a document, not a message: an export, a table
+as CSV, a longer write-up, code). Give the full filename with its
+extension (e.g. "characters.csv", "summary.md") and the complete text
+content -- the file is created from exactly what you pass; there is no
+appending. Text formats only (csv, md, json, code, ...). Call once per
+file, up to 4 per turn. The file uploads when your reply is delivered;
+keep the reply itself short and let the file carry the bulk.
+"""
+
+
 _FIND_NODE_DOC = """\
 Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
@@ -541,6 +554,7 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
     query(order_by=["modified_at desc"], limit=10)
 """),
     "schedule": _SCHEDULE_DOC,
+    "send_file": _SEND_FILE_DOC,
 }
 
 _FICTION_MODES = (
@@ -682,6 +696,7 @@ EXAMPLES:
           order_by=["story_time"])
 """),
     "schedule": _SCHEDULE_DOC,
+    "send_file": _SEND_FILE_DOC,
 }
 
 _WORKSPACE_MODES = (
@@ -823,6 +838,7 @@ EXAMPLES:
     query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
 """),
     "schedule": _SCHEDULE_DOC,
+    "send_file": _SEND_FILE_DOC,
 }
 
 _ASSISTANT_MODES = (

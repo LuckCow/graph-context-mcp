@@ -281,3 +281,13 @@ while the system was down collapse into ONE late fire. Events live as
 prompt, Schedule status, Last fired), so the user can view, edit, or
 create them there too -- an empty status counts as Pending, and a fired
 one-shot is marked Completed automatically.
+
+### send_file
+Send a FILE to the user, attached to your reply in this chat (use it
+when the deliverable is a document, not a message: an export, a table
+as CSV, a longer write-up, code). Give the full filename with its
+extension (e.g. "characters.csv", "summary.md") and the complete text
+content -- the file is created from exactly what you pass; there is no
+appending. Text formats only (csv, md, json, code, ...). Call once per
+file, up to 4 per turn. The file uploads when your reply is delivered;
+keep the reply itself short and let the file carry the bulk.

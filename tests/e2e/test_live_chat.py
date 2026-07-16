@@ -79,5 +79,25 @@ class TestLiveChat:
             await chat_client.rename(chat_id, "E2E Chat renamed")
             names = dict(await chat_client.list_chats())
             assert names[chat_id] == "E2E Chat renamed"
+
+            # C10 (spike S13): upload -> attach -> inbound exposure ->
+            # download, byte-faithful.
+            file_id = await chat_client.upload_file(
+                "e2e-notes.txt", b"file round trip"
+            )
+            facts = await chat_client.attachment_facts(file_id)
+            assert facts["type_key"] == "file"
+            assert facts["extension"] == "txt"
+            assert facts["size_in_bytes"] == 15
+            posted = await chat_client.send_file_message(
+                chat_id, "\N{PAPERCLIP} e2e-notes.txt", file_id
+            )
+            assert posted
+            window = await chat_client.recent_messages(chat_id)
+            carrying = next(m for m in window if m.id == posted)
+            assert any(a.target == file_id for a in carrying.attachments)
+            content, media = await chat_client.fetch_file(file_id)
+            assert content == b"file round trip"
+            assert media.startswith("text/plain")
         finally:
             await client.aclose()

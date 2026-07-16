@@ -813,3 +813,53 @@ class TestScheduleTool:
         assert abs(
             (services.scheduler.now() - expected).total_seconds()
         ) < 5
+
+
+class TestSendFileTool:
+    """WP23 (ADR 032): send_file queues into the turn-scoped outbox; the
+    transport uploads after the reply -- the tool itself does no I/O."""
+
+    async def test_a_valid_file_queues_and_confirms(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.send_file_tool(
+            services, name="report.md", content="# Report"
+        )
+        assert "report.md" in out and "queued" in out
+        (queued,) = services.outbox
+        assert queued.name == "report.md"
+        assert queued.content == "# Report"
+
+    async def test_path_segments_are_stripped_from_the_name(
+        self, services: tools.Services
+    ) -> None:
+        await tools.send_file_tool(
+            services, name="../../etc/notes.txt", content="x"
+        )
+        assert services.outbox[-1].name == "notes.txt"
+
+    async def test_validation_errors_echo_the_fix(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.send_file_tool(services, name="", content="x")
+        assert out.startswith("ERROR:") and "filename" in out
+        out = await tools.send_file_tool(services, name="noext", content="x")
+        assert out.startswith("ERROR:") and "extension" in out
+        out = await tools.send_file_tool(services, name="a.md", content="")
+        assert out.startswith("ERROR:") and "empty" in out
+        assert services.outbox == []
+
+    async def test_oversize_and_per_turn_caps(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.send_file_tool(
+            services, name="big.md",
+            content="x" * (tools.MAX_OUTBOUND_FILE_CHARS + 1),
+        )
+        assert out.startswith("ERROR:") and "cap" in out
+        for i in range(tools.MAX_OUTBOUND_FILES_PER_TURN):
+            await tools.send_file_tool(
+                services, name=f"f{i}.md", content="x"
+            )
+        out = await tools.send_file_tool(services, name="one-more.md", content="x")
+        assert out.startswith("ERROR:") and "next turn" in out

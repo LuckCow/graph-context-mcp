@@ -1860,6 +1860,49 @@ answer reference searched facts).
 - Payload growth: `encrypted_content` is large; if transcripts bloat,
   cap replayed results per decision (newest N) and note the drop.
 
+## WP23 — Chat files, to and from the model (ADR 032) — **shipped 2026-07-16**
+
+**Status:** complete. Drop a file into an Anytype chat and the model can
+read it; ask for a document and it sends a real file back.
+
+### Spike S13 results (2026-07-16, live sidecar, API `2025-11-08`)
+
+Quirk **C10** (pinned in `chat.py`, modeled by the mock, live-verified
+by the E2E round trip):
+
+* `POST /v1/spaces/:sid/files` uploads (multipart field `file`; FLAT
+  response `object_id`/`name`/`media`/`extension`/`size_in_bytes`; the
+  client's default JSON Content-Type must be overridden per request or
+  the server answers "missing file in request" — live-caught). The
+  server sniffs MIME from the bytes; the upload is a REAL object
+  (type `image` for images, `file` otherwise, with size/extension
+  properties but NOT the MIME type).
+* `GET /files/:id` serves the raw bytes directly, Content-Type header
+  as the read-side media source (no `/content` sub-route; no list
+  route — both 404).
+* Chat attachments are the C7 envelopes; **inbound messages expose
+  them** (we had been dropping the field in `to_chat_message`).
+
+What shipped:
+
+* **Inbound**: the gate accepts bare file drops; the bot resolves each
+  attachment (`_resolve_attachments`: facts first, bytes only for what
+  the model gets) against the transport's pure policy
+  (`classify_attachment`; caps 5 MB image / 200 KB text). Text files
+  fold into the user message as fenced `<file name="...">` blocks;
+  images ride `TranscriptEvent.images` (turn-local, like thinking) into
+  native image blocks on BOTH drivers — the SDK driver switches
+  `query()` to the message-dict form (`query_payload`), live-verified
+  on subscription auth (the model described a red test swatch);
+  everything else degrades to a name+size note. The turn diary redacts
+  image base64 to a size note.
+* **Outbound**: a `send_file(name, content)` tool in every mode (text
+  formats, ≤200 K chars, ≤4/turn, filenames sanitized) queues into the
+  TURN-scoped `Services.outbox`; the pipeline drains it into `file`
+  reply events after the reply text; the Anytype transport uploads and
+  posts a `📎 name` message carrying the file card; Discord/CLI/MCP
+  degrade to fenced content. The outbox clears at turn start.
+
 ---
 
 ## Sequencing

@@ -34,6 +34,8 @@ Run:  python -m graph_context.orchestrator.anytype_chat_bot
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
 import logging
 import os
 import random
@@ -51,16 +53,24 @@ from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_transport import (
+    IMAGE_MEDIA_TYPES,
+    MAX_TEXT_BYTES,
     TITLE_GOAL,
     AnytypeChatTurnHandler,
     ChatCursor,
     ChatTitler,
     EditFn,
+    InboundAttachment,
     InboundChatMessage,
+    SendFileFn,
     SendFn,
     SentMessages,
+    attachment_note,
+    classify_attachment,
+    fenced_file,
 )
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.drivers import ImageAttachment
 from graph_context.orchestrator.pipeline import ReplyEvent, is_command
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
@@ -144,14 +154,84 @@ def _inbound(
         text=message.text,
         order_id=message.order_id,
         creator_name=message.creator_name,
+        attachments=tuple(
+            InboundAttachment(target=a.target, type=a.type)
+            for a in message.attachments
+        ),
     )
+
+
+async def _resolve_attachments(
+    chat_client: AnytypeChatClient, message: InboundChatMessage
+) -> tuple[list[str], list[ImageAttachment]]:
+    """A message's attachments -> (text parts, images) for the turn (WP23).
+
+    Classification is the transport's pure policy; this owns the I/O:
+    facts first (name/type/size -- no download), then bytes only for
+    what the model will actually get. Text files inline as fenced
+    blocks, images become native blocks, everything else a note -- and
+    a single unreadable attachment degrades to its own note, never the
+    turn."""
+    parts: list[str] = []
+    images: list[ImageAttachment] = []
+    for attachment in message.attachments:
+        try:
+            facts = await chat_client.attachment_facts(attachment.target)
+            name = str(facts["name"] or attachment.target)
+            extension = str(facts["extension"] or "")
+            display = f"{name}.{extension}" if extension else name
+            size = int(facts["size_in_bytes"] or 0)
+            kind = classify_attachment(
+                str(facts["type_key"]), size, extension
+            )
+            if kind == "object":
+                # An ordinary graph-object card: name it so the model can
+                # find_node it; nothing to download.
+                parts.append(f"[attached object: {name}]")
+                continue
+            if kind == "stub":
+                reason = (
+                    "too large to read here"
+                    if str(facts["type_key"]) in ("image", "file")
+                    and size > MAX_TEXT_BYTES
+                    else "a type the assistant cannot read"
+                )
+                parts.append(attachment_note(display, size, reason))
+                continue
+            content, media = await chat_client.fetch_file(attachment.target)
+            media = media.partition(";")[0].strip().lower()
+            if kind == "image":
+                if media not in IMAGE_MEDIA_TYPES:
+                    parts.append(attachment_note(
+                        display, len(content),
+                        f"an image format the assistant cannot read ({media})",
+                    ))
+                    continue
+                images.append(ImageAttachment(
+                    name=display, media_type=media,
+                    data_base64=base64.b64encode(content).decode("ascii"),
+                ))
+            else:  # text
+                parts.append(fenced_file(
+                    display, content.decode("utf-8", errors="replace")
+                ))
+        except GraphContextError as err:
+            logger.warning(
+                "attachment %s unreadable (chat=%s): %s",
+                attachment.target, message.chat_id, err,
+            )
+            parts.append(
+                f"[an attachment could not be read: {attachment.target}]"
+            )
+    return parts, images
 
 
 
 def _reply_primitives(
     chat_client: AnytypeChatClient, chat_id: str
-) -> tuple[SendFn, EditFn]:
-    """The send/edit pair a turn handler's reply needs, bound to one chat."""
+) -> tuple[SendFn, EditFn, SendFileFn]:
+    """The send/edit/send-file trio a turn handler's reply needs, bound
+    to one chat."""
 
     async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
         return await chat_client.send(chat_id, text, attachments)
@@ -161,7 +241,16 @@ def _reply_primitives(
     ) -> None:
         await chat_client.edit(chat_id, message_id, text, attachments)
 
-    return send, edit
+    async def send_file(name: str, content: str) -> str:
+        # WP23: upload, then one message carrying the file as a card.
+        file_id = await chat_client.upload_file(
+            name, content.encode("utf-8")
+        )
+        return await chat_client.send_file_message(
+            chat_id, f"\N{PAPERCLIP} {name}", file_id
+        )
+
+    return send, edit, send_file
 
 
 async def _maybe_turn(
@@ -176,17 +265,26 @@ async def _maybe_turn(
     if not handler.accepts(inbound):
         return
 
-    send, edit = _reply_primitives(chat_client, chat_id)
+    send, edit, send_file = _reply_primitives(chat_client, chat_id)
 
     # Errors deliver through the same reply, so they replace the turn's
     # "Processing…" placeholder instead of stranding it in the chat --
     # and when the turn streamed activity (WP19), the error posts fresh
     # (the sink claimed the placeholder) and the activity message
     # collapses to its failed-turn summary.
-    reply = handler.reply(send, edit)
+    reply = handler.reply(send, edit, send_file)
     activity = ChatActivity(reply=reply, edit=edit)
     try:
-        events = await handler.run_turn(inbound, reply, activity)
+        images: list[ImageAttachment] = []
+        if inbound.attachments:
+            parts, images = await _resolve_attachments(chat_client, inbound)
+            text = "\n\n".join(
+                piece for piece in (inbound.text.strip(), *parts) if piece
+            )
+            if not text and images:
+                text = "(the user sent the attached image(s))"
+            inbound = dataclasses.replace(inbound, text=text)
+        events = await handler.run_turn(inbound, reply, activity, images=images)
     except GraphContextError as err:
         # Config-shaped errors are actionable; show them in-chat.
         await reply.deliver(f"[error] {err}")
@@ -388,9 +486,9 @@ async def _fire_scheduled(
     """Deliver one due Scheduled Event's turn (same error posture as
     ``_maybe_turn``: the failure replaces the placeholder, never the loop)."""
 
-    send, edit = _reply_primitives(chat_client, chat_id)
+    send, edit, send_file = _reply_primitives(chat_client, chat_id)
 
-    reply = handler.reply(send, edit)
+    reply = handler.reply(send, edit, send_file)
     try:
         await handler.run_scheduled(chat_id, due, reply)
     except GraphContextError as err:
