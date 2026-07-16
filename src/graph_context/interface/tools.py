@@ -65,8 +65,8 @@ from graph_context.interface.tool_args import (
     _parse_detail,
     _parse_edge_type,
     _parse_field_declarations,
+    _parse_fields_and_links,
     _parse_hold_detail,
-    _parse_links,
     _parse_node_type,
     _parse_order_by,
     _parse_predicates,
@@ -393,6 +393,9 @@ async def create_node_tool(
     create_missing_relations: bool = False,
     create_missing_fields: dict[str, str] | None = None,
 ) -> str:
+    fields, parsed_links, declarations = await _parse_fields_and_links(
+        services, fields, links, _parse_field_declarations(create_missing_fields)
+    )
     draft = NodeDraft(
         type=_parse_node_type(type),
         name=name,
@@ -405,9 +408,9 @@ async def create_node_tool(
     )
     node = await services.writer.create_node(
         draft,
-        await _parse_links(links, services),
+        parsed_links,
         create_missing_relations=create_missing_relations,
-        create_missing_fields=_parse_field_declarations(create_missing_fields),
+        create_missing_fields=declarations,
     )
     await _note_mutation(services)
     view = await services.reader.get_node(node.id)
@@ -438,6 +441,9 @@ async def update_node_tool(
         )
         for i in remove_links or []
     ]
+    fields, parsed_add_links, declarations = await _parse_fields_and_links(
+        services, fields, add_links, _parse_field_declarations(create_missing_fields)
+    )
     node = await services.writer.update_node(
         node_id,
         name=name,
@@ -445,10 +451,10 @@ async def update_node_tool(
         description=description,
         story_time=story_time,
         fields=fields,
-        add_links=await _parse_links(add_links, services),
+        add_links=parsed_add_links,
         remove_links=removals,
         create_missing_relations=create_missing_relations,
-        create_missing_fields=_parse_field_declarations(create_missing_fields),
+        create_missing_fields=declarations,
     )
     await _note_mutation(services)
     stale_note = (

@@ -51,6 +51,8 @@ fields: {"key": "value"} attributes. Every key MUST match one of the
   shows what a node already carries. The value writes THAT property,
   visible and filterable in Anytype; select options match by name and
   are created when new; multi-select values are comma-separated names.
+  A key that names a RELATION (e.g. "Assignee") also works: its value
+  is a node id or name, and the entry becomes a link, same as links.
   An unmatched key ERRORS, listing the properties you can reuse --
   prefer reusing one. Only when none fits, resend with
   create_missing_fields={"key": "format"} to create a real new property
@@ -91,7 +93,9 @@ space's own properties, by key or display name -- get_node shows what a
 node already carries, and context action='overview' lists each type's
 properties. The value updates THAT property, visible and filterable in
 Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful"). An
+multi-select values are comma-separated names ("Dark, Hopeful"). A key
+that names a RELATION (e.g. "Assignee") also works: its value is a node
+id or name, and the entry becomes a link, same as add_links. An
 unmatched key ERRORS, listing the properties you can reuse -- prefer
 reusing one. Only when none fits, resend with
 create_missing_fields={"key": "format"} to create a real new property

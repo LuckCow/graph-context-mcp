@@ -13,10 +13,15 @@ import asyncio
 import pytest
 
 from graph_context.domain import attribution
+from graph_context.domain.graph import Direction
 from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
-from graph_context.errors import NodeNotFound, UnknownFieldKey
+from graph_context.errors import (
+    NodeNotFound,
+    UnknownFieldKey,
+    UnknownRelationLabel,
+)
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
@@ -251,12 +256,31 @@ class FieldCatalogContract:
     "Due date" (date), "Status" (select: To Do, In Progress), and an
     "Assignee" objects-format RELATION (an edge, never a fields key)."""
 
+    async def test_relation_label_for_matches_key_and_display_name(
+        self, catalog_repo
+    ):
+        """The tool boundary routes a relation-named fields key into links
+        (turn 1bb6286b0e21); this is the question it asks, and it must
+        match exactly like fields-key resolution: key or display name,
+        case-insensitive."""
+        for spelling in ("assignee", "Assignee", "ASSIGNEE"):
+            label = catalog_repo.relation_label_for(spelling)
+            assert label is not None and label.lower() == "assignee"
+
+    async def test_relation_label_for_is_none_for_scalars_and_unknowns(
+        self, catalog_repo
+    ):
+        assert catalog_repo.relation_label_for("Due date") is None
+        assert catalog_repo.relation_label_for("due_date") is None
+        assert catalog_repo.relation_label_for("nonesuch") is None
+
     async def test_relation_named_as_a_field_redirects_to_links(
         self, catalog_repo
     ):
-        """Live-caught: a model wrote fields={'Assignee': ...} because the
-        relation is invisible in the scalar catalog; the error must point
-        at links, not at minting a shadowing scalar property."""
+        """Port-level backstop: the tool boundary coerces a relation-named
+        fields key into a link, so a direct repository caller that skips
+        that boundary still gets redirected -- the error must point at
+        links, not at minting a shadowing scalar property."""
         with pytest.raises(UnknownFieldKey) as err:
             await catalog_repo.create_node(
                 NodeDraft("Item", name="Ship it", summary="s.",
@@ -276,6 +300,67 @@ class FieldCatalogContract:
                           fields={"Assignee": "Nick"}),
                 create_missing_fields={"Assignee": "text"},
             )
+
+    async def test_unknown_link_label_errors_with_existing_relations(
+        self, catalog_repo
+    ):
+        """Live-caught (turn 1bb6286b0e21): a model invented 'assigned_to'
+        where the space's relation is 'assignee'. The error must offer the
+        existing vocabulary and the explicit opt-in, and the composite
+        create must roll back -- no node, no junk-labelled edge."""
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        with pytest.raises(UnknownRelationLabel) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s."),
+                links=[LinkSpec(edge_type="assigned_to", other=target.id)],
+            )
+        message = str(err.value)
+        assert "create_missing_relations" in message
+        assert "assignee" in message.lower()
+        with pytest.raises(NodeNotFound):
+            catalog_repo.graph.resolve("Ship it")
+
+    async def test_link_label_matches_by_key_or_display_name(
+        self, catalog_repo
+    ):
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        for spelling in ("assignee", "Assignee"):
+            node = await catalog_repo.create_node(
+                NodeDraft("Item", name=f"Task via {spelling}", summary="s."),
+                links=[LinkSpec(edge_type=spelling, other=target.id)],
+            )
+            edge = next(iter(catalog_repo.graph.edges(node.id, Direction.OUT)))
+            # Both spellings canonicalize to the SAME relation.
+            assert edge.type.lower() == "assignee"
+
+    async def test_create_missing_relations_mints_a_reusable_relation(
+        self, catalog_repo
+    ):
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        first = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s."),
+            links=[LinkSpec(edge_type="approved_by", other=target.id)],
+            create_missing_relations=True,
+        )
+        assert any(
+            e.type.lower() == "approved_by"
+            for e in catalog_repo.graph.edges(first.id, Direction.OUT)
+        )
+        # Now part of the space's vocabulary: reusable without the opt-in.
+        second = await catalog_repo.create_node(
+            NodeDraft("Item", name="Land it", summary="s."),
+            links=[LinkSpec(edge_type="approved_by", other=target.id)],
+        )
+        assert any(
+            e.type.lower() == "approved_by"
+            for e in catalog_repo.graph.edges(second.id, Direction.OUT)
+        )
 
     async def test_relations_stay_out_of_the_fields_catalog(
         self, catalog_repo

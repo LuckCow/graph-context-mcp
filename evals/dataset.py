@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from graph_context.domain.schema import FIELD_FORMATS
 from graph_context.orchestrator.drivers import LLMTurn, ToolCall
 
 
@@ -100,6 +101,23 @@ class SeedEdge:
 
 
 @dataclass(frozen=True, slots=True)
+class SeedField:
+    """One property of the case's space, as :class:`FieldSpec` fixture data.
+
+    Seeding ANY ``[[case.seed.field]]`` switches the trial's repository to
+    the catalog-strict fields contract (ADR 023) -- unmatched keys error,
+    and an ``objects``-format entry is a RELATION the tool boundary routes
+    from ``fields`` into ``links``. Without any, the historical open mode
+    applies: every fields key writes verbatim.
+    """
+
+    name: str
+    format: str
+    key: str = ""
+    options: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class GraphExpect:
     node_count_delta: int | None = None
     node_exists: tuple[NodeRef, ...] = ()
@@ -173,6 +191,8 @@ class EvalCase:
     must_fail: bool = False  # grader-honesty case: PASSING is the defect
     seed_nodes: tuple[SeedNode, ...] = ()
     seed_edges: tuple[SeedEdge, ...] = ()
+    seed_fields: tuple[SeedField, ...] = ()  # the space's property catalog
+    seed_members: tuple[str, ...] = ()  # reflected Space member names
     modes: tuple[CaseMode, ...] = ()  # extra in-space modes for the registry
     turns: tuple[Turn, ...] = ()
     graph: GraphExpect = field(default_factory=GraphExpect)
@@ -198,7 +218,11 @@ _CASE_KEYS = {
     "seed", "modes", "turn", "expect", "judge", "script",
 }
 _MODE_KEYS = {"name", "goal", "mutating"}  # no capture until a case needs it
-_SEED_KEYS = {"node", "edge"}
+_SEED_KEYS = {"node", "edge", "field", "members"}
+_SEED_FIELD_KEYS = {"name", "format", "key", "options"}
+# What a seeded property may be: the mintable scalar menu plus "objects"
+# (a relation -- exactly what a case pinning fields-vs-links needs).
+_SEED_FIELD_FORMATS = FIELD_FORMATS | {"objects"}
 _SEED_NODE_KEYS = {
     "type", "name", "summary", "stale", "out_of_band", "story_time",
     "fields", "body", "icon", "ref",
@@ -310,6 +334,14 @@ def _parse_case(raw: Mapping[str, Any], path: Path) -> EvalCase:
             _parse_seed_edge(_table(e, f"{origin} [[case.seed.edge]]"), origin)
             for e in _list(seed.get("edge", []), f"{origin}: seed.edge")
         ),
+        seed_fields=tuple(
+            _parse_seed_field(_table(f, f"{origin} [[case.seed.field]]"), origin)
+            for f in _list(seed.get("field", []), f"{origin}: seed.field")
+        ),
+        seed_members=tuple(
+            str(m)
+            for m in _list(seed.get("members", []), f"{origin}: seed.members")
+        ),
         modes=tuple(
             _parse_case_mode(_table(m, f"{origin} [[case.modes]]"), origin)
             for m in _list(raw.get("modes", []), f"{origin}: modes")
@@ -370,6 +402,25 @@ def _parse_seed_edge(raw: Mapping[str, Any], origin: str) -> SeedEdge:
         source=_required_str(raw, "source", ctx),
         label=_required_str(raw, "label", ctx),
         target=_required_str(raw, "target", ctx),
+    )
+
+
+def _parse_seed_field(raw: Mapping[str, Any], origin: str) -> SeedField:
+    ctx = f"{origin} [[case.seed.field]]"
+    _no_unknown(raw, _SEED_FIELD_KEYS, ctx)
+    fmt = _required_str(raw, "format", ctx)
+    if fmt not in _SEED_FIELD_FORMATS:
+        raise DatasetError(
+            f"{ctx}: format {fmt!r} not allowed; "
+            f"allowed: {sorted(_SEED_FIELD_FORMATS)}"
+        )
+    return SeedField(
+        name=_required_str(raw, "name", ctx),
+        format=fmt,
+        key=str(raw.get("key", "")),
+        options=tuple(
+            str(o) for o in _list(raw.get("options", []), f"{ctx}: options")
+        ),
     )
 
 

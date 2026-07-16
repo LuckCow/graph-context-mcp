@@ -35,7 +35,7 @@ from graph_context.domain.models import (
     TimelineValue,
 )
 from graph_context.domain.schema import Role
-from graph_context.errors import UnknownFieldKey
+from graph_context.errors import UnknownFieldKey, UnknownRelationLabel
 
 
 @dataclass(frozen=True)
@@ -68,31 +68,41 @@ class InMemoryGraphRepository:
         # Type-identifier -> template, mirroring the Anytype adapter applying a
         # type's template on create (default field values + scaffold body).
         self._templates: dict[str, FakeTemplate] = dict(templates or {})
-        # The space's scalar-property catalog (ADR 023). None keeps the
-        # historical open behavior -- any field key, stored verbatim -- so
-        # the memory backend and demos need no vocabulary. A catalog turns
-        # on the strict contract: story-node field keys must match a spec
-        # (by key or name) or be declared via create_missing_fields. An
-        # ``objects``-format spec models a RELATION (an edge, ADR 006):
-        # never a fields target, and a fields key naming one redirects to
-        # ``links`` -- mirroring the adapter's registry.
-        self._field_specs: list[FieldSpec] | None = (
-            list(field_catalog) if field_catalog is not None else None
-        )
-        if self._field_specs is not None:
-            # Bootstrap parity (ADR 028): the Anytype adapter's
-            # ensure_schema guarantees the attribution properties exist,
-            # so recorder writes resolve without an opt-in. The fake's
-            # catalog carries the same guarantee.
-            existing_keys = {spec.key for spec in self._field_specs}
-            self._field_specs.extend(
-                FieldSpec(name=key, format=fmt, key=key)
-                for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
-                if key not in existing_keys
-            )
+        # The space's property catalog (ADR 023). None keeps the
+        # historical open behavior -- any field key or edge label, stored
+        # verbatim -- so the memory backend and demos need no vocabulary.
+        # A catalog turns on the strict contract: story-node field keys
+        # must match a spec (by key or name) or be declared via
+        # create_missing_fields, and link labels must match an ``objects``
+        # spec (canonicalizing to its name) or be minted via
+        # create_missing_relations. An ``objects``-format spec models a
+        # RELATION (an edge, ADR 006): never a fields target, and a fields
+        # key naming one redirects to ``links`` -- mirroring the adapter's
+        # registry.
+        self._field_specs: list[FieldSpec] | None = None
+        if field_catalog is not None:
+            self._adopt_catalog(field_catalog)
         # Space members reflected as read-only nodes (S11), mirroring the
         # Anytype adapter's member fetch: first-class, linkable (an
         # assignee-style edge needs a target IN the index), no role.
+        self._reflect_members(members)
+
+    def _adopt_catalog(self, field_catalog: Sequence[FieldSpec]) -> None:
+        specs = self._field_specs or []
+        specs.extend(field_catalog)
+        # Bootstrap parity (ADR 028): the Anytype adapter's
+        # ensure_schema guarantees the attribution properties exist,
+        # so recorder writes resolve without an opt-in. The fake's
+        # catalog carries the same guarantee.
+        existing_keys = {spec.key for spec in specs}
+        specs.extend(
+            FieldSpec(name=key, format=fmt, key=key)
+            for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
+            if key not in existing_keys
+        )
+        self._field_specs = specs
+
+    def _reflect_members(self, members: Sequence[str]) -> None:
         for name in members:
             self._graph.upsert_node(Node(
                 id=f"member-{next(self._ids):04d}",
@@ -149,7 +159,12 @@ class InMemoryGraphRepository:
             self._bodies[node.id] = body
         try:
             for link in links:
-                self._graph.add_edge(link.to_edge(anchor=node.id))
+                label = self._resolve_link_label(
+                    link.edge_type, create_missing_relations
+                )
+                self._graph.add_edge(
+                    replace(link, edge_type=label).to_edge(anchor=node.id)
+                )
         except Exception:
             # Composite-create contract: never leave a half-applied write.
             self._graph.remove_node(node.id)
@@ -196,7 +211,8 @@ class InMemoryGraphRepository:
     async def add_link(
         self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
     ) -> Edge:
-        edge = link.to_edge(anchor=anchor)
+        label = self._resolve_link_label(link.edge_type, create_missing_relations)
+        edge = replace(link, edge_type=label).to_edge(anchor=anchor)
         self._graph.add_edge(edge)
         return edge
 
@@ -212,8 +228,53 @@ class InMemoryGraphRepository:
         return frozenset(r.value for r in Role if r not in schema.INFRA_ROLES)
 
     def known_edge_labels(self) -> frozenset[str]:
-        # No predefined relation vocabulary off a live space.
-        return frozenset()
+        if self._field_specs is None:
+            # Open mode: no predefined relation vocabulary off a live space.
+            return frozenset()
+        return frozenset(
+            spec.name for spec in self._field_specs if spec.format == "objects"
+        )
+
+    def _resolve_link_label(self, label: str, create_missing: bool) -> str:
+        """The fake's half of the adapter's ``_resolve_relation`` contract.
+
+        Open mode (no catalog): any label lands verbatim, as ever. Catalog
+        mode: a link's ``edge_type`` must match an existing ``objects``
+        relation (by key or display name, case-insensitive) and canonicalizes
+        to that relation's label -- an unmatched label is surfaced for
+        approval unless ``create_missing`` mints a new relation, which then
+        joins the vocabulary for reuse.
+        """
+        if self._field_specs is None:
+            return label
+        spec = self._relation_spec_for(label)
+        if spec is not None:
+            return spec.name
+        if not create_missing:
+            raise UnknownRelationLabel(label, tuple(self.known_edge_labels()))
+        minted = FieldSpec(
+            name=label, format="objects",
+            key=label.strip().lower().replace(" ", "_"),
+        )
+        self._field_specs.append(minted)
+        return minted.name
+
+    def relation_label_for(self, field_key: str) -> str | None:
+        spec = self._relation_spec_for(field_key)
+        return None if spec is None else spec.name
+
+    def _relation_spec_for(self, label: str) -> FieldSpec | None:
+        """Objects relations only, by key or display name -- the fake's
+        ``key_for_label``. Open mode has no relation vocabulary: None."""
+        if self._field_specs is None:
+            return None
+        target = label.strip().lower()
+        for spec in self._field_specs:
+            if spec.format == "objects" and target in (
+                spec.key.strip().lower(), spec.name.strip().lower()
+            ):
+                return spec
+        return None
 
     def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
         if not self._field_specs:
@@ -329,6 +390,21 @@ class InMemoryGraphRepository:
         fetch. Test/eval surface only; not part of the port.
         """
         self._out_of_band.append(draft)
+
+    def stage_space_vocabulary(
+        self,
+        field_catalog: Sequence[FieldSpec] = (),
+        members: Sequence[str] = (),
+    ) -> None:
+        """Adopt a space's property catalog and reflected members after
+        construction -- same semantics as the constructor arguments of the
+        same names. Any catalog (even one staged empty) switches fields
+        resolution to the strict contract. Test/eval surface only, like
+        :meth:`stage_out_of_band`: production composition passes the
+        vocabulary at construction; only the eval fixture stages a
+        case-specific space into an already-built runtime."""
+        self._adopt_catalog(field_catalog)
+        self._reflect_members(members)
 
     async def hydrate(self) -> None:
         """No backing store: the index is already authoritative here."""

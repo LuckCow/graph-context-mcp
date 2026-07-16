@@ -45,6 +45,7 @@ from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.pipeline import (
     ReplyEvent,
     TurnObserver,
+    is_command,
     scheduled_prompt,
     sender_attributed,
 )
@@ -399,9 +400,13 @@ class AnytypeChatTurnHandler:
         The cursor advances BEFORE the turn: a failing turn must not make
         the same message eligible again on the next stream event. The
         placeholder posts BEFORE the route lock, so a queued message
-        shows progress even while an earlier turn holds the space.
-        Replies go out as plain text (quirk C7) with every referenced
-        object attached to the first chunk as a card.
+        shows progress even while an earlier turn holds the space --
+        EXCEPT for command turns (``/mode``, ``/clear``), which the
+        pipeline answers instantly without a model turn: those hold off
+        and post only the output, so a command never costs the user two
+        notifications (``deliver`` without a placeholder is a plain
+        send). Replies go out as plain text (quirk C7) with every
+        referenced object attached to the first chunk as a card.
 
         ``activity`` (WP19, ADR 029) streams the turn into the chat: the
         pipeline feeds it each decision and tool result, it claims the
@@ -410,7 +415,8 @@ class AnytypeChatTurnHandler:
         (and detail ``off``) keeps the pre-WP19 placeholder lifecycle.
         """
         self.cursor.advance(message)
-        await reply.open()
+        if not is_command(message.text):
+            await reply.open()
         if message.text.strip() == "/clear":
             # The orchestrator empties the in-memory ring; the watermark
             # makes the clear survive a restart (seeding stops here).

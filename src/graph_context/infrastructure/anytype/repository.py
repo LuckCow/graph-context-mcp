@@ -171,6 +171,10 @@ class AnytypeGraphRepository:
     def known_edge_labels(self) -> frozenset[str]:
         return self._registry.known_edge_labels()
 
+    def relation_label_for(self, field_key: str) -> str | None:
+        key = self._registry.key_for_label(field_key)
+        return None if key is None else self._registry.label_for(key)
+
     def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
         """Reflectable scalar properties per non-infra type (ADR 023).
 

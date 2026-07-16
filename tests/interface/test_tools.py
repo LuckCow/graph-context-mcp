@@ -585,6 +585,115 @@ class TestFieldCatalogSurface:
         assert out.startswith("ERROR:") and "formats:" in out
 
 
+class TestRelationFieldCoercion:
+    """Live-caught (turn 1bb6286b0e21): Anytype shows an objects-format
+    relation ("Assignee") as a property of the type, so a model wrote it
+    as a fields key -- and the write failed twice. The tool boundary now
+    accepts that spelling and routes it as the edge it is (ADR 006)."""
+
+    def _services(self) -> tools.Services:
+        from graph_context.domain.models import FieldSpec
+
+        repository = InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Due date", format="date", key="due_date"),
+            FieldSpec(name="Assignee", format="objects", key="assignee"),
+        ])
+        return build_services(repository, SessionState(project="t"))
+
+    async def _seed_member(self, services: tools.Services):
+        return await services.writer.create_node(
+            NodeDraft("Person", name="Luckcow", summary="moo")
+        )
+
+    def _edges_to(self, services: tools.Services, name: str, target_id: str):
+        from graph_context.domain.graph import Direction
+
+        graph = services.repository.graph
+        node = graph.resolve(name)
+        return node, [
+            e for e in graph.edges(node.id, Direction.OUT)
+            if e.target == target_id
+        ]
+
+    async def test_relation_named_field_becomes_a_link(self) -> None:
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow"},
+        )
+        assert out.startswith("created:")
+        node, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+        assert not node.fields  # an edge landed, never a scalar shadow
+
+    async def test_field_and_link_naming_the_same_edge_land_once(self) -> None:
+        """The exact failing call: fields={'Assignee': ...} AND the same
+        edge in links. One edge results; nothing errors."""
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow"},
+            links=[{"edge_type": "assignee", "other": member.id}],
+        )
+        assert out.startswith("created:")
+        _, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+
+    async def test_update_relation_field_adds_the_link(self) -> None:
+        services = self._services()
+        member = await self._seed_member(services)
+        await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+        )
+        out = await tools.update_node_tool(
+            services, node_id="Ship it", fields={"Assignee": "Luckcow"},
+        )
+        assert out.startswith("updated:")
+        _, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+
+    async def test_unresolvable_relation_value_errors_actionably(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Nobody"},
+        )
+        assert out.startswith("ERROR:") and "Nobody" in out
+
+    async def test_declaration_for_a_relation_key_is_dropped(self) -> None:
+        """A create_missing_fields declaration must not mint a scalar
+        shadow of the relation -- the entry still becomes the edge."""
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow"},
+            create_missing_fields={"Assignee": "text"},
+        )
+        assert out.startswith("created:")
+        node, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+        assert not node.fields
+        catalog = services.repository.field_catalog()
+        assert "Assignee" not in {
+            spec.name for specs in catalog.values() for spec in specs
+        }
+
+    async def test_scalar_fields_pass_through_beside_a_relation_key(self) -> None:
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow", "Due date": "2026-08-01"},
+        )
+        assert out.startswith("created:")
+        node, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+        assert node.fields["due_date"] == "2026-08-01"
+
+
 # -- the schedule tool (WP18, ADR 027) ---------------------------------------
 
 

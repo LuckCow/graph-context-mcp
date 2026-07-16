@@ -97,6 +97,46 @@ async def _parse_links(
     return links
 
 
+async def _parse_fields_and_links(
+    services: Services,
+    fields: dict[str, str] | None,
+    raw_links: Sequence[dict[str, Any]] | None,
+    declarations: dict[str, str] | None,
+) -> tuple[dict[str, str] | None, list[LinkSpec], dict[str, str] | None]:
+    """Parse a write's ``fields``/``links`` pair as ONE surface.
+
+    Anytype shows an ``objects``-format relation ("Assignee") as a property
+    of the type, so models naturally spell it as a ``fields`` key -- and
+    underneath it IS an edge (ADR 006). The two spellings meet here, at the
+    same boundary that resolves id-or-name: a fields key naming a relation
+    becomes a :class:`LinkSpec` (its value resolves exactly like a link's
+    ``other``), deduplicated against the explicit ``links``. A
+    ``create_missing_fields`` declaration for such a key is dropped -- the
+    relation already exists; nothing may mint a scalar shadow of it.
+    """
+    links = await _parse_links(raw_links, services)
+    if not fields:
+        return fields, links, declarations
+    seen = {
+        (link.edge_type.strip().lower(), link.other, link.outgoing)
+        for link in links
+    }
+    scalars: dict[str, str] = {}
+    for key, value in fields.items():
+        label = services.repository.relation_label_for(key)
+        if label is None:
+            scalars[key] = value
+            continue
+        other = await _resolve(services, str(value))
+        if declarations is not None:
+            declarations.pop(key.strip(), None)
+        coerced = (label.strip().lower(), other, True)
+        if coerced not in seen:
+            seen.add(coerced)
+            links.append(LinkSpec(edge_type=label, other=other))
+    return scalars, links, declarations
+
+
 _OPS_LISTING = ", ".join(op.value for op in Op)
 
 

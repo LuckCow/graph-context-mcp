@@ -273,6 +273,15 @@ class TestProcessingPlaceholder:
         assert recorder.texts() == ["[error] boom"]
         assert "sent-1" in sent  # error posts feed echo suppression too
 
+    async def test_command_turns_skip_the_placeholder(self) -> None:
+        # /clear (and /mode) are answered instantly by the pipeline; a
+        # placeholder would only add a notification, so the output posts
+        # alone, fresh.
+        recorder = await _run(_handler(), _message(text="/clear"))
+        assert PROCESSING_NOTICE not in recorder.posted
+        assert recorder.edited == []
+        assert len(recorder.messages) == 1
+
     async def test_an_eventless_turn_does_not_strand_the_placeholder(
         self,
     ) -> None:
@@ -329,14 +338,15 @@ class TestActivityStreaming:
         for message in recorder.messages:  # the activity message included
             assert str(message["id"]) in handler.sent
 
-    async def test_command_turns_keep_the_placeholder_lifecycle(self) -> None:
-        # /mode returns before the pipeline's turn_started: the sink never
-        # claims, so the placeholder is edited into the notice as always.
+    async def test_command_turns_post_only_their_output(self) -> None:
+        # /mode is answered instantly (no model turn, and it returns
+        # before the pipeline's turn_started so the sink stays inert):
+        # no placeholder posts, only the notice -- one notification.
         handler = _handler([])
         recorder = await _run_streaming(
             handler, _message(text="/mode authoring")
         )
-        assert recorder.edited == ["sent-1"]
+        assert recorder.edited == []
         assert len(recorder.messages) == 1
         assert "mode switched to authoring" in recorder.texts()[0]
 

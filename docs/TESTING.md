@@ -107,6 +107,14 @@ the space but not the index until a resync (a human editing the Anytype
 UI between syncs — the stale-index/duplicate-node class of failure); it
 counts toward the `node_count_delta` baseline, and the runner resyncs
 once after the turns so graders always judge the space, not the index.
+`[[case.seed.field]]` entries stage the space's property catalog
+(name/format/key/options; `format = "objects"` models a relation), which
+switches the trial's repository to the catalog-strict contract: unmatched
+fields keys and unknown link labels are rejected with the existing
+vocabulary (`create_missing_*` being the explicit overrides) — how a case
+reproduces a live space's vocabulary, e.g. "Assignee" being an edge, not
+a scalar. `members = [...]` under `[case.seed]` reflects
+Space member nodes (linkable assignee targets; part of the baseline).
 
 ## Demo scripts
 

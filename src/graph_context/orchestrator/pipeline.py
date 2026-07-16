@@ -141,6 +141,19 @@ def sender_attributed(text: str, sender: str) -> str:
     return f"[from {sender}] {text}" if sender else text
 
 
+def is_command(text: str) -> bool:
+    """Whether ``handle_message`` answers this text instantly -- a
+    ``/``-command handled before the model runs (``/mode``, ``/clear``).
+
+    Transports use this to skip work-in-progress affordances (the
+    Anytype "Processing…" placeholder): a command's output arrives at
+    once, so a placeholder would only add a notification. The command
+    vocabulary lives here, next to the dispatch that implements it.
+    """
+    stripped = text.strip()
+    return stripped.startswith("/mode") or stripped == "/clear"
+
+
 DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
 DEFAULT_MEMORY_CHARS = 6000  # evict oldest beyond this total
 
@@ -313,27 +326,23 @@ class Orchestrator:
                 turn_id, session_id, state.mode, user_id, stripped,
                 sender=sender,
             )
-        if stripped.startswith("/mode"):
-            mode_events = await self._switch_mode(state, stripped)
+        if is_command(stripped):
+            if stripped.startswith("/mode"):
+                command_events = await self._switch_mode(state, stripped)
+            else:  # /clear
+                state.memory.clear()
+                command_events = [ReplyEvent(
+                    "conversation memory cleared. The scratchpad and working "
+                    "set are kept -- reset those with the context tool "
+                    "(action='note' with empty text / action='clear').",
+                    kind="notice",
+                )]
             if self.turn_log:
                 # state.mode is post-switch: the mode the session is IN now.
                 self.turn_log.turn_end(
-                    turn_id, session_id, state.mode, mode_events
+                    turn_id, session_id, state.mode, command_events
                 )
-            return mode_events
-        if stripped == "/clear":
-            state.memory.clear()
-            clear_events = [ReplyEvent(
-                "conversation memory cleared. The scratchpad and working "
-                "set are kept -- reset those with the context tool "
-                "(action='note' with empty text / action='clear').",
-                kind="notice",
-            )]
-            if self.turn_log:
-                self.turn_log.turn_end(
-                    turn_id, session_id, state.mode, clear_events
-                )
-            return clear_events
+            return command_events
 
         spec = self._spec(state)
         logger.info(

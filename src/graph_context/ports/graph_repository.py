@@ -125,6 +125,19 @@ class GraphRepository(Protocol):
         """Relation labels available to reuse (for error suggestions)."""
         ...
 
+    def relation_label_for(self, field_key: str) -> str | None:
+        """The canonical edge label when ``field_key`` names an
+        ``objects``-format relation, else ``None``.
+
+        Matched exactly like a ``fields`` key resolves (by property key or
+        display name, case-insensitive), because that is what this exists
+        for: Anytype presents relations as properties of a type, so models
+        write ``fields={"Assignee": ...}``. The tool boundary asks this
+        question to route such a key as the link it really is (ADR 006:
+        relations are edges) instead of surfacing a rejection.
+        """
+        ...
+
     def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
         """Reflectable scalar properties per type display name (ADR 023).
 
