@@ -146,6 +146,13 @@ class TurnLog:
         }
         if turn.thinking:
             entry["thinking"] = turn.thinking
+        if turn.server_tool_calls:
+            # Provider-executed (web search, ADR 030): they already ran
+            # inside the provider -- no tool_result event will follow.
+            entry["server_tool_calls"] = [
+                {"name": call.name, "arguments": dict(call.arguments)}
+                for call in turn.server_tool_calls
+            ]
         if turn.tool_calls:
             entry["tool_calls"] = [
                 {"name": call.name, "arguments": dict(call.arguments)}

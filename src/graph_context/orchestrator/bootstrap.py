@@ -25,7 +25,7 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from graph_context import composition
 from graph_context.application.intent_recorder import IntentRecorder
@@ -86,6 +86,8 @@ class ManualDriver:
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        web_search: bool = False,
     ) -> LLMTurn:
         last = transcript[-1]
         if last.kind == "tool":
@@ -277,6 +279,9 @@ class SpaceRuntimes:
     space_routes: Mapping[str, ChannelRoute]  # space id -> its shared route
     space_bindings: Mapping[str, SpaceBinding]  # space id -> binding
     session_labels: Mapping[str, dict[str, str]]  # space id -> label sink
+    # chat id -> its current name as last listed (WP21: the auto-titler's
+    # untitled test reads it; the rescan watcher keeps it fresh).
+    chat_names: dict[str, str] = field(default_factory=dict)
 
 
 def register_chat(
@@ -291,6 +296,7 @@ def register_chat(
     binding = runtimes.space_bindings[space_id]
     runtimes.routes[chat_id] = runtimes.space_routes[space_id]
     runtimes.spaces[chat_id] = space_id
+    runtimes.chat_names[chat_id] = name.strip()  # "" = untitled (WP21)
     label = name.strip() or chat_id
     runtimes.descriptions[chat_id] = (
         f"{label} (space={space_id}, profile={binding.profile.name})"
@@ -308,6 +314,7 @@ async def _assemble_runtime(
     space_id: str | None = None,
     project: str | None = None,
     modes_file: str | None = None,
+    default_mode: str | None = None,
 ) -> Runtime:
     """One fully wired runtime: services, provenance, mode registry.
 
@@ -315,7 +322,10 @@ async def _assemble_runtime(
     (a shared journal would attribute one channel's mutations to another
     channel's intent node); the driver and turn log are shared, both
     per-turn stateless. ``modes_file`` overrides ``GC_MODES_FILE`` for
-    this runtime (per-channel modes, ADR 017).
+    this runtime (per-channel modes, ADR 017); ``default_mode`` (WP21)
+    overrides the profile's default for sessions with no persisted mode
+    -- re-applied on every /mode reload, so it survives registry
+    refreshes.
     """
     provenance_on = _knob_on("GC_PROVENANCE")
     store_prompt = _knob_on("GC_STORE_LLM_INPUT")
@@ -336,7 +346,8 @@ async def _assemble_runtime(
 
     async def reload_registry() -> modes.ModeRegistry:
         return modes.load_registry(
-            profile, modes_file, in_space=await built.mode_store.load()
+            profile, modes_file, in_space=await built.mode_store.load(),
+            default=default_mode,
         )
 
     registry = await reload_registry()  # startup: bad specs fail loudly here
@@ -487,6 +498,7 @@ async def build_space_runtimes(
                 binding.profile, driver, model_name, help_line, turn_log,
                 space_id=binding.space_id, project=binding.project,
                 modes_file=binding.modes_file,
+                default_mode=binding.default_mode,
             )
         except GraphContextError as err:
             await composition.run_teardown(teardown)  # close what already built

@@ -386,7 +386,9 @@ class Orchestrator:
             final_decision = decisions_left == 1
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
-            turn = await self.driver.decide(transcript, tools, spec.goal)
+            turn = await self.driver.decide(
+                transcript, tools, spec.goal, web_search=spec.web_search
+            )
             if self.turn_log:
                 self.turn_log.llm_turn(turn_id, session_id, spec.name, turn)
             if observer:
@@ -570,8 +572,10 @@ class Orchestrator:
         if not argument:
             current = self.registry.get(state.mode)
             detail = current.activity_detail if current else ""
+            search = "on" if current and current.web_search else "off"
             events.append(ReplyEvent(
-                f"mode: {state.mode} (activity detail: {detail}); "
+                f"mode: {state.mode} (activity detail: {detail}; "
+                f"web search: {search}); "
                 f"switch with /mode {{{' | '.join(self.registry.names())}}}",
                 kind="notice",
             ))

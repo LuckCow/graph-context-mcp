@@ -92,6 +92,16 @@ class TestChatRest:
         assert stored["content"]["text"] == "v3"
         assert stored["attachments"] == []  # C8: wiped, not preserved
 
+    async def test_rename_shows_in_the_next_relist(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        """Quirk C9 (spike S12): the chat namespace has no update route;
+        renaming goes through the generic object PATCH and the /chats
+        re-list reflects it -- the WP21 auto-titling contract."""
+        chat_id = mock.seed_chat(name="")
+        await chat.rename(chat_id, "Siege engine logistics")
+        assert (chat_id, "Siege engine logistics") in await chat.list_chats()
+
 
 class TestSseParsing:
     async def test_backlog_then_live_events_arrive_in_order(

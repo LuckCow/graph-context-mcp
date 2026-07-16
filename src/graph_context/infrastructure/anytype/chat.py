@@ -36,6 +36,12 @@ version header) lives here, pinned by spike S10 and mirrored by
         value, and attachments ABSENT from the body are removed
         (live-confirmed 2026-07-11 against the sidecar). An edit that
         wants to keep or add cards must re-send their envelopes.
+    C9. A chat object has NO single-chat route: GET and PATCH on
+        ``/chats/<id>`` both 404 (spike S12). It IS addressable through
+        the generic ``/objects/<id>`` routes -- ``PATCH`` there renames
+        it and the new name shows in the next ``/chats`` re-list. A chat
+        created without a name is born with ``name: ""`` (what a fresh
+        UI-created chat looks like to discovery).
 """
 
 from __future__ import annotations
@@ -183,6 +189,11 @@ class AnytypeChatClient:
             (str(c["id"]), str(c.get("name") or ""))
             async for c in self._client.list_chats()
         ]
+
+    async def rename(self, chat_id: str, name: str) -> None:
+        """Set a chat's title (C9: via the generic object PATCH -- the
+        chat namespace has no update route). WP21's auto-titling caller."""
+        await self._client.rename_chat(chat_id, name)
 
     async def recent_messages(
         self, chat_id: str, *, limit: int = 100

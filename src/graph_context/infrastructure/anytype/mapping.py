@@ -142,6 +142,7 @@ ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 # the object BODY (read via body_of), so it needs no property.
 PROP_MODE_MUTATING = "gc_mode_mutating"
 PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
+PROP_MODE_WEB_SEARCH = "gc_mode_web_search"  # WP20, ADR 030
 PROP_CAPTURE_TYPE = "gc_capture_type"
 PROP_CAPTURE_REFERENCES = "gc_capture_references"
 PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
@@ -149,6 +150,7 @@ PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
 MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_MODE_MUTATING: "checkbox",
     PROP_MODE_ACTIVITY_DETAIL: "select",
+    PROP_MODE_WEB_SEARCH: "checkbox",
     PROP_CAPTURE_TYPE: "text",
     PROP_CAPTURE_REFERENCES: "text",
     PROP_CAPTURE_MIN_CHARS: "number",

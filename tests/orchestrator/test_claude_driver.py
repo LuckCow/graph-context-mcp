@@ -17,8 +17,10 @@ from claude_agent_sdk import ResultMessage  # noqa: E402
 
 from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.claude_driver import (  # noqa: E402
+    WEB_SEARCH_TOOL,
     derive_schema,
     local_tool_name,
+    permission_gate,
     sdk_tools,
     session_options,
     usage_from_result,
@@ -92,14 +94,14 @@ class TestSessionCapabilityBoundary:
     built-ins (Read, Write, Bash, ...), no filesystem settings that could
     smuggle extra MCP servers or permissions into the session."""
 
-    def _options(self):
+    def _options(self, **kwargs):
         async def deny(name, tool_input, context):  # pragma: no cover
             raise AssertionError("never invoked here")
 
         server = {"type": "sdk", "name": "gc", "instance": object()}
         return session_options(
             server, "goal", model=None, effort=None, can_use_tool=deny,
-            cli_path=None,
+            cli_path=None, **kwargs,
         )
 
     def test_builtin_tools_are_disabled_by_the_empty_list(self):
@@ -116,6 +118,43 @@ class TestSessionCapabilityBoundary:
         # None = load user+project+local settings (CLI default), which can
         # inject MCP servers, permission grants, and hooks. [] = isolation.
         assert self._options().setting_sources == []
+
+    def test_web_search_admits_exactly_the_websearch_builtin(self):
+        # ADR 030: the one mode-gated exception to the empty list --
+        # server-side execution, so the host boundary is intact.
+        options = self._options(web_search=True)
+        assert options.tools == [WEB_SEARCH_TOOL]
+        assert options.setting_sources == []  # isolation unchanged
+
+
+class TestPermissionGate:
+    """Deny-all with the one ADR 030 exception: WebSearch, when the mode
+    admits it, runs server-side INSIDE the session."""
+
+    @staticmethod
+    async def _ask(gate, name):
+        return await gate(name, {}, None)
+
+    async def test_graph_tools_are_always_denied_with_interrupt(self):
+        from claude_agent_sdk import PermissionResultDeny
+
+        for enabled in (False, True):
+            result = await self._ask(
+                permission_gate(enabled), "mcp__gc__get_node"
+            )
+            assert isinstance(result, PermissionResultDeny)
+            assert result.interrupt is True
+
+    async def test_websearch_is_allowed_only_when_the_mode_admits_it(self):
+        from claude_agent_sdk import (
+            PermissionResultAllow,
+            PermissionResultDeny,
+        )
+
+        allowed = await self._ask(permission_gate(True), WEB_SEARCH_TOOL)
+        assert isinstance(allowed, PermissionResultAllow)
+        denied = await self._ask(permission_gate(False), WEB_SEARCH_TOOL)
+        assert isinstance(denied, PermissionResultDeny)
 
 
 class TestUsageTranslation:

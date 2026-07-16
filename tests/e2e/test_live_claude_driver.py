@@ -77,6 +77,29 @@ async def test_a_transcript_with_the_result_becomes_a_reply(tools):
     assert "mira" in turn.reply.lower()
 
 
+async def test_web_search_answers_a_current_information_question(tools):
+    """WP20 (ADR 030): the WebSearch built-in works headless on
+    subscription auth -- the search runs server-side INSIDE the decide
+    and surfaces as server_tool_calls, never as pipeline work."""
+    driver = ClaudeAgentDriver()
+    turn = await driver.decide(
+        [TranscriptEvent(
+            "user",
+            "Use web search to find what today's date is according to any "
+            "news site, then answer with what you found.",
+        )],
+        tools,
+        goal=GOAL,
+        web_search=True,
+    )
+    assert turn.reply, "expected a searched answer, got no reply"
+    assert not turn.tool_calls, (
+        f"WebSearch leaked into pipeline tool_calls: {turn.tool_calls!r}"
+    )
+    assert turn.server_tool_calls, "the model never searched"
+    assert turn.server_tool_calls[0].name == "WebSearch"
+
+
 async def test_the_live_session_exposes_only_the_bound_gc_tools(tools):
     """The capability boundary, checked against the CLI's own init report:
     no Read/Write/Bash/... -- the binding's mcp__gc__* tools are the whole

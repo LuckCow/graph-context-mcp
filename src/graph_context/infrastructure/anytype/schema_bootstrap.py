@@ -103,6 +103,8 @@ progress the assistant streams into the chat while this mode works a \
 turn: Off (just "Processing..." until the reply), Minimal (tool tally; \
 the default when empty), Tools (each tool call), or Full (thinking and \
 results too).
+- Tick gc_mode_web_search to let the assistant search the web while this \
+mode is active; unticked keeps it grounded in the graph alone.
 - Fill gc_capture_type (and optionally gc_capture_references, \
 gc_capture_min_chars) to auto-capture the assistant's substantial replies \
 as objects of that type.

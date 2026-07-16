@@ -37,13 +37,20 @@ class TestLoadSpaceBindings:
             tmp_path,
             f'[spaces."{SPACE}"]\n'
             'profile = "assistant"\nproject = "Todos"\n'
-            'modes_file = "todo.toml"\nchat_id = "bafychat"\n',
+            'modes_file = "todo.toml"\ndefault_mode = "note_taking"\n'
+            'chat_id = "bafychat"\n',
         )
         (binding,) = load_space_bindings(path, default_profile="fiction")
         assert binding.profile.name == "assistant"
         assert binding.project == "Todos"
         assert binding.modes_file == "todo.toml"
+        assert binding.default_mode == "note_taking"
         assert binding.chat_id == "bafychat"
+
+    def test_default_mode_must_be_a_non_empty_string(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, f'[spaces."{SPACE}"]\ndefault_mode = ""\n')
+        with pytest.raises(GraphContextError, match="default_mode"):
+            load_space_bindings(path, default_profile=None)
 
     def test_unknown_keys_fail_naming_the_space_table(self, tmp_path: Path) -> None:
         path = _write(tmp_path, f'[spaces."{SPACE}"]\nspace_id = "x"\n')

@@ -78,7 +78,10 @@ class ModeSpec:
     picks the tool binding (full surface vs read-only + context);
     ``capture`` enables harness-side auto-capture of substantial replies;
     ``activity_detail`` sets how much live progress a turn streams into
-    the chat (WP19, ADR 029).
+    the chat (WP19, ADR 029); ``web_search`` admits the provider's
+    server-side web search tool for this mode's decisions (WP20, ADR 030
+    -- executed on Anthropic's servers, never by the harness; default off
+    so graph-grounded modes stay graph-grounded).
     """
 
     name: str
@@ -86,6 +89,7 @@ class ModeSpec:
     mutating: bool = False
     capture: CapturePolicy | None = None
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
+    web_search: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.name.replace("_", "").isalnum():

@@ -25,6 +25,7 @@ from graph_context.interface.services import build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
+    _maybe_turn,
     _serve_chat,
     _watch_chats,
     _watch_graph,
@@ -32,6 +33,7 @@ from graph_context.orchestrator.anytype_chat_bot import (
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
     ChatCursor,
+    ChatTitler,
 )
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
@@ -57,9 +59,10 @@ class TestStartup:
 
 
 def _wired_chat(
-    mock: MockAnytype, turns: list[LLMTurn], cursor: ChatCursor
+    mock: MockAnytype, turns: list[LLMTurn], cursor: ChatCursor,
+    chat_name: str = "General",
 ) -> tuple[AnytypeChatClient, str, AnytypeChatTurnHandler]:
-    chat_id = mock.seed_chat("General")
+    chat_id = mock.seed_chat(chat_name)
     config = AnytypeConfig(api_key="test", space_id=mock.space_id)
     chat_client = AnytypeChatClient(AnytypeClient(config, transport=mock.transport))
     services = build_services(
@@ -317,7 +320,9 @@ class TestServeLoop:
         the failed-turn summary -- nothing strands as "Processing…"."""
 
         class _Explodes(ScriptedDriver):
-            async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+            async def decide(
+                self, transcript, tools, goal: str = "", *, web_search: bool = False
+            ) -> LLMTurn:
                 raise RuntimeError("driver fell over")
 
         mock = MockAnytype()
@@ -419,3 +424,123 @@ class TestScheduledEventWatcher:
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
+
+
+class TestAutoTitling:
+    """WP21 (ADR 031): an untitled chat gets a harness-generated title
+    after its first real exchange -- one driver side-call, one rename,
+    once per chat lifetime; failures never fail the turn."""
+
+    @staticmethod
+    def _message(text: str, order_id: str = "!!a"):
+        from graph_context.infrastructure.anytype.chat import ChatMessage
+
+        return ChatMessage(
+            id=f"m-{order_id}", creator="human", text=text, order_id=order_id
+        )
+
+    async def test_the_first_exchange_titles_an_untitled_chat(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock,
+            # Turn 1 answers the message; turn 2 is the titling side-call.
+            [LLMTurn(reply="They throw rocks."),
+             LLMTurn(reply='"Siege Engines 101."')],
+            ChatCursor(), chat_name="",
+        )
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("how do siege engines work?"), chat_client, titler,
+        )
+        names = dict(await chat_client.list_chats())
+        assert names[chat_id] == "Siege Engines 101"  # sanitized
+        assert titler.names[chat_id] == "Siege Engines 101"
+
+    async def test_a_second_exchange_never_retitles(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock,
+            [LLMTurn(reply="one"), LLMTurn(reply="First Title"),
+             LLMTurn(reply="two"), LLMTurn(reply="WRONG: second title")],
+            ChatCursor(), chat_name="",
+        )
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("q1", "!!a"), chat_client, titler,
+        )
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("q2", "!!b"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == "First Title"
+
+    async def test_a_humans_title_is_never_overwritten(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [LLMTurn(reply="answer")], ChatCursor(),
+            chat_name="Trip planning",
+        )
+        titler = ChatTitler(names={chat_id: "Trip planning"})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("hello"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == "Trip planning"
+
+    async def test_commands_never_trigger_titling(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [], ChatCursor(), chat_name="",
+        )
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("/mode"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert titler.needs_title(chat_id)  # the attempt was not consumed
+
+    async def test_a_failed_turn_defers_the_attempt(self) -> None:
+        class _Explodes(ScriptedDriver):
+            async def decide(
+                self, transcript, tools, goal: str = "", *,
+                web_search: bool = False,
+            ) -> LLMTurn:
+                raise RuntimeError("driver fell over")
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [], ChatCursor(), chat_name="",
+        )
+        route = handler.routes[chat_id]
+        route.orchestrator.driver = _Explodes([])
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("hello"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert titler.needs_title(chat_id)  # retry on the next exchange
+
+    async def test_a_failing_rename_never_fails_the_turn(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [LLMTurn(reply="answer"), LLMTurn(reply="A Title")],
+            ChatCursor(), chat_name="",
+        )
+
+        async def broken_rename(chat_id: str, name: str) -> None:
+            raise GraphContextError("rename endpoint down")
+
+        chat_client.rename = broken_rename  # type: ignore[method-assign]
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("hello"), chat_client, titler,
+        )
+        # The reply still reached the chat; the attempt is spent (no storm).
+        texts = [m["content"]["text"] for m in mock.chat_messages(chat_id)]
+        assert any("answer" in t for t in texts)
+        assert not titler.needs_title(chat_id)

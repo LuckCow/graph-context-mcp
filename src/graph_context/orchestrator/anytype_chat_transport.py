@@ -42,6 +42,7 @@ from typing import Protocol
 
 from graph_context.application.scheduler import DueEvent
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.drivers import TranscriptEvent
 from graph_context.orchestrator.pipeline import (
     ReplyEvent,
     TurnObserver,
@@ -243,6 +244,83 @@ class ChatCursor:
             )
 
 
+# Chat names that read as "untitled" to the auto-titler (WP21): the API
+# births a nameless chat with "" (quirk C9 / spike S12); "Chat" is the
+# generic default the UI-created chats have shown. A human's deliberate
+# title -- anything else -- is never overwritten.
+UNTITLED_CHAT_NAMES = frozenset({"", "Chat", "New chat"})
+
+# The auto-title side-call's inputs (the goal is the driver's system-
+# prompt fragment; the prompt is one user turn). Consumers are an LLM.
+TITLE_GOAL = (
+    "You title conversations for a chat sidebar. Answer with the title "
+    "only: 2-6 plain words, no quotes, no trailing punctuation."
+)
+TITLE_PROMPT = (
+    "Write a title for the conversation that begins with this exchange.\n\n"
+    "User: {user}\n\nAssistant: {reply}"
+)
+_TITLE_INPUT_SNIP = 500  # per side; a title needs the gist, not the essay
+MAX_TITLE_CHARS = 60
+
+
+@dataclass
+class ChatTitler:
+    """Claude-app-style auto-titling policy (WP21, ADR 031) -- pure state
+    and text shaping; the composition root owns the driver call and the
+    rename I/O.
+
+    ``names`` is ALIASED from the runtime's chat-name registry (the same
+    live-discovery maps the handler shares), so a chat a human titled --
+    at startup, or spotted by the rescan watcher -- never gets renamed.
+    ``_attempted`` guards against retry storms within one process; it
+    needs no persistence because the name check re-derives the state
+    after a restart (a successfully titled chat re-lists with its title).
+    """
+
+    names: dict[str, str]
+    _attempted: set[str] = field(default_factory=set)
+
+    def needs_title(self, chat_id: str) -> bool:
+        if chat_id in self._attempted:
+            return False
+        return self.names.get(chat_id, "").strip() in UNTITLED_CHAT_NAMES
+
+    def mark_attempted(self, chat_id: str) -> None:
+        self._attempted.add(chat_id)
+
+    def record(self, chat_id: str, title: str) -> None:
+        self.names[chat_id] = title
+
+    @staticmethod
+    def prompt_events(
+        user_text: str, reply_text: str
+    ) -> list[TranscriptEvent]:
+        """The one-shot transcript for the titling side-call."""
+        return [TranscriptEvent("user", TITLE_PROMPT.format(
+            user=_snip(user_text.strip(), _TITLE_INPUT_SNIP),
+            reply=_snip(reply_text.strip(), _TITLE_INPUT_SNIP),
+        ))]
+
+    @staticmethod
+    def sanitize(raw: str) -> str:
+        """Model output -> a chat title, defensively: first line only,
+        wrapper quotes/emphasis stripped, whitespace collapsed, length
+        capped. ``""`` means "no usable title" -- the caller skips."""
+        line = next(
+            (piece.strip() for piece in raw.splitlines() if piece.strip()), ""
+        )
+        line = line.strip("\"'`*_")
+        line = re.sub(r"\s+", " ", line).rstrip(".!?,;:")
+        if len(line) > MAX_TITLE_CHARS:
+            line = line[:MAX_TITLE_CHARS].rsplit(" ", 1)[0].rstrip(".!?,;: ")
+        return line
+
+
+def _snip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 @dataclass
 class TurnReply:
     """One turn's outbound surface: a placeholder first, then the reply.
@@ -394,8 +472,10 @@ class AnytypeChatTurnHandler:
         message: InboundChatMessage,
         reply: TurnReply,
         activity: ActivityObserver | None = None,
-    ) -> None:
+    ) -> list[ReplyEvent]:
         """One accepted message -> placeholder -> turn -> n deliveries.
+        Returns the turn's reply events (the auto-titler reads the first
+        exchange off them; delivery already happened).
 
         The cursor advances BEFORE the turn: a failing turn must not make
         the same message eligible again on the next stream event. The
@@ -435,6 +515,7 @@ class AnytypeChatTurnHandler:
         await self.deliver_events(events, reply)
         if activity is not None:
             await activity.close(ok=True)
+        return list(events)
 
     async def deliver_events(
         self, events: Sequence[ReplyEvent], reply: TurnReply

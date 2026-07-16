@@ -20,6 +20,16 @@ decision as an ``assistant`` TranscriptEvent (paired to results by
 Like every driver, ``decide`` is single-decision and stateless: the
 pipeline owns the agentic loop (ADR 007), executes the returned calls,
 and feeds results back on the next decide.
+
+Web search (ADR 030): when a mode admits it, the request carries the
+provider's SERVER-SIDE web search tool -- searches run on Anthropic's
+infrastructure inside the same ``messages.create`` call and never
+round-trip through the pipeline. Known v1 limitation: when a searching
+decision ALSO emits local tool calls, the transcript rebuilt for the
+next decide omits the ``server_tool_use``/``web_search_tool_result``
+blocks, so the model retains only what it wrote as text. If dogfooding
+shows context loss, the mitigation is folding a search-result digest
+into a fenced ``tool`` transcript event.
 """
 
 from __future__ import annotations
@@ -51,6 +61,34 @@ from graph_context.orchestrator.drivers import (
 
 DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULT_MAX_TOKENS = 16000
+
+# Server-side web search paused mid-turn (the provider's internal loop hit
+# its iteration cap): resume by re-sending with the partial assistant
+# content appended. Bounded -- a turn that keeps pausing is cut off.
+_MAX_PAUSE_RESUMES = 5
+
+# Models whose web search tool supports dynamic filtering (the _20260209
+# variant); everything older takes the basic _20250305 tool. Prefix match:
+# dated snapshots and future point releases of these lines stay covered.
+_DYNAMIC_FILTER_MODELS = (
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable",
+    "claude-mythos",
+)
+
+
+def web_search_tool(model: str) -> dict[str, Any]:
+    """The server-side web search tool definition for ``model``."""
+    kind = (
+        "web_search_20260209"
+        if model.startswith(_DYNAMIC_FILTER_MODELS)
+        else "web_search_20250305"
+    )
+    return {"type": kind, "name": "web_search"}
 
 _REFUSAL_NOTICE = (
     "(the model declined this request for safety reasons; rephrase or "
@@ -173,6 +211,12 @@ def turn_from_response(response: Any) -> LLMTurn:
     the result events), ``thinking`` blocks land in ``LLMTurn.thinking``
     when non-empty (adaptive thinking streams them with empty text by
     default) -- diagnostics for the turn diary, never reply text.
+    ``server_tool_use`` blocks (web search, ADR 030) already ran on the
+    provider's side: they surface as ``server_tool_calls`` for the turn
+    diary and activity stream, never as pipeline work; their
+    ``web_search_tool_result`` companions are consumed by the model
+    in-response and skipped here (error results included -- an error
+    object instead of a result list is the provider's in-band shape).
     ``stop_reason`` outcomes the pipeline should see are folded into the
     reply text: a refusal yields a harness-visible notice instead of
     silence, and a ``max_tokens`` cut is annotated so truncation is not
@@ -180,6 +224,7 @@ def turn_from_response(response: Any) -> LLMTurn:
     reply_parts: list[str] = []
     thinking_parts: list[str] = []
     calls: list[ToolCall] = []
+    server_calls: list[ToolCall] = []
     for block in response.content:
         if block.type == "text":
             reply_parts.append(block.text)
@@ -187,13 +232,24 @@ def turn_from_response(response: Any) -> LLMTurn:
             thinking_parts.append(block.thinking)
         elif block.type == "tool_use":
             calls.append(ToolCall(block.name, dict(block.input), id=block.id))
+        elif block.type == "server_tool_use":
+            server_calls.append(
+                ToolCall(block.name, dict(block.input), id=block.id)
+            )
+        # web_search_tool_result (and any future server-result block):
+        # provider-internal, deliberately skipped.
     reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
     thinking = "\n\n".join(part for part in thinking_parts if part.strip()).strip()
     if response.stop_reason == "refusal":
         return LLMTurn(reply=_REFUSAL_NOTICE)
     if response.stop_reason == "max_tokens":
         reply = f"{reply}\n\n{_TRUNCATION_NOTE}".strip()
-    return LLMTurn(reply=reply, tool_calls=tuple(calls), thinking=thinking)
+    return LLMTurn(
+        reply=reply,
+        tool_calls=tuple(calls),
+        thinking=thinking,
+        server_tool_calls=tuple(server_calls),
+    )
 
 
 def usage_from_response(response: Any, duration_ms: int) -> DecideUsage:
@@ -215,6 +271,42 @@ def usage_from_response(response: Any, duration_ms: int) -> DecideUsage:
             getattr(usage, "cache_creation_input_tokens", 0) or 0
         ),
         num_turns=1,
+    )
+
+
+def usage_from_responses(responses: Sequence[Any], duration_ms: int) -> DecideUsage:
+    """Summed usage across one decide's requests (pause_turn resumes
+    included) -- the metrics tap fires ONCE per decide, so eval reports
+    keep counting decides, not wire round trips."""
+    parts = [usage_from_response(response, duration_ms) for response in responses]
+    return DecideUsage(
+        duration_ms=duration_ms,
+        duration_api_ms=duration_ms,
+        total_cost_usd=None,
+        input_tokens=sum(p.input_tokens for p in parts),
+        output_tokens=sum(p.output_tokens for p in parts),
+        cache_read_tokens=sum(p.cache_read_tokens for p in parts),
+        cache_creation_tokens=sum(p.cache_creation_tokens for p in parts),
+        num_turns=1,
+    )
+
+
+def merged_turn(turns: Sequence[LLMTurn]) -> LLMTurn:
+    """One logical decision from a pause_turn chain of responses.
+
+    The provider pauses MID-decision (its server-tool loop hit an
+    iteration cap), so each resumed response holds only continuation
+    content -- reply text, thinking, and (server) tool calls concatenate
+    in order to reconstruct the whole decision."""
+    if len(turns) == 1:
+        return turns[0]
+    return LLMTurn(
+        reply="\n\n".join(t.reply for t in turns if t.reply).strip(),
+        tool_calls=tuple(c for t in turns for c in t.tool_calls),
+        thinking="\n\n".join(t.thinking for t in turns if t.thinking).strip(),
+        server_tool_calls=tuple(
+            c for t in turns for c in t.server_tool_calls
+        ),
     )
 
 
@@ -268,7 +360,15 @@ class AnthropicDriver:
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        web_search: bool = False,
     ) -> LLMTurn:
+        tool_defs = anthropic_tools(tools, self._schemas)
+        if web_search:
+            # Deterministic tail position (after the sorted graph tools)
+            # keeps requests cache-friendly across decides.
+            tool_defs.append(web_search_tool(self._model))
+        messages = messages_from_transcript(transcript)
         request: dict[str, Any] = {
             "model": self._model,
             "max_tokens": self._max_tokens,
@@ -276,8 +376,8 @@ class AnthropicDriver:
             # Explicit even where it is the model default: omitting it
             # runs WITHOUT thinking on some current models.
             "thinking": {"type": "adaptive"},
-            "tools": anthropic_tools(tools, self._schemas),
-            "messages": messages_from_transcript(transcript),
+            "tools": tool_defs,
+            "messages": messages,
             # No temperature/top_p/top_k: removed on current models (400).
             # Prompt caching deferred: once turn transcripts routinely
             # exceed the model's cacheable minimum, a top-level
@@ -286,8 +386,31 @@ class AnthropicDriver:
         if self._effort is not None:
             request["output_config"] = {"effort": self._effort}
         started = time.perf_counter()
+        responses: list[Any] = []
+        for _ in range(_MAX_PAUSE_RESUMES + 1):
+            responses.append(await self._create(request))
+            if responses[-1].stop_reason != "pause_turn":
+                break
+            # A server-tool turn paused mid-decision: re-send with the
+            # partial assistant content appended; the server resumes where
+            # it left off (no synthetic user nudge).
+            messages = [
+                *messages,
+                {"role": "assistant", "content": responses[-1].content},
+            ]
+            request["messages"] = messages
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        if self._on_result is not None:
+            self._on_result(usage_from_responses(responses, duration_ms))
+        if responses[-1].stop_reason == "refusal":
+            # A mid-chain partial before a refusal is discarded, not
+            # presented as an answer.
+            return turn_from_response(responses[-1])
+        return merged_turn([turn_from_response(r) for r in responses])
+
+    async def _create(self, request: dict[str, Any]) -> Any:
         try:
-            response = await self._client.messages.create(**request)
+            return await self._client.messages.create(**request)
         except RateLimitError as err:
             raise GraphContextError(
                 "anthropic API rate limit exhausted (after SDK retries); "
@@ -301,7 +424,3 @@ class AnthropicDriver:
             raise GraphContextError(
                 "could not reach api.anthropic.com (network/egress?)"
             ) from err
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        if self._on_result is not None:
-            self._on_result(usage_from_response(response, duration_ms))
-        return turn_from_response(response)

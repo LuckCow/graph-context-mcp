@@ -23,6 +23,7 @@ pytest.importorskip("anthropic")
 from graph_context.errors import GraphContextError  # noqa: E402
 from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.anthropic_driver import (  # noqa: E402
+    _MAX_PAUSE_RESUMES,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     AnthropicDriver,
@@ -30,6 +31,7 @@ from graph_context.orchestrator.anthropic_driver import (  # noqa: E402
     messages_from_transcript,
     turn_from_response,
     usage_from_response,
+    web_search_tool,
 )
 from graph_context.orchestrator.driver_common import (  # noqa: E402
     assembled_system_prompt,
@@ -370,3 +372,152 @@ class TestSeamParity:
         ]
         rendered = driver.render_prompt(transcript)
         assert json.loads(rendered) == messages_from_transcript(transcript)
+
+
+def _server_tool_use_block(id: str, query: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="server_tool_use", id=id, name="web_search",
+        input={"query": query},
+    )
+
+
+class _SequenceClient:
+    """Like _StubClient, but answers a fixed response SEQUENCE (the
+    pause_turn resume path makes several wire calls per decide)."""
+
+    def __init__(self, responses: list[SimpleNamespace]) -> None:
+        self._responses = list(responses)
+        self.requests: list[dict] = []
+        self.messages = SimpleNamespace(create=self._create)
+
+    async def _create(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self._responses) > 1:
+            return self._responses.pop(0)
+        return self._responses[0]
+
+
+class TestWebSearch:
+    """WP20 (ADR 030): the provider's SERVER-SIDE web search tool --
+    admitted per decide by the mode flag, executed on Anthropic's
+    infrastructure, surfaced as server_tool_calls (never pipeline work)."""
+
+    def test_dynamic_filter_models_take_the_20260209_variant(self):
+        assert web_search_tool("claude-sonnet-5")["type"] == "web_search_20260209"
+        assert web_search_tool("claude-opus-4-8")["type"] == "web_search_20260209"
+
+    def test_older_models_take_the_basic_variant(self):
+        assert web_search_tool("claude-haiku-4-5")["type"] == "web_search_20250305"
+
+    async def test_the_flag_appends_the_server_tool_after_graph_tools(self):
+        stub = _StubClient(_response([_text_block("Hi.")]))
+        driver = AnthropicDriver(schemas={}, client=stub)
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {"get_node": "Fetch."}, "",
+            web_search=True,
+        )
+        tools = stub.requests[0]["tools"]
+        assert tools[-1] == {"type": "web_search_20260209", "name": "web_search"}
+        assert [t["name"] for t in tools[:-1]] == ["get_node"]
+
+    async def test_the_flag_off_sends_no_server_tool(self):
+        stub = _StubClient(_response([_text_block("Hi.")]))
+        driver = AnthropicDriver(schemas={}, client=stub)
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {"get_node": "Fetch."}, ""
+        )
+        assert all(
+            t.get("type") is None or "web_search" not in str(t.get("type"))
+            for t in stub.requests[0]["tools"]
+        )
+
+    def test_server_tool_use_blocks_land_in_server_tool_calls(self):
+        response = _response([
+            _server_tool_use_block("srvtoolu_1", "anytype local api"),
+            SimpleNamespace(
+                type="web_search_tool_result", tool_use_id="srvtoolu_1",
+                content=[SimpleNamespace(type="web_search_result", url="u")],
+            ),
+            _text_block("Answer."),
+        ])
+        turn = turn_from_response(response)
+        assert turn.reply == "Answer."
+        assert turn.tool_calls == ()  # never pipeline work
+        (call,) = turn.server_tool_calls
+        assert call.name == "web_search"
+        assert call.arguments == {"query": "anytype local api"}
+        assert call.id == "srvtoolu_1"
+
+    def test_an_error_result_object_is_tolerated(self):
+        # A failed search returns HTTP 200 with an error OBJECT (not a
+        # result list) as the block content -- must not crash the parse.
+        response = _response([
+            _server_tool_use_block("srvtoolu_1", "q"),
+            SimpleNamespace(
+                type="web_search_tool_result", tool_use_id="srvtoolu_1",
+                content=SimpleNamespace(
+                    type="web_search_tool_result_error",
+                    error_code="max_uses_exceeded",
+                ),
+            ),
+            _text_block("Could not search."),
+        ])
+        turn = turn_from_response(response)
+        assert turn.reply == "Could not search."
+        assert len(turn.server_tool_calls) == 1
+
+
+class TestPauseTurnResume:
+    """A server-tool turn can pause mid-decision (stop_reason
+    ``pause_turn``); the driver resumes it on the same decide by
+    re-sending with the partial assistant content appended."""
+
+    async def test_a_paused_turn_is_resumed_and_merged(self):
+        paused = _response(
+            [
+                _text_block("Searching..."),
+                _server_tool_use_block("srvtoolu_1", "first query"),
+            ],
+            stop_reason="pause_turn",
+        )
+        final = _response([_text_block("The answer.")])
+        client = _SequenceClient([paused, final])
+        seen = []
+        driver = AnthropicDriver(
+            schemas={}, client=client, on_result=seen.append
+        )
+        turn = await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "", web_search=True
+        )
+        assert len(client.requests) == 2
+        resumed = client.requests[1]["messages"]
+        assert resumed[-1] == {"role": "assistant", "content": paused.content}
+        assert turn.reply == "Searching...\n\nThe answer."
+        assert [c.id for c in turn.server_tool_calls] == ["srvtoolu_1"]
+        # The metrics tap fires ONCE, with usage summed across both calls.
+        assert len(seen) == 1
+        assert seen[0].input_tokens == 20
+
+    async def test_resumes_are_capped(self):
+        always_paused = _response(
+            [_text_block("still going")], stop_reason="pause_turn"
+        )
+        client = _SequenceClient([always_paused])
+        driver = AnthropicDriver(schemas={}, client=client)
+        await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "", web_search=True
+        )
+        assert len(client.requests) == _MAX_PAUSE_RESUMES + 1
+
+    async def test_a_refusal_after_a_pause_discards_the_partial(self):
+        paused = _response(
+            [_text_block("Partial...")], stop_reason="pause_turn"
+        )
+        refused = _response([], stop_reason="refusal")
+        client = _SequenceClient([paused, refused])
+        driver = AnthropicDriver(schemas={}, client=client)
+        turn = await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "", web_search=True
+        )
+        assert "Partial" not in turn.reply
+        assert "declined" in turn.reply

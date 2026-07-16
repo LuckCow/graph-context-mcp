@@ -129,10 +129,21 @@ class ActivityLog:
         decision = _Decision(
             thinking=turn.thinking,
             preamble=turn.reply,
-            calls=[_Call(c.name, dict(c.arguments)) for c in turn.tool_calls],
+            calls=[
+                # Provider-executed calls (web search, ADR 030) arrive
+                # already resolved -- no tool_result will follow, so they
+                # never join the FIFO pending queue.
+                *(
+                    _Call(c.name, dict(c.arguments), ok=True)
+                    for c in turn.server_tool_calls
+                ),
+                *(_Call(c.name, dict(c.arguments)) for c in turn.tool_calls),
+            ],
         )
         self._decisions.append(decision)
-        self._pending.extend(decision.calls)
+        self._pending.extend(
+            call for call in decision.calls if call.ok is None
+        )
 
     def note_tool_result(self, name: str, result: str, ok: bool) -> None:
         """Results arrive in dispatch order (the pipeline executes a

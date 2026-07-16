@@ -4,8 +4,8 @@ Pins against a real server the exact behaviors the mock asserts in
 ``tests/anytype/test_chat_client.py``: chat creation via API (S10e), the
 flat ``message_id`` create response (C1), the ``messages`` recency window
 (C2), SSE ``message_added`` framing with heartbeat comments (C5), the
-wholesale-replacement edit (C8), and message deletion. Gated by
-``ANYTYPE_E2E=1`` like the rest of the suite.
+wholesale-replacement edit (C8), the object-route rename (C9), and
+message deletion. Gated by ``ANYTYPE_E2E=1`` like the rest of the suite.
 
 NOTE: the session-scoped ``live_config`` resets the GC-E2E space before
 and after the run -- spike artifacts (S9/S10 chats, sets, todos) do not
@@ -72,5 +72,12 @@ class TestLiveChat:
 
             await client.delete_chat_message(chat_id, message_id)
             assert await client.list_chat_messages(chat_id) == []
+
+            # C9 (spike S12): the rename rides the generic object PATCH
+            # (the /chats namespace has no update route) and the /chats
+            # re-list reflects it.
+            await chat_client.rename(chat_id, "E2E Chat renamed")
+            names = dict(await chat_client.list_chats())
+            assert names[chat_id] == "E2E Chat renamed"
         finally:
             await client.aclose()

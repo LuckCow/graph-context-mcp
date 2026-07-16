@@ -101,6 +101,26 @@ class TestTurnLogFile:
             "The task needs an assignee edge; find the node first."
         )
 
+    def test_server_tool_calls_are_logged_beside_the_decision(
+        self, tmp_path
+    ) -> None:
+        """WP20 (ADR 030): provider-executed searches already ran -- no
+        tool_result event follows, so the decision entry is their only
+        record in the diary."""
+        path = tmp_path / "turns.jsonl"
+        log = TurnLog(path, now=lambda: "T0")
+        log.llm_turn("t0", "s1", "researcher", LLMTurn(
+            reply="Searched the web.",
+            server_tool_calls=(
+                ToolCall("web_search", {"query": "anytype api"}),
+            ),
+        ))
+        (entry,) = _entries(path)
+        assert entry["server_tool_calls"] == [
+            {"name": "web_search", "arguments": {"query": "anytype api"}}
+        ]
+        assert entry["reply"] == "Searched the web."
+
     def test_oldest_entries_drop_once_the_budget_is_exceeded(
         self, tmp_path
     ) -> None:

@@ -10,6 +10,9 @@ file, keyed by the space id itself::
     profile       = "fiction"      # optional; defaults to GC_PROFILE
     project       = "Ashfall"      # optional cosmetic label
     modes_file    = "ashfall.toml" # optional; overrides GC_MODES_FILE
+    default_mode  = "assistant"    # optional; the mode NEW chats start in
+                                    # (overrides the profile's default;
+                                    # chats that picked a mode keep it)
     chat_id       = "bafyre..."    # optional PIN: serve ONLY this chat,
                                     # no discovery (single-chat deployments)
     exclude_chats = ["bafyre..."]  # optional; chat ids the bot ignores
@@ -38,7 +41,10 @@ from graph_context.errors import GraphContextError
 from graph_context.interface import profiles
 from graph_context.interface.profiles import DomainProfile
 
-_BINDING_KEYS = {"profile", "project", "modes_file", "chat_id", "exclude_chats"}
+_BINDING_KEYS = {
+    "profile", "project", "modes_file", "default_mode", "chat_id",
+    "exclude_chats",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +55,10 @@ class SpaceBinding:
     profile: DomainProfile
     project: str | None = None
     modes_file: str | None = None
+    # The mode new chats start in (WP21): overrides the profile's
+    # default_mode; validated against the LOADED registry at assembly time
+    # (the mode may come from the modes file or the space itself).
+    default_mode: str | None = None
     chat_id: str | None = None  # pin: serve only this chat (no discovery)
     exclude_chats: tuple[str, ...] = ()
 
@@ -131,6 +141,7 @@ def _binding_from_mapping(
         profile=profile,
         project=body.get("project"),
         modes_file=body.get("modes_file"),
+        default_mode=body.get("default_mode"),
         chat_id=body.get("chat_id"),
         exclude_chats=exclude_chats,
     )

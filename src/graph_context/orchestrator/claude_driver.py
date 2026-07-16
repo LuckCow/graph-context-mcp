@@ -36,6 +36,14 @@ Each ``decide`` is a fresh, stateless CLI session over the rendered
 turn-local transcript. Cross-turn conversation memory is deliberately
 absent for now -- the SDK's session-resume machinery is the obvious lever
 when dogfooding asks for it.
+
+Web search (ADR 030): when a mode admits it, ``WebSearch`` -- and only
+``WebSearch`` -- is re-admitted from the CLI's built-in toolset and
+allowed through the permission callback. It executes on Anthropic's
+servers within the session (the firewall never sees search traffic), the
+model reads the results and continues INSIDE the same decide; its
+ToolUseBlocks surface as ``server_tool_calls`` so the pipeline never
+mistakes them for harness work.
 """
 
 from __future__ import annotations
@@ -76,10 +84,12 @@ from graph_context.orchestrator.drivers import (
 )
 
 __all__ = [
+    "WEB_SEARCH_TOOL",
     "ClaudeAgentDriver",
     "assembled_system_prompt",
     "derive_schema",
     "local_tool_name",
+    "permission_gate",
     "render_transcript",
     "sdk_tools",
     "session_options",
@@ -91,6 +101,10 @@ logger = logging.getLogger(__name__)
 _SERVER_NAME = "gc"
 _TOOL_PREFIX = f"mcp__{_SERVER_NAME}__"
 
+# The CLI built-in admitted when a mode enables web search (ADR 030).
+# Executed by Anthropic server-side; never by the harness.
+WEB_SEARCH_TOOL = "WebSearch"
+
 
 def local_tool_name(sdk_name: str) -> str:
     """``mcp__gc__get_node`` -> ``get_node`` (the binding's name)."""
@@ -101,6 +115,30 @@ async def _never_executed(_args: Any) -> dict[str, Any]:
     # can_use_tool denies before any handler runs; this exists because the
     # SDK requires one.
     return {"content": [{"type": "text", "text": "tool execution is harness-owned"}]}
+
+
+def permission_gate(web_search: bool) -> CanUseTool:
+    """The deny-all permission callback, with the one ADR 030 exception.
+
+    Graph-tool calls are denied with ``interrupt=True`` -- the harness
+    executes them (the calls are harvested from the streamed assistant
+    message). ``WebSearch``, when a mode admits it, is ALLOWED: it
+    executes on Anthropic's servers inside the session, so the search
+    stays within one decide and nothing runs on the harness.
+    """
+
+    async def capture_and_stop(
+        name: str, _input: dict[str, Any], _context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        if web_search and name == WEB_SEARCH_TOOL:
+            logger.debug("driver allowed server-side %s", name)
+            return PermissionResultAllow()
+        logger.debug("driver captured tool request %s", name)
+        return PermissionResultDeny(
+            message="the harness executes tool calls", interrupt=True
+        )
+
+    return capture_and_stop
 
 
 def sdk_tools(
@@ -123,6 +161,7 @@ def session_options(
     effort: EffortLevel | None,
     can_use_tool: CanUseTool,
     cli_path: str | None,
+    web_search: bool = False,
 ) -> ClaudeAgentOptions:
     """The session's capability boundary, in one place.
 
@@ -130,7 +169,10 @@ def session_options(
 
     * ``tools=[]`` disables every Claude Code built-in (Read, Write, Bash,
       WebSearch, ...). The empty list is load-bearing -- ``None`` would
-      mean "the CLI's full default toolset".
+      mean "the CLI's full default toolset". The one mode-gated exception
+      (ADR 030): ``web_search=True`` admits exactly ``WebSearch`` --
+      server-side execution, so the boundary still excludes everything
+      that touches the host.
     * ``setting_sources=[]`` is SDK isolation mode: without it the CLI
       loads user/project/local settings from the host filesystem, which
       can inject extra MCP servers, permission grants, and hooks into
@@ -138,7 +180,7 @@ def session_options(
     """
     return ClaudeAgentOptions(
         mcp_servers={_SERVER_NAME: server},
-        tools=[],
+        tools=[WEB_SEARCH_TOOL] if web_search else [],
         setting_sources=[],
         system_prompt=assembled_system_prompt(goal),
         model=model,
@@ -191,30 +233,25 @@ class ClaudeAgentDriver:
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        web_search: bool = False,
     ) -> LLMTurn:
         server = create_sdk_mcp_server(
             name=_SERVER_NAME, version="1.0.0", tools=sdk_tools(tools, self._schemas)
         )
-
-        async def capture_and_stop(
-            name: str, _input: dict[str, Any], _context: ToolPermissionContext
-        ) -> PermissionResultAllow | PermissionResultDeny:
-            logger.debug("driver captured tool request %s", name)
-            return PermissionResultDeny(
-                message="the harness executes tool calls", interrupt=True
-            )
-
         options = session_options(
             server,
             goal,
             model=self._model,
             effort=self._effort,
-            can_use_tool=capture_and_stop,
+            can_use_tool=permission_gate(web_search),
             cli_path=self._cli_path,
+            web_search=web_search,
         )
         reply_parts: list[str] = []
         thinking_parts: list[str] = []
         calls: list[ToolCall] = []
+        server_calls: list[ToolCall] = []
         last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query(render_transcript(transcript))
@@ -229,6 +266,15 @@ class ClaudeAgentDriver:
                     elif isinstance(block, ThinkingBlock):
                         thinking_parts.append(block.thinking)
                     elif isinstance(block, ToolUseBlock):
+                        if block.name == WEB_SEARCH_TOOL:
+                            # Already executed provider-side; diary
+                            # material, never pipeline work.
+                            server_calls.append(
+                                ToolCall(
+                                    block.name, dict(block.input), id=block.id
+                                )
+                            )
+                            continue
                         calls.append(
                             ToolCall(
                                 local_tool_name(block.name),
@@ -247,7 +293,12 @@ class ClaudeAgentDriver:
         thinking = "\n\n".join(
             part for part in thinking_parts if part.strip()
         ).strip()
-        return LLMTurn(reply=reply, tool_calls=tuple(calls), thinking=thinking)
+        return LLMTurn(
+            reply=reply,
+            tool_calls=tuple(calls),
+            thinking=thinking,
+            server_tool_calls=tuple(server_calls),
+        )
 
 
 def usage_from_result(result: ResultMessage) -> DecideUsage:

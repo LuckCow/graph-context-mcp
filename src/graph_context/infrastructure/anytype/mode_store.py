@@ -69,6 +69,7 @@ class AnytypeModeStore:
             # goal prompt's edges are never meaningful.
             "goal": mapping.body_of(obj).strip(),
             "mutating": bool(props.get(mapping.PROP_MODE_MUTATING)),
+            "web_search": bool(props.get(mapping.PROP_MODE_WEB_SEARCH)),
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
         }

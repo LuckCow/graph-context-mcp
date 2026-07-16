@@ -311,6 +311,13 @@ class AnytypeClient:
         payload = await self.request("POST", f"{self._space}/chats", json=body)
         return _unwrap(payload, "object")
 
+    async def rename_chat(self, chat_id: str, name: str) -> None:
+        """Rename a chat object. Quirk C9 (spike S12): the ``/chats``
+        namespace has no single-chat GET or PATCH (both 404) -- a chat
+        renames only through the GENERIC object route, and the new name
+        shows in the next ``/chats`` re-list."""
+        await self.update_object(chat_id, {"name": name})
+
     async def list_chat_messages(
         self, chat_id: str, *, limit: int = 100
     ) -> list[dict[str, Any]]:

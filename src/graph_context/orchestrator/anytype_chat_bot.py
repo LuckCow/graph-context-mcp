@@ -51,14 +51,17 @@ from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_transport import (
+    TITLE_GOAL,
     AnytypeChatTurnHandler,
     ChatCursor,
+    ChatTitler,
     EditFn,
     InboundChatMessage,
     SendFn,
     SentMessages,
 )
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.pipeline import ReplyEvent, is_command
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
 from graph_context.orchestrator.turn_activity import ChatActivity
@@ -167,6 +170,7 @@ async def _maybe_turn(
     chat_id: str,
     message: ChatMessage,
     chat_client: AnytypeChatClient,
+    titler: ChatTitler | None = None,
 ) -> None:
     inbound = _inbound(space_id, chat_id, message)
     if not handler.accepts(inbound):
@@ -182,15 +186,60 @@ async def _maybe_turn(
     reply = handler.reply(send, edit)
     activity = ChatActivity(reply=reply, edit=edit)
     try:
-        await handler.run_turn(inbound, reply, activity)
+        events = await handler.run_turn(inbound, reply, activity)
     except GraphContextError as err:
         # Config-shaped errors are actionable; show them in-chat.
         await reply.deliver(f"[error] {err}")
         await activity.close(ok=False)
+        return
     except Exception:  # a turn must never take the serve loop down
         logger.exception("turn failed (chat=%s)", chat_id)
         await reply.deliver(TURN_FAILED_NOTICE)
         await activity.close(ok=False)
+        return
+    if titler is not None:
+        await _maybe_title(titler, handler, inbound, events, chat_client)
+
+
+async def _maybe_title(
+    titler: ChatTitler,
+    handler: AnytypeChatTurnHandler,
+    inbound: InboundChatMessage,
+    events: list[ReplyEvent],
+    chat_client: AnytypeChatClient,
+) -> None:
+    """Claude-app-style auto-title after a chat's first real exchange
+    (WP21, ADR 031). One driver side-call + one rename PATCH, once per
+    chat lifetime, AFTER the reply is already delivered -- off the
+    user-visible path, and a failure never fails the turn.
+    """
+    if is_command(inbound.text) or not titler.needs_title(inbound.chat_id):
+        return
+    reply_text = next(
+        (event.text for event in events if event.kind == "reply"), ""
+    )
+    if not reply_text.strip():
+        return  # error/notice-only turn: wait for a real exchange
+    titler.mark_attempted(inbound.chat_id)  # win or lose, one attempt
+    route = handler.routes[inbound.chat_id]
+    try:
+        turn = await route.orchestrator.driver.decide(
+            titler.prompt_events(inbound.text, reply_text), {}, TITLE_GOAL
+        )
+        title = titler.sanitize(turn.reply)
+        if not title:
+            logger.warning(
+                "chat %s: title side-call produced nothing usable",
+                inbound.chat_id,
+            )
+            return
+        await chat_client.rename(inbound.chat_id, title)
+        titler.record(inbound.chat_id, title)
+        logger.info("titled chat %s: %r", inbound.chat_id, title)
+    except GraphContextError as err:
+        logger.warning("chat titling failed (chat=%s): %s", inbound.chat_id, err)
+    except Exception:  # titling must never take the serve loop down
+        logger.exception("chat titling failed (chat=%s)", inbound.chat_id)
 
 
 async def _catch_up(
@@ -198,6 +247,7 @@ async def _catch_up(
     chat_client: AnytypeChatClient,
     chat_id: str,
     cursor: ChatCursor,
+    titler: ChatTitler | None = None,
 ) -> None:
     """First-run chats skip history; resumed chats answer the offline gap."""
     window = await chat_client.recent_messages(chat_id, limit=CATCHUP_WINDOW)
@@ -224,7 +274,8 @@ async def _catch_up(
         )
     for message in window:  # the gate drops everything <= the cursor
         await _maybe_turn(
-            handler, chat_client.space_id, chat_id, message, chat_client
+            handler, chat_client.space_id, chat_id, message, chat_client,
+            titler,
         )
 
 
@@ -233,9 +284,10 @@ async def _serve_chat(
     chat_client: AnytypeChatClient,
     chat_id: str,
     cursor: ChatCursor,
+    titler: ChatTitler | None = None,
 ) -> None:
     space_id = chat_client.space_id
-    await _catch_up(handler, chat_client, chat_id, cursor)
+    await _catch_up(handler, chat_client, chat_id, cursor, titler)
     delay = 1.0
     while True:
         try:
@@ -244,7 +296,8 @@ async def _serve_chat(
                 if event.kind != "message_added" or event.message is None:
                     continue  # edits/deletes/reactions/heartbeats: no turns
                 await _maybe_turn(
-                    handler, space_id, chat_id, event.message, chat_client
+                    handler, space_id, chat_id, event.message, chat_client,
+                    titler,
                 )
         except GraphContextError as err:
             logger.warning(
@@ -267,13 +320,16 @@ async def _watch_chats(
     runtimes: bootstrap.SpaceRuntimes,
     task_group: asyncio.TaskGroup,
     interval: float,
+    titler: ChatTitler | None = None,
 ) -> None:
     """Live discovery (WP8): re-list a space's chats and serve new ones.
 
     Reads are unthrottled, so a periodic re-list is cheap. A newly created
     chat is registered (visible to the handler at once, aliased maps) and
-    gets its own serve task with no restart. Never raises -- a failed
-    re-list logs and retries -- so it is safe inside the bot's TaskGroup.
+    gets its own serve task with no restart. Already-served chats get
+    their listed NAME refreshed (WP21: a human's rename must reach the
+    titler's untitled test). Never raises -- a failed re-list logs and
+    retries -- so it is safe inside the bot's TaskGroup.
     """
     space_id = binding.space_id
     while True:
@@ -286,11 +342,12 @@ async def _watch_chats(
         names = dict(listed)
         for chat_id in served_chat_ids(binding, [cid for cid, _ in listed]):
             if chat_id in runtimes.routes:
+                runtimes.chat_names[chat_id] = names.get(chat_id, "").strip()
                 continue
             bootstrap.register_chat(runtimes, space_id, chat_id, names.get(chat_id, ""))
             logger.info("discovered chat %s in space %s; serving it", chat_id, space_id)
             task_group.create_task(
-                _serve_chat(handler, chat_client, chat_id, handler.cursor)
+                _serve_chat(handler, chat_client, chat_id, handler.cursor, titler)
             )
 
 
@@ -448,6 +505,10 @@ async def run() -> None:
             transport_clients[0]
         ) if transport_clients else "",
     )
+    # WP21: Claude-app-style auto-titling. The names map is the same
+    # object register_chat and the rescan watcher write, so a human's
+    # title is always respected.
+    titler = ChatTitler(names=runtimes.chat_names)
     rescan = _rescan_seconds()
     graph_resync = _graph_resync_seconds()
     schedule_tick = _schedule_tick_seconds()
@@ -464,7 +525,8 @@ async def run() -> None:
             for chat_id, space_id in list(runtimes.spaces.items()):
                 task_group.create_task(
                     _serve_chat(
-                        handler, client_for(space_id), chat_id, handler.cursor
+                        handler, client_for(space_id), chat_id,
+                        handler.cursor, titler,
                     )
                 )
             if rescan is not None:
@@ -473,7 +535,7 @@ async def run() -> None:
                         continue  # pinned: no discovery
                     task_group.create_task(_watch_chats(
                         handler, client_for(space_id), binding,
-                        runtimes, task_group, rescan,
+                        runtimes, task_group, rescan, titler,
                     ))
             if graph_resync is not None:
                 for space_id, route in runtimes.space_routes.items():

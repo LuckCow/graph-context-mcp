@@ -19,9 +19,11 @@ from graph_context.interface.profiles import get_profile
 from graph_context.interface.services import build_services
 from graph_context.orchestrator.anytype_chat_transport import (
     MAX_ATTACHMENTS,
+    MAX_TITLE_CHARS,
     PROCESSING_NOTICE,
     AnytypeChatTurnHandler,
     ChatCursor,
+    ChatTitler,
     InboundChatMessage,
     SentMessages,
     TurnReply,
@@ -171,7 +173,9 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         super().__init__(turns)
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
-    async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+    async def decide(
+        self, transcript, tools, goal: str = "", *, web_search: bool = False
+    ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
 
@@ -672,7 +676,7 @@ class TestScheduledTurn:
         from graph_context.domain import scheduling
 
         class _ExplodingDriver(ScriptedDriver):
-            async def decide(self, transcript, tools, goal):  # type: ignore[override]
+            async def decide(self, transcript, tools, goal, *, web_search=False):  # type: ignore[override]
                 raise RuntimeError("driver down")
 
         handler = _handler(routes={CHAT: _route(driver=_ExplodingDriver([]))})
@@ -692,3 +696,51 @@ class TestScheduledTurn:
         assert raised
         stored = repository.graph.node(node.id)
         assert stored.fields.get(scheduling.FIELD_LAST_FIRED)  # at-most-once
+
+
+class TestChatTitler:
+    """WP21 (ADR 031): the pure titling policy -- untitled test, one
+    attempt per chat, defensive title shaping."""
+
+    def test_untitled_names_need_a_title_and_real_names_do_not(self) -> None:
+        titler = ChatTitler(names={
+            "c1": "", "c2": "Chat", "c3": "New chat", "c4": "Trip planning",
+        })
+        assert titler.needs_title("c1")
+        assert titler.needs_title("c2")
+        assert titler.needs_title("c3")
+        assert not titler.needs_title("c4")
+        assert titler.needs_title("unknown-chat")  # no name on record yet
+
+    def test_an_attempt_is_spent_win_or_lose(self) -> None:
+        titler = ChatTitler(names={"c1": ""})
+        titler.mark_attempted("c1")
+        assert not titler.needs_title("c1")
+
+    def test_recording_a_title_updates_the_shared_names(self) -> None:
+        names: dict[str, str] = {"c1": ""}
+        titler = ChatTitler(names=names)
+        titler.record("c1", "Siege Engines 101")
+        assert names["c1"] == "Siege Engines 101"  # aliased, not copied
+
+    def test_sanitize_strips_wrappers_and_trailing_punctuation(self) -> None:
+        assert ChatTitler.sanitize('"Siege Engines 101."') == "Siege Engines 101"
+        assert ChatTitler.sanitize("**Bold title**") == "Bold title"
+        assert ChatTitler.sanitize("  Title:\nexplanation line") == "Title"
+        assert ChatTitler.sanitize("many   inner\tspaces") == "many inner spaces"
+
+    def test_sanitize_caps_length_at_a_word_boundary(self) -> None:
+        long = "word " * 40
+        title = ChatTitler.sanitize(long)
+        assert len(title) <= MAX_TITLE_CHARS
+        assert not title.endswith(" ")
+
+    def test_sanitize_of_nothing_usable_is_empty(self) -> None:
+        assert ChatTitler.sanitize("") == ""
+        assert ChatTitler.sanitize("\n\n  \n") == ""
+
+    def test_prompt_events_snip_long_inputs(self) -> None:
+        (event,) = ChatTitler.prompt_events("u" * 2000, "r" * 2000)
+        assert event.kind == "user"
+        assert len(event.text) < 1200  # both sides snipped
+        assert "…" in event.text

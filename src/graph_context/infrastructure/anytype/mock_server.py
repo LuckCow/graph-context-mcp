@@ -539,6 +539,19 @@ class MockAnytype:
     def _handle_object(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         obj = self._objects.get(match.group("obj"))
         if obj is None:
+            chat = self._chats.get(match.group("obj"))
+            if chat is not None:
+                # C9 (spike S12): chats have no single-chat route of their
+                # own, but the GENERIC object routes serve them -- GET
+                # answers the envelope, PATCH {"name"} renames (the next
+                # /chats re-list reflects it).
+                if request.method == "GET":
+                    return httpx.Response(200, json={"object": chat})
+                if request.method == "PATCH":
+                    body = json.loads(request.content)
+                    if "name" in body:
+                        chat["name"] = body["name"]
+                    return httpx.Response(200, json={"object": chat})
             template = self._templates_by_id.get(match.group("obj"))
             if template is not None and request.method == "GET":
                 # Templates answer the single-object GET like any object,

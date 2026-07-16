@@ -209,7 +209,9 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         super().__init__(turns)
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
-    async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+    async def decide(
+        self, transcript, tools, goal: str = "", *, web_search: bool = False
+    ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
 
@@ -413,7 +415,7 @@ class TestPipeline:
         goals: list[str] = []
 
         class GoalSpy:
-            async def decide(self, transcript, tools, goal):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal, *, web_search=False):  # type: ignore[no-untyped-def]
                 goals.append(goal)
                 return LLMTurn(reply="ok")
 
@@ -785,7 +787,8 @@ class TestActivityDetailFromTheMode:
         orchestrator = _orchestrator(services, [])
         events = await orchestrator.handle_message("s1", "u1", "/mode")
         assert (
-            f"(activity detail: {DEFAULT_ACTIVITY_DETAIL})" in events[-1].text
+            f"(activity detail: {DEFAULT_ACTIVITY_DETAIL}; web search: off)"
+            in events[-1].text
         )
 
     async def test_switching_modes_switches_the_streamed_detail(
@@ -847,6 +850,103 @@ class TestActivityDetailFromTheMode:
             load_registry(FICTION, modes_file=str(path))
         assert "[modes.loud]" in str(err.value)
         assert "off, minimal, tools, full" in str(err.value)
+
+
+class TestWebSearchFromTheMode:
+    """WP20 (ADR 030): web search is a MODE property, default off --
+    picking a mode picks whether the provider's server-side search tool
+    is admitted; the pipeline forwards the flag on every decide."""
+
+    def test_a_modes_file_can_enable_web_search(self, tmp_path) -> None:
+        path = tmp_path / "modes.toml"
+        path.write_text(
+            '[modes.researcher]\ngoal = "Look things up."\nweb_search = true\n'
+        )
+        registry = load_registry(FICTION, modes_file=str(path))
+        spec = registry.get("researcher")
+        assert spec is not None and spec.web_search is True
+
+    def test_an_in_space_mode_object_can_enable_web_search(self) -> None:
+        registry = load_registry(
+            FICTION, in_space=[_mode_payload(web_search=True)]
+        )
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.web_search is True
+
+    def test_web_search_defaults_off(self) -> None:
+        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.web_search is False
+
+    async def test_the_pipeline_forwards_the_active_modes_flag(
+        self, services: Services
+    ) -> None:
+        forwarded: list[bool] = []
+
+        class FlagSpy:
+            def system_prompt(self, goal: str) -> str:
+                return goal
+
+            def render_prompt(self, transcript) -> str:  # type: ignore[no-untyped-def]
+                return ""
+
+            async def decide(self, transcript, tools, goal, *, web_search=False):  # type: ignore[no-untyped-def]
+                forwarded.append(web_search)
+                return LLMTurn(reply="ok")
+
+        searching = ModeSpec(
+            name="researcher", goal="Look things up.", web_search=True
+        )
+        registry = load_registry(FICTION)
+        specs = dict(registry.specs) | {searching.name: searching}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=FlagSpy(),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        await orchestrator.handle_message("s1", "u1", "hi")
+        await orchestrator.handle_message("s1", "u1", "/mode researcher")
+        await orchestrator.handle_message("s1", "u1", "hi again")
+        assert forwarded == [False, True]
+
+    async def test_bare_mode_reports_web_search_on(
+        self, services: Services
+    ) -> None:
+        searching = ModeSpec(
+            name="researcher", goal="Look things up.", web_search=True
+        )
+        registry = load_registry(FICTION)
+        specs = dict(registry.specs) | {searching.name: searching}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver([]),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode researcher")
+        events = await orchestrator.handle_message("s1", "u1", "/mode")
+        assert "web search: on" in events[-1].text
+
+
+class TestDefaultModeOverride:
+    """WP21: spaces.toml can name the mode NEW chats start in. Sessions
+    with a persisted mode keep it (the pipeline only consults
+    ``registry.default`` when no mode was persisted)."""
+
+    def test_a_given_default_wins_over_the_profiles(self) -> None:
+        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        assert registry.default == "world_modeling"  # the profile's
+        overridden = load_registry(
+            FICTION, in_space=[_mode_payload()], default="faithful_scribe"
+        )
+        assert overridden.default == "faithful_scribe"
+
+    def test_an_unknown_default_fails_loudly_listing_loaded_modes(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            load_registry(FICTION, default="nope")
+        assert "default_mode 'nope'" in str(err.value)
+        assert "world_modeling" in str(err.value)
 
 
 class TestProvenanceTurns:

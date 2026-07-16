@@ -78,6 +78,32 @@ class TestActivityLogTools:
         assert "42 nodes" not in text
 
 
+class TestServerToolCalls:
+    """WP20 (ADR 030): provider-executed calls (web search) arrive
+    already resolved -- rendered like any call, never pending, and they
+    must not disturb the FIFO pairing of harness-executed results."""
+
+    def test_a_server_call_renders_resolved_and_tallies(self) -> None:
+        log = ActivityLog(detail="tools")
+        log.note_decision(LLMTurn(
+            server_tool_calls=(ToolCall("web_search", {"query": "mira"}),),
+        ))
+        assert log.render().splitlines()[1] == "-> web_search(query='mira') ✓"
+        assert log.tool_calls == 1
+
+    def test_pairing_of_harness_results_is_undisturbed(self) -> None:
+        log = ActivityLog(detail="tools")
+        log.note_decision(LLMTurn(
+            tool_calls=(ToolCall("explore", {"q": 1}),),
+            server_tool_calls=(ToolCall("web_search", {"query": "kel"}),),
+        ))
+        # The one harness result pairs with explore, not the search.
+        log.note_tool_result("explore", "found", False)
+        lines = log.render().splitlines()
+        assert "-> web_search(query='kel') ✓" in lines
+        assert "-> explore(q=1) ✗" in lines
+
+
 class TestActivityLogFull:
     def test_thinking_interim_text_and_result_excerpts_render(self) -> None:
         log = ActivityLog(detail="full")

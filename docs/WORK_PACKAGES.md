@@ -1718,6 +1718,84 @@ What shipped:
   activity message IS the placeholder whose id was already recorded.
   Scheduled turns (ADR 027) stay silent; Discord unchanged.
 
+## WP20 — Mode-gated web search (ADR 030) — **shipped 2026-07-16**
+
+**Status:** complete. Both drivers can hand the model Anthropic's
+SERVER-SIDE web search tool — executed on Anthropic's infrastructure,
+never by the harness, so the devcontainer's egress firewall is a
+non-issue (`api.anthropic.com` is already allowlisted; nothing else is
+contacted). Availability is a **mode property, default off**, mirroring
+WP19's `activity_detail` end-to-end: `ModeSpec.web_search`, settable in
+profile specs, `GC_MODES_FILE` (`web_search = true`), and the in-space
+Activity Mode object's new `gc_mode_web_search` checkbox
+(minted/retrofitted by bootstrap; explainer body updated). The pipeline
+forwards `web_search=spec.web_search` on every `decide()` (new
+keyword-only protocol parameter).
+
+* **Subscription driver**: `tools=["WebSearch"]` re-admits exactly one
+  CLI built-in; the permission gate (`permission_gate`, extracted for
+  testability) allows it and still denies-with-interrupt everything
+  else. The search runs server-side INSIDE the session, so one decide
+  covers search + answer; harvested `WebSearch` ToolUseBlocks land in
+  `LLMTurn.server_tool_calls`, never in pipeline `tool_calls`. Live
+  behavior pinned by a gated test in `test_live_claude_driver.py`.
+* **API driver**: appends the server tool block after the sorted graph
+  tools (`web_search_20260209` on dynamic-filtering models, the basic
+  `web_search_20250305` otherwise); `turn_from_response` tolerates
+  `server_tool_use` + `web_search_tool_result` blocks (error-object
+  results included); a `pause_turn` stop is resumed in-decide with the
+  partial assistant content appended (≤5 resumes, usage summed, the
+  metrics tap fires once, a refusal discards the partial).
+* **Observability**: `server_tool_calls` in the turn diary (beside the
+  decision — no tool_result follows) and in the WP19 activity stream
+  (rendered already-resolved, FIFO pairing undisturbed). Bare `/mode`
+  reports `web search: on/off`.
+
+## WP21 — Chat auto-titling + per-space default mode (ADR 031) — **shipped 2026-07-16**
+
+**Status:** complete. Claude-app parity for new chats: an untitled chat
+names itself after its first real exchange, and each space can choose
+the mode new chats start in.
+
+### Spike S12 results (2026-07-16, live sidecar, API `2025-11-08`)
+
+`scripts/spike_chat_rename.py`, run against the headless sidecar's
+GC-E2E space:
+
+* `POST /chats {}` → 201, the chat is born with `name: ""` (what a
+  fresh unnamed chat looks like to discovery).
+* `GET /chats/:cid` → **404**; `PATCH /chats/:cid {"name"}` → **404**
+  (`404 page not found` — the route does not exist).
+* `PATCH /objects/:cid {"name"}` → **200**, and the fresh `/chats`
+  re-list reflects the new name; `GET /objects/:cid` agrees. **Chats
+  are renameable via the generic object route** — pinned as quirk C9
+  in `chat.py`, modeled by the mock (`/objects/:id` GET/PATCH now serve
+  chats), and pinned live by the E2E chat round-trip.
+* Bonus: `DELETE /chats/:cid` → 200 (unused, recorded for the future).
+
+What shipped:
+
+* **`AnytypeClient.rename_chat` / `AnytypeChatClient.rename`** (C9:
+  `update_object` underneath, named for the intent).
+* **`ChatTitler`** (transport policy, pure): untitled test over the
+  runtime's live chat-name registry (`""`/`"Chat"`/`"New chat"` read as
+  untitled; a human's title is never overwritten — the rescan watcher
+  refreshes names, so a UI rename reaches the test within one poll),
+  one attempt per chat lifetime (no persistence: the name check
+  re-derives state across restarts), the titling prompt, and
+  defensive sanitization (first line, wrappers stripped, ≤60 chars).
+* **`anytype_chat_bot._maybe_title`**: after a successful non-command
+  turn in an untitled chat — `run_turn` now returns its `ReplyEvent`s —
+  ONE side-call through the existing driver abstraction (works on the
+  subscription driver with no API key; one extra CLI session per chat
+  lifetime, off the user-visible path) and ONE rename PATCH. Failures
+  log and never fail the turn; error-only turns defer the attempt.
+* **`default_mode` in `spaces.toml`** (per-space, sibling of
+  `profile`/`modes_file`): overrides the profile's default when the
+  registry loads — new chats start there; chats with a persisted mode
+  keep it. Unknown mode fails LOUDLY at startup naming the value and
+  the loaded modes; the `/mode` reload closure re-applies the override.
+
 ---
 
 ## Sequencing

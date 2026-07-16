@@ -15,6 +15,8 @@ order) by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
     # mutating defaults to false
     # activity_detail = "tools"  # live-activity verbosity (ADR 029);
     #                              off | minimal (default) | tools | full
+    # web_search = true          # admit the provider's server-side web
+    #                              search tool (ADR 030); default off
 
     [modes.record_procedure.capture]
     artifact_type = "procedure"
@@ -122,6 +124,7 @@ def load_registry(
     profile: DomainProfile,
     modes_file: str | None = None,
     in_space: Sequence[Mapping[str, Any]] = (),
+    default: str | None = None,
 ) -> ModeRegistry:
     """Profile defaults < GC_MODES_FILE TOML < in-space mode objects.
 
@@ -129,6 +132,13 @@ def load_registry(
     ``in_space`` payloads come from the ModeStore port. Every problem
     raises :class:`GraphContextError` naming the config source, mode, and
     field -- load-time is the only acceptable place for a spec to fail.
+
+    ``default`` (WP21: the spaces.toml per-space ``default_mode``)
+    overrides the profile's default for sessions with no persisted mode.
+    Deployment config naming a mode that is not loaded is a config error
+    and fails LOUDLY -- unlike the profile's own default, which degrades
+    (a profile is code, its default may predate a modes file that
+    replaced everything).
     """
     specs = {spec.name: spec for spec in profile.mode_specs}
     if modes_file:
@@ -141,11 +151,21 @@ def load_registry(
             f"profile {profile.name!r} defines no activity modes and no "
             "GC_MODES_FILE was given"
         )
-    default = profile.default_mode if profile.default_mode in specs else next(iter(specs))
-    return ModeRegistry(specs=specs, default=default)
+    if default is not None:
+        if default not in specs:
+            raise GraphContextError(
+                f"default_mode {default!r} is not a loaded mode; "
+                f"loaded: {', '.join(sorted(specs))}"
+            )
+        return ModeRegistry(specs=specs, default=default)
+    fallback = (
+        profile.default_mode if profile.default_mode in specs
+        else next(iter(specs))
+    )
+    return ModeRegistry(specs=specs, default=fallback)
 
 
-_SPEC_KEYS = {"goal", "mutating", "capture", "activity_detail"}
+_SPEC_KEYS = {"goal", "mutating", "capture", "activity_detail", "web_search"}
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
 
 
@@ -190,6 +210,7 @@ def _spec_from_mapping(
             goal=str(body.get("goal", "")),
             mutating=bool(body.get("mutating", False)),
             capture=capture,
+            web_search=bool(body.get("web_search", False)),
             **({"activity_detail": detail} if detail else {}),
         )
     except ValueError as err:
@@ -270,7 +291,7 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             )
         body = {
             key: payload[key]
-            for key in ("goal", "mutating", "capture", "activity_detail")
+            for key in ("goal", "mutating", "capture", "activity_detail", "web_search")
             if key in payload
         }
         specs.append(_spec_from_mapping(name, body, origin))

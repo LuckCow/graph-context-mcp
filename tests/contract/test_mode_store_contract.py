@@ -85,10 +85,13 @@ def _seed_mode(
     references: str = "",
     min_chars: float | None = None,
     activity_detail: str = "",
+    web_search: bool = False,
 ) -> str:
     properties: list[dict[str, Any]] = [
         {"key": mapping.PROP_MODE_MUTATING, "format": "checkbox",
          "checkbox": mutating},
+        {"key": mapping.PROP_MODE_WEB_SEARCH, "format": "checkbox",
+         "checkbox": web_search},
         {"key": mapping.PROP_CAPTURE_TYPE, "format": "text",
          "text": capture_type},
         # A select: the read side sees the picked option as a tag envelope.
@@ -163,6 +166,19 @@ async def test_activity_detail_rides_the_payload_when_set(
     payloads = await _load_by_name(anytype_client)
     assert payloads["Chatty"]["activity_detail"] == "Full"
     assert "activity_detail" not in payloads["Unset"]
+
+
+async def test_web_search_checkbox_rides_the_payload(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """WP20 (ADR 030): gc_mode_web_search is a checkbox; ticked admits
+    the provider's server-side web search for the mode. Always present
+    in the payload (like ``mutating``) -- unticked reads False."""
+    _seed_mode(mock, "Researcher", "A goal.", web_search=True)
+    _seed_mode(mock, "Grounded", "A goal.")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Researcher"]["web_search"] is True
+    assert payloads["Grounded"]["web_search"] is False
 
 
 async def test_bootstrap_seeds_the_detail_dropdown_options(

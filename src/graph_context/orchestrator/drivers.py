@@ -71,11 +71,17 @@ class LLMTurn:
     ``thinking`` is the model's reasoning text when the provider streams
     extended-thinking blocks. Diagnostics only: the turn diary records it
     so a human can see WHY a decision was made; it never re-enters the
-    transcript and never counts as reply text."""
+    transcript and never counts as reply text.
+
+    ``server_tool_calls`` are provider-executed tool invocations (web
+    search, ADR 030) that ALREADY RAN inside the provider before the
+    decision came back. Observability only: the turn log and activity
+    stream show them; the pipeline must never execute them."""
 
     reply: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     thinking: str = ""
+    server_tool_calls: tuple[ToolCall, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,9 +118,14 @@ class LLMDriver(Protocol):
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str,
+        *,
+        web_search: bool = False,
     ) -> LLMTurn:
         """Choose the next step given the transcript, bound tools, and the
-        active mode's goal prompt (ADR 015 -- the system-prompt fragment)."""
+        active mode's goal prompt (ADR 015 -- the system-prompt fragment).
+
+        ``web_search`` admits the provider's server-side web search tool
+        for this decision (ADR 030); drivers without one ignore it."""
         ...
 
     def system_prompt(self, goal: str) -> str:
@@ -160,6 +171,8 @@ class ScriptedDriver:
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        web_search: bool = False,
     ) -> LLMTurn:
         if self._cursor >= len(self._turns):
             return LLMTurn(reply="(script exhausted)")

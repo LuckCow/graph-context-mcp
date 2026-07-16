@@ -120,7 +120,9 @@ class TestTurn:
                 super().__init__([LLMTurn(reply="hi Nick")])
                 self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
-            async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+            async def decide(
+                self, transcript, tools, goal: str = "", *, web_search: bool = False
+            ) -> LLMTurn:
                 self.transcripts.append(tuple(transcript))
                 return await super().decide(transcript, tools, goal)
 
@@ -163,7 +165,7 @@ class TestTurn:
         overlaps: list[int] = []
 
         class SlowDriver:
-            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal="", *, web_search=False):  # type: ignore[no-untyped-def]
                 nonlocal active
                 active += 1
                 overlaps.append(active)
@@ -226,7 +228,7 @@ class TestRouting:
         overlaps: list[int] = []
 
         class SlowDriver:
-            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal="", *, web_search=False):  # type: ignore[no-untyped-def]
                 nonlocal active
                 active += 1
                 overlaps.append(active)
@@ -255,7 +257,7 @@ class TestRouting:
         overlaps: list[int] = []
 
         class SlowDriver:
-            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal="", *, web_search=False):  # type: ignore[no-untyped-def]
                 nonlocal active
                 active += 1
                 overlaps.append(active)
