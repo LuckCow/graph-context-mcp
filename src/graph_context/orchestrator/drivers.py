@@ -49,6 +49,14 @@ class TranscriptEvent:
     decision. Stateless drivers (a fresh session per decide) replay it so
     the model keeps its own train of thought across decisions; it stays
     turn-local -- cross-turn memory keeps only the spoken halves.
+
+    ``server_tool_calls``/``server_tool_results`` (WP22, ADR 030
+    amendment) carry a decision's provider-executed searches so the NEXT
+    decide can replay what the search returned, not just what the model
+    wrote about it. Results are OPAQUE provider-shaped payloads
+    (JSON-serialized raw blocks), position-paired with the calls; ``""``
+    means the result was never captured, and drivers must never replay
+    an unpaired half. Turn-local, like ``thinking``.
     """
 
     kind: str
@@ -57,6 +65,8 @@ class TranscriptEvent:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_use_id: str = ""
     thinking: str = ""
+    server_tool_calls: tuple[ToolCall, ...] = ()
+    server_tool_results: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +85,17 @@ class LLMTurn:
 
     ``server_tool_calls`` are provider-executed tool invocations (web
     search, ADR 030) that ALREADY RAN inside the provider before the
-    decision came back. Observability only: the turn log and activity
-    stream show them; the pipeline must never execute them."""
+    decision came back. The pipeline must never execute them; it copies
+    them (with ``server_tool_results``, the position-paired opaque raw
+    result payloads -- ``""`` = not captured) onto the recorded decision
+    event so the next decide replays what the search returned (WP22),
+    and the turn log / activity stream show them."""
 
     reply: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     thinking: str = ""
     server_tool_calls: tuple[ToolCall, ...] = ()
+    server_tool_results: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

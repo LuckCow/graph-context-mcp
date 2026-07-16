@@ -1,7 +1,10 @@
 # ADR 030: Mode-gated server-side web search
 
 Date: 2026-07-16
-Status: accepted
+Status: accepted (amended 2026-07-16: the v1 transcript-continuity
+limitation is retired by WP22 — searching decisions carry their raw
+result payloads on the decision event, so the next decide replays what
+the search returned; see Consequences)
 
 ## Context
 
@@ -71,12 +74,19 @@ touching its FIFO result pairing.
   as grounded as before WP20. `/mode` reports `web search: on/off`.
 - Cost rides the driver choice: subscription quota on the default path,
   API billing (per-search + tokens) on `anthropic_api`.
-- Known v1 limitation (documented in `anthropic_driver.py`): when a
-  searching decision ALSO emits local tool calls, the transcript rebuilt
-  for the next decide omits the server-tool blocks — the model retains
-  only what it wrote as text. If dogfooding shows context loss, the
-  mitigation is folding a search-result digest into a fenced `tool`
-  transcript event.
+- ~~Known v1 limitation: when a searching decision ALSO emits local
+  tool calls, the transcript rebuilt for the next decide omits the
+  server-tool blocks.~~ **Retired by WP22 (2026-07-16).** The transcript
+  stays provider-neutral, but a searching decision now carries its raw
+  result payloads as opaque JSON (`TranscriptEvent.server_tool_calls` /
+  `server_tool_results`, position-paired, turn-local like `thinking`):
+  the API driver replays `server_tool_use` + raw result block pairs
+  verbatim (`encrypted_content` untouched — the API's multi-turn
+  requirement; an unpaired half is never sent, a dangling block is a
+  400), and the subscription driver — whose fresh CLI sessions take
+  text — replays each search as a fenced call + result-DIGEST pair
+  (`search_digest`, single-homed in `driver_common`). The turn diary
+  logs digests, never raw payloads.
 - The subscription path's headless-WebSearch behavior is pinned by a
   gated live test (`tests/e2e/test_live_claude_driver.py`); if the CLI
   ever refuses WebSearch under OAuth subscription auth, web search

@@ -191,3 +191,89 @@ class TestUsageTranslation:
         assert usage.output_tokens == 0
         assert usage.cache_read_tokens == 0
         assert usage.total_cost_usd is None
+
+
+class TestBlockHarvest:
+    """WP22: streamed blocks -> the decision, server searches captured
+    with their raw results (both wire shapes the CLI has shown)."""
+
+    def test_native_server_blocks_pair_call_and_result(self) -> None:
+        import json
+
+        from claude_agent_sdk import (
+            ServerToolResultBlock,
+            ServerToolUseBlock,
+            TextBlock,
+        )
+
+        from graph_context.orchestrator.claude_driver import (
+            BlockHarvest,
+            harvest_assistant_blocks,
+        )
+
+        harvest = BlockHarvest()
+        harvest_assistant_blocks([
+            ServerToolUseBlock(id="s1", name="WebSearch",
+                               input={"query": "anytype api"}),
+            ServerToolResultBlock(tool_use_id="s1", content={
+                "type": "web_search_tool_result",
+                "content": [{"title": "A", "url": "https://a"}],
+            }),
+            TextBlock(text="Answer."),
+        ], harvest)
+        turn = harvest.turn()
+        assert turn.reply == "Answer."
+        assert turn.tool_calls == ()
+        (call,) = turn.server_tool_calls
+        assert call.name == "WebSearch" and call.id == "s1"
+        (raw,) = turn.server_tool_results
+        assert json.loads(raw)["content"]["content"][0]["title"] == "A"
+
+    def test_tooluseblock_websearch_result_arrives_in_a_user_message(
+        self,
+    ) -> None:
+        import json
+
+        from claude_agent_sdk import ToolResultBlock, ToolUseBlock
+
+        from graph_context.orchestrator.claude_driver import (
+            BlockHarvest,
+            harvest_assistant_blocks,
+            harvest_result_blocks,
+        )
+
+        harvest = BlockHarvest()
+        harvest_assistant_blocks([
+            ToolUseBlock(id="s1", name="WebSearch",
+                         input={"query": "anytype api"}),
+        ], harvest)
+        harvest_result_blocks([
+            ToolResultBlock(tool_use_id="s1",
+                            content="Web search results: ..."),
+            ToolResultBlock(tool_use_id="other",  # not a search of ours
+                            content="ignored"),
+        ], harvest)
+        turn = harvest.turn()
+        assert turn.tool_calls == ()  # never pipeline work
+        (raw,) = turn.server_tool_results
+        assert json.loads(raw)["content"].startswith("Web search results")
+
+    def test_local_tool_calls_are_untouched_by_the_harvest_split(
+        self,
+    ) -> None:
+        from claude_agent_sdk import ToolUseBlock
+
+        from graph_context.orchestrator.claude_driver import (
+            BlockHarvest,
+            harvest_assistant_blocks,
+        )
+
+        harvest = BlockHarvest()
+        harvest_assistant_blocks([
+            ToolUseBlock(id="t1", name="mcp__gc__find_node",
+                         input={"name": "Mira"}),
+        ], harvest)
+        turn = harvest.turn()
+        assert turn.server_tool_calls == ()
+        (call,) = turn.tool_calls
+        assert call.name == "find_node"  # prefix stripped

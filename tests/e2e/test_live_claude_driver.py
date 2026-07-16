@@ -98,6 +98,10 @@ async def test_web_search_answers_a_current_information_question(tools):
     )
     assert turn.server_tool_calls, "the model never searched"
     assert turn.server_tool_calls[0].name == "WebSearch"
+    # WP22: the raw result payload rides along for next-decide replay.
+    assert any(raw for raw in turn.server_tool_results), (
+        "no search result payload was captured from the stream"
+    )
 
 
 async def test_the_live_session_exposes_only_the_bound_gc_tools(tools):

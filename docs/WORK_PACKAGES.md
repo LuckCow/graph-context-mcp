@@ -1796,6 +1796,70 @@ What shipped:
   keep it. Unknown mode fails LOUDLY at startup naming the value and
   the loaded modes; the `/mode` reload closure re-applies the override.
 
+## WP22 — Lossless server-tool continuity across decides (ADR 030 amendment) — **shipped 2026-07-16**
+
+**Status:** complete. Retires ADR 030's v1 limitation: when one decision
+both searches the web AND calls a local tool, the next decide's rebuilt
+conversation now carries the search calls *and results* — not just what
+the model wrote as text. The Anthropic API supports this fully (echo the
+`server_tool_use` + `web_search_tool_result` blocks, `encrypted_content`
+included — that field exists precisely for multi-turn replay); the gap
+was that our `TranscriptEvent` had nowhere to hold them. Live-verified
+on the subscription driver (the stream delivers the raw result payloads
+and the harvest captures them).
+
+**Design: the transcript stays provider-neutral; payloads ride as
+opaque JSON.**
+
+1. **`drivers.py`** — `LLMTurn.server_tool_results: tuple[str, ...]`
+   (JSON-serialized raw result blocks, paired to `server_tool_calls` by
+   `tool_use_id`); the same two fields on the mid-turn assistant
+   `TranscriptEvent`. Turn-local like `thinking` — cross-turn
+   `ConversationMemory` keeps only the spoken halves, unchanged.
+2. **Harvest** — `anthropic_driver.turn_from_response` keeps the
+   `web_search_tool_result` blocks it currently skips (serialize via
+   `model_dump()` with a `vars()` fallback for test fixtures);
+   `claude_driver` additionally harvests `ServerToolUseBlock` /
+   `ServerToolResultBlock` (the SDK's native server-tool types;
+   `ToolUseBlock`-named-`WebSearch` stays as the live-verified path).
+   `merged_turn` (pause chains) concatenates.
+3. **Pipeline** — copy both fields onto the recorded decision event,
+   beside `thinking` (one line).
+4. **API-driver replay** — `messages_from_transcript` rebuilds a
+   searching decision's assistant content as
+   `[text?] + server_tool_use... + web_search_tool_result... + tool_use...`,
+   deserializing stored result JSON VERBATIM so `encrypted_content`
+   round-trips untouched. Never send an unpaired half (a call whose
+   result wasn't captured degrades to today's omission — the API 400s
+   on dangling blocks). Local `tool_use` id registration unchanged.
+5. **Subscription-driver replay** — fresh CLI sessions take text, so
+   `render_transcript` folds a `search_digest(results_json)` (title /
+   url / snippet per result, capped) into the assistant section as a
+   fenced block — the ADR 030 "digest" mitigation, now fed by real
+   captured results. Digest helper single-homed in `driver_common.py`.
+6. **Turn log** — never log raw payloads (`encrypted_content` bloat):
+   log the digest + result count per search.
+
+**Tests.** Anthropic driver: mixed decision → the next request's
+messages carry the verbatim server blocks, pairing intact, encrypted
+content byte-identical; unpaired-half guard. Claude driver: digest in
+the rendered transcript. Pipeline: propagation onto the event. One
+gated live run per driver (a mode that searches then calls `find_node`
+in the same decision; the follow-up decide must 200 and the final
+answer reference searched facts).
+
+**Residual risks (watch in dogfooding).**
+- The API may be stricter about replayed block ORDERING than the
+  reconstruction preserves (the rebuild emits text, then call/result
+  pairs, then local tool_use — not the original interleaving). Fallback
+  if a live mixed-decision turn 400s: capture the whole raw
+  `response.content` verbatim on the event (the pause_turn pattern).
+- Replayed server blocks alongside our dropped thinking blocks may trip
+  thinking-ordering rules on some models; if so, searching decisions
+  also replay their thinking blocks unchanged.
+- Payload growth: `encrypted_content` is large; if transcripts bloat,
+  cap replayed results per decision (newest N) and note the drop.
+
 ---
 
 ## Sequencing

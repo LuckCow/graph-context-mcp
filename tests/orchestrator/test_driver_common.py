@@ -8,9 +8,13 @@ stay in ``test_claude_driver`` behind its importorskip.
 
 from __future__ import annotations
 
+import json
+
 from graph_context.orchestrator.driver_common import (
+    SEARCH_DIGEST_MAX_RESULTS,
     assembled_system_prompt,
     render_transcript,
+    search_digest,
 )
 from graph_context.orchestrator.drivers import ToolCall, TranscriptEvent
 
@@ -96,3 +100,87 @@ class TestTranscriptRendering:
             TranscriptEvent("assistant", "   "),
         ])
         assert prompt == "hello"
+
+
+class TestSearchDigest:
+    """WP22: opaque raw search payloads -> the plain-text replay/diary
+    form. Parsing is defensive -- provider shapes vary and must never
+    raise."""
+
+    def test_a_result_list_digests_to_title_url_lines(self) -> None:
+        raw = json.dumps({"content": [
+            {"type": "web_search_result", "title": "Anytype API",
+             "url": "https://developers.anytype.io",
+             "encrypted_content": "OPAQUE"},
+            {"type": "web_search_result", "title": "Changelog",
+             "url": "https://anytype.io/changelog"},
+        ]})
+        digest = search_digest(raw)
+        assert "- Anytype API (https://developers.anytype.io)" in digest
+        assert "- Changelog (https://anytype.io/changelog)" in digest
+        assert "OPAQUE" not in digest  # encrypted payloads never surface
+
+    def test_an_error_object_names_its_code(self) -> None:
+        raw = json.dumps({"content": {"type": "web_search_tool_result_error",
+                                      "error_code": "max_uses_exceeded"}})
+        assert search_digest(raw) == "search failed: max_uses_exceeded"
+
+    def test_text_shaped_content_is_kept_snipped(self) -> None:
+        # The SDK's ToolResultBlock can carry a plain string result.
+        raw = json.dumps({"content": "Web search results: x" + "x" * 5000})
+        digest = search_digest(raw)
+        assert digest.startswith("Web search results:")
+        assert len(digest) < 2000
+
+    def test_long_result_lists_are_capped_with_a_drop_note(self) -> None:
+        raw = json.dumps({"content": [
+            {"title": f"r{i}", "url": f"https://x/{i}"} for i in range(20)
+        ]})
+        digest = search_digest(raw)
+        assert digest.count("\n") == SEARCH_DIGEST_MAX_RESULTS  # + drop note
+        assert "12 more result(s)" in digest
+
+    def test_garbage_degrades_never_raises(self) -> None:
+        assert search_digest("not json") == "(unreadable search result payload)"
+        assert search_digest(json.dumps({"content": None})) == "(no results)"
+        assert search_digest(json.dumps({"content": []})) == "(no results)"
+
+
+class TestServerActivityRendering:
+    """WP22: a searching decision replays as call + digest pairs in the
+    text transcript, so a fresh session keeps what the search returned."""
+
+    def test_a_search_replays_as_call_and_digest(self) -> None:
+        raw = json.dumps({"content": [
+            {"title": "Anytype API", "url": "https://developers.anytype.io"},
+        ]})
+        rendered = render_transcript([
+            TranscriptEvent("user", "What changed upstream?"),
+            TranscriptEvent(
+                "assistant", "Checking.",
+                tool_calls=(ToolCall("find_node", {"name": "API"}, id="t1"),),
+                server_tool_calls=(
+                    ToolCall("web_search", {"query": "anytype api"}, id="s1"),
+                ),
+                server_tool_results=(raw,),
+            ),
+        ])
+        assert '<tool_call tool="web_search">' in rendered
+        assert '<tool_result tool="web_search">' in rendered
+        assert "Anytype API (https://developers.anytype.io)" in rendered
+        assert '<tool_call tool="find_node">' in rendered
+
+    def test_a_search_without_a_captured_result_renders_the_call_alone(
+        self,
+    ) -> None:
+        rendered = render_transcript([
+            TranscriptEvent(
+                "assistant", "",
+                server_tool_calls=(
+                    ToolCall("web_search", {"query": "q"}, id="s1"),
+                ),
+                server_tool_results=("",),
+            ),
+        ])
+        assert '<tool_call tool="web_search">' in rendered
+        assert '<tool_result tool="web_search">' not in rendered

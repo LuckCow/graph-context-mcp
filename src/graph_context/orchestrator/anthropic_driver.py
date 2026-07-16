@@ -24,12 +24,12 @@ and feeds results back on the next decide.
 Web search (ADR 030): when a mode admits it, the request carries the
 provider's SERVER-SIDE web search tool -- searches run on Anthropic's
 infrastructure inside the same ``messages.create`` call and never
-round-trip through the pipeline. Known v1 limitation: when a searching
-decision ALSO emits local tool calls, the transcript rebuilt for the
-next decide omits the ``server_tool_use``/``web_search_tool_result``
-blocks, so the model retains only what it wrote as text. If dogfooding
-shows context loss, the mitigation is folding a search-result digest
-into a fenced ``tool`` transcript event.
+round-trip through the pipeline. A searching decision's raw result
+blocks are captured as opaque payloads on the decision event (WP22),
+so when the same decision ALSO called local tools, the transcript
+rebuilt for the next decide replays the search verbatim
+(``encrypted_content`` untouched) -- the model keeps what the search
+returned, not just what it wrote about it.
 """
 
 from __future__ import annotations
@@ -90,6 +90,25 @@ def web_search_tool(model: str) -> dict[str, Any]:
     )
     return {"type": kind, "name": "web_search"}
 
+
+def _as_data(value: Any) -> Any:
+    """A response content block -> plain JSON-serializable data.
+
+    Real SDK blocks are pydantic models (``model_dump``); test fixtures
+    are namespaces; either way the captured payload must round-trip
+    ``json.dumps``/``loads`` byte-faithfully (``encrypted_content`` is
+    the part the API requires back verbatim)."""
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump()
+    if isinstance(value, Mapping):
+        return {key: _as_data(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_as_data(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {key: _as_data(item) for key, item in vars(value).items()}
+    return value
+
 _REFUSAL_NOTICE = (
     "(the model declined this request for safety reasons; rephrase or "
     "narrow the ask)"
@@ -117,6 +136,12 @@ def messages_from_transcript(
     * A ``tool_result`` block is only valid against a ``tool_use`` block
       already in the list; a tool event whose ``tool_use_id`` matches
       nothing (or is empty) falls back to fenced text in a user turn.
+    * A decision's provider-executed searches (WP22) replay as
+      ``server_tool_use`` + raw result block PAIRS, each result verbatim
+      from capture (``encrypted_content`` untouched -- the API's
+      multi-turn requirement). An unpaired half is never sent: a call
+      whose result was not captured is omitted whole (the pre-WP22
+      behavior for that search), because a dangling block is a 400.
     """
     messages: list[dict[str, Any]] = []
     known_tool_use_ids: set[str] = set()
@@ -128,10 +153,26 @@ def messages_from_transcript(
     while index < len(events):
         event = events[index]
         if event.kind == "assistant":
-            if event.tool_calls:
+            if event.tool_calls or event.server_tool_calls:
                 content: list[dict[str, Any]] = []
                 if event.text.strip():
                     content.append({"type": "text", "text": event.text})
+                for position, call in enumerate(event.server_tool_calls):
+                    raw = (
+                        event.server_tool_results[position]
+                        if position < len(event.server_tool_results) else ""
+                    )
+                    if not raw:
+                        continue  # never replay an unpaired half
+                    content.append(
+                        {
+                            "type": "server_tool_use",
+                            "id": call.id,
+                            "name": call.name,
+                            "input": dict(call.arguments),
+                        }
+                    )
+                    content.append(json.loads(raw))
                 for call in event.tool_calls:
                     known_tool_use_ids.add(call.id)
                     content.append(
@@ -142,6 +183,11 @@ def messages_from_transcript(
                             "input": dict(call.arguments),
                         }
                     )
+                if not content:
+                    # Every search was unpaired and the decision carried
+                    # no text or local calls: nothing valid to replay.
+                    index += 1
+                    continue
                 messages.append({"role": "assistant", "content": content})
             elif not messages:
                 # Orphaned reply half at the top of replayed history.
@@ -213,10 +259,12 @@ def turn_from_response(response: Any) -> LLMTurn:
     default) -- diagnostics for the turn diary, never reply text.
     ``server_tool_use`` blocks (web search, ADR 030) already ran on the
     provider's side: they surface as ``server_tool_calls`` for the turn
-    diary and activity stream, never as pipeline work; their
-    ``web_search_tool_result`` companions are consumed by the model
-    in-response and skipped here (error results included -- an error
-    object instead of a result list is the provider's in-band shape).
+    diary and activity stream, never as pipeline work. Their result
+    companions (``web_search_tool_result`` -- error-object results
+    included) are captured as OPAQUE raw payloads in
+    ``server_tool_results``, position-paired by ``tool_use_id`` (WP22:
+    the next decide replays them so the model keeps what the search
+    returned; ``""`` marks a result that never arrived).
     ``stop_reason`` outcomes the pipeline should see are folded into the
     reply text: a refusal yields a harness-visible notice instead of
     silence, and a ``max_tokens`` cut is annotated so truncation is not
@@ -225,6 +273,7 @@ def turn_from_response(response: Any) -> LLMTurn:
     thinking_parts: list[str] = []
     calls: list[ToolCall] = []
     server_calls: list[ToolCall] = []
+    results_by_id: dict[str, str] = {}
     for block in response.content:
         if block.type == "text":
             reply_parts.append(block.text)
@@ -236,8 +285,12 @@ def turn_from_response(response: Any) -> LLMTurn:
             server_calls.append(
                 ToolCall(block.name, dict(block.input), id=block.id)
             )
-        # web_search_tool_result (and any future server-result block):
-        # provider-internal, deliberately skipped.
+        elif block.type.endswith("_tool_result"):
+            # A server tool's result: keep the WHOLE raw block (the API
+            # wants encrypted_content back verbatim on replay).
+            results_by_id[str(getattr(block, "tool_use_id", ""))] = json.dumps(
+                _as_data(block), default=str
+            )
     reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
     thinking = "\n\n".join(part for part in thinking_parts if part.strip()).strip()
     if response.stop_reason == "refusal":
@@ -249,6 +302,9 @@ def turn_from_response(response: Any) -> LLMTurn:
         tool_calls=tuple(calls),
         thinking=thinking,
         server_tool_calls=tuple(server_calls),
+        server_tool_results=tuple(
+            results_by_id.get(call.id, "") for call in server_calls
+        ),
     )
 
 
@@ -306,6 +362,9 @@ def merged_turn(turns: Sequence[LLMTurn]) -> LLMTurn:
         thinking="\n\n".join(t.thinking for t in turns if t.thinking).strip(),
         server_tool_calls=tuple(
             c for t in turns for c in t.server_tool_calls
+        ),
+        server_tool_results=tuple(
+            r for t in turns for r in t.server_tool_results
         ),
     )
 

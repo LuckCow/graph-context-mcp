@@ -43,13 +43,18 @@ allowed through the permission callback. It executes on Anthropic's
 servers within the session (the firewall never sees search traffic), the
 model reads the results and continues INSIDE the same decide; its
 ToolUseBlocks surface as ``server_tool_calls`` so the pipeline never
-mistakes them for harness work.
+mistakes them for harness work. Raw result payloads are captured too
+(WP22): a fresh CLI session takes text, so the next decide's rendered
+transcript replays each search as a call + result-digest pair -- the
+model keeps what the search returned across decisions.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from claude_agent_sdk import (
@@ -63,10 +68,14 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ResultMessage,
     SdkMcpTool,
+    ServerToolResultBlock,
+    ServerToolUseBlock,
     TextBlock,
     ThinkingBlock,
     ToolPermissionContext,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
     create_sdk_mcp_server,
     tool,
 )
@@ -85,9 +94,12 @@ from graph_context.orchestrator.drivers import (
 
 __all__ = [
     "WEB_SEARCH_TOOL",
+    "BlockHarvest",
     "ClaudeAgentDriver",
     "assembled_system_prompt",
     "derive_schema",
+    "harvest_assistant_blocks",
+    "harvest_result_blocks",
     "local_tool_name",
     "permission_gate",
     "render_transcript",
@@ -115,6 +127,106 @@ async def _never_executed(_args: Any) -> dict[str, Any]:
     # can_use_tool denies before any handler runs; this exists because the
     # SDK requires one.
     return {"content": [{"type": "text", "text": "tool execution is harness-owned"}]}
+
+
+@dataclass
+class BlockHarvest:
+    """One decide's streamed blocks, accumulated into a decision.
+
+    Extracted from the receive loop so the translation is testable
+    without a live CLI. Server-executed searches arrive two ways --
+    native ``ServerToolUseBlock``/``ServerToolResultBlock`` pairs, or
+    (live-verified) a ``ToolUseBlock`` named ``WebSearch`` whose result
+    comes back as a ``ToolResultBlock`` in a following user message --
+    both land in ``server_calls``/``server_results`` (WP22: raw result
+    payloads, replayed as a digest on the next decide's transcript).
+    """
+
+    reply_parts: list[str] = field(default_factory=list)
+    thinking_parts: list[str] = field(default_factory=list)
+    calls: list[ToolCall] = field(default_factory=list)
+    server_calls: list[ToolCall] = field(default_factory=list)
+    server_results: dict[str, str] = field(default_factory=dict)
+
+    def turn(self) -> LLMTurn:
+        # Text alongside tool calls is usually preamble ("I'll look that
+        # up"), but it travels with the calls anyway: on a turn's FINAL
+        # decision the pipeline treats it as the bundled reply (see
+        # pipeline.LAST_TURN_WARNING). Which text counts is the
+        # pipeline's rule, not this adapter's.
+        reply = "\n\n".join(p for p in self.reply_parts if p.strip()).strip()
+        thinking = "\n\n".join(
+            p for p in self.thinking_parts if p.strip()
+        ).strip()
+        return LLMTurn(
+            reply=reply,
+            tool_calls=tuple(self.calls),
+            thinking=thinking,
+            server_tool_calls=tuple(self.server_calls),
+            server_tool_results=tuple(
+                self.server_results.get(call.id, "")
+                for call in self.server_calls
+            ),
+        )
+
+
+def _result_payload(tool_use_id: str, content: Any) -> str:
+    """A server tool's raw result -> the opaque stored payload (WP22).
+
+    The SDK hands content as a raw dict/list/str; ``search_digest``
+    reads the ``content`` key back out when rendering the replay."""
+    return json.dumps(
+        {"tool_use_id": tool_use_id, "content": content}, default=str
+    )
+
+
+def harvest_assistant_blocks(
+    blocks: Sequence[Any], harvest: BlockHarvest
+) -> None:
+    """One assistant message's content blocks into the harvest."""
+    for block in blocks:
+        if isinstance(block, TextBlock):
+            harvest.reply_parts.append(block.text)
+        elif isinstance(block, ThinkingBlock):
+            harvest.thinking_parts.append(block.thinking)
+        elif isinstance(block, ServerToolUseBlock):
+            harvest.server_calls.append(
+                ToolCall(str(block.name), dict(block.input), id=block.id)
+            )
+        elif isinstance(block, ServerToolResultBlock):
+            harvest.server_results[block.tool_use_id] = _result_payload(
+                block.tool_use_id, block.content
+            )
+        elif isinstance(block, ToolUseBlock):
+            if block.name == WEB_SEARCH_TOOL:
+                # Already executed provider-side; diary + replay
+                # material, never pipeline work.
+                harvest.server_calls.append(
+                    ToolCall(block.name, dict(block.input), id=block.id)
+                )
+            else:
+                harvest.calls.append(
+                    ToolCall(
+                        local_tool_name(block.name),
+                        dict(block.input),
+                        id=block.id,
+                    )
+                )
+
+
+def harvest_result_blocks(
+    blocks: Sequence[Any], harvest: BlockHarvest
+) -> None:
+    """Tool results from a USER message: only the ones answering a
+    harvested server-side search (the ``ToolUseBlock``-shaped WebSearch
+    path returns its result this way); everything else in user messages
+    is the session's own plumbing and stays ignored."""
+    ids = {call.id for call in harvest.server_calls}
+    for block in blocks:
+        if isinstance(block, ToolResultBlock) and block.tool_use_id in ids:
+            harvest.server_results[block.tool_use_id] = _result_payload(
+                block.tool_use_id, block.content
+            )
 
 
 def permission_gate(web_search: bool) -> CanUseTool:
@@ -248,57 +360,24 @@ class ClaudeAgentDriver:
             cli_path=self._cli_path,
             web_search=web_search,
         )
-        reply_parts: list[str] = []
-        thinking_parts: list[str] = []
-        calls: list[ToolCall] = []
-        server_calls: list[ToolCall] = []
+        harvest = BlockHarvest()
         last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query(render_transcript(transcript))
             async for message in client.receive_response():
                 if isinstance(message, ResultMessage):
                     last_result = message
-                if not isinstance(message, AssistantMessage):
-                    continue
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        reply_parts.append(block.text)
-                    elif isinstance(block, ThinkingBlock):
-                        thinking_parts.append(block.thinking)
-                    elif isinstance(block, ToolUseBlock):
-                        if block.name == WEB_SEARCH_TOOL:
-                            # Already executed provider-side; diary
-                            # material, never pipeline work.
-                            server_calls.append(
-                                ToolCall(
-                                    block.name, dict(block.input), id=block.id
-                                )
-                            )
-                            continue
-                        calls.append(
-                            ToolCall(
-                                local_tool_name(block.name),
-                                dict(block.input),
-                                id=block.id,
-                            )
-                        )
+                elif isinstance(message, AssistantMessage):
+                    harvest_assistant_blocks(message.content, harvest)
+                elif isinstance(message, UserMessage) and isinstance(
+                    message.content, list
+                ):
+                    # WebSearch results for ToolUseBlock-shaped calls come
+                    # back as tool results in a user message (WP22).
+                    harvest_result_blocks(message.content, harvest)
         if self._on_result is not None and last_result is not None:
             self._on_result(usage_from_result(last_result))
-        # Text alongside tool calls is usually preamble ("I'll look that
-        # up"), but it travels with the calls anyway: on a turn's FINAL
-        # decision the pipeline treats it as the bundled reply (see
-        # pipeline.LAST_TURN_WARNING). Which text counts is the
-        # pipeline's rule, not this adapter's.
-        reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
-        thinking = "\n\n".join(
-            part for part in thinking_parts if part.strip()
-        ).strip()
-        return LLMTurn(
-            reply=reply,
-            tool_calls=tuple(calls),
-            thinking=thinking,
-            server_tool_calls=tuple(server_calls),
-        )
+        return harvest.turn()
 
 
 def usage_from_result(result: ResultMessage) -> DecideUsage:

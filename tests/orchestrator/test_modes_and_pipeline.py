@@ -929,6 +929,36 @@ class TestWebSearchFromTheMode:
         assert "web search: on" in events[-1].text
 
 
+class TestServerToolContinuity:
+    """WP22 (ADR 030 amendment): a decision's provider-executed searches
+    ride the recorded decision event -- the NEXT decide sees the calls
+    and their raw result payloads, turn-locally."""
+
+    async def test_the_next_decide_sees_the_searches(
+        self, services: Services
+    ) -> None:
+        raw = '{"content": [{"title": "A", "url": "https://a"}]}'
+        searching = LLMTurn(
+            tool_calls=(ToolCall("find_node", {"name": "Mira"}),),
+            server_tool_calls=(
+                ToolCall("web_search", {"query": "mira"}, id="s1"),
+            ),
+            server_tool_results=(raw,),
+        )
+        driver = _TranscriptRecordingDriver(
+            [searching, LLMTurn(reply="done")]
+        )
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=load_registry(FICTION),
+        )
+        await orchestrator.handle_message("s1", "u1", "look this up")
+        second = driver.transcripts[1]
+        decision = next(e for e in second if e.kind == "assistant")
+        assert decision.server_tool_calls == searching.server_tool_calls
+        assert decision.server_tool_results == (raw,)
+
+
 class TestDefaultModeOverride:
     """WP21: spaces.toml can name the mode NEW chats start in. Sessions
     with a persisted mode keep it (the pipeline only consults

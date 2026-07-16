@@ -28,6 +28,7 @@ from graph_context.orchestrator.anthropic_driver import (  # noqa: E402
     DEFAULT_MODEL,
     AnthropicDriver,
     anthropic_tools,
+    merged_turn,
     messages_from_transcript,
     turn_from_response,
     usage_from_response,
@@ -521,3 +522,122 @@ class TestPauseTurnResume:
         )
         assert "Partial" not in turn.reply
         assert "declined" in turn.reply
+
+
+def _search_result_block(
+    tool_use_id: str, content, block_type: str = "web_search_tool_result"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        type=block_type, tool_use_id=tool_use_id, content=content
+    )
+
+
+class TestServerResultCapture:
+    """WP22: a searching decision's raw result blocks are captured as
+    opaque payloads, position-paired with the calls."""
+
+    def test_results_pair_with_their_calls_by_id(self) -> None:
+        result_a = _search_result_block("s1", [SimpleNamespace(
+            type="web_search_result", title="A", url="https://a",
+            encrypted_content="ENC-A",
+        )])
+        result_b = _search_result_block(
+            "s2",
+            SimpleNamespace(type="web_search_tool_result_error",
+                            error_code="unavailable"),
+        )
+        turn = turn_from_response(_response([
+            _server_tool_use_block("s1", "first"),
+            result_a,
+            _server_tool_use_block("s2", "second"),
+            result_b,
+            _text_block("Answer."),
+        ]))
+        assert [c.id for c in turn.server_tool_calls] == ["s1", "s2"]
+        first, second = (json.loads(raw) for raw in turn.server_tool_results)
+        assert first["content"][0]["encrypted_content"] == "ENC-A"
+        assert second["content"]["error_code"] == "unavailable"
+
+    def test_a_missing_result_pairs_as_empty(self) -> None:
+        turn = turn_from_response(_response([
+            _server_tool_use_block("s1", "q"),
+            _text_block("Answer."),
+        ]))
+        assert turn.server_tool_results == ("",)
+
+    def test_pause_chains_merge_results_in_order(self) -> None:
+        paused = turn_from_response(_response(
+            [_server_tool_use_block("s1", "q1"),
+             _search_result_block("s1", [])],
+            stop_reason="pause_turn",
+        ))
+        final = turn_from_response(_response(
+            [_server_tool_use_block("s2", "q2"),
+             _search_result_block("s2", [])],
+        ))
+        merged = merged_turn([paused, final])
+        assert [c.id for c in merged.server_tool_calls] == ["s1", "s2"]
+        assert len(merged.server_tool_results) == 2
+
+
+class TestServerResultReplay:
+    """WP22: the rebuilt conversation replays server_tool_use + raw
+    result pairs verbatim -- encrypted_content untouched, unpaired
+    halves never sent."""
+
+    @staticmethod
+    def _event(results: tuple[str, ...]):
+        return TranscriptEvent(
+            "assistant", "Searching first.",
+            tool_calls=(ToolCall("find_node", {"name": "API"}, id="t1"),),
+            server_tool_calls=(
+                ToolCall("web_search", {"query": "anytype api"}, id="s1"),
+            ),
+            server_tool_results=results,
+        )
+
+    def test_a_captured_search_replays_verbatim(self) -> None:
+        raw = json.dumps({
+            "type": "web_search_tool_result", "tool_use_id": "s1",
+            "content": [{"type": "web_search_result", "title": "A",
+                         "url": "https://a", "encrypted_content": "ENC"}],
+        })
+        messages = messages_from_transcript([
+            TranscriptEvent("user", "What changed?"),
+            self._event((raw,)),
+            TranscriptEvent("tool", "API node.", tool_name="find_node",
+                            tool_use_id="t1"),
+        ])
+        content = messages[1]["content"]
+        assert [b["type"] for b in content] == [
+            "text", "server_tool_use", "web_search_tool_result", "tool_use",
+        ]
+        assert content[1] == {
+            "type": "server_tool_use", "id": "s1", "name": "web_search",
+            "input": {"query": "anytype api"},
+        }
+        assert content[2] == json.loads(raw)  # byte-faithful round trip
+        # Local tool pairing is untouched by the server blocks.
+        assert messages[2]["content"][0]["tool_use_id"] == "t1"
+
+    def test_an_uncaptured_search_is_omitted_whole(self) -> None:
+        messages = messages_from_transcript([
+            TranscriptEvent("user", "What changed?"),
+            self._event(("",)),
+        ])
+        content = messages[1]["content"]
+        assert [b["type"] for b in content] == ["text", "tool_use"]
+
+    def test_a_fully_unpaired_decision_with_nothing_else_is_skipped(
+        self,
+    ) -> None:
+        event = TranscriptEvent(
+            "assistant", "",
+            server_tool_calls=(ToolCall("web_search", {"query": "q"},
+                                        id="s1"),),
+            server_tool_results=("",),
+        )
+        messages = messages_from_transcript([
+            TranscriptEvent("user", "Hi"), event,
+        ])
+        assert [m["role"] for m in messages] == ["user"]

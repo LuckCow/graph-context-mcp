@@ -121,6 +121,25 @@ class TestTurnLogFile:
         ]
         assert entry["reply"] == "Searched the web."
 
+    def test_server_results_log_as_digests_never_raw(self, tmp_path) -> None:
+        """WP22: the diary shows WHAT a search returned, but the raw
+        payload (bulky encrypted_content) never lands in the log."""
+        path = tmp_path / "turns.jsonl"
+        log = TurnLog(path, now=lambda: "T0")
+        raw = (
+            '{"content": [{"title": "Anytype API", "url": "https://a", '
+            '"encrypted_content": "OPAQUE-BYTES"}]}'
+        )
+        log.llm_turn("t0", "s1", "researcher", LLMTurn(
+            reply="Found it.",
+            server_tool_calls=(ToolCall("web_search", {"query": "q"}),),
+            server_tool_results=(raw,),
+        ))
+        (entry,) = _entries(path)
+        (call,) = entry["server_tool_calls"]
+        assert call["result"] == "- Anytype API (https://a)"
+        assert "OPAQUE-BYTES" not in path.read_text()
+
     def test_oldest_entries_drop_once_the_budget_is_exceeded(
         self, tmp_path
     ) -> None:

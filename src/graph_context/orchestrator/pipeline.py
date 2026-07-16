@@ -413,6 +413,12 @@ class Orchestrator:
                 TranscriptEvent(
                     "assistant", turn.reply, tool_calls=tool_calls,
                     thinking=turn.thinking,
+                    # WP22: the decision's provider-executed searches ride
+                    # along (calls + opaque raw results) so the next
+                    # decide replays what the search returned. Turn-local,
+                    # like thinking.
+                    server_tool_calls=turn.server_tool_calls,
+                    server_tool_results=turn.server_tool_results,
                 )
             )
             for call in tool_calls:
