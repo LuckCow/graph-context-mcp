@@ -4,6 +4,9 @@
 ADR 008's capture beyond fiction; builds on WP5's profiles. Amended
 2026-07-06 — decision 3's stated direction landed: in-space mode
 configuration via `gc_activity_mode` objects (see Amendment below).
+Superseded in part by ADR 035 (2026-07-17): the three-source precedence
+is retired — in-space objects are the ONLY live source; profile mode
+specs are gone and the TOML only seeds starter objects.
 
 ## Context
 
@@ -128,7 +131,9 @@ live-confirmed) and seeds a one-time **Example Mode** template whose body
 documents the feature in-space, including that edits apply only when
 `/mode` is next used.
 
-**Precedence:** profile defaults < `GC_MODES_FILE` < in-space. Anytype is
+**Precedence** *(retired by ADR 035 — in-space is now the only live
+source; the TOML seeds starter objects instead of merging)*: profile
+defaults < `GC_MODES_FILE` < in-space. Anytype is
 the human editing surface (ADR 001); an edit made there must never be
 silently shadowed by a file. One validation seam
 (`modes._spec_from_mapping`) serves both config sources; errors name the

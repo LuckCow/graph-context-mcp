@@ -7,30 +7,18 @@ the enforcement mechanism is unchanged from ADR 007: a spec that isn't
 mutating simply never has the mutation tools in its table. Unavailable, not
 refused.
 
-Specs come from the active profile's defaults, overlaid (in precedence
-order) by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
+Since ADR 035 the space's own ``Activity Mode`` objects are the ONLY live
+source of specs: ``in_space`` payloads read through the ModeStore port,
+where the object name slugifies to the mode name and the page body is the
+goal. Anytype is the human editing surface; there is no profile or TOML
+overlay left to shadow an edit made there (seed TOMLs mint starter
+objects into a mode-less space at composition time -- see
+``interface/mode_config.py`` -- and are never consulted again).
 
-    [modes.record_procedure]
-    goal = "Notate each step the user takes so it can be repeated later..."
-    # mutating defaults to false
-    # activity_detail = "tools"  # live-activity verbosity (ADR 029);
-    #                              off | minimal (default) | tools | full
-    # web_search = true          # admit the provider's server-side web
-    #                              search tool (ADR 030); default off
-    # model = "opus 4.8"         # pin the Claude model for this mode's
-    #                              decisions (ADR 033); sonnet 5 |
-    #                              opus 4.8 | fable 5; empty = the
-    #                              deployment default
-
-    [modes.record_procedure.capture]
-    artifact_type = "procedure"
-    min_chars = 120
-
-and by the space's own ``Activity Mode`` objects (ADR 015 amendment) --
-``in_space`` payloads read through the ModeStore port, where the object
-name slugifies to the mode name and the page body is the goal. In-space
-wins: Anytype is the human editing surface, and an edit made there must
-never be shadowed by a file.
+Which mode NEW chats start in is in-space config too (ADR 034): the
+space's ``Space Context`` singleton links an Activity Mode object via
+``gc_default_mode``, read through the SpaceContextStore port; no link
+falls back to the alphabetically first mode, with a logged hint.
 
 Bad specs fail LOUDLY at load time (specs are prompts; a broken one should
 stop startup, not surface mid-turn); a RUNTIME reload (the ``/mode``
@@ -39,17 +27,18 @@ refresh) catches the same errors and degrades instead -- see the pipeline.
 
 from __future__ import annotations
 
-import re
-import tomllib
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from graph_context.errors import GraphContextError
 from graph_context.interface import tools
-from graph_context.interface.profiles import CapturePolicy, DomainProfile, ModeSpec
+from graph_context.interface.mode_config import slugify, spec_from_mapping
+from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.services import Services
+
+logger = logging.getLogger(__name__)
 
 ToolFn = Callable[..., Awaitable[str]]
 
@@ -128,148 +117,91 @@ class ModeRegistry:
 
 
 def load_registry(
-    profile: DomainProfile,
-    modes_file: str | None = None,
-    in_space: Sequence[Mapping[str, Any]] = (),
-    default: str | None = None,
+    in_space: Sequence[Mapping[str, Any]],
+    space_context: Sequence[Mapping[str, Any]] = (),
 ) -> ModeRegistry:
-    """Profile defaults < GC_MODES_FILE TOML < in-space mode objects.
+    """The space's Activity Mode objects -> the live registry (ADR 035).
 
-    Later sources override same-named specs and may add new ones;
-    ``in_space`` payloads come from the ModeStore port. Every problem
-    raises :class:`GraphContextError` naming the config source, mode, and
-    field -- load-time is the only acceptable place for a spec to fail.
+    ``in_space`` payloads come from the ModeStore port -- the ONLY spec
+    source since ADR 035. Every problem raises
+    :class:`GraphContextError` naming the object and field; load-time is
+    the only acceptable place for a spec to fail.
 
-    ``default`` (WP21: the spaces.toml per-space ``default_mode``)
-    overrides the profile's default for sessions with no persisted mode.
-    Deployment config naming a mode that is not loaded is a config error
-    and fails LOUDLY -- unlike the profile's own default, which degrades
-    (a profile is code, its default may predate a modes file that
-    replaced everything).
+    ``space_context`` payloads come from the SpaceContextStore port (ADR
+    034): the space's Space Context object links the Activity Mode
+    object NEW chats start in. No link falls back to the alphabetically
+    first mode (deterministic; a logged hint says how to choose) -- a
+    BROKEN link fails loudly like any other in-space config error.
     """
-    specs = {spec.name: spec for spec in profile.mode_specs}
-    if modes_file:
-        for spec in _parse_modes_file(Path(modes_file)):
-            specs[spec.name] = spec
-    for spec in _parse_in_space(in_space):
-        specs[spec.name] = spec
+    specs = {spec.name: spec for spec in _parse_in_space(in_space)}
     if not specs:
         raise GraphContextError(
-            f"profile {profile.name!r} defines no activity modes and no "
-            "GC_MODES_FILE was given"
+            "the space has no Activity Mode objects to load; create one in "
+            "Anytype (or unarchive one) -- a restart reseeds the starter "
+            "modes into a space that has none (ADR 035)"
         )
-    if default is not None:
-        if default not in specs:
-            raise GraphContextError(
-                f"default_mode {default!r} is not a loaded mode; "
-                f"loaded: {', '.join(sorted(specs))}"
-            )
-        return ModeRegistry(specs=specs, default=default)
-    fallback = (
-        profile.default_mode if profile.default_mode in specs
-        else next(iter(specs))
-    )
-    return ModeRegistry(specs=specs, default=fallback)
+    if set(specs) == {"example_mode"}:
+        # The pre-ADR-035 signature: the mint-time explainer is blocking
+        # the heal in a space that used to ride the retired profile modes.
+        logger.warning(
+            "the only loaded mode is the Example Mode template; archive it "
+            "and restart to seed the starter modes (ADR 035 migration)"
+        )
+    default = _default_from_space_context(space_context, in_space)
+    if default is None:
+        default = sorted(specs)[0]
+        logger.info(
+            "no default-mode link on the Space Context; defaulting to %r "
+            "-- link an Activity Mode object there to choose", default,
+        )
+    return ModeRegistry(specs=specs, default=default)
 
 
-_SPEC_KEYS = {
-    "goal", "mutating", "capture", "activity_detail", "web_search", "model",
-}
-_CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
+def _default_from_space_context(
+    payloads: Sequence[Mapping[str, Any]],
+    in_space: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The space-declared default mode name, or ``None`` (ADR 034).
 
-
-def _spec_from_mapping(
-    name: str, body: Mapping[str, Any], origin: str
-) -> ModeSpec:
-    """One validated ModeSpec from config data; errors name ``origin``.
-
-    The single validation seam for every config source (TOML file,
-    in-space objects) -- the sources differ only in how ``name``, the
-    field mapping, and the ``origin`` label are derived.
+    ``payloads`` are SpaceContextStore payloads (normally zero or one);
+    the default is the mode whose OBJECT the singleton's
+    ``gc_default_mode`` relation links. Resolving by object id means the
+    default can only ever be an in-space Activity Mode -- which is the
+    point: the space's settings point at the space's own config objects,
+    never at names that exist only in code or a TOML file.
     """
-    unknown = set(body) - _SPEC_KEYS
-    if unknown:
+    if not payloads:
+        return None
+    if len(payloads) > 1:
+        listed = ", ".join(
+            str(p.get("origin") or "(unknown object)") for p in payloads
+        )
         raise GraphContextError(
-            f"{origin} has unknown keys {sorted(unknown)}; "
-            f"allowed: {sorted(_SPEC_KEYS)}"
+            f"the space has {len(payloads)} Space Context objects ({listed}); "
+            "keep exactly one -- archive the rest"
         )
-    capture = None
-    if body.get("capture") is not None:
-        raw = body["capture"]
-        if not isinstance(raw, Mapping):
-            raise GraphContextError(f"{origin}: capture must be a table")
-        unknown = set(raw) - _CAPTURE_KEYS
-        if unknown:
-            raise GraphContextError(
-                f"{origin}: capture has unknown keys {sorted(unknown)}; "
-                f"allowed: {sorted(_CAPTURE_KEYS)}"
-            )
-        kwargs = dict(raw)
-        if "min_chars" in kwargs:
-            kwargs["min_chars"] = _positive_int(
-                kwargs["min_chars"], f"{origin}: min_chars"
-            )
-        capture = CapturePolicy(**kwargs)
-    # Humans type the level (TOML or the Anytype UI): normalize case and
-    # padding; empty means "not set" and takes the default. The model
-    # choice (ADR 033) follows the same rule.
-    detail = str(body.get("activity_detail") or "").strip().lower()
-    model = str(body.get("model") or "").strip().lower()
-    try:
-        return ModeSpec(
-            name=name,
-            goal=str(body.get("goal", "")),
-            mutating=bool(body.get("mutating", False)),
-            capture=capture,
-            web_search=bool(body.get("web_search", False)),
-            model=model,
-            **({"activity_detail": detail} if detail else {}),
-        )
-    except ValueError as err:
-        raise GraphContextError(f"{origin}: {err}") from None
-
-
-def _positive_int(value: Any, origin: str) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or value != int(value)
-        or value <= 0
-    ):
+    payload = payloads[0]
+    origin = f"Space Context {payload.get('origin') or '(unknown object)'}"
+    ids = [str(i) for i in payload.get("default_mode_ids") or []]
+    if not ids:
+        return None
+    if len(ids) > 1:
         raise GraphContextError(
-            f"{origin} must be a positive whole number, got {value!r}"
+            f"{origin}: the default-mode field links {len(ids)} objects; "
+            "link exactly one Activity Mode"
         )
-    return int(value)
-
-
-def _slugify(name: str) -> str:
-    """An object's display name -> the ``/mode`` name.
-
-    ``"Faithful Scribe"`` -> ``faithful_scribe``; empty when nothing
-    alphanumeric survives.
-    """
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-
-
-def _parse_modes_file(path: Path) -> list[ModeSpec]:
-    try:
-        data = tomllib.loads(path.read_text())
-    except FileNotFoundError:
-        raise GraphContextError(f"GC_MODES_FILE not found: {path}") from None
-    except tomllib.TOMLDecodeError as err:
-        raise GraphContextError(f"GC_MODES_FILE is not valid TOML: {err}") from None
-    modes = data.get("modes")
-    if not isinstance(modes, dict) or not modes:
+    modes_by_id = {str(p.get("id") or ""): p for p in in_space}
+    target = modes_by_id.get(ids[0])
+    if target is None:
         raise GraphContextError(
-            "GC_MODES_FILE must define at least one [modes.<name>] table"
+            f"{origin}: the default-mode field links object {ids[0]}, which "
+            "is not a loadable Activity Mode object (archived, deleted, or "
+            "not an Activity Mode?) -- link one of the space's Activity "
+            "Mode objects"
         )
-    specs: list[ModeSpec] = []
-    for name, body in modes.items():
-        origin = f"GC_MODES_FILE [modes.{name}]"
-        if not isinstance(body, dict):
-            raise GraphContextError(f"{origin} must be a table")
-        specs.append(_spec_from_mapping(name, body, origin))
-    return specs
+    # The name reduced to a usable slug and parsed into a spec, or
+    # _parse_in_space would have raised before we got here.
+    return slugify(str(target.get("name") or ""))
 
 
 def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
@@ -284,7 +216,7 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
     for payload in payloads:
         label = str(payload.get("origin") or "(unknown object)")
         origin = f"Activity Mode {label}"
-        name = _slugify(str(payload.get("name") or ""))
+        name = slugify(str(payload.get("name") or ""))
         if not name:
             raise GraphContextError(
                 f"{origin}: the object name {payload.get('name')!r} does not "
@@ -309,5 +241,5 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             )
             if key in payload
         }
-        specs.append(_spec_from_mapping(name, body, origin))
+        specs.append(spec_from_mapping(name, body, origin))
     return specs

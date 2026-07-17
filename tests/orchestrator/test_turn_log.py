@@ -22,9 +22,9 @@ from graph_context.interface.profiles import get_profile
 from graph_context.interface.services import Services, build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver, ToolCall
-from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
 from graph_context.orchestrator.turn_log import TurnLog
+from tests.orchestrator.mode_fixtures import fiction_registry
 
 FICTION = get_profile("fiction")
 
@@ -205,7 +205,7 @@ def _orchestrator(
 ) -> Orchestrator:
     return Orchestrator(
         services=services, driver=ScriptedDriver(turns), profile=FICTION,
-        registry=load_registry(FICTION), turn_log=log,
+        registry=fiction_registry(), turn_log=log,
     )
 
 
@@ -350,7 +350,7 @@ class TestPipelineTurnLogging:
     ) -> None:
         orchestrator = Orchestrator(
             services=services, driver=ScriptedDriver([LLMTurn(reply="ok")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         )
         events = await orchestrator.handle_message("s1", "u1", "hello")
         assert events[-1].kind == "reply"

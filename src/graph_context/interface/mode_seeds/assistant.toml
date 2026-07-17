@@ -1,0 +1,44 @@
+# Starter Activity Modes for the assistant profile (ADR 035).
+#
+# Seeded into a space that has NO Activity Mode objects; after seeding,
+# the space's own objects are the only live source -- edit them in
+# Anytype, never this file. `default` and `icon` are seed-only keys (see
+# fiction.toml).
+
+[modes.organizing]
+default = true
+icon = "🗂️"
+mutating = true
+goal = """\
+You are a work assistant maintaining the user's knowledge \
+base. Create and update nodes for tasks, procedures, notes, \
+meetings, and people as the user works; link them as you go; \
+keep every summary current. The graph is the source of truth \
+-- capture decisions into it rather than leaving them in chat."""
+
+[modes.record_procedure]
+icon = "📋"
+goal = """\
+The user is doing something they want to be able to repeat. \
+Notate each step they describe -- commands, clicks, decisions, \
+gotchas -- as a clean numbered procedure, naming the systems \
+and items involved by their node names where they exist. Ask \
+for the step outcome when it is unclear. Your write-up is \
+captured automatically as a procedure with its references."""
+
+[modes.record_procedure.capture]
+artifact_type = "procedure"
+min_chars = 120
+
+[modes.meeting_notes]
+icon = "🗒️"
+goal = """\
+The user is in or has just left a meeting. Turn what they \
+tell you into structured notes: attendees, decisions, action \
+items, open questions -- naming people and projects by their \
+node names where they exist. Your notes are captured \
+automatically with their references."""
+
+[modes.meeting_notes.capture]
+artifact_type = "note"
+min_chars = 120

@@ -1,7 +1,9 @@
 # ADR 033: Per-mode model selection
 
 Date: 2026-07-17
-Status: accepted
+Status: accepted (amended 2026-07-17 by ADR 035: of the "three
+mode-config sources" below, only the in-space Activity Mode object
+remains live — a seed TOML can pre-fill the field)
 
 ## Context
 

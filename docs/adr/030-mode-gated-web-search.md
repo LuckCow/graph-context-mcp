@@ -1,7 +1,9 @@
 # ADR 030: Mode-gated server-side web search
 
 Date: 2026-07-16
-Status: accepted (amended 2026-07-16: the v1 transcript-continuity
+Status: accepted (amended 2026-07-17 by ADR 035: of the "three
+mode-config sources" below, only the in-space Activity Mode object
+remains live — a seed TOML can pre-fill the field; amended 2026-07-16: the v1 transcript-continuity
 limitation is retired by WP22 — searching decisions carry their raw
 result payloads on the decision event, so the next decide replays what
 the search returned; see Consequences)

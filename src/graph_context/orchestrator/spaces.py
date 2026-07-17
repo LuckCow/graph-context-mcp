@@ -9,13 +9,17 @@ file, keyed by the space id itself::
     [spaces."bafyre..."]
     profile       = "fiction"      # optional; defaults to GC_PROFILE
     project       = "Ashfall"      # optional cosmetic label
-    modes_file    = "ashfall.toml" # optional; overrides GC_MODES_FILE
-    default_mode  = "assistant"    # optional; the mode NEW chats start in
-                                    # (overrides the profile's default;
-                                    # chats that picked a mode keep it)
+    modes_file    = "ashfall.toml" # optional; the SEED source (ADR 035)
+                                    # for a space with no Activity Mode
+                                    # objects; overrides GC_MODES_FILE
     chat_id       = "bafyre..."    # optional PIN: serve ONLY this chat,
                                     # no discovery (single-chat deployments)
     exclude_chats = ["bafyre..."]  # optional; chat ids the bot ignores
+
+The mode NEW chats start in is NOT declared here (ADR 034, retiring
+WP21's ``default_mode`` key): it lives in the space itself, on the Space
+Context object's default-mode link, next to the Activity Mode objects it
+points at.
 
 By default the bot serves EVERY chat in the space (WP8): each chat is a
 separate THREAD with its own session context (scratchpad / working set /
@@ -42,8 +46,7 @@ from graph_context.interface import profiles
 from graph_context.interface.profiles import DomainProfile
 
 _BINDING_KEYS = {
-    "profile", "project", "modes_file", "default_mode", "chat_id",
-    "exclude_chats",
+    "profile", "project", "modes_file", "chat_id", "exclude_chats",
 }
 
 
@@ -55,10 +58,6 @@ class SpaceBinding:
     profile: DomainProfile
     project: str | None = None
     modes_file: str | None = None
-    # The mode new chats start in (WP21): overrides the profile's
-    # default_mode; validated against the LOADED registry at assembly time
-    # (the mode may come from the modes file or the space itself).
-    default_mode: str | None = None
     chat_id: str | None = None  # pin: serve only this chat (no discovery)
     exclude_chats: tuple[str, ...] = ()
 
@@ -116,6 +115,12 @@ def load_space_bindings(
 def _binding_from_mapping(
     space_id: str, body: dict[str, Any], origin: str, default_profile: str | None
 ) -> SpaceBinding:
+    if "default_mode" in body:
+        raise GraphContextError(
+            f"{origin}: default_mode moved into the space itself (ADR 034) "
+            "-- link the Activity Mode object on the space's Space Context "
+            "object instead, and remove this key"
+        )
     unknown = set(body) - _BINDING_KEYS
     if unknown:
         raise GraphContextError(
@@ -141,7 +146,6 @@ def _binding_from_mapping(
         profile=profile,
         project=body.get("project"),
         modes_file=body.get("modes_file"),
-        default_mode=body.get("default_mode"),
         chat_id=body.get("chat_id"),
         exclude_chats=exclude_chats,
     )

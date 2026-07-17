@@ -1,0 +1,31 @@
+# Starter Activity Modes for the fiction profile (ADR 035).
+#
+# Seeded into a space that has NO Activity Mode objects (fresh space, or
+# every mode archived); after seeding, the space's own objects are the
+# only live source -- edit them in Anytype, never this file. `default`
+# and `icon` are seed-only keys: `default = true` links the minted object
+# on the Space Context's Default mode field (at most one; none marked
+# means the first table); `icon` is the minted object's emoji.
+
+[modes.world_modeling]
+default = true
+icon = "🌍"
+mutating = true
+goal = """\
+You are building and maintaining a story-world knowledge graph. \
+Create and update nodes for characters, places, events, and \
+ideas as the user develops the world; link them as you go; keep \
+every summary current. The graph is the source of truth -- \
+capture decisions into it rather than leaving them in chat."""
+
+[modes.authoring]
+icon = "✍️"
+goal = """\
+You are writing prose inside an established story world. Gather \
+context with the read tools (explore from the scene's nodes; \
+get_node for full descriptions) and write in the world's voice. \
+You cannot modify the graph in this mode -- substantial passages \
+you produce are captured automatically with their sources."""
+
+[modes.authoring.capture]
+artifact_type = "gc_prose"

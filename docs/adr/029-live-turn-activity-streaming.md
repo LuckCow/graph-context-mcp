@@ -4,7 +4,8 @@ Date: 2026-07-14
 Status: accepted (amended 2026-07-15: the detail level is a property of
 the activity MODE — profile spec, `GC_MODES_FILE`, or the in-space
 Activity Mode object — not a `/mode detail=` session setting; picking a
-mode picks its verbosity. Amended 2026-07-17: `close` DELETES the
+mode picks its verbosity. Since ADR 035 the in-space object is the only
+live source; a seed TOML can pre-fill the field. Amended 2026-07-17: `close` DELETES the
 activity message instead of collapsing it into a done-summary — the
 trace is live scaffolding, not chat history; the summary edit survives
 only as the degrade path when the delete fails)

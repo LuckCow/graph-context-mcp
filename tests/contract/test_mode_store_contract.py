@@ -31,13 +31,13 @@ from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
 from graph_context.infrastructure.anytype.mode_store import AnytypeModeStore
 from graph_context.infrastructure.anytype.schema_bootstrap import (
-    EXAMPLE_MODE_NAME,
     MODE_TYPE_KEY,
     ensure_schema,
 )
 from graph_context.infrastructure.memory.fake_mode_store import InMemoryModeStore
 
 SCRIBE = {
+    "id": "obj-1",
     "name": "Faithful Scribe",
     "goal": "Record only what the user explicitly states.",
     "mutating": True,
@@ -114,18 +114,15 @@ async def _load_by_name(client: AnytypeClient) -> dict[str, dict[str, Any]]:
     return {p["name"]: p for p in await AnytypeModeStore(client).load()}
 
 
-async def test_bootstrap_seeds_the_example_mode_once(
+async def test_the_type_mint_seeds_no_objects(
     anytype_client: AnytypeClient,
 ) -> None:
-    """The type mint ships the one-time template whose body explains the
-    feature (including that /mode applies edits); a re-run adds nothing."""
+    """ADR 035: ensure_schema mints the TYPE only; the example/template
+    object now ships with the starter-mode seed (mode_seeder), whose
+    trigger is "the space has no Activity Mode objects" -- so the mint
+    must leave the space empty for the seeder to see it that way."""
     await ensure_schema(anytype_client)  # idempotent second run
-    payloads = await AnytypeModeStore(anytype_client).load()
-    assert [p["name"] for p in payloads] == [EXAMPLE_MODE_NAME]
-    example = payloads[0]
-    assert "/mode" in example["goal"]  # the explainer names the command
-    assert not example["mutating"]
-    assert example["capture"] is None
+    assert await AnytypeModeStore(anytype_client).load() == []
 
 
 async def test_anytype_store_round_trips_a_mode_object(
@@ -147,6 +144,8 @@ async def test_anytype_store_round_trips_a_mode_object(
         "min_chars": 120.0,
     }
     assert object_id in scribe["origin"]  # errors can name the object
+    # ADR 034: the Space Context's default-mode link resolves by object id.
+    assert scribe["id"] == object_id
 
 
 async def test_anytype_store_skips_archived_objects(

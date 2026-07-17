@@ -41,12 +41,14 @@ SESSION_TYPE_KEY = "gc_session_context"
 INTENT_TYPE_KEY = "gc_intent"  # WP7/ADR 008: one provenance node per turn
 MODE_TYPE_KEY = "gc_activity_mode"  # ADR 015 amendment: in-space mode config
 SCHEDULED_TYPE_KEY = "gc_scheduled_event"  # WP18/ADR 027: timed prompts
+SPACE_CONTEXT_TYPE_KEY = "gc_space_context"  # ADR 034: space-wide settings
 INFRA_TYPES: dict[str, str] = {
     PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
     INTENT_TYPE_KEY: Role.INTENT.value,
     MODE_TYPE_KEY: "Activity Mode",
     SCHEDULED_TYPE_KEY: "Scheduled Event",
+    SPACE_CONTEXT_TYPE_KEY: "Space Context",
 }
 
 # Types whose fields humans edit in the Anytype UI get their properties
@@ -73,49 +75,12 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
         **mapping.SESSION_PROPERTIES,
         **mapping.SESSION_STATE_PROPERTIES,
     },
+    SPACE_CONTEXT_TYPE_KEY: mapping.SPACE_CONTEXT_PROPERTIES,
 }
 
-# Seeded once, when the Activity Mode type is first minted: a template
-# object whose body doubles as the feature's in-space documentation. The
-# human edits or deletes it like any other object; deleting is permanent
-# (only the TYPE is create-if-missing). It loads as a valid read-only
-# mode, so switching to it makes the model explain it is a template.
-EXAMPLE_MODE_NAME = "Example Mode"
-EXAMPLE_MODE_SUMMARY = (
-    "Template: edit this page to define an assistant behavior; "
-    "changes apply when /mode is next used in chat."
-)
-EXAMPLE_MODE_BODY = """\
-Replace this page body with the mode's goal -- the instructions the \
-assistant follows while this mode is active (for example: "Record only \
-what the user explicitly states; organize and link it, but never invent \
-or embellish details.").
-
-How Activity Mode objects work:
-
-- Every object of this type is one mode the assistant can switch into.
-- The object name becomes the /mode name: "Example Mode" -> /mode example_mode.
-- This page body is the goal prompt handed to the model.
-- Tick gc_mode_mutating to let the mode create and update nodes; unticked \
-means read-only.
-- Pick a gc_mode_activity_detail option to control how much live \
-progress the assistant streams into the chat while this mode works a \
-turn: Off (just "Processing..." until the reply), Minimal (tool tally; \
-the default when empty), Tools (each tool call), or Full (thinking and \
-results too).
-- Tick gc_mode_web_search to let the assistant search the web while this \
-mode is active; unticked keeps it grounded in the graph alone.
-- Pick a gc_mode_model option to run this mode on a specific Claude \
-model (Sonnet 5, Opus 4.8, or Fable 5); empty uses the deployment's \
-default model.
-- Fill gc_capture_type (and optionally gc_capture_references, \
-gc_capture_min_chars) to auto-capture the assistant's substantial replies \
-as objects of that type.
-- Edits here do NOT apply on their own: send /mode in the chat to reload \
-and list modes, or /mode <name> to switch. An object named after a \
-built-in mode (e.g. world_modeling) overrides it.
-- Archive an object to disable its mode.
-"""
+# The Activity Mode explainer/template moved to mode_seeder.py (ADR 035):
+# it is part of the starter-mode kit, seeded whenever a mode-less space
+# is healed -- no longer tied to the type mint.
 
 # Seeded once, when the Scheduled Event type is first minted (ADR 027):
 # the same explainer pattern as the example mode. Its schedule is left
@@ -148,6 +113,30 @@ The assistant marks a one-shot Completed after it fires.
 
 You can also just ask the assistant in chat ("remind me a week before \
 taxes are due") -- it creates these objects itself.
+"""
+
+# Seeded once, when the Space Context type is first minted (ADR 034).
+# Unlike the two explainers above, this object IS the config surface: the
+# loader reads its gc_default_mode link on every registry (re)load. Its
+# body documents itself; deleting it just returns new chats to the
+# profile's built-in default mode.
+SPACE_CONTEXT_NAME = "Space Context"
+SPACE_CONTEXT_SUMMARY = (
+    "Space-wide assistant settings: link an Activity Mode under "
+    "Default mode to pick what NEW chats start in."
+)
+SPACE_CONTEXT_BODY = """\
+This object holds space-wide assistant settings; the assistant re-reads \
+it whenever modes reload (send /mode in a chat to apply edits).
+
+- Default mode -- link exactly ONE Activity Mode object here to make it \
+the mode NEW chats start in. Chats that already picked a mode with \
+/mode keep their choice. Leave the link empty to use the assistant's \
+built-in default.
+- Keep exactly one Space Context object in the space -- a second one is \
+a configuration error the assistant reports instead of guessing.
+- Deleting this object simply returns new chats to the built-in \
+default; create a new Space Context object to set one again.
 """
 
 # Starter relation vocabulary (key, display name). Reusable defaults; the
@@ -203,10 +192,10 @@ async def ensure_schema(
                     {entry["key"]: entry for entry in inline}
                 )
             await client.create_type(payload)
-            if key == MODE_TYPE_KEY:
-                await _seed_example_mode(client)
             if key == SCHEDULED_TYPE_KEY:
                 await _seed_example_event(client)
+            if key == SPACE_CONTEXT_TYPE_KEY:
+                await _seed_space_context(client)
         else:
             # Upgraded-space path: the type predates a field added to its
             # inline set (e.g. WP19's gc_mode_activity_detail) -- attach
@@ -245,11 +234,12 @@ async def ensure_schema(
             await client.create_property(
                 {"key": key, "name": _display_name(key), "format": fmt}
             )
-    # Scheduled Event fields (WP18/ADR 027) and attribution stamps (ADR
-    # 028): same coverage posture as the mode fields -- a fresh mint
-    # attaches them inline with the type.
+    # Scheduled Event fields (WP18/ADR 027), attribution stamps (ADR 028),
+    # and the Space Context link (ADR 034): same coverage posture as the
+    # mode fields -- a fresh mint attaches them inline with the type.
     for key, fmt in {
         **mapping.SCHEDULED_PROPERTIES, **mapping.ATTRIBUTION_PROPERTIES,
+        **mapping.SPACE_CONTEXT_PROPERTIES,
     }.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
@@ -396,24 +386,29 @@ async def _seed_example_event(client: AnytypeClient) -> None:
         )
 
 
-async def _seed_example_mode(client: AnytypeClient) -> None:
-    """The one-time template/explainer object (see EXAMPLE_MODE_BODY).
+async def _seed_space_context(client: AnytypeClient) -> None:
+    """The Space Context singleton (ADR 034), seeded with an empty link.
 
-    Best-effort: a failure here must not block startup -- the feature
-    works without the template, and the README carries the same guide.
+    Best-effort like the explainers: without it new chats simply start in
+    the profile's default mode, and a human can create the object by hand
+    (the loader treats any single non-archived gc_space_context object as
+    THE settings surface).
     """
     try:
         await client.create_object({
-            "name": EXAMPLE_MODE_NAME,
-            "type_key": MODE_TYPE_KEY,
-            "body": EXAMPLE_MODE_BODY,
+            "name": SPACE_CONTEXT_NAME,
+            "type_key": SPACE_CONTEXT_TYPE_KEY,
+            "body": SPACE_CONTEXT_BODY,
+            "icon": {"format": "emoji", "emoji": "⚙️"},
             "properties": [
                 mapping.property_entry(
-                    mapping.PROP_SUMMARY, "text", EXAMPLE_MODE_SUMMARY
+                    mapping.PROP_SUMMARY, "text", SPACE_CONTEXT_SUMMARY
                 ),
             ],
         })
     except AnytypeApiError:
         logger.warning(
-            "bootstrap: could not seed the example Activity Mode", exc_info=True
+            "bootstrap: could not seed the Space Context object", exc_info=True
         )
+
+

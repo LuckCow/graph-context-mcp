@@ -315,40 +315,36 @@ async def _assemble_runtime(
     space_id: str | None = None,
     project: str | None = None,
     modes_file: str | None = None,
-    default_mode: str | None = None,
 ) -> Runtime:
     """One fully wired runtime: services, provenance, mode registry.
 
     Everything space-bound multiplies per call -- the journal included
     (a shared journal would attribute one channel's mutations to another
     channel's intent node); the driver and turn log are shared, both
-    per-turn stateless. ``modes_file`` overrides ``GC_MODES_FILE`` for
-    this runtime (per-channel modes, ADR 017); ``default_mode`` (WP21)
-    overrides the profile's default for sessions with no persisted mode
-    -- re-applied on every /mode reload, so it survives registry
-    refreshes.
+    per-turn stateless. ``modes_file`` (or ``GC_MODES_FILE``) is the SEED
+    source since ADR 035 -- composition mints starter Activity Mode
+    objects into a mode-less space; the space's own objects are the only
+    live source, and the Space Context object picks the default (ADR
+    034). The reload closure re-reads both stores on every /mode
+    command, so an edit made in Anytype applies without a restart.
     """
     provenance_on = _knob_on("GC_PROVENANCE")
     store_prompt = _knob_on("GC_STORE_LLM_INPUT")
     journal = MutationJournal() if provenance_on else None
     built = await composition.build_runtime(
-        profile, journal=journal, space_id=space_id, project=project
+        profile, journal=journal, space_id=space_id, project=project,
+        modes_file=modes_file or os.environ.get("GC_MODES_FILE"),
     )
     services = built.services
     recorder = (
         IntentRecorder(services.repository, store_prompt=store_prompt)
         if provenance_on else None
     )
-    # ADR 015: profile defaults, overlaid by the modes file TOML and by
-    # the space's own Activity Mode objects (in-space wins). The same
-    # closure re-reads all three sources on every /mode command, so an
-    # edit made in Anytype applies without a restart.
-    modes_file = modes_file or os.environ.get("GC_MODES_FILE")
 
     async def reload_registry() -> modes.ModeRegistry:
         return modes.load_registry(
-            profile, modes_file, in_space=await built.mode_store.load(),
-            default=default_mode,
+            in_space=await built.mode_store.load(),
+            space_context=await built.space_context_store.load(),
         )
 
     registry = await reload_registry()  # startup: bad specs fail loudly here
@@ -499,7 +495,6 @@ async def build_space_runtimes(
                 binding.profile, driver, model_name, help_line, turn_log,
                 space_id=binding.space_id, project=binding.project,
                 modes_file=binding.modes_file,
-                default_mode=binding.default_mode,
             )
         except GraphContextError as err:
             await composition.run_teardown(teardown)  # close what already built

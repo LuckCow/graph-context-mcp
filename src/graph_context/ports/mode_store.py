@@ -10,6 +10,8 @@ representation detail stays quarantined in the adapter.
 Payload shape (one dict per non-archived mode object)::
 
     {
+        "id": str,         # the object's id (ADR 034: the Space Context's
+                           # default-mode link resolves against it)
         "name": str,       # the object's display name, unslugged
         "goal": str,       # the page body, verbatim
         "mutating": bool,

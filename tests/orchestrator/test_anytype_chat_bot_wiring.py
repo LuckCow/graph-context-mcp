@@ -42,10 +42,10 @@ from graph_context.orchestrator.drivers import (
     ToolCall,
     TranscriptEvent,
 )
-from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding
+from tests.orchestrator.mode_fixtures import fiction_registry
 
 FICTION = get_profile("fiction")
 
@@ -92,7 +92,7 @@ def _wired_chat(
     )
     orchestrator = Orchestrator(
         services=services, driver=ScriptedDriver(turns),
-        profile=FICTION, registry=load_registry(FICTION),
+        profile=FICTION, registry=fiction_registry(),
     )
     handler = AnytypeChatTurnHandler(
         routes={chat_id: ChannelRoute(orchestrator=orchestrator)},
@@ -181,7 +181,7 @@ class TestLiveDiscovery:
                 SessionState(project="Ashfall"),
             ),
             driver=ScriptedDriver([LLMTurn(reply="served the new thread")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         ))
         runtimes = bootstrap.SpaceRuntimes(
             routes={}, spaces={}, descriptions={}, help_line="",
@@ -241,7 +241,7 @@ class TestLiveDiscovery:
                 SessionState(project="Ashfall"),
             ),
             driver=ScriptedDriver([LLMTurn(reply="answered the opener")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         ))
         runtimes = bootstrap.SpaceRuntimes(
             routes={}, spaces={}, descriptions={}, help_line="",
@@ -290,7 +290,7 @@ class TestPeriodicGraphResync:
         route = ChannelRoute(orchestrator=Orchestrator(
             services=build_services(repository, SessionState(project="Todo")),
             driver=ScriptedDriver([]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         ))
         repository.stage_out_of_band(
             NodeDraft("Project", name="Garden", summary="Yard work.")

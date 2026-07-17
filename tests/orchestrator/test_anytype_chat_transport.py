@@ -56,7 +56,7 @@ def _route(
     turns: list[LLMTurn] | None = None,
     driver: ScriptedDriver | None = None,
 ) -> ChannelRoute:
-    from graph_context.orchestrator.modes import load_registry
+    from tests.orchestrator.mode_fixtures import fiction_registry
 
     services = build_services(
         InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
@@ -64,7 +64,7 @@ def _route(
     )
     orchestrator = Orchestrator(
         services=services, driver=driver or ScriptedDriver(turns or []),
-        profile=FICTION, registry=load_registry(FICTION),
+        profile=FICTION, registry=fiction_registry(),
     )
     return ChannelRoute(orchestrator=orchestrator)
 
@@ -501,7 +501,7 @@ class TestIntentOrigin:
         from graph_context.application.intent_recorder import IntentRecorder
         from graph_context.application.mutation_journal import MutationJournal
         from graph_context.orchestrator.drivers import ToolCall
-        from graph_context.orchestrator.modes import load_registry
+        from tests.orchestrator.mode_fixtures import fiction_registry
 
         repository = InMemoryGraphRepository(role_overrides=FICTION.role_overrides)
         journal = MutationJournal()
@@ -517,7 +517,7 @@ class TestIntentOrigin:
                 LLMTurn(reply="made her"),
             ]),
             profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
             provenance=IntentRecorder(repository),
         )
         handler = AnytypeChatTurnHandler(

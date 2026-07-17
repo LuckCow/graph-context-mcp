@@ -47,12 +47,19 @@ class Role(StrEnum):
     # prompt the orchestrator hands the LLM when it comes due. Humans edit
     # them in Anytype; the LLM manages them through the `schedule` tool.
     SCHEDULED = "ScheduledEvent"
+    # The space-settings singleton (ADR 034): space-wide assistant config
+    # humans edit in Anytype -- today, which Activity Mode new chats start
+    # in. The LLM's traversal never sees it.
+    SPACE_CONTEXT = "SpaceContext"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
 INFRA_ROLES: frozenset[Role] = frozenset(
-    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE, Role.SCHEDULED}
+    {
+        Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE,
+        Role.SCHEDULED, Role.SPACE_CONTEXT,
+    }
 )
 
 
@@ -76,6 +83,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_intent": Role.INTENT,
     "gc_activity_mode": Role.MODE,
     "gc_scheduled_event": Role.SCHEDULED,
+    "gc_space_context": Role.SPACE_CONTEXT,
     # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
     # the gc_ keys above; backends without a key registry (the in-memory
     # repository, eval worlds) see the display name as the type, and these
@@ -83,6 +91,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     # about what find_node can see.
     "activity mode": Role.MODE,
     "scheduled event": Role.SCHEDULED,
+    "space context": Role.SPACE_CONTEXT,
 }
 
 

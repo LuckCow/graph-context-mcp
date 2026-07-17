@@ -39,7 +39,12 @@ async def main() -> None:
     journal = MutationJournal()
     built = await composition.build_runtime(profile, journal=journal)
     services, teardown = built.services, built.teardown
-    registry = load_registry(profile)
+    # ADR 035: the memory runtime's stores come pre-seeded with the
+    # profile's starter modes -- load the registry the way the bot does.
+    registry = load_registry(
+        in_space=await built.mode_store.load(),
+        space_context=await built.space_context_store.load(),
+    )
     orchestrator = Orchestrator(
         services=services,
         profile=profile,

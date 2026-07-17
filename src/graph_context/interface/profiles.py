@@ -1,10 +1,21 @@
 """Domain profiles: the deployment's *framing* of the graph (WP5).
 
+DEPRECATED (ADR 035 / WP27). Profiles are a transitional framing layer on
+the way out: activity modes already moved in-space (the profile's mode
+specs are GONE -- the space's Activity Mode objects are the only live
+source, with ``interface/mode_config.py`` seeding starters). What remains
+here keeps working until WP27 retires it: ``tool_docs`` will collapse to
+one neutral code-owned set; ``role_overrides`` variance will be dropped;
+``time_property``/``time_format`` will be REPLACED by a redesigned
+general-purpose timeline feature (not migrated as-is); ``ranking``
+variance moves to deployment config. Do not add new profile fields --
+new configuration belongs in the space (Space Context, ADR 034) or in
+deployment config.
+
 The schema is space-reflecting and domain-neutral (ADR 006); what actually
 differs between a story world and a work knowledge base is framing — the
 tool docstrings (which are prompts, WP2), their worked examples, and which
-native type keys map to semantic roles. A :class:`DomainProfile` bundles
-exactly that and nothing else. Storage keys (``gc_story_time``,
+native type keys map to semantic roles. Storage keys (``gc_story_time``,
 ``gc_prose``, …), tool names, and parameter names are frozen across
 profiles: a profile changes words, never wire format.
 
@@ -116,21 +127,32 @@ class ModeSpec:
 
 @dataclass(frozen=True, slots=True)
 class DomainProfile:
-    """One deployment's framing: prompt text, roles, and activity modes."""
+    """One deployment's framing: prompt text and roles.
+
+    DEPRECATED (ADR 035 / WP27): activity modes left this dataclass for
+    the space's Activity Mode objects; every remaining field is on the
+    WP27 retirement list (see the module docstring).
+    """
 
     name: str
     description: str
+    # DEPRECATED (WP27): collapses to one neutral code-owned set.
     tool_docs: Mapping[str, str]
+    # DEPRECATED (WP27): variance dropped; only Role.EVENT ever changed
+    # behavior (timeline), and the timeline itself is being redesigned.
     role_overrides: Mapping[str, Role]
-    mode_specs: tuple[ModeSpec, ...] = ()
-    default_mode: str = "world_modeling"
     # The Event-role timeline source (ADR 015): a property key + format.
     # Fiction keeps the gc_story_time number; a date-axis profile names a
     # native date property (ISO strings order lexicographically).
+    # DEPRECATED (WP27): replaced by a redesigned general-purpose
+    # timeline feature, not migrated as-is -- the seam to preserve is
+    # that the pair flows as a parameter through composition.build_runtime.
     time_property: str = "gc_story_time"
     time_format: str = "number"
     # Ranking signal weights (ADR 016) -- data, tuned against the eval
     # golden. Fiction leaves recency at zero; the assistant raises it.
+    # DEPRECATED (WP27): moves to deployment config; the seam to preserve
+    # is Ranker taking RankingWeights via constructor.
     ranking: RankingWeights = RankingWeights()
 
     def __post_init__(self) -> None:
@@ -141,18 +163,13 @@ class DomainProfile:
                 f"profile {self.name!r} tool_docs mismatch: "
                 f"missing={sorted(missing)} extra={sorted(extra)}"
             )
-        names = [spec.name for spec in self.mode_specs]
-        if len(names) != len(set(names)):
-            raise ValueError(f"profile {self.name!r} has duplicate mode names")
-        if self.mode_specs and self.default_mode not in names:
-            raise ValueError(
-                f"profile {self.name!r} default_mode {self.default_mode!r} "
-                f"is not among its modes {names}"
-            )
 
 
 def get_profile(name: str | None) -> DomainProfile:
     """Resolve ``GC_PROFILE`` (or an explicit name) to a profile.
+
+    DEPRECATED (ADR 035 / WP27): profiles are being retired; new
+    configuration belongs in the space, not in a new profile.
 
     ``None``/empty defaults to ``fiction`` — existing setups see zero
     change. The error, like all our errors, lists the allowed values.
@@ -566,37 +583,15 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
     "send_file": _SEND_FILE_DOC,
 }
 
-_FICTION_MODES = (
-    ModeSpec(
-        name="world_modeling",
-        goal=(
-            "You are building and maintaining a story-world knowledge graph. "
-            "Create and update nodes for characters, places, events, and "
-            "ideas as the user develops the world; link them as you go; keep "
-            "every summary current. The graph is the source of truth -- "
-            "capture decisions into it rather than leaving them in chat."
-        ),
-        mutating=True,
-    ),
-    ModeSpec(
-        name="authoring",
-        goal=(
-            "You are writing prose inside an established story world. Gather "
-            "context with the read tools (explore from the scene's nodes; "
-            "get_node for full descriptions) and write in the world's voice. "
-            "You cannot modify the graph in this mode -- substantial passages "
-            "you produce are captured automatically with their sources."
-        ),
-        capture=CapturePolicy(artifact_type="gc_prose"),
-    ),
-)
+# Starter activity modes live in mode_seeds/*.toml since ADR 035 -- the
+# space's Activity Mode objects are the only live source; profiles no
+# longer carry mode specs.
 
 FICTION = DomainProfile(
     name="fiction",
     description="story-world building and prose rendering (the original surface)",
     tool_docs=_FICTION_DOCS,
     role_overrides={},  # DEFAULT_TYPE_ROLES already speaks fiction
-    mode_specs=_FICTION_MODES,
 )
 
 
@@ -708,36 +703,10 @@ EXAMPLES:
     "send_file": _SEND_FILE_DOC,
 }
 
-_WORKSPACE_MODES = (
-    ModeSpec(
-        name="world_modeling",
-        goal=(
-            "You are maintaining a work knowledge base. Create and update "
-            "nodes for people, teams, projects, meetings, and decisions as "
-            "the user works; link them as you go; keep every summary "
-            "current. The graph is the source of truth -- capture decisions "
-            "into it rather than leaving them in chat."
-        ),
-        mutating=True,
-    ),
-    ModeSpec(
-        name="authoring",
-        goal=(
-            "You are drafting work documents (briefs, summaries, reports) "
-            "from an established knowledge base. Gather context with the "
-            "read tools and write clearly. You cannot modify the graph in "
-            "this mode -- substantial drafts you produce are captured "
-            "automatically with their sources."
-        ),
-        capture=CapturePolicy(artifact_type="gc_prose"),
-    ),
-)
-
 WORKSPACE = DomainProfile(
     name="workspace",
     description="work knowledge base (people, teams, projects, meetings, decisions)",
     tool_docs=_WORKSPACE_DOCS,
-    mode_specs=_WORKSPACE_MODES,
     role_overrides={
         # Only Role.EVENT changes behavior (story_time invariant + as_of
         # timeline); the rest are cosmetic role names for error suggestions.
@@ -850,43 +819,6 @@ EXAMPLES:
     "send_file": _SEND_FILE_DOC,
 }
 
-_ASSISTANT_MODES = (
-    ModeSpec(
-        name="organizing",
-        goal=(
-            "You are a work assistant maintaining the user's knowledge "
-            "base. Create and update nodes for tasks, procedures, notes, "
-            "meetings, and people as the user works; link them as you go; "
-            "keep every summary current. The graph is the source of truth "
-            "-- capture decisions into it rather than leaving them in chat."
-        ),
-        mutating=True,
-    ),
-    ModeSpec(
-        name="record_procedure",
-        goal=(
-            "The user is doing something they want to be able to repeat. "
-            "Notate each step they describe -- commands, clicks, decisions, "
-            "gotchas -- as a clean numbered procedure, naming the systems "
-            "and items involved by their node names where they exist. Ask "
-            "for the step outcome when it is unclear. Your write-up is "
-            "captured automatically as a procedure with its references."
-        ),
-        capture=CapturePolicy(artifact_type="procedure", min_chars=120),
-    ),
-    ModeSpec(
-        name="meeting_notes",
-        goal=(
-            "The user is in or has just left a meeting. Turn what they "
-            "tell you into structured notes: attendees, decisions, action "
-            "items, open questions -- naming people and projects by their "
-            "node names where they exist. Your notes are captured "
-            "automatically with their references."
-        ),
-        capture=CapturePolicy(artifact_type="note", min_chars=120),
-    ),
-)
-
 ASSISTANT = DomainProfile(
     name="assistant",
     description="personal work assistant & note taker (tasks, procedures, notes)",
@@ -898,8 +830,6 @@ ASSISTANT = DomainProfile(
         "milestone": Role.EVENT,
         "tool": Role.TECHNOLOGY,
     },
-    mode_specs=_ASSISTANT_MODES,
-    default_mode="organizing",
     time_property="event_date",
     time_format="date",
     # "The deploy task" usually means the live one: recency matters here

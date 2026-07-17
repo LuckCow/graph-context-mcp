@@ -1,7 +1,8 @@
 # ADR 031: Chat auto-titling and the per-space default mode
 
 Date: 2026-07-16
-Status: accepted
+Status: accepted; the default-mode half is superseded by ADR 034 (the
+default moved off `spaces.toml` onto the in-space Space Context object)
 
 ## Context
 

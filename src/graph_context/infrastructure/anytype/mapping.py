@@ -172,6 +172,17 @@ SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# The Space Context singleton's field (ADR 034): an ``objects``-format
+# link to the Activity Mode object NEW chats start in. Kept OUT of
+# SCALAR_PROPERTIES -- it lives only on the gc_space_context object. On
+# the relation denylist below, so the link never reflects as a graph edge
+# and never surfaces as reusable edge vocabulary: it is server config,
+# not story structure.
+PROP_DEFAULT_MODE = "gc_default_mode"
+SPACE_CONTEXT_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints
+    PROP_DEFAULT_MODE: "objects",
+}
+
 # Session discriminator (WP8, ADR 021): every gc_session_context node
 # carries the transport-scoped session key it belongs to (e.g.
 # "anytype:<chat_id>", "mcp"). Kept OUT of SCALAR_PROPERTIES -- it lives
@@ -219,6 +230,7 @@ SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # "Schedule …"-prefixed to stay clear of common user properties like
 # "Status". Properties absent here mint under their raw key, as before.
 PROPERTY_DISPLAY_NAMES: dict[str, str] = {
+    PROP_DEFAULT_MODE: "Default mode",
     PROP_SCHEDULE: "Schedule",
     PROP_SCHEDULE_PROMPT: "Schedule prompt",
     PROP_SCHEDULE_STATUS: "Schedule status",
@@ -275,7 +287,10 @@ SYSTEM_PROPERTY_DENYLIST: frozenset[str] = frozenset(
 # already covered by the in-memory reverse index, so reading it would
 # double-count; ``creator``/``last_modified_by`` point at the user account.
 SYSTEM_RELATION_DENYLIST: frozenset[str] = frozenset(
-    {"backlinks", "creator", "last_modified_by"}
+    # gc_default_mode (ADR 034) is server config on the Space Context
+    # singleton: quarantined here so it never reflects as an edge and
+    # never appears as reusable edge vocabulary.
+    {"backlinks", "creator", "last_modified_by", PROP_DEFAULT_MODE}
 )
 
 _VALUE_FIELD = {

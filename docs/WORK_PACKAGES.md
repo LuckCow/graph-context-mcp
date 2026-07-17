@@ -1798,6 +1798,8 @@ What shipped:
   registry loads — new chats start there; chats with a persisted mode
   keep it. Unknown mode fails LOUDLY at startup naming the value and
   the loaded modes; the `/mode` reload closure re-applies the override.
+  **[Superseded by WP25/ADR 034: the key is retired; the default is
+  the Space Context object's link.]**
 
 ## WP22 — Lossless server-tool continuity across decides (ADR 030 amendment) — **shipped 2026-07-16**
 
@@ -1930,6 +1932,105 @@ What shipped:
   search tool variant on the API driver).
 * `/mode` reports `model: <choice|default>`; intent nodes stamp the
   resolved model id when a mode pins one (ADR 028's `gc_model`).
+
+---
+
+## WP25 — Space Context: the default mode moves in-space (ADR 034) — **shipped 2026-07-17**
+
+**Status:** complete. Which mode NEW chats start in is now space
+content, not deployment config: a seeded `gc_space_context` singleton
+("Space Context", infra role `SpaceContext`) carries a
+`gc_default_mode` **object link** to the Activity Mode object new
+chats start in, superseding WP21's `spaces.toml` `default_mode` key
+(now a loud migration error pointing at the object).
+
+What shipped:
+
+* The type + singleton: minted/retrofitted by bootstrap with the link
+  field inline, seeded ONCE with an explainer body and an empty link
+  (like the ADR 015/027 explainers, but this object IS the config
+  surface). Deleting it reverts to the profile default; the role joins
+  `INFRA_ROLES`, so traversal never sees it.
+* **`SpaceContextStore`** port (fake + Anytype adapter, contract-tested
+  like ModeStore): payloads of `{name, default_mode_ids, origin}`;
+  ModeStore payloads gained the object `id` the link resolves against.
+* Loader resolution in `modes.load_registry` (the `default` param is
+  gone): singleton rule (two objects → loud, naming both), link arity
+  (exactly one), dangling links (loud, naming the object and id); an
+  empty link falls back to the profile default. Startup fails loudly,
+  the `/mode` refresh degrades — and because the reload closure
+  re-reads the store, relinking applies on the next `/mode`, no
+  restart.
+* Edge quarantine: `gc_default_mode` joined `SYSTEM_RELATION_DENYLIST`
+  — never a graph edge, never reusable edge vocabulary (pinned at the
+  `to_edges` seam).
+* Live E2E: the link round-trips through the store against the real
+  server.
+
+---
+
+## WP26 — In-space-only activity modes; TOML demoted to seeder (ADR 035) — **shipped 2026-07-17**
+
+**Status:** complete. The space's Activity Mode objects are the ONLY
+live source of mode specs; profile `mode_specs`/`default_mode` are
+deleted and the modes TOML now SEEDS starter objects into a mode-less
+space instead of merging at load. First step of the DomainProfile
+deprecation (rest in WP27).
+
+What shipped:
+
+* **`interface/mode_config.py`** — the layering-neutral home for the
+  validation seam (`spec_from_mapping`/`slugify`, moved from
+  `orchestrator/modes.py`; nothing may import the orchestrator) plus
+  the seed-TOML parser (`[modes.<name>]` tables + seed-only
+  `default`/`icon` keys) and `seed_payloads` (ModeStore-port shape,
+  synthetic `seed:<slug>` ids — ONE representation feeds the memory
+  store, the Anytype seeder, and the eval runner).
+* **Packaged corpora** `interface/mode_seeds/{fiction,workspace,
+  assistant}.toml` — the retired profile mode specs verbatim, pinned by
+  `tests/interface/test_mode_config.py`; a binding's `modes_file` or
+  `GC_MODES_FILE` overrides the packaged set (same keys, repurposed
+  semantics, announced by a startup log line).
+* **`load_registry(in_space, space_context)`** — no profile, no file;
+  empty space fails loudly pointing at reseeding; no default link →
+  alphabetically first mode with a logged hint; a registry loading
+  ONLY `example_mode` logs the missed-migration warning.
+* **`infrastructure/anytype/mode_seeder.py`** — zero-visible-objects
+  heal (fresh mint ≡ empty space; archived objects never block it and
+  are never touched): mints one object per seed + the Example Mode
+  explainer (moved out of `ensure_schema`), bounded searchability poll
+  (fresh-object settle), links the marked default on the Space Context
+  when the link is empty. Loud failures; a space with any mode object
+  is never touched.
+* Memory backend = a freshly seeded space (stores pre-filled, default
+  linked); eval runner overlays `[[case.modes]]` on the profile's
+  corpus (seed ids preserved under shadowing so the default link never
+  dangles); demo scripts load from the built stores.
+* Deprecation markers across `profiles.py` (tool_docs, role_overrides,
+  time_property/format, ranking → WP27); ADR 015/029/030/033/034
+  amendment banners.
+* Migration for pre-035 spaces (TestWorld, Todolist): archive the
+  mint-time "Example Mode" object in each space, restart, verify with
+  `/mode` — no spaces.toml change (`profile` selects the corpus).
+
+## WP27 — Profile retirement (stub; roadmap per ADR 035)
+
+Drop `DomainProfile` and `GC_PROFILE`. Contents, roughly in order:
+
+* One neutral code-owned tool-doc set (docstrings are prompts — golden
+  review + behavioral evals gate the wording change); drop
+  `name`/`description` and role-override variance.
+* A redesigned **general-purpose timeline** replacing
+  `time_property`/`time_format` (NOT a migration of the current pair —
+  seam preserved: the timeline tuple flows as a parameter through
+  `composition.build_runtime`).
+* Ranking weights to deployment config (seam preserved: `Ranker` takes
+  `RankingWeights` via constructor; only `recency` ever varied).
+* `ModeSpec`/`CapturePolicy` move to `interface/mode_config.py`
+  (re-export flip; the module already imports them from profiles).
+* Seed-corpus selection stops keying off `profile.name` (becomes pure
+  deployment config, e.g. `modes_file` everywhere or one default
+  corpus).
 
 ---
 

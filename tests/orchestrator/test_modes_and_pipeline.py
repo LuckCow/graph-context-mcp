@@ -47,10 +47,14 @@ from graph_context.orchestrator.pipeline import (
     Orchestrator,
     sender_attributed,
 )
+from tests.orchestrator.mode_fixtures import fiction_registry
 
 FICTION = get_profile("fiction")
-AUTHORING = next(s for s in FICTION.mode_specs if s.name == "authoring")
-WORLD_MODELING = next(s for s in FICTION.mode_specs if s.name == "world_modeling")
+# ADR 035: the canonical world_modeling/authoring specs come from the
+# packaged seed corpus, loaded the way a freshly seeded space loads them.
+_FICTION_REGISTRY = fiction_registry()
+AUTHORING = _FICTION_REGISTRY.specs["authoring"]
+WORLD_MODELING = _FICTION_REGISTRY.specs["world_modeling"]
 
 
 class TestBindings:
@@ -69,54 +73,10 @@ class TestBindings:
         assert all(docs.values())  # docstrings are prompts; never empty
 
 
-class TestRegistryLoader:
-    def test_profile_defaults_load_with_profile_default_mode(self) -> None:
-        registry = load_registry(FICTION)
-        assert registry.names() == ["authoring", "world_modeling"]
-        assert registry.default == "world_modeling"
-
-    def test_modes_file_adds_and_overrides(self, tmp_path) -> None:
-        modes_file = tmp_path / "modes.toml"
-        modes_file.write_text('''
-[modes.record_procedure]
-goal = "Notate each step the user takes so it can be repeated later."
-
-[modes.record_procedure.capture]
-artifact_type = "procedure"
-min_chars = 120
-
-[modes.authoring]
-goal = "Overridden authoring goal."
-''')
-        registry = load_registry(FICTION, str(modes_file))
-        procedure = registry.get("record_procedure")
-        assert procedure is not None and procedure.capture is not None
-        assert procedure.capture.artifact_type == "procedure"
-        assert procedure.capture.min_chars == 120
-        assert not procedure.mutating  # the safe default
-        authoring = registry.get("authoring")
-        assert authoring is not None
-        assert authoring.goal == "Overridden authoring goal."
-        assert authoring.capture is None  # override REPLACES the spec
-
-    def test_bad_specs_fail_loudly_at_load(self, tmp_path) -> None:
-        missing_goal = tmp_path / "bad1.toml"
-        missing_goal.write_text("[modes.broken]\nmutating = true\n")
-        with pytest.raises(GraphContextError, match="goal"):
-            load_registry(FICTION, str(missing_goal))
-
-        unknown_key = tmp_path / "bad2.toml"
-        unknown_key.write_text('[modes.broken]\ngoal = "g"\nprompt = "typo"\n')
-        with pytest.raises(GraphContextError, match="unknown keys"):
-            load_registry(FICTION, str(unknown_key))
-
-        with pytest.raises(GraphContextError, match="not found"):
-            load_registry(FICTION, str(tmp_path / "absent.toml"))
-
-
 def _mode_payload(**overrides) -> dict:
     """One in-space Activity Mode payload, ModeStore-port shaped."""
     payload = {
+        "id": "obj-1",
         "name": "Faithful Scribe",
         "goal": "Record only what the user explicitly states.",
         "mutating": True,
@@ -127,32 +87,52 @@ def _mode_payload(**overrides) -> dict:
     return payload
 
 
-class TestInSpaceOverlay:
-    """ADR 015 amendment: the space's Activity Mode objects win."""
+class TestRegistryLoader:
+    """ADR 035: the space's Activity Mode objects are the ONLY source."""
+
+    def test_the_seeded_corpus_loads_with_the_linked_default(self) -> None:
+        registry = fiction_registry()
+        assert registry.names() == ["authoring", "world_modeling"]
+        assert registry.default == "world_modeling"
+
+    def test_no_modes_fails_loudly_pointing_at_reseeding(self) -> None:
+        with pytest.raises(GraphContextError, match="no Activity Mode"):
+            load_registry(in_space=[])
+
+    def test_no_default_link_falls_back_alphabetically(self) -> None:
+        registry = load_registry(in_space=[
+            _mode_payload(name="Zed", id="obj-z", origin="'Zed' (obj-z)"),
+            _mode_payload(name="Alpha", id="obj-a", origin="'Alpha' (obj-a)"),
+        ])
+        assert registry.default == "alpha"  # deterministic, not load order
+
+    def test_only_the_example_mode_warns_about_the_migration(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The pre-ADR-035 signature: the mint-time explainer alone in a
+        space that used to ride profile modes -- loud hint, not silence."""
+        with caplog.at_level("WARNING"):
+            load_registry(in_space=[_mode_payload(
+                name="Example Mode", id="ex-1",
+                origin="'Example Mode' (ex-1)",
+            )])
+        assert "archive it" in caplog.text
+
+
+class TestInSpaceModes:
+    """The space's Activity Mode objects, through the loader seam."""
 
     def test_in_space_adds_a_mode_with_a_slugged_name(self) -> None:
-        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        registry = fiction_registry(_mode_payload())
         scribe = registry.get("faithful_scribe")
         assert scribe is not None and scribe.mutating
         assert scribe.goal == "Record only what the user explicitly states."
         assert registry.default == "world_modeling"  # untouched
 
-    def test_in_space_overrides_profile_and_toml(self, tmp_path) -> None:
-        modes_file = tmp_path / "modes.toml"
-        modes_file.write_text('[modes.authoring]\ngoal = "From the TOML."\n')
-        registry = load_registry(
-            FICTION, str(modes_file),
-            in_space=[_mode_payload(name="Authoring", goal="From the space.",
-                                    mutating=False)],
-        )
-        authoring = registry.get("authoring")
-        assert authoring is not None
-        assert authoring.goal == "From the space."  # in-space wins
-
     def test_in_space_capture_fills_policy_defaults(self) -> None:
-        registry = load_registry(FICTION, in_space=[_mode_payload(
+        registry = fiction_registry(_mode_payload(
             capture={"artifact_type": "note", "min_chars": 120.0},
-        )])
+        ))
         spec = registry.get("faithful_scribe")
         assert spec is not None and spec.capture is not None
         assert spec.capture.artifact_type == "note"
@@ -161,25 +141,25 @@ class TestInSpaceOverlay:
 
     def test_empty_goal_names_the_object_and_the_fix(self) -> None:
         with pytest.raises(GraphContextError, match="page body"):
-            load_registry(FICTION, in_space=[_mode_payload(goal="  ")])
+            fiction_registry(_mode_payload(goal="  "))
 
     def test_unusable_name_fails_loudly(self) -> None:
         with pytest.raises(GraphContextError, match="letters and digits"):
-            load_registry(FICTION, in_space=[_mode_payload(name="!!!")])
+            fiction_registry(_mode_payload(name="!!!"))
 
     def test_duplicate_slugs_name_both_objects(self) -> None:
         first = _mode_payload(origin="'Faithful Scribe' (obj-1)")
         second = _mode_payload(name="faithful   SCRIBE",
                                origin="'faithful   SCRIBE' (obj-2)")
         with pytest.raises(GraphContextError) as excinfo:
-            load_registry(FICTION, in_space=[first, second])
+            fiction_registry(first, second)
         assert "obj-1" in str(excinfo.value) and "obj-2" in str(excinfo.value)
 
     def test_bad_min_chars_is_rejected(self) -> None:
         with pytest.raises(GraphContextError, match="min_chars"):
-            load_registry(FICTION, in_space=[_mode_payload(
+            fiction_registry(_mode_payload(
                 capture={"artifact_type": "note", "min_chars": -3},
-            )])
+            ))
 
 
 @pytest.fixture
@@ -193,7 +173,7 @@ def services() -> Services:
 def _orchestrator(services: Services, turns: list[LLMTurn]) -> Orchestrator:
     return Orchestrator(
         services=services, driver=ScriptedDriver(turns), profile=FICTION,
-        registry=load_registry(FICTION),
+        registry=fiction_registry(),
     )
 
 
@@ -295,7 +275,7 @@ class TestPipeline:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         assert len(driver.transcripts) == 2  # two decisions in the turn
@@ -313,7 +293,7 @@ class TestPipeline:
         driver = _TranscriptRecordingDriver([LLMTurn(reply="hi")])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "hello")
         (transcript,) = driver.transcripts
@@ -327,7 +307,7 @@ class TestPipeline:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "hello")
         await orchestrator.handle_message("s1", "u1", "and again")
@@ -347,7 +327,7 @@ class TestPipeline:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "hello", sender="Nick")
         assert driver.transcripts[0][-1].text == "[from Nick] hello"
@@ -370,7 +350,7 @@ class TestPipeline:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("chat-one", "u1", "first chat")
         await orchestrator.handle_message("chat-two", "u1", "second chat")
@@ -385,7 +365,7 @@ class TestPipeline:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "before the clear")
         cleared = await orchestrator.handle_message("s1", "u1", "/clear")
@@ -400,7 +380,7 @@ class TestPipeline:
         driver = _TranscriptRecordingDriver([LLMTurn(reply="ok")])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.seed_memory(
             "s1", [("user", "earlier question"), ("assistant", "earlier answer")]
@@ -422,7 +402,7 @@ class TestPipeline:
 
         orchestrator = Orchestrator(
             services=services, driver=GoalSpy(), profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "hello")
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
@@ -438,11 +418,11 @@ class TestPipeline:
         payloads: list[dict] = []
 
         async def reload():
-            return load_registry(FICTION, in_space=payloads)
+            return fiction_registry(*payloads)
 
         orchestrator = Orchestrator(
             services=services, driver=ScriptedDriver([]), profile=FICTION,
-            registry=load_registry(FICTION), reload_registry=reload,
+            registry=fiction_registry(), reload_registry=reload,
         )
         payloads.append(_mode_payload())  # the human creates the object
         events = await orchestrator.handle_message("s1", "u1", "/mode")
@@ -462,7 +442,7 @@ class TestPipeline:
 
         orchestrator = Orchestrator(
             services=services, driver=ScriptedDriver([]), profile=FICTION,
-            registry=load_registry(FICTION), reload_registry=reload,
+            registry=fiction_registry(), reload_registry=reload,
         )
         events = await orchestrator.handle_message("s1", "u1", "/mode authoring")
         errors = [e for e in events if e.kind == "error"]
@@ -476,11 +456,11 @@ class TestPipeline:
         payloads = [_mode_payload()]
 
         async def reload():
-            return load_registry(FICTION, in_space=payloads)
+            return fiction_registry(*payloads)
 
         orchestrator = Orchestrator(
             services=services, driver=ScriptedDriver([LLMTurn(reply="ok")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
             reload_registry=reload,
         )
         await orchestrator.handle_message("s1", "u1", "/mode faithful_scribe")
@@ -499,11 +479,11 @@ class TestPipeline:
         payloads = [_mode_payload()]
 
         async def reload():
-            return load_registry(FICTION, in_space=payloads)
+            return fiction_registry(*payloads)
 
         orchestrator = Orchestrator(
             services=services, driver=ScriptedDriver([LLMTurn(reply="ok")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
             reload_registry=reload,
         )
         await orchestrator.handle_message("a", "u1", "/mode faithful_scribe")
@@ -518,7 +498,7 @@ class TestPipeline:
         orchestrator = Orchestrator(
             services=services,
             driver=ScriptedDriver([LLMTurn(tool_calls=(probe,))] * 99),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
             max_tool_calls=3,
         )
         events = await orchestrator.handle_message("s1", "u1", "loop forever")
@@ -538,7 +518,7 @@ class TestPipeline:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION), max_tool_calls=3,
+            registry=fiction_registry(), max_tool_calls=3,
         )
         events = await orchestrator.handle_message("s1", "u1", "dig deep")
         warned = [
@@ -596,7 +576,7 @@ def _provenance_orchestrator(
         SessionState(project="Ashfall"),
         journal=journal,
     )
-    registry = load_registry(FICTION)
+    registry = fiction_registry()
     if extra_specs:
         registry = modes.ModeRegistry(
             specs={**registry.specs, **{s.name: s for s in extra_specs}},
@@ -640,7 +620,7 @@ def _keyed_orchestrator(
 
     orchestrator = Orchestrator(
         services=base, driver=driver or ScriptedDriver(turns), profile=FICTION,
-        registry=load_registry(FICTION), services_for=services_for,
+        registry=fiction_registry(), services_for=services_for,
     )
     return orchestrator, store
 
@@ -799,7 +779,7 @@ class TestActivityDetailFromTheMode:
         chatty = ModeSpec(
             name="narrator", goal="Narrate.", activity_detail="full"
         )
-        registry = load_registry(FICTION)
+        registry = fiction_registry()
         specs = dict(registry.specs) | {chatty.name: chatty}
         orchestrator = Orchestrator(
             services=services,
@@ -817,40 +797,23 @@ class TestActivityDetailFromTheMode:
         await orchestrator.handle_message("s1", "u1", "hi", observer=observer)
         assert observer.events[0] == ("turn_started", "narrator", "full")
 
-    def test_a_modes_file_can_set_the_detail(self, tmp_path) -> None:
-        path = tmp_path / "modes.toml"
-        path.write_text(
-            '[modes.quiet]\ngoal = "Work silently."\n'
-            'activity_detail = "off"\n'
-        )
-        registry = load_registry(FICTION, modes_file=str(path))
-        spec = registry.get("quiet")
-        assert spec is not None and spec.activity_detail == "off"
-
     def test_an_in_space_mode_object_can_set_the_detail(self) -> None:
-        registry = load_registry(
-            FICTION,
-            in_space=[_mode_payload(activity_detail="Tools ")],  # UI-typed
+        registry = fiction_registry(
+            _mode_payload(activity_detail="Tools "),  # UI-typed
         )
         spec = registry.get("faithful_scribe")
         assert spec is not None and spec.activity_detail == "tools"
 
     def test_an_unset_detail_takes_the_default(self) -> None:
-        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        registry = fiction_registry(_mode_payload())
         spec = registry.get("faithful_scribe")
         assert spec is not None
         assert spec.activity_detail == DEFAULT_ACTIVITY_DETAIL
 
-    def test_an_unknown_detail_fails_loudly_naming_the_source(
-        self, tmp_path
-    ) -> None:
-        path = tmp_path / "modes.toml"
-        path.write_text(
-            '[modes.loud]\ngoal = "g"\nactivity_detail = "verbose"\n'
-        )
+    def test_an_unknown_detail_fails_loudly_naming_the_object(self) -> None:
         with pytest.raises(GraphContextError) as err:
-            load_registry(FICTION, modes_file=str(path))
-        assert "[modes.loud]" in str(err.value)
+            fiction_registry(_mode_payload(activity_detail="verbose"))
+        assert "Faithful Scribe" in str(err.value)
         assert "off, minimal, tools, full" in str(err.value)
 
 
@@ -859,24 +822,13 @@ class TestWebSearchFromTheMode:
     picking a mode picks whether the provider's server-side search tool
     is admitted; the pipeline forwards the flag on every decide."""
 
-    def test_a_modes_file_can_enable_web_search(self, tmp_path) -> None:
-        path = tmp_path / "modes.toml"
-        path.write_text(
-            '[modes.researcher]\ngoal = "Look things up."\nweb_search = true\n'
-        )
-        registry = load_registry(FICTION, modes_file=str(path))
-        spec = registry.get("researcher")
-        assert spec is not None and spec.web_search is True
-
     def test_an_in_space_mode_object_can_enable_web_search(self) -> None:
-        registry = load_registry(
-            FICTION, in_space=[_mode_payload(web_search=True)]
-        )
+        registry = fiction_registry(_mode_payload(web_search=True))
         spec = registry.get("faithful_scribe")
         assert spec is not None and spec.web_search is True
 
     def test_web_search_defaults_off(self) -> None:
-        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        registry = fiction_registry(_mode_payload())
         spec = registry.get("faithful_scribe")
         assert spec is not None and spec.web_search is False
 
@@ -899,7 +851,7 @@ class TestWebSearchFromTheMode:
         searching = ModeSpec(
             name="researcher", goal="Look things up.", web_search=True
         )
-        registry = load_registry(FICTION)
+        registry = fiction_registry()
         specs = dict(registry.specs) | {searching.name: searching}
         orchestrator = Orchestrator(
             services=services,
@@ -918,7 +870,7 @@ class TestWebSearchFromTheMode:
         searching = ModeSpec(
             name="researcher", goal="Look things up.", web_search=True
         )
-        registry = load_registry(FICTION)
+        registry = fiction_registry()
         specs = dict(registry.specs) | {searching.name: searching}
         orchestrator = Orchestrator(
             services=services,
@@ -936,35 +888,22 @@ class TestModelFromTheMode:
     picking a mode picks which model runs its decisions; the pipeline
     resolves the choice to a provider model id on every decide."""
 
-    def test_a_modes_file_can_pin_the_model(self, tmp_path) -> None:
-        path = tmp_path / "modes.toml"
-        path.write_text(
-            '[modes.heavy]\ngoal = "Think hard."\nmodel = "opus 4.8"\n'
-        )
-        registry = load_registry(FICTION, modes_file=str(path))
-        spec = registry.get("heavy")
-        assert spec is not None and spec.model == "opus 4.8"
-
     def test_an_in_space_mode_object_can_pin_the_model(self) -> None:
-        registry = load_registry(
-            FICTION, in_space=[_mode_payload(model="Sonnet 5 ")],  # UI-typed
+        registry = fiction_registry(
+            _mode_payload(model="Sonnet 5 "),  # UI-typed
         )
         spec = registry.get("faithful_scribe")
         assert spec is not None and spec.model == "sonnet 5"
 
     def test_the_model_defaults_unset(self) -> None:
-        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        registry = fiction_registry(_mode_payload())
         spec = registry.get("faithful_scribe")
         assert spec is not None and spec.model == ""
 
-    def test_an_unknown_model_fails_loudly_naming_the_source(
-        self, tmp_path
-    ) -> None:
-        path = tmp_path / "modes.toml"
-        path.write_text('[modes.heavy]\ngoal = "g"\nmodel = "haiku 3"\n')
+    def test_an_unknown_model_fails_loudly_naming_the_object(self) -> None:
         with pytest.raises(GraphContextError) as err:
-            load_registry(FICTION, modes_file=str(path))
-        assert "[modes.heavy]" in str(err.value)
+            fiction_registry(_mode_payload(model="haiku 3"))
+        assert "Faithful Scribe" in str(err.value)
         assert "sonnet 5, opus 4.8, fable 5" in str(err.value)
 
     async def test_the_pipeline_forwards_the_resolved_model_id(
@@ -986,7 +925,7 @@ class TestModelFromTheMode:
         pinned = ModeSpec(
             name="heavy", goal="Think hard.", model="opus 4.8"
         )
-        registry = load_registry(FICTION)
+        registry = fiction_registry()
         specs = dict(registry.specs) | {pinned.name: pinned}
         orchestrator = Orchestrator(
             services=services,
@@ -1003,7 +942,7 @@ class TestModelFromTheMode:
         self, services: Services
     ) -> None:
         pinned = ModeSpec(name="heavy", goal="Think hard.", model="fable 5")
-        registry = load_registry(FICTION)
+        registry = fiction_registry()
         specs = dict(registry.specs) | {pinned.name: pinned}
         orchestrator = Orchestrator(
             services=services,
@@ -1037,7 +976,7 @@ class TestServerToolContinuity:
         )
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "look this up")
         second = driver.transcripts[1]
@@ -1046,24 +985,77 @@ class TestServerToolContinuity:
         assert decision.server_tool_results == (raw,)
 
 
-class TestDefaultModeOverride:
-    """WP21: spaces.toml can name the mode NEW chats start in. Sessions
-    with a persisted mode keep it (the pipeline only consults
+def _space_context_payload(**overrides) -> dict:
+    """One Space Context payload, SpaceContextStore-port shaped."""
+    payload = {
+        "name": "Space Context",
+        "default_mode_ids": ["obj-1"],  # _mode_payload's object
+        "origin": "Space Context (sc-1)",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestSpaceContextDefault:
+    """ADR 034 (superseding WP21's spaces.toml key): the space's Space
+    Context object LINKS the Activity Mode object NEW chats start in.
+    Sessions with a persisted mode keep it (the pipeline only consults
     ``registry.default`` when no mode was persisted)."""
 
-    def test_a_given_default_wins_over_the_profiles(self) -> None:
-        registry = load_registry(FICTION, in_space=[_mode_payload()])
-        assert registry.default == "world_modeling"  # the profile's
-        overridden = load_registry(
-            FICTION, in_space=[_mode_payload()], default="faithful_scribe"
+    def test_the_linked_mode_becomes_the_default(self) -> None:
+        registry = load_registry(
+            in_space=[_mode_payload()],
+            space_context=[_space_context_payload()],
         )
-        assert overridden.default == "faithful_scribe"
+        assert registry.default == "faithful_scribe"
 
-    def test_an_unknown_default_fails_loudly_listing_loaded_modes(self) -> None:
+    def test_an_empty_link_falls_back_alphabetically(self) -> None:
+        registry = load_registry(
+            in_space=[
+                _mode_payload(),
+                _mode_payload(name="Advisor", id="obj-2",
+                              origin="'Advisor' (obj-2)"),
+            ],
+            space_context=[_space_context_payload(default_mode_ids=[])],
+        )
+        assert registry.default == "advisor"
+
+    def test_a_dangling_link_fails_loudly_naming_the_object(self) -> None:
+        """A link to anything but a loadable Activity Mode object --
+        archived, deleted, or the wrong type -- is a config error; the
+        message names the Space Context object AND the linked id."""
         with pytest.raises(GraphContextError) as err:
-            load_registry(FICTION, default="nope")
-        assert "default_mode 'nope'" in str(err.value)
-        assert "world_modeling" in str(err.value)
+            load_registry(
+                in_space=[_mode_payload()],
+                space_context=[_space_context_payload(
+                    default_mode_ids=["gone-1"]
+                )],
+            )
+        assert "Space Context (sc-1)" in str(err.value)
+        assert "gone-1" in str(err.value)
+
+    def test_linking_two_modes_fails_loudly(self) -> None:
+        with pytest.raises(GraphContextError, match="exactly one"):
+            load_registry(
+                in_space=[_mode_payload()],
+                space_context=[_space_context_payload(
+                    default_mode_ids=["obj-1", "obj-2"]
+                )],
+            )
+
+    def test_two_space_context_objects_fail_loudly_naming_both(self) -> None:
+        """The singleton rule: two settings objects is a human mistake
+        the loader reports (naming both) instead of picking one."""
+        with pytest.raises(GraphContextError) as err:
+            load_registry(
+                in_space=[_mode_payload()],
+                space_context=[
+                    _space_context_payload(),
+                    _space_context_payload(origin="Space Context (sc-2)"),
+                ],
+            )
+        assert "Space Context (sc-1)" in str(err.value)
+        assert "Space Context (sc-2)" in str(err.value)
 
 
 class TestProvenanceTurns:
@@ -1151,7 +1143,7 @@ class TestToolRoundTripTranscript:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         second = driver.transcripts[1]
@@ -1179,7 +1171,7 @@ class TestToolRoundTripTranscript:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         second = driver.transcripts[1]
@@ -1196,7 +1188,7 @@ class TestToolRoundTripTranscript:
         ])
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         await orchestrator.handle_message("s1", "u1", "Add Mira.")
         await orchestrator.handle_message("s1", "u1", "And now?")

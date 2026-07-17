@@ -63,6 +63,9 @@ class AnytypeModeStore:
             if min_chars is not None:
                 capture["min_chars"] = min_chars
         payload = {
+            # The object id (ADR 034): the Space Context's gc_default_mode
+            # link resolves against it to pick the default mode.
+            "id": str(obj.get("id") or ""),
             "name": name,
             # Stripped: the live markdown export pads the body with
             # trailing whitespace/newline (observed 2026-07-06), and a

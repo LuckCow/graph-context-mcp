@@ -7,11 +7,17 @@
 # Keys (all optional):
 #   profile        defaults to GC_PROFILE
 #   project        cosmetic label
-#   modes_file     overrides GC_MODES_FILE
+#   modes_file     the starter-mode SEED source (ADR 035): fills a space
+#                  that has no Activity Mode objects, then the space's
+#                  own objects are authoritative; overrides GC_MODES_FILE
+#                  (unset -> the profile's packaged corpus)
 #   chat_id        PIN: serve ONLY this chat, disable discovery (a
 #                  single-chat deployment). Mutually exclusive with
 #                  exclude_chats.
 #   exclude_chats  list of chat ids the bot ignores; serve everything else.
+#
+# The mode NEW chats start in is NOT set here (ADR 034): link an Activity
+# Mode object on the space's own "Space Context" object instead.
 #
 # By default (no chat_id pin) the bot serves all chats and picks up chats
 # created while it runs (GC_CHAT_RESCAN_SECONDS; default 60, off disables).
