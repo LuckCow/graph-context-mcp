@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from graph_context.orchestrator.driver_common import search_digest
-from graph_context.orchestrator.drivers import LLMTurn, ToolCall
+from graph_context.orchestrator.drivers import DecideUsage, LLMTurn, ToolCall
 
 
 def _server_result(turn: LLMTurn, position: int) -> str:
@@ -180,6 +180,25 @@ class TurnLog:
                 entry["reply"] = turn.reply
         else:
             entry["reply"] = turn.reply
+        self._append(entry)
+
+    def usage(self, usage: DecideUsage) -> None:
+        """One decide's cost/usage (ADR 037): tokens, cache stats, and --
+        on the subscription driver -- dollars, which production
+        previously computed and DISCARDED (``on_result`` was only ever
+        wired by the eval harness). No turn id: the driver's callback
+        fires outside the pipeline's turn scope, so adjacency to the
+        surrounding ``llm_turn`` lines is the correlation."""
+        entry: dict[str, Any] = {
+            "event": "usage",
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cache_creation_tokens": usage.cache_creation_tokens,
+            "duration_ms": usage.duration_ms,
+        }
+        if usage.total_cost_usd is not None:
+            entry["total_cost_usd"] = usage.total_cost_usd
         self._append(entry)
 
     def tool_result(

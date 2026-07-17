@@ -45,6 +45,7 @@ from typing import Protocol
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.application.scheduler import SchedulerTick
 from graph_context.domain.model_choice import model_id
+from graph_context.domain.models import Node
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
@@ -59,6 +60,7 @@ from graph_context.orchestrator.drivers import (
     TranscriptEvent,
 )
 from graph_context.orchestrator.modes import ModeRegistry
+from graph_context.orchestrator.process_trace import ProcessTrace
 from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
@@ -85,11 +87,17 @@ class ReplyEvent:
     actionable), ``file`` (WP23: ``text`` is the file's CONTENT and
     ``file_name`` its name -- transports with a file surface upload it;
     the rest render it fenced).
+
+    ``attach`` (ADR 038) names graph objects the event should carry as
+    object cards INDEPENDENT of its text -- the turn's intent node, so
+    the reply links its own background-process record. Transports
+    without an attachment surface ignore it.
     """
 
     text: str
     kind: str = "reply"
     file_name: str = ""
+    attach: tuple[str, ...] = ()
 
 
 class TurnObserver(Protocol):
@@ -393,19 +401,24 @@ class Orchestrator:
             )
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
+        # ADR 038: the archive-grade fold of this turn's background work,
+        # fed beside the observer/turn-log taps; rendered once at turn end
+        # into the intent node the reply's card opens.
+        process = ProcessTrace()
         reply_text = ""
         for decisions_left in range(self.max_tool_calls, 0, -1):
             final_decision = decisions_left == 1
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(
-                transcript, tools, spec.goal, web_search=spec.web_search,
-                model=model_id(spec.model),
+                transcript, tools, spec.goal,
+                options=modes.decide_options(spec),
             )
             if self.turn_log:
                 self.turn_log.llm_turn(turn_id, session_id, spec.name, turn)
             if observer:
                 await observer.decision(turn)
+            process.note_decision(turn)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -460,6 +473,10 @@ class Orchestrator:
                         call, result,
                         ok=not (unavailable or is_error_result(result)),
                     )
+                process.note_result(
+                    call.name, result,
+                    ok=not (unavailable or is_error_result(result)),
+                )
                 transcript.append(
                     TranscriptEvent(
                         "tool", result, tool_name=call.name, tool_use_id=call.id
@@ -485,9 +502,21 @@ class Orchestrator:
                 outbound.content, kind="file", file_name=outbound.name
             ))
         state.services.outbox.clear()
-        await self._finish_turn(
-            state.services, spec, user_id, stripped, reply_text, trace, origin
+        intent = await self._finish_turn(
+            state.services, spec, user_id, stripped, reply_text, trace,
+            origin, process.render() if process.worked else "",
         )
+        if intent is not None and process.worked:
+            # ADR 038: the reply carries its background-process record as
+            # an object card -- only on turns that DID background work
+            # (a plain answer stays a plain answer, even when capture
+            # minted a node for it).
+            for index in range(len(events) - 1, -1, -1):
+                if events[index].kind == "reply":
+                    events[index] = dataclasses.replace(
+                        events[index], attach=(intent.id,)
+                    )
+                    break
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
             # The attributed form: replayed history must keep who spoke.
@@ -512,12 +541,14 @@ class Orchestrator:
         reply_text: str,
         trace: list[ToolTrace],
         origin: str = "",
-    ) -> None:
+        process_trace: str = "",
+    ) -> Node | None:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
-        drain -> intent node. ``services`` is the session's view; its
+        drain -> intent node (returned so the caller can attach it to the
+        reply, ADR 038). ``services`` is the session's view; its
         repository/capture/journal are the runtime's shared instances."""
         if self.provenance is None:
-            return
+            return None
         policy = spec.capture
         if policy is not None and reply_text:
             references = capture.entity_links(
@@ -540,6 +571,7 @@ class Orchestrator:
             prompt=prompt,
             mutations=mutations,
             trace=trace,
+            process_trace=process_trace,
             user_id=user_id,
             # ADR 033: a mode-pinned model is what actually generated the
             # turn; only unpinned modes stamp the deployment default.
@@ -550,6 +582,7 @@ class Orchestrator:
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
                         intent.id, len(mutations))
+        return intent
 
     async def _session(self, session_id: str) -> _SessionState:
         """The per-session state, created (with I/O) on first sight.
@@ -602,9 +635,31 @@ class Orchestrator:
             detail = current.activity_detail if current else ""
             search = "on" if current and current.web_search else "off"
             model = (current.model if current else "") or "default"
+            thinking = (current.thinking if current else "") or "default"
+            extras = ""
+            if current:
+                # ADR 037 knobs report only when set -- the default line
+                # stays short for the common unconfigured mode.
+                parts = []
+                if current.max_tokens:
+                    parts.append(f"max tokens: {current.max_tokens}")
+                if current.web_search_max_uses:
+                    parts.append(f"search uses: {current.web_search_max_uses}")
+                if current.web_search_allowed_domains:
+                    parts.append(
+                        "search domains: "
+                        + ", ".join(current.web_search_allowed_domains)
+                    )
+                if current.web_search_blocked_domains:
+                    parts.append(
+                        "blocked domains: "
+                        + ", ".join(current.web_search_blocked_domains)
+                    )
+                extras = "".join(f"; {part}" for part in parts)
             events.append(ReplyEvent(
                 f"mode: {state.mode} (activity detail: {detail}; "
-                f"web search: {search}; model: {model}); "
+                f"web search: {search}; model: {model}; "
+                f"thinking: {thinking}{extras}); "
                 f"switch with /mode {{{' | '.join(self.registry.names())}}}",
                 kind="notice",
             ))

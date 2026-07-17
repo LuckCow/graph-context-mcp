@@ -91,4 +91,25 @@ class AnytypeModeStore:
         ).strip()
         if model:
             payload["model"] = model
+        # ADR 037 driver options -- all "unset means default": the
+        # thinking select follows the WP19 rule, the numbers ride only
+        # when non-zero, the domain lists only when non-empty (the
+        # loader parses the human-typed text into a tuple).
+        thinking = mapping.field_value(
+            "select", props.get(mapping.PROP_MODE_THINKING)
+        ).strip()
+        if thinking:
+            payload["thinking"] = thinking
+        max_tokens = props.get(mapping.PROP_MODE_MAX_TOKENS)
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        max_uses = props.get(mapping.PROP_MODE_SEARCH_MAX_USES)
+        if max_uses:
+            payload["web_search_max_uses"] = max_uses
+        allowed = str(props.get(mapping.PROP_MODE_SEARCH_ALLOWED) or "").strip()
+        if allowed:
+            payload["web_search_allowed_domains"] = allowed
+        blocked = str(props.get(mapping.PROP_MODE_SEARCH_BLOCKED) or "").strip()
+        if blocked:
+            payload["web_search_blocked_domains"] = blocked
         return payload

@@ -72,6 +72,16 @@ mode is active; unticked keeps it grounded in the graph alone.
 - Pick a gc_mode_model option to run this mode on a specific Claude \
 model (Sonnet 5, Opus 4.8, or Fable 5); empty uses the deployment's \
 default model.
+- Pick a gc_mode_thinking option to set how hard this mode thinks: a \
+level (Low ... Max) enables thinking at that depth, Off disables it \
+(not allowed with Fable 5, which always thinks), and empty uses the \
+deployment default.
+- Set gc_mode_max_tokens to cap one reply's output length in tokens; \
+empty/0 uses the deployment default.
+- With web search on: gc_mode_search_max_uses caps searches per turn, \
+and gc_mode_search_allowed_domains / gc_mode_search_blocked_domains \
+(comma or space separated) scope where it may search -- set at most one \
+of the two lists.
 - Fill gc_capture_type (and optionally gc_capture_references, \
 gc_capture_min_chars) to auto-capture the assistant's substantial replies \
 as objects of that type.
@@ -155,6 +165,29 @@ async def _create_payload(
             mapping.PROP_MODE_MODEL, "select",
             await _tag_key(client, mapping.PROP_MODE_MODEL, model),
         ))
+    # ADR 037 driver options, written only when set (unset = default).
+    thinking = str(payload.get("thinking") or "").strip()
+    if thinking:
+        properties.append(mapping.property_entry(
+            mapping.PROP_MODE_THINKING, "select",
+            await _tag_key(client, mapping.PROP_MODE_THINKING, thinking),
+        ))
+    for key, prop in (
+        ("max_tokens", mapping.PROP_MODE_MAX_TOKENS),
+        ("web_search_max_uses", mapping.PROP_MODE_SEARCH_MAX_USES),
+    ):
+        if payload.get(key):
+            properties.append(
+                mapping.property_entry(prop, "number", int(payload[key]))
+            )
+    for key, prop in (
+        ("web_search_allowed_domains", mapping.PROP_MODE_SEARCH_ALLOWED),
+        ("web_search_blocked_domains", mapping.PROP_MODE_SEARCH_BLOCKED),
+    ):
+        if str(payload.get(key) or "").strip():
+            properties.append(
+                mapping.property_entry(prop, "text", str(payload[key]))
+            )
     capture = payload.get("capture")
     if capture:
         properties.append(mapping.property_entry(

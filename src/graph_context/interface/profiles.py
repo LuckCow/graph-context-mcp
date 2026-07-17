@@ -37,13 +37,18 @@ from graph_context.domain.activity import (
     ACTIVITY_DETAIL_LEVELS,
     DEFAULT_ACTIVITY_DETAIL,
 )
-from graph_context.domain.model_choice import MODEL_CHOICES
+from graph_context.domain.model_choice import (
+    MODEL_CHOICES,
+    model_id,
+    thinking_locked,
+)
 from graph_context.domain.schema import FIELD_FORMATS, Role
 from graph_context.domain.session import (
     DEFAULT_FULL_SLOTS,
     DEFAULT_SUMMARY_SLOTS,
     SCRATCHPAD_MAX_CHARS,
 )
+from graph_context.domain.thinking_choice import THINKING_LEVELS, THINKING_OFF
 from graph_context.errors import GraphContextError
 
 TOOL_NAMES: tuple[str, ...] = (
@@ -97,6 +102,17 @@ class ModeSpec:
     so graph-grounded modes stay graph-grounded); ``model`` pins which
     Claude model runs this mode's decisions (ADR 033 -- a canonical
     ``MODEL_CHOICES`` name; empty = the deployment's configured default).
+
+    ADR 037 driver options -- all "empty/zero = not set", API-driver
+    surfaces (the subscription driver maps what it can and documents the
+    rest): ``thinking`` is a ``THINKING_LEVELS`` choice (a level implies
+    adaptive thinking at that effort; ``off`` disables thinking -- and
+    is rejected here when the mode pins a Fable/Mythos model, where
+    thinking cannot be turned off); ``max_tokens`` caps one decision's
+    output; ``web_search_max_uses`` / ``web_search_allowed_domains`` /
+    ``web_search_blocked_domains`` bound the server-side search tool
+    (inert unless ``web_search`` is on; the API takes at most ONE of the
+    domain lists per request, so setting both is a spec error).
     """
 
     name: str
@@ -106,6 +122,11 @@ class ModeSpec:
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
     web_search: bool = False
     model: str = ""
+    thinking: str = ""
+    max_tokens: int = 0
+    web_search_max_uses: int = 0
+    web_search_allowed_domains: tuple[str, ...] = ()
+    web_search_blocked_domains: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.name.replace("_", "").isalnum():
@@ -122,6 +143,26 @@ class ModeSpec:
             raise ValueError(
                 f"mode {self.name!r} has unknown model {self.model!r}; "
                 f"allowed: {', '.join(MODEL_CHOICES)}"
+            )
+        if self.thinking and self.thinking not in THINKING_LEVELS:
+            raise ValueError(
+                f"mode {self.name!r} has unknown thinking {self.thinking!r}; "
+                f"allowed: {', '.join(THINKING_LEVELS)}"
+            )
+        if self.thinking == THINKING_OFF and thinking_locked(model_id(self.model)):
+            raise ValueError(
+                f"mode {self.name!r} sets thinking = off but pins "
+                f"{self.model!r}, which cannot turn thinking off"
+            )
+        if self.max_tokens < 0 or self.web_search_max_uses < 0:
+            raise ValueError(
+                f"mode {self.name!r}: max_tokens and web_search_max_uses "
+                "must be non-negative (0 = not set)"
+            )
+        if self.web_search_allowed_domains and self.web_search_blocked_domains:
+            raise ValueError(
+                f"mode {self.name!r} sets both allowed and blocked search "
+                "domains; the search tool takes at most one list"
             )
 
 

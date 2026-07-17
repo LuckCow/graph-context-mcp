@@ -185,8 +185,7 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
     async def decide(
-        self, transcript, tools, goal: str = "", *,
-        web_search: bool = False, model: str = "",
+        self, transcript, tools, goal: str = "", *, options=None,
     ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
@@ -232,6 +231,29 @@ class TestTurn:
         assert recorder.attachments()[0] == (OBJECT_ID,)
         assert all(a == () for a in recorder.attachments()[1:])
         assert "[Mira](" not in recorder.texts()[0]  # plainified: name only
+
+    async def test_explicit_attach_merges_with_scraped_references(
+        self,
+    ) -> None:
+        """ADR 038: ``ReplyEvent.attach`` (the turn's intent card) rides
+        ahead of ids scraped from the text, deduped, first chunk only --
+        the same C7 card surface either way."""
+        from graph_context.orchestrator.pipeline import ReplyEvent
+
+        handler = _handler([])
+        recorder = _ChatRecorder()
+        reply = handler.reply(recorder.send, recorder.edit)
+        intent_id = OBJECT_ID.replace("bafyreid", "bafyreie")
+        await handler.deliver_events(
+            [ReplyEvent(
+                f"made [Mira]({OBJECT_ID})\n" + "pad " * 700,
+                attach=(intent_id, OBJECT_ID),  # OBJECT_ID also in text
+            )],
+            reply,
+        )
+        assert len(recorder.messages) > 1  # chunked
+        assert recorder.attachments()[0] == (intent_id, OBJECT_ID)  # deduped
+        assert all(a == () for a in recorder.attachments()[1:])
 
     async def test_a_processed_message_is_not_eligible_twice(self) -> None:
         handler = _handler([LLMTurn(reply="once")])
@@ -716,7 +738,7 @@ class TestScheduledTurn:
         from graph_context.domain import scheduling
 
         class _ExplodingDriver(ScriptedDriver):
-            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[override]
+            async def decide(self, transcript, tools, goal, *, options=None):  # type: ignore[override]
                 raise RuntimeError("driver down")
 
         handler = _handler(routes={CHAT: _route(driver=_ExplodingDriver([]))})

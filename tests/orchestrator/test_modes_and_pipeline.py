@@ -30,6 +30,7 @@ from graph_context.interface.services import Services, build_services
 from graph_context.orchestrator import modes
 from graph_context.orchestrator.driver_common import assembled_system_prompt
 from graph_context.orchestrator.drivers import (
+    DecideOptions,
     LLMTurn,
     ScriptedDriver,
     ToolCall,
@@ -190,8 +191,7 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
     async def decide(
-        self, transcript, tools, goal: str = "", *,
-        web_search: bool = False, model: str = "",
+        self, transcript, tools, goal: str = "", *, options=None,
     ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
@@ -396,7 +396,7 @@ class TestPipeline:
         goals: list[str] = []
 
         class GoalSpy:
-            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal, *, options=None):  # type: ignore[no-untyped-def]
                 goals.append(goal)
                 return LLMTurn(reply="ok")
 
@@ -769,7 +769,7 @@ class TestActivityDetailFromTheMode:
         events = await orchestrator.handle_message("s1", "u1", "/mode")
         assert (
             f"(activity detail: {DEFAULT_ACTIVITY_DETAIL}; web search: off; "
-            "model: default)"
+            "model: default; thinking: default)"
             in events[-1].text
         )
 
@@ -844,8 +844,8 @@ class TestWebSearchFromTheMode:
             def render_prompt(self, transcript) -> str:  # type: ignore[no-untyped-def]
                 return ""
 
-            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[no-untyped-def]
-                forwarded.append(web_search)
+            async def decide(self, transcript, tools, goal, *, options=None):  # type: ignore[no-untyped-def]
+                forwarded.append(bool(options and options.web_search))
                 return LLMTurn(reply="ok")
 
         searching = ModeSpec(
@@ -918,8 +918,8 @@ class TestModelFromTheMode:
             def render_prompt(self, transcript) -> str:  # type: ignore[no-untyped-def]
                 return ""
 
-            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[no-untyped-def]
-                forwarded.append(model)
+            async def decide(self, transcript, tools, goal, *, options=None):  # type: ignore[no-untyped-def]
+                forwarded.append(options.model if options else "")
                 return LLMTurn(reply="ok")
 
         pinned = ModeSpec(
@@ -953,6 +953,107 @@ class TestModelFromTheMode:
         await orchestrator.handle_message("s1", "u1", "/mode heavy")
         events = await orchestrator.handle_message("s1", "u1", "/mode")
         assert "model: fable 5" in events[-1].text
+
+
+class TestDriverOptionsFromTheMode:
+    """ADR 037: thinking / max_tokens / search limits are MODE properties
+    riding one DecideOptions value into every decide."""
+
+    def test_an_in_space_mode_object_can_pin_the_thinking_level(self) -> None:
+        registry = fiction_registry(
+            _mode_payload(thinking="Xhigh "),  # UI-typed
+        )
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.thinking == "xhigh"
+
+    def test_thinking_off_with_a_fable_mode_names_the_object(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            fiction_registry(
+                _mode_payload(model="Fable 5", thinking="Off"),
+            )
+        assert "Faithful Scribe" in str(err.value)
+        assert "cannot turn thinking off" in str(err.value)
+
+    def test_in_space_limits_reach_the_spec(self) -> None:
+        registry = fiction_registry(_mode_payload(
+            web_search=True,
+            web_search_max_uses=4.0,
+            web_search_allowed_domains="Example.com  b.example",
+            max_tokens=32000.0,
+        ))
+        spec = registry.get("faithful_scribe")
+        assert spec is not None
+        assert spec.web_search_max_uses == 4
+        assert spec.max_tokens == 32000
+        assert spec.web_search_allowed_domains == (
+            "example.com", "b.example",
+        )
+
+    def test_decide_options_carry_the_whole_spec(self) -> None:
+        spec = ModeSpec(
+            name="tuned", goal="g", web_search=True, model="opus 4.8",
+            thinking="max", max_tokens=32000, web_search_max_uses=2,
+            web_search_blocked_domains=("spam.example",),
+        )
+        options = modes.decide_options(spec)
+        assert options == DecideOptions(
+            web_search=True, model="claude-opus-4-8", thinking="max",
+            max_tokens=32000, web_search_max_uses=2,
+            web_search_blocked_domains=("spam.example",),
+        )
+
+    async def test_the_pipeline_forwards_the_options(
+        self, services: Services
+    ) -> None:
+        forwarded: list[DecideOptions] = []
+
+        class OptionsSpy:
+            def system_prompt(self, goal: str) -> str:
+                return goal
+
+            def render_prompt(self, transcript) -> str:  # type: ignore[no-untyped-def]
+                return ""
+
+            async def decide(self, transcript, tools, goal, *, options=None):  # type: ignore[no-untyped-def]
+                forwarded.append(options)
+                return LLMTurn(reply="ok")
+
+        tuned = ModeSpec(name="tuned", goal="g", thinking="low", max_tokens=9)
+        registry = fiction_registry()
+        specs = dict(registry.specs) | {tuned.name: tuned}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=OptionsSpy(),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode tuned")
+        await orchestrator.handle_message("s1", "u1", "hi")
+        assert forwarded == [DecideOptions(thinking="low", max_tokens=9)]
+
+    async def test_bare_mode_reports_thinking_and_set_extras(
+        self, services: Services
+    ) -> None:
+        tuned = ModeSpec(
+            name="tuned", goal="g", thinking="xhigh", max_tokens=32000,
+            web_search=True, web_search_max_uses=3,
+            web_search_allowed_domains=("example.com",),
+        )
+        registry = fiction_registry()
+        specs = dict(registry.specs) | {tuned.name: tuned}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver([]),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode tuned")
+        events = await orchestrator.handle_message("s1", "u1", "/mode")
+        text = events[-1].text
+        assert "thinking: xhigh" in text
+        assert "max tokens: 32000" in text
+        assert "search uses: 3" in text
+        assert "search domains: example.com" in text
 
 
 class TestServerToolContinuity:
@@ -1076,13 +1177,49 @@ class TestProvenanceTurns:
             mira.id
         }
 
-    async def test_read_only_turn_records_nothing(self) -> None:
+    async def test_a_working_read_only_turn_records_its_process(self) -> None:
+        """ADR 038 (deliberately supersedes the WP7 read-only-writes-
+        nothing rule): a turn that RAN TOOLS records how the reply was
+        made even without mutations -- the intent node carries the
+        process trace and links nothing."""
         orchestrator, services = _provenance_orchestrator([
             LLMTurn(tool_calls=(ToolCall("context", {"action": "get"}),)),
             LLMTurn(reply="All quiet."),
         ])
-        await orchestrator.handle_message("s1", "u", "How big is the world?")
+        events = await orchestrator.handle_message(
+            "s1", "u", "How big is the world?"
+        )
+        (intent,) = _intent_nodes(services)
+        body = await services.repository.fetch_body(intent.id)
+        assert "### gc:process" in body
+        assert "-> context" in body
+        assert "### gc:touched\n(none)" in body
+        assert list(services.repository.graph.edges(intent.id)) == []
+        # ...and the reply carries the trace node as its card (ADR 038).
+        assert events[-1].attach == (intent.id,)
+
+    async def test_a_plain_answer_records_nothing(self) -> None:
+        """No tools, no thinking, no mutations: nothing to trace -- the
+        pre-ADR-038 quiet turn stays quiet."""
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(reply="All quiet."),
+        ])
+        events = await orchestrator.handle_message("s1", "u", "Anything up?")
         assert _intent_nodes(services) == []
+        assert events[-1].attach == ()
+
+    async def test_a_thinking_only_turn_records_its_process(self) -> None:
+        """Thinking counts as background work (ADR 038): the summary is
+        the whole point of the collapsible thought process."""
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(reply="Considered answer.", thinking="Weighing options."),
+        ])
+        events = await orchestrator.handle_message("s1", "u", "Tricky one?")
+        (intent,) = _intent_nodes(services)
+        assert "Weighing options." in await services.repository.fetch_body(
+            intent.id
+        )
+        assert events[-1].attach == (intent.id,)
 
     async def test_capture_policy_threshold_is_respected(self) -> None:
         """A custom spec with a lower threshold captures what the default

@@ -29,7 +29,10 @@ blocks are captured as opaque payloads on the decision event (WP22),
 so when the same decision ALSO called local tools, the transcript
 rebuilt for the next decide replays the search verbatim
 (``encrypted_content`` untouched) -- the model keeps what the search
-returned, not just what it wrote about it.
+returned, not just what it wrote about it. A cited reply's citations
+fold into the reply text as inline markdown links (ADR 036 amendment,
+``_cited_block_text``) -- this driver is the only one that sees them;
+the subscription SDK exposes reply text without citation metadata.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlparse
 
 from anthropic import (
     APIConnectionError,
@@ -46,6 +50,8 @@ from anthropic import (
     RateLimitError,
 )
 
+from graph_context.domain.model_choice import thinking_locked
+from graph_context.domain.thinking_choice import THINKING_OFF
 from graph_context.errors import GraphContextError
 from graph_context.orchestrator.driver_common import (
     assembled_system_prompt,
@@ -53,6 +59,8 @@ from graph_context.orchestrator.driver_common import (
     fenced_tool_result,
 )
 from graph_context.orchestrator.drivers import (
+    DEFAULT_OPTIONS,
+    DecideOptions,
     DecideUsage,
     LLMTurn,
     ToolCall,
@@ -81,14 +89,58 @@ _DYNAMIC_FILTER_MODELS = (
 )
 
 
-def web_search_tool(model: str) -> dict[str, Any]:
-    """The server-side web search tool definition for ``model``."""
+def web_search_tool(model: str, options: DecideOptions) -> dict[str, Any]:
+    """The server-side web search tool definition for ``model``.
+
+    The mode's search limits (ADR 037) ride the definition only when
+    set: ``max_uses`` caps searches per decision; the domain lists scope
+    results (spec validation guarantees at most one list is present --
+    the API rejects both on one request)."""
     kind = (
         "web_search_20260209"
         if model.startswith(_DYNAMIC_FILTER_MODELS)
         else "web_search_20250305"
     )
-    return {"type": kind, "name": "web_search"}
+    tool: dict[str, Any] = {"type": kind, "name": "web_search"}
+    if options.web_search_max_uses:
+        tool["max_uses"] = options.web_search_max_uses
+    if options.web_search_allowed_domains:
+        tool["allowed_domains"] = list(options.web_search_allowed_domains)
+    if options.web_search_blocked_domains:
+        tool["blocked_domains"] = list(options.web_search_blocked_domains)
+    return tool
+
+
+def thinking_params(
+    choice: str, model: str, default_effort: str | None
+) -> dict[str, Any]:
+    """The request's thinking/effort parameters for one decision (ADR 037).
+
+    Precedence: the mode's thinking level > the deployment effort
+    (``GC_DRIVER_EFFORT``) > the model default. Adaptive thinking is
+    always requested EXPLICITLY (omitting it runs without thinking on
+    some current models) and always with ``display: "summarized"`` --
+    the default ``omitted`` streams thinking blocks with EMPTY text, and
+    the turn diary, activity stream, and intent-node trace all want the
+    real summaries. ``off`` sends ``disabled`` -- rejected here for
+    models that cannot turn thinking off (spec validation catches the
+    pinned-model case; this guard covers a Fable/Mythos deployment
+    default the spec cannot see)."""
+    if choice == THINKING_OFF:
+        if thinking_locked(model):
+            raise GraphContextError(
+                f"this mode sets thinking = off but the decision runs on "
+                f"{model}, which cannot turn thinking off -- pick a level "
+                "or a different model"
+            )
+        return {"thinking": {"type": "disabled"}}
+    adaptive: dict[str, Any] = {
+        "thinking": {"type": "adaptive", "display": "summarized"}
+    }
+    effort = choice or default_effort
+    if effort:
+        adaptive["output_config"] = {"effort": effort}
+    return adaptive
 
 
 def _as_data(value: Any) -> Any:
@@ -267,19 +319,54 @@ def anthropic_tools(
     return definitions
 
 
+def _cited_block_text(block: Any) -> str:
+    """A text block's text, its web-search citations folded in as
+    markdown links right after the cited span.
+
+    With citations the API splits the reply into a text block PER CITED
+    SPAN and hangs the sources on the block -- the block boundary IS the
+    placement information. Each distinct source URL becomes one
+    ``[domain](url)`` link appended in parentheses, so downstream
+    markdown surfaces render it natively and the Anytype transport's
+    marks conversion (ADR 036) makes it clickable. Parens in URLs are
+    percent-escaped -- a raw ``)`` would end the markdown target early.
+    Citation shapes without a ``url`` (non-web citation types) are
+    skipped rather than guessed at."""
+    text = str(block.text)
+    seen: set[str] = set()
+    links: list[str] = []
+    for citation in getattr(block, "citations", None) or ():
+        url = str(getattr(citation, "url", "") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        host = urlparse(url).netloc.removeprefix("www.") or url
+        target = url.replace("(", "%28").replace(")", "%29")
+        links.append(f"[{host}]({target})")
+    if not links or not text.strip():
+        return text
+    body = text.rstrip()  # the marker hugs the span, not its whitespace
+    return f"{body} ({', '.join(links)}){text[len(body):]}"
+
+
 def turn_from_response(response: Any) -> LLMTurn:
     """A Messages-API response -> the driver's decision.
 
-    Text blocks join into the reply, ``tool_use`` blocks become
-    ToolCalls (real API ids preserved -- the pipeline echoes them back on
-    the result events), ``thinking`` blocks land in ``LLMTurn.thinking``
-    when non-empty (adaptive thinking streams them with empty text by
-    default) -- diagnostics for the turn diary, never reply text.
-    ``server_tool_use`` blocks (web search, ADR 030) already ran on the
-    provider's side: they surface as ``server_tool_calls`` for the turn
-    diary and activity stream, never as pipeline work. Their result
-    companions (``web_search_tool_result`` -- error-object results
-    included) are captured as OPAQUE raw payloads in
+    Text blocks assemble into the reply: ADJACENT text blocks
+    concatenate verbatim -- with citations enabled the API splits text
+    mid-sentence at cited-span boundaries, so a separator there would
+    shatter paragraphs -- while text separated by other block kinds
+    keeps a paragraph break. A block's web-search citations are folded
+    in as inline markdown links (``_cited_block_text``). ``tool_use``
+    blocks become ToolCalls (real API ids preserved -- the pipeline
+    echoes them back on the result events), ``thinking`` blocks land in
+    ``LLMTurn.thinking`` when non-empty (adaptive thinking streams them
+    with empty text by default) -- diagnostics for the turn diary, never
+    reply text. ``server_tool_use`` blocks (web search, ADR 030) already
+    ran on the provider's side: they surface as ``server_tool_calls``
+    for the turn diary and activity stream, never as pipeline work.
+    Their result companions (``web_search_tool_result`` -- error-object
+    results included) are captured as OPAQUE raw payloads in
     ``server_tool_results``, position-paired by ``tool_use_id`` (WP22:
     the next decide replays them so the model keeps what the search
     returned; ``""`` marks a result that never arrived).
@@ -288,14 +375,24 @@ def turn_from_response(response: Any) -> LLMTurn:
     silence, and a ``max_tokens`` cut is annotated so truncation is not
     mistaken for a complete answer."""
     reply_parts: list[str] = []
+    text_run: list[str] = []
     thinking_parts: list[str] = []
     calls: list[ToolCall] = []
     server_calls: list[ToolCall] = []
     results_by_id: dict[str, str] = {}
+
+    def flush_text_run() -> None:
+        run = "".join(text_run)
+        text_run.clear()
+        if run.strip():
+            reply_parts.append(run)
+
     for block in response.content:
         if block.type == "text":
-            reply_parts.append(block.text)
-        elif block.type == "thinking":
+            text_run.append(_cited_block_text(block))
+            continue
+        flush_text_run()
+        if block.type == "thinking":
             thinking_parts.append(block.thinking)
         elif block.type == "tool_use":
             calls.append(ToolCall(block.name, dict(block.input), id=block.id))
@@ -309,7 +406,8 @@ def turn_from_response(response: Any) -> LLMTurn:
             results_by_id[str(getattr(block, "tool_use_id", ""))] = json.dumps(
                 _as_data(block), default=str
             )
-    reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
+    flush_text_run()
+    reply = "\n\n".join(reply_parts).strip()
     thinking = "\n\n".join(part for part in thinking_parts if part.strip()).strip()
     if response.stop_reason == "refusal":
         return LLMTurn(reply=_REFUSAL_NOTICE)
@@ -451,34 +549,30 @@ class AnthropicDriver:
         tools: Mapping[str, str],
         goal: str = "",
         *,
-        web_search: bool = False,
-        model: str = "",
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         # ADR 033: the active mode's pinned model wins over the
         # constructor default for this decision.
-        effective_model = model or self._model
+        effective_model = options.model or self._model
         tool_defs = anthropic_tools(tools, self._schemas)
-        if web_search:
+        if options.web_search:
             # Deterministic tail position (after the sorted graph tools)
             # keeps requests cache-friendly across decides.
-            tool_defs.append(web_search_tool(effective_model))
+            tool_defs.append(web_search_tool(effective_model, options))
         messages = messages_from_transcript(transcript)
         request: dict[str, Any] = {
             "model": effective_model,
-            "max_tokens": self._max_tokens,
+            # ADR 037: the mode's cap wins over the constructor default.
+            "max_tokens": options.max_tokens or self._max_tokens,
             "system": assembled_system_prompt(goal),
-            # Explicit even where it is the model default: omitting it
-            # runs WITHOUT thinking on some current models.
-            "thinking": {"type": "adaptive"},
             "tools": tool_defs,
             "messages": messages,
             # No temperature/top_p/top_k: removed on current models (400).
             # Prompt caching deferred: once turn transcripts routinely
             # exceed the model's cacheable minimum, a top-level
             # cache_control={"type": "ephemeral"} is the one-kwarg upgrade.
+            **thinking_params(options.thinking, effective_model, self._effort),
         }
-        if self._effort is not None:
-            request["output_config"] = {"effort": self._effort}
         started = time.perf_counter()
         responses: list[Any] = []
         for _ in range(_MAX_PAUSE_RESUMES + 1):

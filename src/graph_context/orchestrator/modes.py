@@ -32,11 +32,13 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from graph_context.domain.model_choice import model_id
 from graph_context.errors import GraphContextError
 from graph_context.interface import tools
 from graph_context.interface.mode_config import slugify, spec_from_mapping
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.services import Services
+from graph_context.orchestrator.drivers import DecideOptions
 
 logger = logging.getLogger(__name__)
 
@@ -238,8 +240,28 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             for key in (
                 "goal", "mutating", "capture", "activity_detail",
                 "web_search", "model",
+                "thinking", "max_tokens", "web_search_max_uses",
+                "web_search_allowed_domains", "web_search_blocked_domains",
             )
             if key in payload
         }
         specs.append(spec_from_mapping(name, body, origin))
     return specs
+
+
+def decide_options(spec: ModeSpec) -> DecideOptions:
+    """The spec's driver options for one decision (ADR 037).
+
+    The model choice resolves to its provider id here -- drivers take
+    ids, never canonical names; everything else passes through with
+    "empty/zero = not set" intact.
+    """
+    return DecideOptions(
+        web_search=spec.web_search,
+        model=model_id(spec.model),
+        thinking=spec.thinking,
+        max_tokens=spec.max_tokens,
+        web_search_max_uses=spec.web_search_max_uses,
+        web_search_allowed_domains=spec.web_search_allowed_domains,
+        web_search_blocked_domains=spec.web_search_blocked_domains,
+    )

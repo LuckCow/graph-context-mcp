@@ -2034,6 +2034,104 @@ Drop `DomainProfile` and `GC_PROFILE`. Contents, roughly in order:
 
 ---
 
+## WP28 — Chat text formatting via marks (ADR 036) — **shipped 2026-07-17**
+
+**Status:** complete. The model's markdown links (and inline styles)
+render clickable/styled in the Anytype chat instead of as literal
+glyphs.
+
+### Spike S14 results (2026-07-17, live sidecar, API `2025-11-08`)
+
+Quirk **C11** (pinned in `chat.py` + `marks.py`, modeled by the mock,
+live-verified by the E2E round trip):
+
+* Messages accept `marks` (`{"from","to","type"}` + `"param"` for
+  links) on create and edit; they round-trip verbatim at
+  `content.marks` and replace wholesale on edit (C8).
+* Offsets are **UTF-16 code units** (an emoji-prefixed text
+  bounds-checks at its UTF-16 length, not its code-point count).
+* Invalid ranges (negative, inverted, out-of-bounds) **500** — and the
+  client retries 500s, so a bad mark stalls the turn rather than
+  failing fast. Unknown mark types / param-less links land silently; a
+  non-list `marks` 400s.
+
+What shipped:
+
+* `infrastructure/anytype/marks.py` — pure markdown→(text, marks)
+  converter: links, bare URLs, bold/italic/strikethrough/inline code
+  (→ `keyboard`), nesting via recursion, fenced-block shielding,
+  underscore emphasis deliberately unparsed (`gc_` keys), every mark
+  bounds-validated against the emitted text before it leaves.
+* `_message_body` applies it to every outbound message (replies,
+  activity edits, file captions); mock mirrors storage + the 400/500
+  validation split; live E2E round-trips an emoji-prefixed link.
+* **API-driver inline citations (ADR 036 amendment, same day):** with
+  the deployment preparing to default to `anthropic_api`,
+  `turn_from_response` folds each cited text block's web-search
+  sources in as inline ` ([domain](url))` markdown links (deduped,
+  URL parens escaped) and concatenates ADJACENT text blocks verbatim —
+  citation splits land mid-sentence; the old join-all-with-`\n\n`
+  shattered cited paragraphs (latent WP20 bug, fixed). Subscription
+  driver deliberately untouched (its SDK exposes text only).
+* Not done (follow-ups if they bite): inbound marks→markdown
+  reconstruction (a human link mark's URL currently doesn't reach the
+  model).
+
+---
+
+## WP29 — Mode-level driver options (ADR 037) — **shipped 2026-07-17**
+
+**Status:** complete. Five new Activity Mode properties tune the driver
+per mode, ahead of the `anthropic_api` default cutover.
+
+* `gc_mode_thinking` select (Off/Low/Medium/High/Xhigh/Max; EMPTY = the
+  default — no "Default" option): a level = adaptive thinking at that
+  `output_config.effort`; Off = disabled, rejected loudly for
+  Fable/Mythos (always-on thinking) at spec load AND at the driver
+  (effective-model guard). Precedence: mode level > `GC_DRIVER_EFFORT`
+  > model default. Every adaptive request now carries
+  `display: "summarized"` — thinking text used to arrive EMPTY.
+* `gc_mode_max_tokens`, `gc_mode_search_max_uses`,
+  `gc_mode_search_allowed_domains`/`_blocked_domains` (at most one
+  list; inert without `web_search`) — zero/empty = unset; the limits
+  ride the search-tool definition on the API driver.
+* `DecideOptions` (one frozen value via `modes.decide_options(spec)`)
+  replaced the per-knob `decide()` kwargs on the protocol and all
+  drivers. Subscription driver: thinking level → SDK `effort`;
+  off/max_tokens/limits skipped with one warning
+  (`inexpressible_options`).
+* `/mode` reports `thinking:` + only-if-set extras. Vocabulary in
+  `domain/thinking_choice.py`; select options minted table-driven.
+* Audit quick win: `bootstrap.build_driver` wires `on_result` →
+  `TurnLog.usage` — per-decide tokens/cache/cost stop being discarded
+  in production. Known discards documented in ADR 037 (redacted
+  thinking, thinking signatures, response id/model, server-tool usage
+  counts); eval `[[case.modes]]` overlay gap unchanged.
+
+## WP30 — The turn-trace card (ADR 038) — **shipped 2026-07-17**
+
+**Status:** complete. Claude-app-style disclosure, Anytype-shaped: a
+reply that did background work carries an object card opening the
+turn's intent node, whose body holds the full process trace.
+
+* Intent nodes now record WORKING read-only turns too (deliberately
+  supersedes WP7's read-only-writes-nothing): work = tools ran /
+  provider searched / thinking produced. Plain answers still write
+  nothing. Working-only nodes link nothing; `gc:touched` reads
+  `(none)`.
+* `orchestrator/process_trace.py` (`ProcessTrace`): archive-grade fold
+  beside the observer/turn-log taps — thinking, interim text, calls,
+  search digests, results; per-item caps, no collapsing; rendered ONCE
+  at turn end into the body's `### gc:process` (supersedes the
+  condensed `gc:tool_trace`). Write-once body policy intact — complete
+  at creation, no post-turn PATCH.
+* `ReplyEvent.attach` + `_finish_turn` returning the intent node; the
+  Anytype transport merges explicit attach ids ahead of text-scraped
+  refs (dedupe, cap 8, first chunk). WP19's live activity message
+  still deletes on close — ephemeral scaffolding vs durable card.
+
+---
+
 ## Sequencing
 
 ```

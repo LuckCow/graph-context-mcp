@@ -58,8 +58,7 @@ class _SpyDriver(ScriptedDriver):
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
     async def decide(
-        self, transcript, tools, goal: str = "", *,
-        web_search: bool = False, model: str = "",
+        self, transcript, tools, goal: str = "", *, options=None,
     ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
@@ -388,8 +387,7 @@ class TestServeLoop:
 
         class _Explodes(ScriptedDriver):
             async def decide(
-                self, transcript, tools, goal: str = "", *,
-                web_search: bool = False, model: str = "",
+                self, transcript, tools, goal: str = "", *, options=None,
             ) -> LLMTurn:
                 raise RuntimeError("driver fell over")
 
@@ -570,8 +568,7 @@ class TestAutoTitling:
     async def test_a_failed_turn_defers_the_attempt(self) -> None:
         class _Explodes(ScriptedDriver):
             async def decide(
-                self, transcript, tools, goal: str = "", *,
-                web_search: bool = False, model: str = "",
+                self, transcript, tools, goal: str = "", *, options=None,
             ) -> LLMTurn:
                 raise RuntimeError("driver fell over")
 

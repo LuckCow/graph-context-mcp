@@ -25,6 +25,7 @@ from graph_context.orchestrator.claude_driver import (  # noqa: E402
     session_options,
     usage_from_result,
 )
+from graph_context.orchestrator.drivers import DecideOptions  # noqa: E402
 
 # Transcript rendering is SDK-free and pinned in test_driver_common (CI
 # runs it there; this module self-skips without claude-agent-sdk).
@@ -125,6 +126,32 @@ class TestSessionCapabilityBoundary:
         options = self._options(web_search=True)
         assert options.tools == [WEB_SEARCH_TOOL]
         assert options.setting_sources == []  # isolation unchanged
+
+
+class TestModeOptionsBestEffort:
+    """ADR 037 on the subscription driver: a thinking LEVEL rides the
+    SDK's effort knob; everything the SDK cannot express is skipped and
+    reported, never an error (the API driver is the full surface)."""
+
+    def test_a_thinking_level_overrides_the_deployment_effort(self):
+        from graph_context.orchestrator.claude_driver import mode_effort
+
+        assert mode_effort(DecideOptions(thinking="xhigh"), "low") == "xhigh"
+        assert mode_effort(DecideOptions(), "low") == "low"
+        assert mode_effort(DecideOptions(thinking="off"), "low") == "low"
+
+    def test_inexpressible_options_are_named_for_the_warning(self):
+        from graph_context.orchestrator.claude_driver import (
+            inexpressible_options,
+        )
+
+        assert inexpressible_options(DecideOptions()) == []
+        assert inexpressible_options(DecideOptions(thinking="high")) == []
+        named = inexpressible_options(DecideOptions(
+            thinking="off", max_tokens=1000,
+            web_search_allowed_domains=("a.example",),
+        ))
+        assert named == ["thinking=off", "max_tokens", "web_search limits"]
 
 
 class TestPermissionGate:

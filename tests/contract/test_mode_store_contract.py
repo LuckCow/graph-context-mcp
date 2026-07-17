@@ -87,6 +87,11 @@ def _seed_mode(
     activity_detail: str = "",
     web_search: bool = False,
     model: str = "",
+    thinking: str = "",
+    max_tokens: float | None = None,
+    search_max_uses: float | None = None,
+    search_allowed: str = "",
+    search_blocked: str = "",
 ) -> str:
     properties: list[dict[str, Any]] = [
         {"key": mapping.PROP_MODE_MUTATING, "format": "checkbox",
@@ -100,7 +105,21 @@ def _seed_mode(
          "select": {"name": activity_detail} if activity_detail else None},
         {"key": mapping.PROP_MODE_MODEL, "format": "select",
          "select": {"name": model} if model else None},
+        {"key": mapping.PROP_MODE_THINKING, "format": "select",
+         "select": {"name": thinking} if thinking else None},
     ]
+    if max_tokens is not None:
+        properties.append({"key": mapping.PROP_MODE_MAX_TOKENS,
+                           "format": "number", "number": max_tokens})
+    if search_max_uses is not None:
+        properties.append({"key": mapping.PROP_MODE_SEARCH_MAX_USES,
+                           "format": "number", "number": search_max_uses})
+    if search_allowed:
+        properties.append({"key": mapping.PROP_MODE_SEARCH_ALLOWED,
+                           "format": "text", "text": search_allowed})
+    if search_blocked:
+        properties.append({"key": mapping.PROP_MODE_SEARCH_BLOCKED,
+                           "format": "text", "text": search_blocked})
     if references:
         properties.append({"key": mapping.PROP_CAPTURE_REFERENCES,
                            "format": "text", "text": references})
@@ -212,6 +231,52 @@ async def test_bootstrap_seeds_the_model_dropdown_options(
         t["name"] async for t in anytype_client.list_tags(prop["id"])
     ]
     assert sorted(names) == ["Fable 5", "Opus 4.8", "Sonnet 5"]
+
+
+async def test_driver_options_ride_the_payload_when_set(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """ADR 037: the thinking select follows the WP19 select rule; the
+    number and text options ride only when set, so an untouched mode
+    object yields the same payload it did before the fields existed."""
+    _seed_mode(
+        mock, "Tuned", "A goal.", thinking="Xhigh", max_tokens=32000.0,
+        search_max_uses=5.0, search_allowed="example.com, docs.example.com",
+    )
+    _seed_mode(mock, "Untouched", "A goal.", max_tokens=0.0)
+    payloads = await _load_by_name(anytype_client)
+    tuned = payloads["Tuned"]
+    assert tuned["thinking"] == "Xhigh"
+    assert tuned["max_tokens"] == 32000.0
+    assert tuned["web_search_max_uses"] == 5.0
+    assert tuned["web_search_allowed_domains"] == (
+        "example.com, docs.example.com"
+    )
+    assert "web_search_blocked_domains" not in tuned
+    untouched = payloads["Untouched"]
+    for key in (
+        "thinking", "max_tokens", "web_search_max_uses",
+        "web_search_allowed_domains", "web_search_blocked_domains",
+    ):
+        assert key not in untouched  # zero/empty = unset
+
+
+async def test_bootstrap_seeds_the_thinking_dropdown_options(
+    anytype_client: AnytypeClient,
+) -> None:
+    """ADR 037: gc_mode_thinking is a SELECT whose options bootstrap
+    pre-seeds -- Off plus the effort levels; NO "Default" option (the
+    empty select IS the default). Idempotent: a re-run adds no
+    duplicates."""
+    await ensure_schema(anytype_client)  # second run
+    prop = {
+        p["key"]: p async for p in anytype_client.list_properties()
+    }[mapping.PROP_MODE_THINKING]
+    assert prop["format"] == "select"
+    names = [
+        t["name"] async for t in anytype_client.list_tags(prop["id"])
+    ]
+    assert sorted(names) == ["High", "Low", "Max", "Medium", "Off", "Xhigh"]
 
 
 async def test_bootstrap_seeds_the_detail_dropdown_options(

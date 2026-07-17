@@ -55,7 +55,8 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from functools import cache
+from typing import Any, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -80,12 +81,15 @@ from claude_agent_sdk import (
     tool,
 )
 
+from graph_context.domain.thinking_choice import THINKING_OFF
 from graph_context.orchestrator.driver_common import (
     assembled_system_prompt,
     derive_schema,
     render_transcript,
 )
 from graph_context.orchestrator.drivers import (
+    DEFAULT_OPTIONS,
+    DecideOptions,
     DecideUsage,
     LLMTurn,
     ToolCall,
@@ -122,6 +126,51 @@ WEB_SEARCH_TOOL = "WebSearch"
 def local_tool_name(sdk_name: str) -> str:
     """``mcp__gc__get_node`` -> ``get_node`` (the binding's name)."""
     return sdk_name.removeprefix(_TOOL_PREFIX)
+
+
+def mode_effort(
+    options: DecideOptions, default: EffortLevel | None
+) -> EffortLevel | None:
+    """The session's effort knob (ADR 037, best effort on this driver).
+
+    A mode thinking LEVEL maps straight onto the SDK's effort vocabulary
+    (the same five names) and beats the deployment default; ``off`` and
+    the unset choice keep the default -- ``off`` has no SDK surface, so
+    it is reported by :func:`inexpressible_options`, not honored."""
+    if options.thinking and options.thinking != THINKING_OFF:
+        return cast(EffortLevel, options.thinking)
+    return default
+
+
+def inexpressible_options(options: DecideOptions) -> list[str]:
+    """The mode options this driver has no SDK surface for (ADR 037):
+    ``thinking = off``, ``max_tokens``, and the web-search limits. They
+    are skipped (the mode still works, just without the knob); the API
+    driver is the full implementation."""
+    return [
+        label
+        for label, is_set in (
+            ("thinking=off", options.thinking == THINKING_OFF),
+            ("max_tokens", bool(options.max_tokens)),
+            ("web_search limits", bool(
+                options.web_search_max_uses
+                or options.web_search_allowed_domains
+                or options.web_search_blocked_domains
+            )),
+        )
+        if is_set
+    ]
+
+
+@cache
+def _warn_inexpressible(labels: str) -> None:
+    # Once per distinct combination per process: mode options this driver
+    # cannot express (ADR 037) are skipped, not errors -- the mode still
+    # works, just without the knob, and the log says so exactly once.
+    logger.warning(
+        "subscription driver cannot express mode option(s): %s -- "
+        "skipped (the anthropic_api driver honors them)", labels,
+    )
 
 
 async def _never_executed(_args: Any) -> dict[str, Any]:
@@ -385,26 +434,28 @@ class ClaudeAgentDriver:
         tools: Mapping[str, str],
         goal: str = "",
         *,
-        web_search: bool = False,
-        model: str = "",
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         server = create_sdk_mcp_server(
             name=_SERVER_NAME, version="1.0.0", tools=sdk_tools(tools, self._schemas)
         )
-        options = session_options(
+        skipped = inexpressible_options(options)
+        if skipped:
+            _warn_inexpressible(", ".join(skipped))
+        session = session_options(
             server,
             goal,
             # ADR 033: the active mode's pinned model wins over the
             # constructor default (GC_DRIVER_MODEL / the CLI's own).
-            model=model or self._model,
-            effort=self._effort,
-            can_use_tool=permission_gate(web_search),
+            model=options.model or self._model,
+            effort=mode_effort(options, self._effort),
+            can_use_tool=permission_gate(options.web_search),
             cli_path=self._cli_path,
-            web_search=web_search,
+            web_search=options.web_search,
         )
         harvest = BlockHarvest()
         last_result: ResultMessage | None = None
-        async with ClaudeSDKClient(options=options) as client:
+        async with ClaudeSDKClient(options=session) as client:
             await client.query(query_payload(transcript))
             async for message in client.receive_response():
                 if isinstance(message, ResultMessage):

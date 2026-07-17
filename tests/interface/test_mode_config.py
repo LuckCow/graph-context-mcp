@@ -96,6 +96,91 @@ class TestParseSeedModes:
         assert seed.spec.goal == "g"
 
 
+class TestDriverOptionKeys:
+    """ADR 037: thinking / max_tokens / web-search limits parse with the
+    same "empty = unset" normalization the model choice uses."""
+
+    def test_thinking_normalizes_case_and_padding(self) -> None:
+        (seed,) = parse_seed_modes(
+            '[modes.deep]\ngoal = "g"\nthinking = " Xhigh "\n', "test"
+        )
+        assert seed.spec.thinking == "xhigh"
+
+    def test_unknown_thinking_fails_naming_the_table_and_choices(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            parse_seed_modes(
+                '[modes.deep]\ngoal = "g"\nthinking = "turbo"\n', "seed"
+            )
+        assert "[modes.deep]" in str(err.value)
+        assert "off, low, medium, high, xhigh, max" in str(err.value)
+
+    def test_thinking_off_with_a_locked_model_fails_loudly(self) -> None:
+        with pytest.raises(GraphContextError, match="cannot turn thinking off"):
+            parse_seed_modes(
+                '[modes.locked]\ngoal = "g"\nmodel = "fable 5"\n'
+                'thinking = "off"\n',
+                "seed",
+            )
+
+    def test_domains_parse_from_a_string_or_a_list(self) -> None:
+        (seed,) = parse_seed_modes(
+            '[modes.scoped]\ngoal = "g"\nweb_search = true\n'
+            'web_search_allowed_domains = "Example.com, docs.example.com  "\n',
+            "test",
+        )
+        assert seed.spec.web_search_allowed_domains == (
+            "example.com", "docs.example.com",
+        )
+        (seed,) = parse_seed_modes(
+            '[modes.scoped]\ngoal = "g"\n'
+            'web_search_blocked_domains = ["a.example", "b.example"]\n',
+            "test",
+        )
+        assert seed.spec.web_search_blocked_domains == (
+            "a.example", "b.example",
+        )
+
+    def test_both_domain_lists_fail_loudly(self) -> None:
+        with pytest.raises(GraphContextError, match="at most one list"):
+            parse_seed_modes(
+                '[modes.scoped]\ngoal = "g"\n'
+                'web_search_allowed_domains = "a.example"\n'
+                'web_search_blocked_domains = "b.example"\n',
+                "test",
+            )
+
+    def test_counts_must_be_non_negative_whole_numbers(self) -> None:
+        with pytest.raises(GraphContextError, match="max_tokens"):
+            parse_seed_modes(
+                '[modes.m]\ngoal = "g"\nmax_tokens = -1\n', "test"
+            )
+        with pytest.raises(GraphContextError, match="web_search_max_uses"):
+            parse_seed_modes(
+                '[modes.m]\ngoal = "g"\nweb_search_max_uses = 2.5\n', "test"
+            )
+
+    def test_option_payloads_emit_only_when_set(self) -> None:
+        seeds = parse_seed_modes(
+            '[modes.tuned]\ngoal = "g"\nthinking = "high"\n'
+            'max_tokens = 32000\nweb_search = true\n'
+            'web_search_max_uses = 3\n'
+            'web_search_allowed_domains = ["example.com", "b.example"]\n'
+            '[modes.plain]\ngoal = "g"\n',
+            "test",
+        )
+        tuned, plain = seed_payloads(seeds)
+        assert tuned["thinking"] == "high"
+        assert tuned["max_tokens"] == 32000
+        assert tuned["web_search_max_uses"] == 3
+        # Domains flatten to the human-typed text-property shape.
+        assert tuned["web_search_allowed_domains"] == "example.com b.example"
+        for key in (
+            "thinking", "max_tokens", "web_search_max_uses",
+            "web_search_allowed_domains", "web_search_blocked_domains",
+        ):
+            assert key not in plain
+
+
 class TestLoadSeedModes:
     def test_an_explicit_source_wins_and_missing_files_fail(self, tmp_path) -> None:
         path = tmp_path / "custom.toml"

@@ -99,5 +99,24 @@ class TestLiveChat:
             content, media = await chat_client.fetch_file(file_id)
             assert content == b"file round trip"
             assert media.startswith("text/plain")
+
+            # C11 (spike S14): markdown converts to text + marks on the
+            # way out and the marks round-trip at content.marks. The
+            # emoji makes this a live UTF-16 bounds check too -- with
+            # code-point offsets the server would 500 the post.
+            marked = await chat_client.send(
+                chat_id,
+                "\N{SLIGHTLY SMILING FACE} see the "
+                "[API docs](https://developers.anytype.io)",
+            )
+            raw_window = await client.list_chat_messages(chat_id)
+            stored = next(m for m in raw_window if m["id"] == marked)
+            assert stored["content"]["text"] == (
+                "\N{SLIGHTLY SMILING FACE} see the API docs"
+            )
+            assert stored["content"]["marks"] == [{
+                "from": 11, "to": 19, "type": "link",
+                "param": "https://developers.anytype.io",
+            }]
         finally:
             await client.aclose()

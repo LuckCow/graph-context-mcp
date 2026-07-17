@@ -30,3 +30,13 @@ def model_id(choice: str) -> str:
     (= the deployment default). Unknown choices cannot reach here --
     ``ModeSpec`` validation rejects them at spec load."""
     return MODEL_CHOICES[choice] if choice else ""
+
+
+def thinking_locked(model: str) -> bool:
+    """Whether ``model`` (a provider id) refuses to turn thinking off.
+
+    The Fable/Mythos line runs with thinking always on -- an explicit
+    ``disabled`` is rejected with a 400 -- so a mode pinning one of
+    these cannot also pick ``thinking = off`` (ADR 037). Prefix match
+    covers dated snapshots and point releases."""
+    return model.startswith(("claude-fable", "claude-mythos"))

@@ -54,6 +54,15 @@ version header) lives here, pinned by spike S10 and mirrored by
         type). Chat messages reference files through the same
         ``attachments`` envelopes as C7 (``{"target", "type"}``), and
         inbound messages EXPOSE their attachments.
+    C11. Rich text rides ``marks`` beside ``text`` (spike S14):
+        ``{"from", "to", "type"}`` + ``"param"`` for links, offsets in
+        UTF-16 CODE UNITS. Ranges are bounds-checked server-side and an
+        invalid one 500s (which the client retries!), so outbound text
+        is converted markdown -> plain text + validated marks in ONE
+        place (``marks.to_marked_text``, applied by ``_message_body``).
+        Marks round-trip at ``content.marks`` and replace wholesale on
+        edit like the rest of the content (C8). Full pinned detail in
+        ``marks.py``'s module docstring.
 """
 
 from __future__ import annotations
@@ -65,6 +74,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.marks import to_marked_text
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +200,20 @@ async def discover_bot_identity(client: AnytypeClient) -> str:
     return ""
 
 
-def _message_body(text: str, attachments: Sequence[str]) -> dict[str, Any]:
-    """The create/edit payload: object ids become C7 link envelopes."""
-    body: dict[str, Any] = {"text": text}
+def _message_body(
+    text: str, attachments: Sequence[str], attachment_type: str = "link"
+) -> dict[str, Any]:
+    """The create/edit payload: markdown becomes plain text + marks
+    (C11 -- links go clickable, C7's plain-text rendering shows the
+    rest unstyled otherwise), object ids become C7/C10 envelopes."""
+    plain, marks = to_marked_text(text)
+    body: dict[str, Any] = {"text": plain}
+    if marks:
+        body["marks"] = marks
     if attachments:
         body["attachments"] = [
-            {"target": object_id, "type": "link"} for object_id in attachments
+            {"target": object_id, "type": attachment_type}
+            for object_id in attachments
         ]
     return body
 
@@ -258,10 +276,9 @@ class AnytypeChatClient:
     ) -> str:
         """Post a message carrying one uploaded file (C10: same envelope
         family as C7, ``type: "file"`` so clients render a file card)."""
-        return await self._client.create_chat_message(chat_id, {
-            "text": text,
-            "attachments": [{"target": file_id, "type": "file"}],
-        })
+        return await self._client.create_chat_message(
+            chat_id, _message_body(text, (file_id,), attachment_type="file")
+        )
 
     async def recent_messages(
         self, chat_id: str, *, limit: int = 100

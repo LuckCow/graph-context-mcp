@@ -39,6 +39,8 @@ from graph_context.interface.profiles import CapturePolicy, ModeSpec
 
 _SPEC_KEYS = {
     "goal", "mutating", "capture", "activity_detail", "web_search", "model",
+    "thinking", "max_tokens", "web_search_max_uses",
+    "web_search_allowed_domains", "web_search_blocked_domains",
 }
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
 _SEED_ONLY_KEYS = {"default", "icon"}
@@ -87,9 +89,10 @@ def spec_from_mapping(
         capture = CapturePolicy(**kwargs)
     # Humans type the level (TOML or the Anytype UI): normalize case and
     # padding; empty means "not set" and takes the default. The model
-    # choice (ADR 033) follows the same rule.
+    # choice (ADR 033) and the ADR 037 options follow the same rule.
     detail = str(body.get("activity_detail") or "").strip().lower()
     model = str(body.get("model") or "").strip().lower()
+    thinking = str(body.get("thinking") or "").strip().lower()
     try:
         return ModeSpec(
             name=name,
@@ -98,10 +101,57 @@ def spec_from_mapping(
             capture=capture,
             web_search=bool(body.get("web_search", False)),
             model=model,
+            thinking=thinking,
+            max_tokens=_count(body.get("max_tokens"), f"{origin}: max_tokens"),
+            web_search_max_uses=_count(
+                body.get("web_search_max_uses"),
+                f"{origin}: web_search_max_uses",
+            ),
+            web_search_allowed_domains=_domains(
+                body.get("web_search_allowed_domains"),
+                f"{origin}: web_search_allowed_domains",
+            ),
+            web_search_blocked_domains=_domains(
+                body.get("web_search_blocked_domains"),
+                f"{origin}: web_search_blocked_domains",
+            ),
             **({"activity_detail": detail} if detail else {}),
         )
     except ValueError as err:
         raise GraphContextError(f"{origin}: {err}") from None
+
+
+def _count(value: Any, origin: str) -> int:
+    """A non-negative whole number; absent/empty reads as 0 (not set)."""
+    if value is None or value == "":
+        return 0
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or value != int(value)
+        or value < 0
+    ):
+        raise GraphContextError(
+            f"{origin} must be a non-negative whole number, got {value!r}"
+        )
+    return int(value)
+
+
+def _domains(value: Any, origin: str) -> tuple[str, ...]:
+    """A domain list from a TOML array or a human-typed text field
+    (comma/whitespace separated -- the Anytype property is plain text)."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        parts = re.split(r"[,\s]+", value)
+    elif isinstance(value, Sequence):
+        parts = [str(item) for item in value]
+    else:
+        raise GraphContextError(
+            f"{origin} must be a list or a comma-separated string, "
+            f"got {value!r}"
+        )
+    return tuple(dict.fromkeys(p.strip().lower() for p in parts if p.strip()))
 
 
 def _positive_int(value: Any, origin: str) -> int:
@@ -252,5 +302,19 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
             }
         if spec.model:
             payload["model"] = spec.model
+        if spec.thinking:
+            payload["thinking"] = spec.thinking
+        if spec.max_tokens:
+            payload["max_tokens"] = spec.max_tokens
+        if spec.web_search_max_uses:
+            payload["web_search_max_uses"] = spec.web_search_max_uses
+        if spec.web_search_allowed_domains:
+            payload["web_search_allowed_domains"] = " ".join(
+                spec.web_search_allowed_domains
+            )
+        if spec.web_search_blocked_domains:
+            payload["web_search_blocked_domains"] = " ".join(
+                spec.web_search_blocked_domains
+            )
         payloads.append(payload)
     return payloads

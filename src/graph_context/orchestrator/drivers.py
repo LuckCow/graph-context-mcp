@@ -118,6 +118,42 @@ class LLMTurn:
 
 
 @dataclass(frozen=True, slots=True)
+class DecideOptions:
+    """The active mode's per-decision driver options (ADRs 030/033/037).
+
+    One value object instead of a kwarg per knob, so a new option is one
+    field here plus the drivers that honor it. Everything follows the
+    mode-property idiom "empty/zero = not set" -- an unset knob keeps the
+    driver's configured default.
+
+    * ``web_search`` admits the provider's server-side search tool
+      (ADR 030); ``web_search_max_uses`` caps searches per decision and
+      the domain tuples scope results (at most ONE of allowed/blocked --
+      spec validation enforces it; API-driver only).
+    * ``model`` is a provider model id overriding the driver default
+      (ADR 033 -- already resolved from the canonical choice).
+    * ``thinking`` is a ``THINKING_LEVELS`` choice (ADR 037): a level
+      means adaptive thinking at that effort with summarized display;
+      ``off`` disables thinking (the API driver refuses it for models
+      that cannot); empty keeps the driver's configured effort.
+    * ``max_tokens`` caps one decision's output tokens (API driver).
+    """
+
+    web_search: bool = False
+    model: str = ""
+    thinking: str = ""
+    max_tokens: int = 0
+    web_search_max_uses: int = 0
+    web_search_allowed_domains: tuple[str, ...] = ()
+    web_search_blocked_domains: tuple[str, ...] = ()
+
+
+# The all-defaults value, shared as the ``decide`` argument default
+# (frozen, so sharing is safe).
+DEFAULT_OPTIONS = DecideOptions()
+
+
+@dataclass(frozen=True, slots=True)
 class DecideUsage:
     """What one ``decide`` call cost, translated off the SDK's result.
 
@@ -152,18 +188,14 @@ class LLMDriver(Protocol):
         tools: Mapping[str, str],
         goal: str,
         *,
-        web_search: bool = False,
-        model: str = "",
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         """Choose the next step given the transcript, bound tools, and the
         active mode's goal prompt (ADR 015 -- the system-prompt fragment).
 
-        ``web_search`` admits the provider's server-side web search tool
-        for this decision (ADR 030); drivers without one ignore it.
-        ``model`` is a provider model id overriding the driver's
-        configured default for this decision (ADR 033 -- the active
-        mode's pinned model, already resolved by the pipeline); empty
-        keeps the default, and modelless drivers ignore it."""
+        ``options`` carries the active mode's per-decision driver knobs
+        (:class:`DecideOptions`); a driver honors what it can express and
+        ignores the rest (documenting the gaps)."""
         ...
 
     def system_prompt(self, goal: str) -> str:
@@ -210,8 +242,7 @@ class ScriptedDriver:
         tools: Mapping[str, str],
         goal: str = "",
         *,
-        web_search: bool = False,
-        model: str = "",
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         if self._cursor >= len(self._turns):
             return LLMTurn(reply="(script exhausted)")

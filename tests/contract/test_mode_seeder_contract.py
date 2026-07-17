@@ -31,7 +31,11 @@ from graph_context.infrastructure.anytype.schema_bootstrap import (
 from graph_context.infrastructure.anytype.space_context_store import (
     AnytypeSpaceContextStore,
 )
-from graph_context.interface.mode_config import load_seed_modes, seed_payloads
+from graph_context.interface.mode_config import (
+    load_seed_modes,
+    parse_seed_modes,
+    seed_payloads,
+)
 from graph_context.orchestrator.modes import load_registry
 
 FICTION_PAYLOADS = seed_payloads(load_seed_modes(None, "fiction"))
@@ -99,6 +103,28 @@ async def test_round_trip_matches_the_directly_built_registry(
     for name, spec in direct.specs.items():
         assert seeded.specs[name] == spec
     assert seeded.default == direct.default
+
+
+async def test_driver_options_round_trip_through_the_seeder(
+    anytype_client: AnytypeClient,
+) -> None:
+    """ADR 037: a seed corpus pre-filling thinking / max_tokens / search
+    limits mints objects the store reads back to the SAME specs the
+    memory path builds -- the select goes through the pre-seeded option,
+    the numbers and domain text ride real properties."""
+    payloads = seed_payloads(parse_seed_modes(
+        '[modes.tuned]\ngoal = "Think hard."\nthinking = "xhigh"\n'
+        'max_tokens = 32000\nweb_search = true\nweb_search_max_uses = 3\n'
+        'web_search_allowed_domains = ["example.com", "b.example"]\n',
+        "test corpus",
+    ))
+    await seed_activity_modes(anytype_client, payloads)
+    seeded = await _loaded_registry(anytype_client)
+    spec = seeded.specs["tuned"]
+    assert spec.thinking == "xhigh"
+    assert spec.max_tokens == 32000
+    assert spec.web_search_max_uses == 3
+    assert spec.web_search_allowed_domains == ("example.com", "b.example")
 
 
 async def test_a_second_run_is_a_no_op(anytype_client: AnytypeClient) -> None:

@@ -630,7 +630,12 @@ class AnytypeChatTurnHandler:
                 await reply.deliver_file(event.file_name, event.text)
                 continue
             rendered = render(event)
-            attachments = object_references(rendered)
+            # ADR 038: explicit attachments (the turn's intent node) ride
+            # ahead of ids scraped from the text, deduped, same cap.
+            merged = tuple(dict.fromkeys(
+                (*event.attach, *object_references(rendered))
+            ))[:MAX_ATTACHMENTS]
+            attachments = merged
             for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):
                 await reply.deliver(piece, attachments)
                 attachments = ()  # cards ride the first chunk only

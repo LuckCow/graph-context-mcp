@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.session import SessionState
 from graph_context.orchestrator.drivers import (
+    DEFAULT_OPTIONS,
+    DecideOptions,
     DecideUsage,
     LLMDriver,
     LLMTurn,
@@ -57,12 +59,11 @@ class RecordingDriver:
         tools: Mapping[str, str],
         goal: str = "",
         *,
-        web_search: bool = False,
-        model: str = "",
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         start = time.perf_counter()
         turn = await self._inner.decide(
-            transcript, tools, goal, web_search=web_search, model=model
+            transcript, tools, goal, options=options
         )
         self.decisions.append(DecisionRecord(
             latency_s=time.perf_counter() - start,

@@ -77,6 +77,8 @@ from typing import Any
 
 import httpx
 
+from graph_context.infrastructure.anytype.marks import utf16_len
+
 _SPACES = re.compile(r"^/v1/spaces$")
 _SPACE = re.compile(r"^/v1/spaces/(?P<space>[^/]+)$")
 _MEMBERS = re.compile(r"^/v1/spaces/(?P<space>[^/]+)/members$")
@@ -458,12 +460,18 @@ class MockAnytype:
         creator: str,
         text: str,
         attachments: list[dict[str, Any]] | None = None,
+        marks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         # C7: attachments must be {"target", "type"} envelopes -- a bare
         # id list 400s on the live server.
         for entry in attachments or []:
             if not isinstance(entry, dict) or "target" not in entry:
                 raise ValueError("attachments must be {'target', 'type'} dicts")
+        content: dict[str, Any] = {"text": text, "style": "paragraph"}
+        if marks:
+            # C11d: marks round-trip verbatim at content.marks (the key
+            # is absent when none were sent, like live).
+            content["marks"] = list(marks)
         message = {
             "id": self._new_id(),
             # Short lexicographically-increasing string, like live (C3).
@@ -472,7 +480,7 @@ class MockAnytype:
             "creator_name": creator,
             "created_at": next(self._clock),
             "modified_at": 0,
-            "content": {"text": text, "style": "paragraph"},
+            "content": content,
             "attachments": list(attachments or []),
             "reactions": {},
             "pinned": False,
@@ -769,13 +777,37 @@ class MockAnytype:
                 not isinstance(e, dict) for e in raw_attachments
             ):
                 return self._error(400, "bad_request")  # C7: envelopes only
+            text = str(body.get("text", ""))
+            invalid = self._marks_error(text, body.get("marks"))
+            if invalid is not None:
+                return invalid
             message = self._new_chat_message(
-                chat_id, self.api_member_id, str(body.get("text", "")),
-                attachments=raw_attachments,
+                chat_id, self.api_member_id, text,
+                attachments=raw_attachments, marks=body.get("marks"),
             )
             # C1: flat message_id, no envelope key.
             return httpx.Response(201, json={"message_id": message["id"]})
         return self._error(405, "method_not_allowed")
+
+    def _marks_error(
+        self, text: str, marks: Any
+    ) -> httpx.Response | None:
+        """C11 (spike S14): a non-list ``marks`` 400s (Go unmarshal); a
+        range that is negative, inverted, or past the text's UTF-16
+        length 500s ("failed to add chat message"). Mark ``type``
+        vocabulary is NOT vetted (unknown types land silently)."""
+        if marks is None:
+            return None
+        if not isinstance(marks, list) or any(
+            not isinstance(m, dict) for m in marks
+        ):
+            return self._error(400, "bad_request")
+        limit = utf16_len(text)
+        for mark in marks:
+            start, end = int(mark.get("from", 0)), int(mark.get("to", 0))
+            if start < 0 or end < start or end > limit:
+                return self._error(500, "internal_server_error")
+        return None
 
     def _handle_chat_message(
         self, request: httpx.Request, match: re.Match[str]
@@ -794,10 +826,18 @@ class MockAnytype:
                 not isinstance(e, dict) for e in raw_attachments
             ):
                 return self._error(400, "bad_request")  # C7: envelopes only
-            message["content"]["text"] = str(body.get("text", ""))
-            # C8: an edit replaces content wholesale -- attachments absent
-            # from the body are removed (live-confirmed).
+            text = str(body.get("text", ""))
+            invalid = self._marks_error(text, body.get("marks"))
+            if invalid is not None:
+                return invalid
+            message["content"]["text"] = text
+            # C8: an edit replaces content wholesale -- attachments (and
+            # marks, C11d) absent from the body are removed (live-confirmed).
             message["attachments"] = list(raw_attachments or [])
+            if body.get("marks"):
+                message["content"]["marks"] = list(body["marks"])
+            else:
+                message["content"].pop("marks", None)
             message["modified_at"] = next(self._clock)
             self._notify_chat(
                 chat_id, {"kind": "message_updated", "message": message}

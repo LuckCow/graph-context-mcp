@@ -103,6 +103,88 @@ class TestChatRest:
         assert (chat_id, "Siege engine logistics") in await chat.list_chats()
 
 
+class TestMarks:
+    """Quirk C11 (spike S14): outbound markdown becomes plain text plus
+    marks, and the mock enforces the live server's range rules."""
+
+    async def test_send_converts_markdown_links_to_marks(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        await chat.send(
+            chat_id,
+            "See the [API docs](https://developers.anytype.io) for details",
+        )
+        (stored,) = mock.chat_messages(chat_id)
+        assert stored["content"]["text"] == "See the API docs for details"
+        assert stored["content"]["marks"] == [{
+            "from": 8, "to": 16, "type": "link",
+            "param": "https://developers.anytype.io",
+        }]
+
+    async def test_plain_text_sends_without_a_marks_key(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        await chat.send(chat_id, "no formatting")
+        (stored,) = mock.chat_messages(chat_id)
+        assert "marks" not in stored["content"]
+
+    async def test_an_edit_replaces_marks_wholesale(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        """C11d rides C8: the edited body's marks land; an edit whose
+        text converts to none drops the old ones."""
+        chat_id = mock.seed_chat()
+        message_id = await chat.send(chat_id, "[a](https://a.example)")
+        await chat.edit(chat_id, message_id, "**bold now**")
+        (stored,) = mock.chat_messages(chat_id)
+        assert stored["content"]["text"] == "bold now"
+        assert stored["content"]["marks"] == [
+            {"from": 0, "to": 8, "type": "bold"}
+        ]
+        await chat.edit(chat_id, message_id, "plain now")
+        (stored,) = mock.chat_messages(chat_id)
+        assert "marks" not in stored["content"]
+
+    async def test_the_file_caption_travels_through_the_converter(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        file_id = await chat.upload_file("report.md", b"# Report")
+        await chat.send_file_message(chat_id, "\N{PAPERCLIP} report.md", file_id)
+        (stored,) = mock.chat_messages(chat_id)
+        assert stored["content"]["text"] == "\N{PAPERCLIP} report.md"
+        assert stored["attachments"] == [{"target": file_id, "type": "file"}]
+
+    async def test_the_mock_rejects_ranges_like_the_live_server(
+        self, mock: MockAnytype, client: AnytypeClient
+    ) -> None:
+        """Fidelity pin: out-of-bounds/inverted/negative ranges 500
+        (bounds in UTF-16 units -- ``to`` one past an emoji's code-point
+        length lands); a non-list ``marks`` 400s."""
+        from graph_context.infrastructure.anytype.config import AnytypeApiError
+
+        chat_id = mock.seed_chat()
+        emoji_text = "\N{SLIGHTLY SMILING FACE} link"  # 6 cp, 7 utf-16
+        ok = await client.create_chat_message(chat_id, {
+            "text": emoji_text,
+            "marks": [{"from": 2, "to": 7, "type": "link",
+                       "param": "https://example.com"}],
+        })
+        assert ok
+        for bad in (
+            [{"from": 2, "to": 8, "type": "link"}],   # past utf-16 end
+            [{"from": 5, "to": 2, "type": "bold"}],   # inverted
+            [{"from": -1, "to": 3, "type": "bold"}],  # negative
+            {"from": 0},                              # not a list
+        ):
+            with pytest.raises(AnytypeApiError):
+                await client.create_chat_message(
+                    chat_id, {"text": emoji_text, "marks": bad}
+                )
+
+
 class TestSseParsing:
     async def test_backlog_then_live_events_arrive_in_order(
         self, mock: MockAnytype, chat: AnytypeChatClient

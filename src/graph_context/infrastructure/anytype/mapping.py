@@ -97,6 +97,7 @@ from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
 from graph_context.domain.model_choice import MODEL_CHOICES
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
 from graph_context.domain.schema import FIELD_FORMATS
+from graph_context.domain.thinking_choice import THINKING_LEVELS
 
 if TYPE_CHECKING:
     from graph_context.infrastructure.anytype.registry import SpaceRegistry
@@ -145,6 +146,11 @@ PROP_MODE_MUTATING = "gc_mode_mutating"
 PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
 PROP_MODE_WEB_SEARCH = "gc_mode_web_search"  # WP20, ADR 030
 PROP_MODE_MODEL = "gc_mode_model"  # ADR 033
+PROP_MODE_THINKING = "gc_mode_thinking"  # ADR 037
+PROP_MODE_MAX_TOKENS = "gc_mode_max_tokens"  # ADR 037
+PROP_MODE_SEARCH_MAX_USES = "gc_mode_search_max_uses"  # ADR 037
+PROP_MODE_SEARCH_ALLOWED = "gc_mode_search_allowed_domains"  # ADR 037
+PROP_MODE_SEARCH_BLOCKED = "gc_mode_search_blocked_domains"  # ADR 037
 PROP_CAPTURE_TYPE = "gc_capture_type"
 PROP_CAPTURE_REFERENCES = "gc_capture_references"
 PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
@@ -154,6 +160,11 @@ MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_MODE_ACTIVITY_DETAIL: "select",
     PROP_MODE_WEB_SEARCH: "checkbox",
     PROP_MODE_MODEL: "select",
+    PROP_MODE_THINKING: "select",
+    PROP_MODE_MAX_TOKENS: "number",
+    PROP_MODE_SEARCH_MAX_USES: "number",
+    PROP_MODE_SEARCH_ALLOWED: "text",
+    PROP_MODE_SEARCH_BLOCKED: "text",
     PROP_CAPTURE_TYPE: "text",
     PROP_CAPTURE_REFERENCES: "text",
     PROP_CAPTURE_MIN_CHARS: "number",
@@ -169,6 +180,10 @@ SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
     ),
     PROP_MODE_MODEL: tuple(
         choice.capitalize() for choice in MODEL_CHOICES
+    ),
+    # ADR 037: no "Default" option -- the EMPTY select is the default.
+    PROP_MODE_THINKING: tuple(
+        level.capitalize() for level in THINKING_LEVELS
     ),
 }
 
