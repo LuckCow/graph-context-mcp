@@ -4,7 +4,10 @@ Date: 2026-07-14
 Status: accepted (amended 2026-07-15: the detail level is a property of
 the activity MODE — profile spec, `GC_MODES_FILE`, or the in-space
 Activity Mode object — not a `/mode detail=` session setting; picking a
-mode picks its verbosity)
+mode picks its verbosity. Amended 2026-07-17: `close` DELETES the
+activity message instead of collapsing it into a done-summary — the
+trace is live scaffolding, not chat history; the summary edit survives
+only as the degrade path when the delete fails)
 
 ## Context
 
@@ -33,16 +36,20 @@ The pipeline had no mid-turn seam: `handle_message` returns all
 
 ## Decision
 
-**One activity message, edited in place, collapsed at the end.** The
+**One activity message, edited in place, deleted at the end.** The
 `Processing…` placeholder still posts the moment the turn starts (before
 the route lock — a queued message must show progress). When the turn
 begins streaming, the sink *claims* the placeholder
 (`TurnReply.claim_placeholder`) as its activity message and PATCHes the
 rendered activity into it as events arrive. The final reply then posts
 as a **fresh message** (a claimed `TurnReply` naturally falls into its
-plain-send branch), and a last edit collapses the activity message into
-a compact done-summary (`✓ 4 tool calls · 3 decisions`; `✗ turn failed ·
-…` on the error paths). The trace stays in history without clutter.
+plain-send branch), and `close` DELETES the activity message: the trace
+is live scaffolding, not chat history — the turn log keeps the full
+record — and the reply alone remains. (2026-07-17 amendment; originally
+the message collapsed into a compact done-summary like `✓ 4 tool calls ·
+3 decisions`, which dogfooding read as clutter. That summary edit
+survives only as the degrade path when the delete fails, so a live
+"working…" text never strands.)
 
 **A narrow per-turn observer, not a TurnLog sibling.** `handle_message`
 gains an optional `observer: TurnObserver | None` parameter — a
@@ -101,8 +108,9 @@ never reads the setting at all — the sink learns it from
 
 **Leading-edge coalescing, no timers.** The sink edits at most once per
 `ACTIVITY_EDIT_SECONDS` (2s): an event inside the window folds silently
-into the log; the next event past it (or the unconditional closing
-collapse) flushes everything accumulated. Worst case stays under half
+into the log; the next event past it flushes everything accumulated
+(the unconditional closing delete supersedes anything still unflushed).
+Worst case stays under half
 the sustained request budget. Rejected: a trailing-edge debounce task
 (timers and cancellation in a pure module, nondeterministic tests) and a
 client-side throttle in the chat client (it would delay the reply
@@ -110,11 +118,11 @@ itself, and the client deliberately has none).
 
 **Wiring.** The transport's `run_turn` takes an optional
 `ActivityObserver` (the pipeline protocol plus `close`), forwards it as
-the observer, and closes it after the reply is delivered — "collapse
+the observer, and closes it after the reply is delivered — "clean up
 after the reply posts" is transport sequencing the pipeline cannot see.
 The composition root builds the concrete `ChatActivity` beside each
 `TurnReply` and closes it with `ok=False` on the error paths, so a
-crashed turn posts its error fresh and still collapses its activity
+crashed turn posts its error fresh and still deletes its activity
 message. Echo suppression is free: the activity message *is* the
 placeholder, whose id `open()` already recorded; claiming transfers
 ownership, not identity. Scheduled turns (ADR 027) keep posting nothing
@@ -122,9 +130,13 @@ until the reply is ready — `run_scheduled` takes no sink.
 
 ## Consequences
 
-- Every streamed turn leaves two bot messages: the collapsed activity
-  trace and the reply. A mode with `activity_detail = "off"` (or
-  switching to one) restores the single edited message.
+- Every streamed turn leaves ONE bot message — the reply — same as
+  detail `off`; the trace exists only while the turn runs. The chat is
+  not an audit surface: the full trace lives in the turn log. The
+  notification cost is unchanged either way (two posts per streamed
+  turn: the placeholder and the fresh reply; the chat API offers no
+  silent-post flag, and deleting a message cannot retract a
+  notification already shown).
 - The `ok`/error reading of a tool result lives with the `ERROR: `
   prefix rule in `interface/tools.py` (`is_error_result`), not re-spelled
   in the pipeline.

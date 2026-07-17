@@ -386,6 +386,7 @@ class ClaudeAgentDriver:
         goal: str = "",
         *,
         web_search: bool = False,
+        model: str = "",
     ) -> LLMTurn:
         server = create_sdk_mcp_server(
             name=_SERVER_NAME, version="1.0.0", tools=sdk_tools(tools, self._schemas)
@@ -393,7 +394,9 @@ class ClaudeAgentDriver:
         options = session_options(
             server,
             goal,
-            model=self._model,
+            # ADR 033: the active mode's pinned model wins over the
+            # constructor default (GC_DRIVER_MODEL / the CLI's own).
+            model=model or self._model,
             effort=self._effort,
             can_use_tool=permission_gate(web_search),
             cli_path=self._cli_path,

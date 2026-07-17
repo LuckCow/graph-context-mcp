@@ -44,6 +44,7 @@ from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.application.scheduler import SchedulerTick
+from graph_context.domain.model_choice import model_id
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
@@ -398,7 +399,8 @@ class Orchestrator:
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(
-                transcript, tools, spec.goal, web_search=spec.web_search
+                transcript, tools, spec.goal, web_search=spec.web_search,
+                model=model_id(spec.model),
             )
             if self.turn_log:
                 self.turn_log.llm_turn(turn_id, session_id, spec.name, turn)
@@ -539,7 +541,9 @@ class Orchestrator:
             mutations=mutations,
             trace=trace,
             user_id=user_id,
-            model=self.model_name,
+            # ADR 033: a mode-pinned model is what actually generated the
+            # turn; only unpinned modes stamp the deployment default.
+            model=model_id(spec.model) or self.model_name,
             mode=spec.name,
             origin=origin,
         )
@@ -597,9 +601,10 @@ class Orchestrator:
             current = self.registry.get(state.mode)
             detail = current.activity_detail if current else ""
             search = "on" if current and current.web_search else "off"
+            model = (current.model if current else "") or "default"
             events.append(ReplyEvent(
                 f"mode: {state.mode} (activity detail: {detail}; "
-                f"web search: {search}); "
+                f"web search: {search}; model: {model}); "
                 f"switch with /mode {{{' | '.join(self.registry.names())}}}",
                 kind="notice",
             ))

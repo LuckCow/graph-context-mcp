@@ -13,7 +13,11 @@ Startup catch-up (user requirement, ADR 019): the chat cursor persists
 (``GC_CHAT_CURSOR``, default ``logs/chat_cursor.json``; ``0``/``off``
 disables). A chat WITH a persisted position first answers every message
 that arrived while the bot was down (up to the API's recency window);
-only a chat with NO position fast-forwards past its history.
+only a chat with NO position fast-forwards past its history. A chat the
+rescan watcher discovers mid-run is adopted from its beginning instead
+(``ChatCursor.begin``): it was born while the bot ran, so the messages
+typed before the subscription opened are unanswered conversation, not
+history.
 
 Reconnects: the client's SSE read timeout is tied to the heartbeat, so a
 half-dead stream raises instead of hanging; this loop reconnects with
@@ -59,6 +63,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
     ChatCursor,
     ChatTitler,
+    DeleteFn,
     EditFn,
     InboundAttachment,
     InboundChatMessage,
@@ -82,7 +87,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CURSOR_PATH = "logs/chat_cursor.json"
 CATCHUP_WINDOW = 100  # the messages endpoint's recency window (C2)
 _RECONNECT_CAP_SECONDS = 60.0
-CHAT_RESCAN_SECONDS = 60  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
+CHAT_RESCAN_SECONDS = 3  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
+# 3s makes new-chat pickup near-instant: sidecar reads are unthrottled
+# (S7), so a tight re-list costs nothing. Raise this when pointing at a
+# throttled desktop endpoint.
 GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
 SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_SECONDS
 
@@ -229,9 +237,9 @@ async def _resolve_attachments(
 
 def _reply_primitives(
     chat_client: AnytypeChatClient, chat_id: str
-) -> tuple[SendFn, EditFn, SendFileFn]:
-    """The send/edit/send-file trio a turn handler's reply needs, bound
-    to one chat."""
+) -> tuple[SendFn, EditFn, SendFileFn, DeleteFn]:
+    """The send/edit/send-file/delete primitives a turn needs, bound to
+    one chat (delete serves the activity sink, not the reply)."""
 
     async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
         return await chat_client.send(chat_id, text, attachments)
@@ -250,7 +258,10 @@ def _reply_primitives(
             chat_id, f"\N{PAPERCLIP} {name}", file_id
         )
 
-    return send, edit, send_file
+    async def delete(message_id: str) -> None:
+        await chat_client.delete(chat_id, message_id)
+
+    return send, edit, send_file, delete
 
 
 async def _maybe_turn(
@@ -265,15 +276,15 @@ async def _maybe_turn(
     if not handler.accepts(inbound):
         return
 
-    send, edit, send_file = _reply_primitives(chat_client, chat_id)
+    send, edit, send_file, delete = _reply_primitives(chat_client, chat_id)
 
     # Errors deliver through the same reply, so they replace the turn's
     # "Processing…" placeholder instead of stranding it in the chat --
     # and when the turn streamed activity (WP19), the error posts fresh
-    # (the sink claimed the placeholder) and the activity message
-    # collapses to its failed-turn summary.
+    # (the sink claimed the placeholder) and the activity message is
+    # deleted like on the happy path.
     reply = handler.reply(send, edit, send_file)
-    activity = ChatActivity(reply=reply, edit=edit)
+    activity = ChatActivity(reply=reply, edit=edit, delete=delete)
     try:
         images: list[ImageAttachment] = []
         if inbound.attachments:
@@ -347,7 +358,10 @@ async def _catch_up(
     cursor: ChatCursor,
     titler: ChatTitler | None = None,
 ) -> None:
-    """First-run chats skip history; resumed chats answer the offline gap."""
+    """First-run chats skip history; resumed chats answer the offline gap.
+    (A live-discovered chat counts as resumed: discovery positions its
+    cursor at the beginning, making the pre-subscription messages the gap.)
+    """
     window = await chat_client.recent_messages(chat_id, limit=CATCHUP_WINDOW)
     if not cursor.has(chat_id):
         if window:
@@ -424,7 +438,9 @@ async def _watch_chats(
 
     Reads are unthrottled, so a periodic re-list is cheap. A newly created
     chat is registered (visible to the handler at once, aliased maps) and
-    gets its own serve task with no restart. Already-served chats get
+    gets its own serve task with no restart -- adopted from its beginning,
+    so the message that opened the thread is answered even though it
+    predates the subscription. Already-served chats get
     their listed NAME refreshed (WP21: a human's rename must reach the
     titler's untitled test). Never raises -- a failed re-list logs and
     retries -- so it is safe inside the bot's TaskGroup.
@@ -444,6 +460,12 @@ async def _watch_chats(
                 continue
             bootstrap.register_chat(runtimes, space_id, chat_id, names.get(chat_id, ""))
             logger.info("discovered chat %s in space %s; serving it", chat_id, space_id)
+            # A discovered chat was born while the bot ran: adopt it from
+            # its beginning, so the message(s) typed before this
+            # subscription opened -- the thread's opener, typically --
+            # count as offline backlog for _catch_up, not skippable
+            # first-run history.
+            handler.cursor.begin(chat_id)
             task_group.create_task(
                 _serve_chat(handler, chat_client, chat_id, handler.cursor, titler)
             )
@@ -486,7 +508,7 @@ async def _fire_scheduled(
     """Deliver one due Scheduled Event's turn (same error posture as
     ``_maybe_turn``: the failure replaces the placeholder, never the loop)."""
 
-    send, edit, send_file = _reply_primitives(chat_client, chat_id)
+    send, edit, send_file, _ = _reply_primitives(chat_client, chat_id)
 
     reply = handler.reply(send, edit, send_file)
     try:
@@ -617,8 +639,9 @@ async def run() -> None:
         )
         logger.info("anytype chat: serving %s. %s", served, runtimes.help_line)
         # TaskGroup (not gather): the discovery watchers spawn serve tasks
-        # into the same lifecycle. A brand-new chat's serve task fast-
-        # forwards past its (empty) history via _catch_up's first-run path.
+        # into the same lifecycle. A discovered chat is adopted from its
+        # beginning (cursor.begin), so _catch_up answers anything typed
+        # before the subscription opened instead of skipping it.
         async with asyncio.TaskGroup() as task_group:
             for chat_id, space_id in list(runtimes.spaces.items()):
                 task_group.create_task(

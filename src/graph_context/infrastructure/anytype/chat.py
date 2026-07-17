@@ -290,6 +290,11 @@ class AnytypeChatClient:
             chat_id, message_id, _message_body(text, attachments)
         )
 
+    async def delete(self, chat_id: str, message_id: str) -> None:
+        """Remove a message (WP19: the live activity trace is deleted
+        once the reply has posted)."""
+        await self._client.delete_chat_message(chat_id, message_id)
+
     async def stream(
         self, chat_id: str, *, heartbeat_seconds: int = 30
     ) -> AsyncIterator[ChatEvent]:

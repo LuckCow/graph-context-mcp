@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING, Any
 
 from graph_context.domain import attribution, scheduling
 from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
+from graph_context.domain.model_choice import MODEL_CHOICES
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
 from graph_context.domain.schema import FIELD_FORMATS
 
@@ -143,6 +144,7 @@ ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 PROP_MODE_MUTATING = "gc_mode_mutating"
 PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
 PROP_MODE_WEB_SEARCH = "gc_mode_web_search"  # WP20, ADR 030
+PROP_MODE_MODEL = "gc_mode_model"  # ADR 033
 PROP_CAPTURE_TYPE = "gc_capture_type"
 PROP_CAPTURE_REFERENCES = "gc_capture_references"
 PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
@@ -151,6 +153,7 @@ MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_MODE_MUTATING: "checkbox",
     PROP_MODE_ACTIVITY_DETAIL: "select",
     PROP_MODE_WEB_SEARCH: "checkbox",
+    PROP_MODE_MODEL: "select",
     PROP_CAPTURE_TYPE: "text",
     PROP_CAPTURE_REFERENCES: "text",
     PROP_CAPTURE_MIN_CHARS: "number",
@@ -163,6 +166,9 @@ MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
     PROP_MODE_ACTIVITY_DETAIL: tuple(
         level.capitalize() for level in ACTIVITY_DETAIL_LEVELS
+    ),
+    PROP_MODE_MODEL: tuple(
+        choice.capitalize() for choice in MODEL_CHOICES
     ),
 }
 

@@ -210,7 +210,8 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
     async def decide(
-        self, transcript, tools, goal: str = "", *, web_search: bool = False
+        self, transcript, tools, goal: str = "", *,
+        web_search: bool = False, model: str = "",
     ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
@@ -415,7 +416,7 @@ class TestPipeline:
         goals: list[str] = []
 
         class GoalSpy:
-            async def decide(self, transcript, tools, goal, *, web_search=False):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[no-untyped-def]
                 goals.append(goal)
                 return LLMTurn(reply="ok")
 
@@ -787,7 +788,8 @@ class TestActivityDetailFromTheMode:
         orchestrator = _orchestrator(services, [])
         events = await orchestrator.handle_message("s1", "u1", "/mode")
         assert (
-            f"(activity detail: {DEFAULT_ACTIVITY_DETAIL}; web search: off)"
+            f"(activity detail: {DEFAULT_ACTIVITY_DETAIL}; web search: off; "
+            "model: default)"
             in events[-1].text
         )
 
@@ -890,7 +892,7 @@ class TestWebSearchFromTheMode:
             def render_prompt(self, transcript) -> str:  # type: ignore[no-untyped-def]
                 return ""
 
-            async def decide(self, transcript, tools, goal, *, web_search=False):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[no-untyped-def]
                 forwarded.append(web_search)
                 return LLMTurn(reply="ok")
 
@@ -927,6 +929,91 @@ class TestWebSearchFromTheMode:
         await orchestrator.handle_message("s1", "u1", "/mode researcher")
         events = await orchestrator.handle_message("s1", "u1", "/mode")
         assert "web search: on" in events[-1].text
+
+
+class TestModelFromTheMode:
+    """ADR 033: the Claude model is a MODE property, default unset --
+    picking a mode picks which model runs its decisions; the pipeline
+    resolves the choice to a provider model id on every decide."""
+
+    def test_a_modes_file_can_pin_the_model(self, tmp_path) -> None:
+        path = tmp_path / "modes.toml"
+        path.write_text(
+            '[modes.heavy]\ngoal = "Think hard."\nmodel = "opus 4.8"\n'
+        )
+        registry = load_registry(FICTION, modes_file=str(path))
+        spec = registry.get("heavy")
+        assert spec is not None and spec.model == "opus 4.8"
+
+    def test_an_in_space_mode_object_can_pin_the_model(self) -> None:
+        registry = load_registry(
+            FICTION, in_space=[_mode_payload(model="Sonnet 5 ")],  # UI-typed
+        )
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.model == "sonnet 5"
+
+    def test_the_model_defaults_unset(self) -> None:
+        registry = load_registry(FICTION, in_space=[_mode_payload()])
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.model == ""
+
+    def test_an_unknown_model_fails_loudly_naming_the_source(
+        self, tmp_path
+    ) -> None:
+        path = tmp_path / "modes.toml"
+        path.write_text('[modes.heavy]\ngoal = "g"\nmodel = "haiku 3"\n')
+        with pytest.raises(GraphContextError) as err:
+            load_registry(FICTION, modes_file=str(path))
+        assert "[modes.heavy]" in str(err.value)
+        assert "sonnet 5, opus 4.8, fable 5" in str(err.value)
+
+    async def test_the_pipeline_forwards_the_resolved_model_id(
+        self, services: Services
+    ) -> None:
+        forwarded: list[str] = []
+
+        class ModelSpy:
+            def system_prompt(self, goal: str) -> str:
+                return goal
+
+            def render_prompt(self, transcript) -> str:  # type: ignore[no-untyped-def]
+                return ""
+
+            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[no-untyped-def]
+                forwarded.append(model)
+                return LLMTurn(reply="ok")
+
+        pinned = ModeSpec(
+            name="heavy", goal="Think hard.", model="opus 4.8"
+        )
+        registry = load_registry(FICTION)
+        specs = dict(registry.specs) | {pinned.name: pinned}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ModelSpy(),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        await orchestrator.handle_message("s1", "u1", "hi")
+        await orchestrator.handle_message("s1", "u1", "/mode heavy")
+        await orchestrator.handle_message("s1", "u1", "hi again")
+        assert forwarded == ["", "claude-opus-4-8"]
+
+    async def test_bare_mode_reports_the_pinned_model(
+        self, services: Services
+    ) -> None:
+        pinned = ModeSpec(name="heavy", goal="Think hard.", model="fable 5")
+        registry = load_registry(FICTION)
+        specs = dict(registry.specs) | {pinned.name: pinned}
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver([]),
+            profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode heavy")
+        events = await orchestrator.handle_message("s1", "u1", "/mode")
+        assert "model: fable 5" in events[-1].text
 
 
 class TestServerToolContinuity:

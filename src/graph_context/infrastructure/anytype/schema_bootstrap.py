@@ -105,6 +105,9 @@ the default when empty), Tools (each tool call), or Full (thinking and \
 results too).
 - Tick gc_mode_web_search to let the assistant search the web while this \
 mode is active; unticked keeps it grounded in the graph alone.
+- Pick a gc_mode_model option to run this mode on a specific Claude \
+model (Sonnet 5, Opus 4.8, or Fable 5); empty uses the deployment's \
+default model.
 - Fill gc_capture_type (and optionally gc_capture_references, \
 gc_capture_min_chars) to auto-capture the assistant's substantial replies \
 as objects of that type.

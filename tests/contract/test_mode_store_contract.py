@@ -86,6 +86,7 @@ def _seed_mode(
     min_chars: float | None = None,
     activity_detail: str = "",
     web_search: bool = False,
+    model: str = "",
 ) -> str:
     properties: list[dict[str, Any]] = [
         {"key": mapping.PROP_MODE_MUTATING, "format": "checkbox",
@@ -97,6 +98,8 @@ def _seed_mode(
         # A select: the read side sees the picked option as a tag envelope.
         {"key": mapping.PROP_MODE_ACTIVITY_DETAIL, "format": "select",
          "select": {"name": activity_detail} if activity_detail else None},
+        {"key": mapping.PROP_MODE_MODEL, "format": "select",
+         "select": {"name": model} if model else None},
     ]
     if references:
         properties.append({"key": mapping.PROP_CAPTURE_REFERENCES,
@@ -179,6 +182,37 @@ async def test_web_search_checkbox_rides_the_payload(
     payloads = await _load_by_name(anytype_client)
     assert payloads["Researcher"]["web_search"] is True
     assert payloads["Grounded"]["web_search"] is False
+
+
+async def test_model_choice_rides_the_payload_when_set(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """ADR 033: the picked gc_mode_model option's NAME reaches the loader
+    (same select rule as activity_detail: the loader lowercases and
+    validates, naming the object); an unpicked select leaves the key out,
+    so the deployment default applies."""
+    _seed_mode(mock, "Heavy", "A goal.", model="Opus 4.8")
+    _seed_mode(mock, "Unset", "A goal.")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Heavy"]["model"] == "Opus 4.8"
+    assert "model" not in payloads["Unset"]
+
+
+async def test_bootstrap_seeds_the_model_dropdown_options(
+    anytype_client: AnytypeClient,
+) -> None:
+    """ADR 033: gc_mode_model is a SELECT whose options bootstrap
+    pre-seeds -- the human picks the Claude model from a dropdown.
+    Idempotent: a re-run adds no duplicates."""
+    await ensure_schema(anytype_client)  # second run
+    prop = {
+        p["key"]: p async for p in anytype_client.list_properties()
+    }[mapping.PROP_MODE_MODEL]
+    assert prop["format"] == "select"
+    names = [
+        t["name"] async for t in anytype_client.list_tags(prop["id"])
+    ]
+    assert sorted(names) == ["Fable 5", "Opus 4.8", "Sonnet 5"]
 
 
 async def test_bootstrap_seeds_the_detail_dropdown_options(

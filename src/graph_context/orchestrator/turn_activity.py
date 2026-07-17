@@ -7,8 +7,11 @@ rendered text in place. Anytype has no write-side streaming API, but every
 edit reaches watching clients instantly as a ``message_updated`` SSE
 event -- edit-in-place IS the streaming mechanism. The final reply posts
 as a fresh message (the transport claims the placeholder away from
-:class:`TurnReply`), and ``close`` collapses the activity message into a
-compact done-summary.
+:class:`TurnReply`), and ``close`` DELETES the activity message: the
+trace is live scaffolding, not chat history (the turn log keeps the full
+record), and the reply alone remains. A failed delete degrades to
+editing in a compact done-summary, so a live "working…" text never
+strands.
 
 Detail levels are interpreted HERE and nowhere else (the ACTIVE MODE
 owns the setting -- ``ModeSpec.activity_detail``, so switching modes
@@ -24,7 +27,7 @@ Rate-limit hygiene (the API allows a burst of 60 requests, then ~1
 request/second sustained, shared with the turn's own graph writes):
 edits coalesce on the leading edge -- at most one per
 :data:`ACTIVITY_EDIT_SECONDS`, later events fold silently and the next
-edit (or the closing collapse, which is unconditional) flushes them.
+edit flushes them (the closing delete supersedes anything unflushed).
 An activity edit failure never fails the turn: every PATCH degrades to a
 logged warning.
 
@@ -43,6 +46,7 @@ from typing import Any
 
 from graph_context.orchestrator.anytype_chat_transport import (
     ANYTYPE_MESSAGE_LIMIT,
+    DeleteFn,
     EditFn,
     TurnReply,
 )
@@ -187,6 +191,8 @@ class ActivityLog:
         return text[:limit]
 
     def summary(self, ok: bool) -> str:
+        """The compact done-line -- the DEGRADE rendering ``close`` edits
+        in when the activity message cannot be deleted."""
         parts = [
             "✓" if ok else "✗ turn failed ·",
             _count(self.tool_calls, "tool call"),
@@ -247,12 +253,13 @@ class ChatActivity:
     at detail ``off``, or when the placeholder never posted -- then the
     turn behaves exactly as before WP19). ``close`` is called by the
     transport AFTER the reply is delivered (or by the composition root on
-    the error paths), never by the pipeline: "collapse after the reply
+    the error paths), never by the pipeline: "clean up after the reply
     posts" is transport sequencing the pipeline cannot see.
     """
 
     reply: TurnReply
     edit: EditFn
+    delete: DeleteFn
     now: Callable[[], float] = time.monotonic  # injectable for tests
     min_interval: float = ACTIVITY_EDIT_SECONDS
     _log: ActivityLog | None = None
@@ -282,11 +289,20 @@ class ChatActivity:
         await self._maybe_edit()
 
     async def close(self, ok: bool) -> None:
-        """Collapse to the done-summary; unconditional (no coalescing) --
-        the final state must always land. A no-op when nothing streamed."""
+        """Delete the activity message; unconditional (no coalescing) --
+        the trace must always leave the chat. A failed delete degrades to
+        editing in the done-summary rather than stranding a live
+        "working…" text. A no-op when nothing streamed."""
         if self._log is None or self._message_id is None:
             return
-        await self._push(self._log.summary(ok))
+        try:
+            await self.delete(self._message_id)
+        except Exception:  # noqa: BLE001 -- a diagnostic never fails a turn
+            logger.warning(
+                "activity delete failed (message %s); degrading to the "
+                "done-summary edit", self._message_id, exc_info=True,
+            )
+            await self._push(self._log.summary(ok))
 
     async def _maybe_edit(self) -> None:
         if self._message_id is None or self._log is None:

@@ -75,6 +75,9 @@ PROCESSING_NOTICE = "Processing…"
 
 SendFn = Callable[[str, tuple[str, ...]], Awaitable[str]]
 EditFn = Callable[[str, str, tuple[str, ...]], Awaitable[None]]
+# WP19: remove a message by id -- the activity sink deletes its trace
+# once the reply is delivered.
+DeleteFn = Callable[[str], Awaitable[None]]
 # WP23: (filename, text content) -> the posted message's id. The bot's
 # primitive uploads the file and posts a message carrying it as a card.
 SendFileFn = Callable[[str, str], Awaitable[str]]
@@ -82,7 +85,7 @@ SendFileFn = Callable[[str, str], Awaitable[str]]
 
 class ActivityObserver(TurnObserver, Protocol):
     """What ``run_turn`` needs from a live-activity sink (WP19): the
-    pipeline's per-turn observer, plus the transport-sequenced collapse
+    pipeline's per-turn observer, plus the transport-sequenced cleanup
     ("after the reply posts" is a fact only the transport knows). The
     concrete sink is ``turn_activity.ChatActivity``, built by the
     composition root -- named here as a protocol so the policy module
@@ -241,6 +244,18 @@ class ChatCursor:
     def fast_forward(self, chat_id: str, order_id: str) -> None:
         if order_id > self._seen.get(chat_id, ""):
             self._seen[chat_id] = order_id
+            self._save()
+
+    def begin(self, chat_id: str) -> None:
+        """Adopt a chat from its very beginning: record the empty position,
+        under which every real order_id counts as new. Live discovery calls
+        this for a chat born while the bot runs -- whatever was typed before
+        the subscription opened (typically the thread's first message) must
+        be answered, not skipped as first-run history. A no-op when a
+        position already exists; persisted, so the promise survives a crash
+        between discovery and catch-up."""
+        if chat_id not in self._seen:
+            self._seen[chat_id] = ""
             self._save()
 
     def _save(self) -> None:
@@ -574,8 +589,9 @@ class AnytypeChatTurnHandler:
         ``activity`` (WP19, ADR 029) streams the turn into the chat: the
         pipeline feeds it each decision and tool result, it claims the
         placeholder as its live activity message, and after the reply is
-        delivered it collapses that message into a done-summary. ``None``
-        (and detail ``off``) keeps the pre-WP19 placeholder lifecycle.
+        delivered it DELETES that message -- the trace is live scaffolding,
+        not history (the turn log keeps the record). ``None`` (and detail
+        ``off``) keeps the pre-WP19 placeholder lifecycle.
         """
         self.cursor.advance(message)
         if not is_command(message.text):

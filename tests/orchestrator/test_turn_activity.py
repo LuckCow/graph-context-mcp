@@ -196,13 +196,19 @@ class _Clock:
 
 
 class _Recorder:
-    def __init__(self, *, edit_raises: bool = False) -> None:
+    def __init__(
+        self, *, edit_raises: bool = False, delete_raises: bool = False
+    ) -> None:
         self.messages: dict[str, str] = {}
         self.edits: list[tuple[str, str]] = []
+        self.deletes: list[str] = []
+        self._sent = 0
         self._edit_raises = edit_raises
+        self._delete_raises = delete_raises
 
     async def send(self, text: str, attachments: tuple[str, ...] = ()) -> str:
-        message_id = f"sent-{len(self.messages) + 1}"
+        self._sent += 1
+        message_id = f"sent-{self._sent}"
         self.messages[message_id] = text
         return message_id
 
@@ -214,6 +220,12 @@ class _Recorder:
         self.messages[message_id] = text
         self.edits.append((message_id, text))
 
+    async def delete(self, message_id: str) -> None:
+        if self._delete_raises:
+            raise RuntimeError("chat API down")
+        del self.messages[message_id]
+        self.deletes.append(message_id)
+
 
 async def _opened(recorder: _Recorder) -> tuple[TurnReply, ChatActivity, _Clock]:
     reply = TurnReply(
@@ -221,7 +233,9 @@ async def _opened(recorder: _Recorder) -> tuple[TurnReply, ChatActivity, _Clock]
     )
     await reply.open()
     clock = _Clock()
-    activity = ChatActivity(reply=reply, edit=recorder.edit, now=clock)
+    activity = ChatActivity(
+        reply=reply, edit=recorder.edit, delete=recorder.delete, now=clock
+    )
     return reply, activity, clock
 
 
@@ -248,19 +262,23 @@ class TestChatActivitySink:
         await activity.decision(_decision(EXPLORE))
         await reply.deliver("the reply")
         await activity.close(ok=True)
-        assert recorder.messages["sent-2"] == "the reply"  # fresh message
-        assert recorder.messages["sent-1"] == "✓ 1 tool call · 1 decision"
+        # The activity message is deleted; only the fresh reply remains.
+        assert recorder.messages == {"sent-2": "the reply"}
+        assert recorder.deletes == ["sent-1"]
 
     async def test_without_a_placeholder_the_sink_stays_inert(self) -> None:
         recorder = _Recorder()
         reply = TurnReply(
             send=recorder.send, edit=recorder.edit, sent=SentMessages()
         )  # open() never ran (it failed at the composition root)
-        activity = ChatActivity(reply=reply, edit=recorder.edit)
+        activity = ChatActivity(
+            reply=reply, edit=recorder.edit, delete=recorder.delete
+        )
         await activity.turn_started("world_modeling", "full")
         await activity.decision(_decision(EXPLORE))
         await activity.close(ok=False)
         assert recorder.messages == {} and recorder.edits == []
+        assert recorder.deletes == []
 
     async def test_edits_within_the_interval_coalesce_without_loss(self) -> None:
         recorder = _Recorder()
@@ -277,32 +295,50 @@ class TestChatActivitySink:
         assert "decision 2" in recorder.edits[-1][1]
         assert "explore ×2" in recorder.edits[-1][1]
 
-    async def test_close_flushes_even_inside_the_interval(self) -> None:
+    async def test_close_deletes_even_inside_the_interval(self) -> None:
         recorder = _Recorder()
         _, activity, clock = await _opened(recorder)
         await activity.turn_started("world_modeling", "minimal")
         await activity.decision(_decision(EXPLORE))
         clock.t = 0.5  # well inside the coalescing window
         await activity.close(ok=True)
-        assert recorder.messages["sent-1"].startswith("✓")
+        assert recorder.deletes == ["sent-1"]
+        assert recorder.messages == {}
 
-    async def test_a_failing_edit_never_escapes(self) -> None:
-        broken = _Recorder(edit_raises=True)
+    async def test_a_failing_delete_degrades_to_the_done_summary(self) -> None:
+        recorder = _Recorder(delete_raises=True)
+        _, activity, _ = await _opened(recorder)
+        await activity.turn_started("world_modeling", "tools")
+        await activity.decision(_decision(EXPLORE))
+        await activity.tool_result(EXPLORE, "found", True)
+        await activity.close(ok=True)
+        # The trace could not leave the chat, so it collapses instead of
+        # stranding a live "working…" text.
+        assert recorder.messages["sent-1"] == "✓ 1 tool call · 1 decision"
+
+    async def test_failing_edit_and_delete_never_escape(self) -> None:
+        broken = _Recorder(edit_raises=True, delete_raises=True)
         reply = TurnReply(
             send=broken.send, edit=broken.edit, sent=SentMessages()
         )
         await reply.open()
-        activity = ChatActivity(reply=reply, edit=broken.edit)
+        activity = ChatActivity(
+            reply=reply, edit=broken.edit, delete=broken.delete
+        )
         await activity.turn_started("world_modeling", "tools")
         await activity.decision(_decision(EXPLORE))  # swallowed
-        await activity.close(ok=True)                # swallowed
-        assert broken.edits == []
+        await activity.close(ok=True)                # swallowed twice
+        assert broken.edits == [] and broken.deletes == []
 
     async def test_a_second_turn_started_does_not_reset_the_log(self) -> None:
         recorder = _Recorder()
-        _, activity, _ = await _opened(recorder)
+        _, activity, clock = await _opened(recorder)
         await activity.turn_started("world_modeling", "minimal")
         await activity.decision(_decision(EXPLORE))
         await activity.turn_started("world_modeling", "full")  # ignored
-        await activity.close(ok=True)
-        assert recorder.messages["sent-1"] == "✓ 1 tool call · 1 decision"
+        clock.t = 3.0
+        await activity.decision(_decision(EXPLORE))
+        # Still counting from the first decision, still at minimal detail.
+        assert recorder.edits[-1][1] == (
+            "working… decision 2\ntools: explore ×2"
+        )

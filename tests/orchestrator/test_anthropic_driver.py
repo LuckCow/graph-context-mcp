@@ -330,6 +330,22 @@ class TestRequestShape:
         request = await self._decide(stub)
         assert "output_config" not in request
 
+    async def test_a_per_decide_model_override_wins(self, stub):
+        """ADR 033: the active mode's pinned model overrides the
+        constructor default for that decision -- including the web search
+        tool variant, which is picked per effective model."""
+        driver = AnthropicDriver(schemas={}, client=stub)
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {}, "",
+            web_search=True, model="claude-opus-4-8",
+        )
+        request = stub.requests[0]
+        assert request["model"] == "claude-opus-4-8"
+        assert request["tools"][-1]["type"] == "web_search_20260209"
+        stub.requests.clear()
+        await driver.decide([TranscriptEvent("user", "Hello")], {}, "")
+        assert stub.requests[0]["model"] == DEFAULT_MODEL
+
     async def test_the_usage_observer_fires_once_per_decide(self, stub):
         seen = []
         driver = AnthropicDriver(schemas={}, client=stub, on_result=seen.append)

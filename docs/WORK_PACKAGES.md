@@ -1666,8 +1666,11 @@ becomes a live **activity message** edited in place as the pipeline
 works (Anytype has no write-side streaming API, but every PATCH reaches
 watching clients instantly over their SSE subscription — edit-in-place
 IS the streaming mechanism), the final reply posts as a **fresh
-message**, and a last edit collapses the activity message into a
-done-summary (`✓ 4 tool calls · 3 decisions`).
+message**, and the activity message is **deleted** once the reply is
+delivered (amended 2026-07-17: originally it collapsed into a
+`✓ 4 tool calls · 3 decisions` done-summary; that edit survives only as
+the degrade path when the delete fails — the trace is live scaffolding,
+not history, and the turn log keeps the record).
 
 What shipped:
 
@@ -1708,13 +1711,13 @@ What shipped:
   placeholder via `TurnReply.claim_placeholder` — once claimed,
   `deliver` posts fresh and `finish` no-ops — and coalesces edits on
   the leading edge (≥2s apart, `ACTIVITY_EDIT_SECONDS`; the closing
-  collapse is unconditional), keeping worst-case traffic under half the
+  delete is unconditional), keeping worst-case traffic under half the
   API's ~1 req/s sustained budget. Activity edit failures degrade to a
   warning, never the turn.
 * **Wiring**: `run_turn(message, reply, activity=None)` forwards the
   sink and closes it after delivery; `_maybe_turn` builds it and closes
   `ok=False` on the error paths (a crashed turn posts its error fresh
-  and collapses to `✗ turn failed · …`). Echo suppression is free — the
+  and still deletes its trace). Echo suppression is free — the
   activity message IS the placeholder whose id was already recorded.
   Scheduled turns (ADR 027) stay silent; Discord unchanged.
 
@@ -1902,6 +1905,31 @@ What shipped:
   reply events after the reply text; the Anytype transport uploads and
   posts a `📎 name` message carrying the file card; Discord/CLI/MCP
   degrade to fenced content. The outbox clears at turn start.
+
+---
+
+## WP24 — Per-mode model selection (ADR 033) — **shipped 2026-07-17**
+
+**Status:** complete. Each activity mode can pin which Claude model
+runs its decisions — Sonnet 5, Opus 4.8, or Fable 5 — from any of the
+three mode-config sources; unset keeps the deployment default.
+
+What shipped:
+
+* `ModeSpec.model` (canonical choices in `domain/model_choice.py`,
+  which also maps them to full provider model ids), validated at spec
+  load like `activity_detail` — an unknown model fails loudly naming
+  the config source.
+* The in-space surface: a `gc_mode_model` SELECT on the Activity Mode
+  type (minted + retrofitted by bootstrap, options pre-seeded
+  "Sonnet 5"/"Opus 4.8"/"Fable 5", explainer body updated); the mode
+  store forwards the picked option like the detail select.
+* The seam: `decide(..., model=<resolved id>)` — a per-decision
+  override of the driver's configured default on both driver paths
+  (session options on the subscription driver; request model + web
+  search tool variant on the API driver).
+* `/mode` reports `model: <choice|default>`; intent nodes stamp the
+  resolved model id when a mode pins one (ADR 028's `gc_model`).
 
 ---
 

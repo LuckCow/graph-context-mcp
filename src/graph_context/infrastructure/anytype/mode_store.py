@@ -82,4 +82,10 @@ class AnytypeModeStore:
         ).strip()
         if detail:
             payload["activity_detail"] = detail
+        # Same select rule for the mode's pinned model (ADR 033).
+        model = mapping.field_value(
+            "select", props.get(mapping.PROP_MODE_MODEL)
+        ).strip()
+        if model:
+            payload["model"] = model
         return payload

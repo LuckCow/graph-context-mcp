@@ -58,9 +58,12 @@ class RecordingDriver:
         goal: str = "",
         *,
         web_search: bool = False,
+        model: str = "",
     ) -> LLMTurn:
         start = time.perf_counter()
-        turn = await self._inner.decide(transcript, tools, goal, web_search=web_search)
+        turn = await self._inner.decide(
+            transcript, tools, goal, web_search=web_search, model=model
+        )
         self.decisions.append(DecisionRecord(
             latency_s=time.perf_counter() - start,
             tool_calls=turn.tool_calls,

@@ -17,6 +17,10 @@ order) by a ``GC_MODES_FILE`` TOML file (deployment configuration)::
     #                              off | minimal (default) | tools | full
     # web_search = true          # admit the provider's server-side web
     #                              search tool (ADR 030); default off
+    # model = "opus 4.8"         # pin the Claude model for this mode's
+    #                              decisions (ADR 033); sonnet 5 |
+    #                              opus 4.8 | fable 5; empty = the
+    #                              deployment default
 
     [modes.record_procedure.capture]
     artifact_type = "procedure"
@@ -168,7 +172,9 @@ def load_registry(
     return ModeRegistry(specs=specs, default=fallback)
 
 
-_SPEC_KEYS = {"goal", "mutating", "capture", "activity_detail", "web_search"}
+_SPEC_KEYS = {
+    "goal", "mutating", "capture", "activity_detail", "web_search", "model",
+}
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
 
 
@@ -205,8 +211,10 @@ def _spec_from_mapping(
             )
         capture = CapturePolicy(**kwargs)
     # Humans type the level (TOML or the Anytype UI): normalize case and
-    # padding; empty means "not set" and takes the default.
+    # padding; empty means "not set" and takes the default. The model
+    # choice (ADR 033) follows the same rule.
     detail = str(body.get("activity_detail") or "").strip().lower()
+    model = str(body.get("model") or "").strip().lower()
     try:
         return ModeSpec(
             name=name,
@@ -214,6 +222,7 @@ def _spec_from_mapping(
             mutating=bool(body.get("mutating", False)),
             capture=capture,
             web_search=bool(body.get("web_search", False)),
+            model=model,
             **({"activity_detail": detail} if detail else {}),
         )
     except ValueError as err:
@@ -294,7 +303,10 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             )
         body = {
             key: payload[key]
-            for key in ("goal", "mutating", "capture", "activity_detail", "web_search")
+            for key in (
+                "goal", "mutating", "capture", "activity_detail",
+                "web_search", "model",
+            )
             if key in payload
         }
         specs.append(_spec_from_mapping(name, body, origin))

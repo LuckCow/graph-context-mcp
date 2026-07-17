@@ -95,9 +95,10 @@ class _ChatRecorder:
         self.messages: list[dict[str, object]] = []
         self.posted: list[str] = []  # send texts, pre-edit, in post order
         self.edited: list[str] = []  # ids that received an edit
+        self.deleted: list[str] = []  # ids removed from the chat
 
     async def send(self, text: str, attachments: tuple[str, ...] = ()) -> str:
-        message_id = f"sent-{len(self.messages) + 1}"
+        message_id = f"sent-{len(self.posted) + 1}"
         self.messages.append(
             {"id": message_id, "text": text, "attachments": attachments}
         )
@@ -111,6 +112,10 @@ class _ChatRecorder:
         message["text"] = text
         message["attachments"] = attachments
         self.edited.append(message_id)
+
+    async def delete(self, message_id: str) -> None:
+        self.messages = [m for m in self.messages if m["id"] != message_id]
+        self.deleted.append(message_id)
 
     def texts(self) -> list[str]:
         return [str(m["text"]) for m in self.messages]
@@ -180,7 +185,8 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
     async def decide(
-        self, transcript, tools, goal: str = "", *, web_search: bool = False
+        self, transcript, tools, goal: str = "", *,
+        web_search: bool = False, model: str = "",
     ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
@@ -311,7 +317,10 @@ async def _run_streaming(
     """run_turn with a live-activity sink, edits uncoalesced for testing."""
     recorder = _ChatRecorder()
     reply = handler.reply(recorder.send, recorder.edit)
-    activity = ChatActivity(reply=reply, edit=recorder.edit, min_interval=0.0)
+    activity = ChatActivity(
+        reply=reply, edit=recorder.edit, delete=recorder.delete,
+        min_interval=0.0,
+    )
     await handler.run_turn(message, reply, activity)
     return recorder
 
@@ -319,10 +328,10 @@ async def _run_streaming(
 class TestActivityStreaming:
     """WP19 (ADR 029): with a sink attached, the placeholder becomes a
     live activity message edited as the turn runs, the reply posts as a
-    fresh message, and a final edit collapses the activity message into
-    a done-summary."""
+    fresh message, and the activity message is DELETED once the reply
+    is delivered -- the reply alone remains in the chat."""
 
-    async def test_activity_streams_then_collapses_and_the_reply_posts_fresh(
+    async def test_activity_streams_then_is_deleted_and_the_reply_posts_fresh(
         self,
     ) -> None:
         probe = ToolCall("context", {"action": "get"})
@@ -331,13 +340,12 @@ class TestActivityStreaming:
         ])
         recorder = await _run_streaming(handler, _message())
         assert recorder.posted[0] == PROCESSING_NOTICE
-        # Live edits landed on the placeholder while the turn ran, and the
-        # last one is the collapse; the reply is its own fresh message.
+        # Live edits landed on the placeholder while the turn ran; the
+        # reply posted fresh and the trace left the chat.
         assert set(recorder.edited) == {"sent-1"}
-        assert len(recorder.edited) > 2
-        assert recorder.texts() == [
-            "✓ 1 tool call · 2 decisions", "the answer",
-        ]
+        assert len(recorder.edited) >= 2
+        assert recorder.deleted == ["sent-1"]
+        assert recorder.texts() == ["the answer"]
 
     async def test_every_message_id_is_echo_suppressed(self) -> None:
         probe = ToolCall("context", {"action": "get"})
@@ -345,8 +353,11 @@ class TestActivityStreaming:
             LLMTurn(tool_calls=(probe,)), LLMTurn(reply="done"),
         ])
         recorder = await _run_streaming(handler, _message())
-        for message in recorder.messages:  # the activity message included
+        for message in recorder.messages:
             assert str(message["id"]) in handler.sent
+        # The deleted activity message stays in the ledger too: its id
+        # was recorded at open() and deletion never rewrites history.
+        assert "sent-1" in handler.sent
 
     async def test_command_turns_post_only_their_output(self) -> None:
         # /mode is answered instantly (no model turn, and it returns
@@ -360,9 +371,9 @@ class TestActivityStreaming:
         assert len(recorder.messages) == 1
         assert "mode switched to authoring" in recorder.texts()[0]
 
-    async def test_a_replyless_streamed_turn_leaves_the_summary(self) -> None:
+    async def test_a_replyless_streamed_turn_strands_nothing(self) -> None:
         # The driver script runs dry -> budget notice; the activity
-        # message still collapses and nothing strands as "Processing…".
+        # message is still deleted and nothing strands as "Processing…".
         probe = ToolCall("context", {"action": "get"})
         route = _route([LLMTurn(tool_calls=(probe,))] * 99)
         route.orchestrator.max_tool_calls = 3
@@ -370,8 +381,9 @@ class TestActivityStreaming:
             routes={CHAT: route}, spaces={CHAT: SPACE}
         )
         recorder = await _run_streaming(handler, _message())
-        assert recorder.texts()[0] == "✓ 3 tool calls · 3 decisions"
+        assert recorder.deleted == ["sent-1"]
         assert PROCESSING_NOTICE not in recorder.texts()
+        assert "working…" not in " ".join(recorder.texts())
 
 
 class TestReplyPreparation:
@@ -460,6 +472,28 @@ class TestCursor:
         cursor.fast_forward(CHAT, "o9")
         cursor.fast_forward(CHAT, "o3")  # replayed old event must not rewind
         assert json.loads(Path(path).read_text()) == {CHAT: "o9"}
+
+    def test_begin_adopts_a_chat_with_every_message_still_new(
+        self, tmp_path: Path
+    ) -> None:
+        """Live discovery's position: the chat reads as resumed, and the
+        messages typed before the subscription opened are the gap."""
+        path = str(tmp_path / "cursor.json")
+        cursor = ChatCursor(path)
+        cursor.begin(CHAT)
+        assert cursor.has(CHAT)
+        assert cursor.is_new(_message(order_id="o1"))
+        reborn = ChatCursor(path)  # persisted: survives a crash unserved
+        assert reborn.has(CHAT)
+
+    def test_begin_never_rewinds_an_existing_position(
+        self, tmp_path: Path
+    ) -> None:
+        path = str(tmp_path / "cursor.json")
+        cursor = ChatCursor(path)
+        cursor.fast_forward(CHAT, "o9")
+        cursor.begin(CHAT)
+        assert not cursor.is_new(_message(order_id="o9"))
 
 
 class TestIntentOrigin:
@@ -682,7 +716,7 @@ class TestScheduledTurn:
         from graph_context.domain import scheduling
 
         class _ExplodingDriver(ScriptedDriver):
-            async def decide(self, transcript, tools, goal, *, web_search=False):  # type: ignore[override]
+            async def decide(self, transcript, tools, goal, *, web_search=False, model=""):  # type: ignore[override]
                 raise RuntimeError("driver down")
 
         handler = _handler(routes={CHAT: _route(driver=_ExplodingDriver([]))})

@@ -26,6 +26,7 @@ from graph_context.domain.activity import (
     ACTIVITY_DETAIL_LEVELS,
     DEFAULT_ACTIVITY_DETAIL,
 )
+from graph_context.domain.model_choice import MODEL_CHOICES
 from graph_context.domain.schema import FIELD_FORMATS, Role
 from graph_context.domain.session import (
     DEFAULT_FULL_SLOTS,
@@ -82,7 +83,9 @@ class ModeSpec:
     the chat (WP19, ADR 029); ``web_search`` admits the provider's
     server-side web search tool for this mode's decisions (WP20, ADR 030
     -- executed on Anthropic's servers, never by the harness; default off
-    so graph-grounded modes stay graph-grounded).
+    so graph-grounded modes stay graph-grounded); ``model`` pins which
+    Claude model runs this mode's decisions (ADR 033 -- a canonical
+    ``MODEL_CHOICES`` name; empty = the deployment's configured default).
     """
 
     name: str
@@ -91,6 +94,7 @@ class ModeSpec:
     capture: CapturePolicy | None = None
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
     web_search: bool = False
+    model: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.name.replace("_", "").isalnum():
@@ -102,6 +106,11 @@ class ModeSpec:
                 f"mode {self.name!r} has unknown activity_detail "
                 f"{self.activity_detail!r}; allowed: "
                 f"{', '.join(ACTIVITY_DETAIL_LEVELS)}"
+            )
+        if self.model and self.model not in MODEL_CHOICES:
+            raise ValueError(
+                f"mode {self.name!r} has unknown model {self.model!r}; "
+                f"allowed: {', '.join(MODEL_CHOICES)}"
             )
 
 

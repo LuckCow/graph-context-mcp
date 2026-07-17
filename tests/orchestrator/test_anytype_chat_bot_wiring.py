@@ -58,7 +58,8 @@ class _SpyDriver(ScriptedDriver):
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
     async def decide(
-        self, transcript, tools, goal: str = "", *, web_search: bool = False
+        self, transcript, tools, goal: str = "", *,
+        web_search: bool = False, model: str = "",
     ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
@@ -209,21 +210,69 @@ class TestLiveDiscovery:
                         await asyncio.sleep(0.01)
                     await asyncio.sleep(0.05)  # serve task's catch-up settles
                     mock.post_chat_message_directly(chat_id, "human", "hello?")
-                    while True:  # placeholder first, then the edit lands
+                    # WP19: the placeholder became the activity message,
+                    # the reply posted fresh, and the trace was deleted --
+                    # the reply ends up the ONLY bot post in the chat.
+                    while True:
                         replies = [
-                            m for m in mock.chat_messages(chat_id)
+                            m["content"]["text"]
+                            for m in mock.chat_messages(chat_id)
                             if m["creator"] == mock.api_member_id
                         ]
-                        if any(
-                            m["content"]["text"] == "served the new thread"
-                            for m in replies
-                        ):
+                        if replies == ["served the new thread"]:
                             break
                         await asyncio.sleep(0.01)
                 assert runtimes.spaces[chat_id] == mock.space_id
-                # WP19: the placeholder became the activity message, so
-                # the reply is the SECOND bot post (a fresh message).
-                assert replies[1]["content"]["text"] == "served the new thread"
+                raise _Done
+        except* _Done:
+            pass
+
+    async def test_a_message_typed_before_discovery_is_answered(self) -> None:
+        """The thread's opening message predates the bot's subscription
+        (the user types, THEN the rescan finds the chat); discovery adopts
+        the chat from its beginning so catch-up answers it."""
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        chat_client = AnytypeChatClient(AnytypeClient(config, transport=mock.transport))
+        binding = SpaceBinding(space_id=mock.space_id, profile=FICTION)
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(
+                InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+                SessionState(project="Ashfall"),
+            ),
+            driver=ScriptedDriver([LLMTurn(reply="answered the opener")]),
+            profile=FICTION, registry=load_registry(FICTION),
+        ))
+        runtimes = bootstrap.SpaceRuntimes(
+            routes={}, spaces={}, descriptions={}, help_line="",
+            teardown=[], space_routes={mock.space_id: route},
+            space_bindings={mock.space_id: binding},
+            session_labels={mock.space_id: {}},
+        )
+        handler = AnytypeChatTurnHandler(routes=runtimes.routes, spaces=runtimes.spaces)
+        # The chat and its opener exist BEFORE the watcher runs at all.
+        chat_id = mock.seed_chat("A New Arc")
+        mock.post_chat_message_directly(chat_id, "human", "anyone there?")
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(_watch_chats(
+                    handler, chat_client, binding, runtimes, tg, interval=0.02
+                ))
+                async with asyncio.timeout(5):
+                    while True:
+                        replies = [
+                            m["content"]["text"]
+                            for m in mock.chat_messages(chat_id)
+                            if m["creator"] == mock.api_member_id
+                        ]
+                        if replies == ["answered the opener"]:
+                            break
+                        await asyncio.sleep(0.01)
+                assert handler.cursor.has(chat_id)  # positioned past it
                 raise _Done
         except* _Done:
             pass
@@ -271,8 +320,8 @@ class TestServeLoop:
             await asyncio.sleep(0.05)  # catch-up done, stream open
             mock.post_chat_message_directly(chat_id, "human", "hi bot")
             # The first bot post is the "Processing…" placeholder; WP19
-            # claims it as the activity message and posts the reply fresh,
-            # then collapses the activity message into a done-summary.
+            # claims it as the activity message, posts the reply fresh,
+            # then DELETES the trace -- the reply alone remains.
             async with asyncio.timeout(5):
                 while True:
                     texts = [
@@ -280,16 +329,13 @@ class TestServeLoop:
                         for m in mock.chat_messages(chat_id)
                         if m["creator"] == mock.api_member_id
                     ]
-                    if "hello from the graph" in texts:
+                    if texts == ["hello from the graph"]:
                         break
                     await asyncio.sleep(0.01)
-            assert texts == [
-                "✓ 0 tool calls · 1 decision", "hello from the graph",
-            ]
             # The bot's own posts echoed back on the stream but ran no turn
             # (echo suppression) -- give it a beat to prove it.
             await asyncio.sleep(0.05)
-            assert len(mock.chat_messages(chat_id)) == 3  # hi + trace + reply
+            assert len(mock.chat_messages(chat_id)) == 2  # hi + reply
         finally:
             serve.cancel()
             await asyncio.gather(serve, return_exceptions=True)
@@ -316,8 +362,9 @@ class TestServeLoop:
             for m in mock.chat_messages(chat_id)
             if m["creator"] == mock.api_member_id
         ]
-        # One turn (the offline message only): its activity trace + reply.
-        assert replies == ["✓ 0 tool calls · 1 decision", "caught up"]
+        # One turn (the offline message only): its reply, the activity
+        # trace already deleted.
+        assert replies == ["caught up"]
         assert seen_id  # the pre-cursor message ran no turn
 
     async def test_a_first_run_chat_skips_its_history(self) -> None:
@@ -334,14 +381,15 @@ class TestServeLoop:
         assert replies == []
         assert handler.cursor.has(chat_id)  # positioned past the history
 
-    async def test_a_mid_turn_crash_collapses_the_activity_message(self) -> None:
+    async def test_a_mid_turn_crash_deletes_the_activity_message(self) -> None:
         """WP19: once the sink claimed the placeholder, a crashed turn
-        must post its error fresh AND collapse the activity message into
-        the failed-turn summary -- nothing strands as "Processing…"."""
+        must post its error fresh AND delete the activity message --
+        nothing strands as "Processing…" or "working…"."""
 
         class _Explodes(ScriptedDriver):
             async def decide(
-                self, transcript, tools, goal: str = "", *, web_search: bool = False
+                self, transcript, tools, goal: str = "", *,
+                web_search: bool = False, model: str = "",
             ) -> LLMTurn:
                 raise RuntimeError("driver fell over")
 
@@ -356,10 +404,7 @@ class TestServeLoop:
             for m in mock.chat_messages(chat_id)
             if m["creator"] == mock.api_member_id
         ]
-        assert texts == [
-            "✗ turn failed · 0 tool calls · 0 decisions",
-            TURN_FAILED_NOTICE,
-        ]
+        assert texts == [TURN_FAILED_NOTICE]
 
 
 class TestScheduledEventWatcher:
@@ -526,7 +571,7 @@ class TestAutoTitling:
         class _Explodes(ScriptedDriver):
             async def decide(
                 self, transcript, tools, goal: str = "", *,
-                web_search: bool = False,
+                web_search: bool = False, model: str = "",
             ) -> LLMTurn:
                 raise RuntimeError("driver fell over")
 

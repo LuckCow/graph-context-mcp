@@ -59,7 +59,8 @@ is no unkeyed or default session.**
   (ADR 009's write lock already covers the store layer). New chats become
   new threads with zero config.
 - **Live discovery.** A per-space watcher re-lists chats every
-  `GC_CHAT_RESCAN_SECONDS` (default 60; `off` disables) and registers +
+  `GC_CHAT_RESCAN_SECONDS` (default 3 — sidecar reads are unthrottled,
+  so a tight poll is near-instant and free; `off` disables) and registers +
   serves any new one without a restart. `main()` uses an `asyncio.TaskGroup`
   so watchers spawn serve tasks into the bot's lifecycle. The routing maps
   are shared (aliased) between `SpaceRuntimes` and the turn handler, so a

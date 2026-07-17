@@ -452,15 +452,19 @@ class AnthropicDriver:
         goal: str = "",
         *,
         web_search: bool = False,
+        model: str = "",
     ) -> LLMTurn:
+        # ADR 033: the active mode's pinned model wins over the
+        # constructor default for this decision.
+        effective_model = model or self._model
         tool_defs = anthropic_tools(tools, self._schemas)
         if web_search:
             # Deterministic tail position (after the sorted graph tools)
             # keeps requests cache-friendly across decides.
-            tool_defs.append(web_search_tool(self._model))
+            tool_defs.append(web_search_tool(effective_model))
         messages = messages_from_transcript(transcript)
         request: dict[str, Any] = {
-            "model": self._model,
+            "model": effective_model,
             "max_tokens": self._max_tokens,
             "system": assembled_system_prompt(goal),
             # Explicit even where it is the model default: omitting it

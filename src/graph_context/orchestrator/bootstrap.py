@@ -88,6 +88,7 @@ class ManualDriver:
         goal: str = "",
         *,
         web_search: bool = False,
+        model: str = "",
     ) -> LLMTurn:
         last = transcript[-1]
         if last.kind == "tool":

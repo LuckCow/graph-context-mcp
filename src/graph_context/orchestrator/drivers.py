@@ -153,12 +153,17 @@ class LLMDriver(Protocol):
         goal: str,
         *,
         web_search: bool = False,
+        model: str = "",
     ) -> LLMTurn:
         """Choose the next step given the transcript, bound tools, and the
         active mode's goal prompt (ADR 015 -- the system-prompt fragment).
 
         ``web_search`` admits the provider's server-side web search tool
-        for this decision (ADR 030); drivers without one ignore it."""
+        for this decision (ADR 030); drivers without one ignore it.
+        ``model`` is a provider model id overriding the driver's
+        configured default for this decision (ADR 033 -- the active
+        mode's pinned model, already resolved by the pipeline); empty
+        keeps the default, and modelless drivers ignore it."""
         ...
 
     def system_prompt(self, goal: str) -> str:
@@ -206,6 +211,7 @@ class ScriptedDriver:
         goal: str = "",
         *,
         web_search: bool = False,
+        model: str = "",
     ) -> LLMTurn:
         if self._cursor >= len(self._turns):
             return LLMTurn(reply="(script exhausted)")
