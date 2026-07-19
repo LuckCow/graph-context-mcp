@@ -149,6 +149,8 @@ action property.
   - Uncheck others of type keeps a checkbox exclusive: when it is \
 ticked on one object, it is unticked on every other object of the \
 type. Leave Rule condition and Rule action property empty for this one.
+  - Run script runs the Python code block in THIS page's body (see \
+Recipe 3) in a sandbox.
 - Rule status -- Active rules run; set Paused to switch one off. Empty \
 counts as Active. The assistant sets Error (with Rule last error) when \
 a rule is misconfigured, and flips it back to Active once it is fixed.
@@ -161,6 +163,31 @@ property Completion date.
 
 Recipe 2 -- one default at a time: target type Project, watch property \
 Default, action Uncheck others of type.
+
+Recipe 3 -- a script (action Run script, condition Changed): put a \
+python code block in the rule page's body, like this one, which keeps \
+an open-task count on a project:
+
+```python
+open_tasks = [t for t in objects(type="Task")
+              if field(t, "Done") != "true"]
+project = find("Roadmap", type="Project")
+if project:
+    set(project, "Open tasks", len(open_tasks))
+    log(f"{len(open_tasks)} open tasks")
+```
+
+The script sees: trigger (the changed object as a dict), before/after \
+(the watched value around the change; empty means unset), now (the \
+current local date-time as text -- use it instead of the clock), \
+objects(type=None), find(name, type=None), field(obj, prop), \
+neighbors(obj, edge_type=None) to read the space, set(obj, prop, \
+value) to queue writes (at most 20 per fire; the property must \
+already exist), and log(msg) for the assistant's log (print output \
+is discarded). No imports beyond Python's standard library, no \
+network, about 5 seconds of run time, and spaces over 2000 objects \
+are too large for scripts. Text properties save as you type, so \
+prefer checkbox or select watch properties.
 """
 
 # Seeded once, when the Space Context type is first minted (ADR 034).

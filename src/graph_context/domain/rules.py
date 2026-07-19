@@ -62,7 +62,14 @@ CONDITIONS = (
 ACTION_SET_NOW = "set property to now"
 ACTION_SET_VALUE = "set property value"
 ACTION_UNCHECK_OTHERS = "uncheck others of type"
-ACTIONS = (ACTION_SET_NOW, ACTION_SET_VALUE, ACTION_UNCHECK_OTHERS)
+# WP32 (ADR 040): the sandboxed script action. The Python source lives
+# in the rule node's BODY as a fenced ```python block (extract_script);
+# the engine runs it out-of-process and applies the writes it queues.
+ACTION_RUN_SCRIPT = "run script"
+ACTIONS = (
+    ACTION_SET_NOW, ACTION_SET_VALUE, ACTION_UNCHECK_OTHERS,
+    ACTION_RUN_SCRIPT,
+)
 
 _CONDITION_WORDS = ", ".join(repr(c) for c in CONDITIONS)
 _ACTION_WORDS = ", ".join(repr(a) for a in ACTIONS)
@@ -157,7 +164,9 @@ def parse_rule_fields(fields: Mapping[str, str]) -> RuleConfig:
     action_property = fields.get(FIELD_ACTION_PROPERTY, "").strip()
     if action == ACTION_UNCHECK_OTHERS:
         action_property = action_property or watch_property
-    elif not action_property:
+    elif action != ACTION_RUN_SCRIPT and not action_property:
+        # run script needs no action property -- its writes come from
+        # the script's own set() calls; a filled-in value is ignored.
         raise SchemaViolation(
             f"action {action!r} needs a 'Rule action property': the "
             "property it writes (e.g. 'Completion date')"
@@ -176,6 +185,46 @@ def parse_rule_fields(fields: Mapping[str, str]) -> RuleConfig:
         action_property=action_property,
         action_value=action_value,
     )
+
+
+_FENCE_OPEN = re.compile(r"^```\s*(python\b.*)?$", re.IGNORECASE)
+_FENCE_CLOSE = re.compile(r"^```\s*$")
+
+
+def extract_script(body: str) -> str:
+    """The FIRST executable fenced code block in a rule node's body,
+    else "".
+
+    A fence executes when it is tagged ``python`` or carries NO language
+    tag -- the live server's markdown export strips fence language tags
+    (quirk A13), so a ```python block written at create reads back bare
+    and tag-only matching would never fire there. A fence tagged with
+    another language (```bash, ...) still never executes, and prose
+    bodies without fences (the seeded explainer, someone's notes) never
+    run as code. Only rules whose action is ``run script`` are ever read
+    through this. An unterminated fence runs to the end of the body.
+    (Quirk A9 flattens a first-LINE heading on the PATCH round trip; a
+    fence line is not a heading, so scripts survive body edits intact.)
+    """
+    lines = body.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.startswith("```"):
+            # Walk the whole fence, executable or not: a skipped bash
+            # fence's CLOSING line must not read as a bare opener.
+            executable = _FENCE_OPEN.match(stripped) is not None
+            script: list[str] = []
+            index += 1
+            while index < len(lines) and not _FENCE_CLOSE.match(
+                lines[index].strip()
+            ):
+                script.append(lines[index])
+                index += 1
+            if executable:
+                return "\n".join(script).strip()
+        index += 1
+    return ""
 
 
 def condition_met(condition: str, before: str, after: str) -> bool:

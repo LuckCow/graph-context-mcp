@@ -2172,6 +2172,45 @@ in the Anytype UI as `gc_rule` objects, no deployment config.
 
 ---
 
+## WP32 — Sandboxed script action + the `automation` tool (ADR 040) — **shipped 2026-07-19**
+
+**Status:** complete. WP31's two scope cuts, un-cut the same day: rules
+gained a fourth action, `run script`, and the assistant gained a tenth
+tool, `automation`, so "whenever a task's Done is checked, …" is a
+one-tool-call request.
+
+* **Scripts live in the rule node's BODY** as the first fenced
+  ```` ```python ```` block (`rules.extract_script`; prose never
+  executes), fetched via `fetch_body` and cached per rule by
+  `modified_at` — a body edit swaps the script in.
+* **Subprocess sandbox** (`ports/script_runner.py` +
+  `infrastructure/sandbox/`, stdlib only): `python -I -S bootstrap.py`
+  per fire, scrubbed env, child self-applied rlimits (CPU/AS/FSIZE/
+  NOFILE/NPROC), parent wall-clock kill (`GC_RULE_SCRIPT_TIMEOUT_SECONDS`,
+  default 5s) + output caps. Chosen for robustness before security: an
+  in-process runaway would hang the bot under the turn lock. Kill path
+  gotcha, load-bearing: after SIGKILL the pipes are drained to EOF or
+  `process.wait()` hangs on the undisconnected pipe transport. Threat
+  model (ADR): contains the owner's accidents, not a hostile author.
+* **Read a snapshot, queue effects**: the child gets every non-infra
+  node + edges (cap 2000, loud) and the trigger context; its API is
+  `objects/find/field/neighbors/set/log` + injected `now`. The engine
+  validates ALL queued writes (existence, non-infra, per-type property
+  resolution, value parse, ≤20) then applies through `_write_field` —
+  so WP31's rebaseline/loop-prevention/at-most-once semantics hold
+  unchanged: scripts can never trigger rules.
+* **The `automation` tool** (bound in every mode beside `schedule`;
+  MCP-registered): create/update with tool-boundary validation, list,
+  pause/resume (no hard delete — the port has no archive), and
+  **test** — a dry run through the real sandbox + the production
+  validation path, reporting `would set …` lines while applying
+  nothing; works on stored rules AND inline drafts, so the model
+  iterates before creating.
+* `tests/sandbox/` runs the REAL subprocess battery (loop kill, memory
+  bomb, stdout bomb, env scrub) in ~1.4s inside the normal suite.
+
+---
+
 ## Sequencing
 
 ```

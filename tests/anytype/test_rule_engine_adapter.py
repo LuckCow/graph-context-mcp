@@ -124,6 +124,91 @@ class TestStampCompletion:
         assert (await engine.run_tick()).fired == ()
 
 
+class TestScriptedRule:
+    """WP32 (ADR 040): the run script action over the real adapter and
+    the REAL subprocess runner -- no fakes below the mock server."""
+
+    def _runner(self):  # type: ignore[no-untyped-def]
+        from graph_context.infrastructure.sandbox.runner import (
+            SubprocessScriptRunner,
+        )
+        return SubprocessScriptRunner(timeout_seconds=10.0)
+
+    async def _scripted_rule(self, repo, script: str):  # type: ignore[no-untyped-def]
+        return await repo.create_node(NodeDraft(
+            type="Automation Rule", name="scripted rollup",
+            summary="counts open tasks",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_WATCH_PROPERTY: "Done",
+                rules.FIELD_CONDITION: "Changed",
+                rules.FIELD_ACTION: "Run script",
+            },
+            body=f"```python\n{script}\n```",
+        ))
+
+    async def test_a_script_fire_lands_writes_in_the_store(
+        self, mock, client, repo, clock
+    ) -> None:
+        await seed_task_type(client, repo)
+        await self._scripted_rule(repo, (
+            "open_tasks = [t for t in objects(type='Task')\n"
+            "              if field(t, 'Done') != 'true']\n"
+            "set(trigger, 'Completion date', 'open: %d' % len(open_tasks))\n"
+            "log('counted')"
+        ))
+        task = await repo.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        await repo.create_node(NodeDraft(
+            type="Task", name="still open", summary="a task",
+        ))
+        engine = RuleEngine(repo, now=clock, script_runner=self._runner())
+        await engine.run_tick()  # baseline
+
+        mock.edit_object_directly(task.id, set_property=mapping.property_entry(
+            "done", "checkbox", True,
+        ))
+        await repo.resync()
+        report = await engine.run_tick()
+
+        assert [f.action for f in report.fired] == ["run script"]
+        stored = await stored_properties(client, task.id)
+        assert stored["completion_date"] == "open: 1"
+        # Self-write suppression holds for script writes too.
+        assert await repo.resync() == frozenset()
+        assert (await engine.run_tick()).fired == ()
+
+    async def test_a_body_edit_swaps_in_the_new_script(
+        self, mock, client, repo, clock
+    ) -> None:
+        await seed_task_type(client, repo)
+        rule = await self._scripted_rule(
+            repo, "set(trigger, 'Completion date', 'v1')"
+        )
+        task = await repo.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        engine = RuleEngine(repo, now=clock, script_runner=self._runner())
+        await engine.run_tick()
+
+        # The human rewrites the script in the Anytype editor.
+        mock.edit_object_directly(
+            rule.id,
+            markdown="```python\nset(trigger, 'Completion date', 'v2')\n```",
+        )
+        await repo.resync()
+        mock.edit_object_directly(task.id, set_property=mapping.property_entry(
+            "done", "checkbox", True,
+        ))
+        await repo.resync()
+        report = await engine.run_tick()
+        assert len(report.fired) == 1
+        assert (await stored_properties(client, task.id))[
+            "completion_date"
+        ] == "v2"
+
+
 class TestUncheckOthers:
     async def test_exclusivity_across_store_objects(
         self, mock, client, repo, clock

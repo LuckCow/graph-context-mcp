@@ -57,6 +57,10 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     # authorship -- deliberately NOT a mutation tool, so read-only modes
     # can still take "remind me" requests (the node it mints is infra).
     "schedule": tools.schedule_tool,
+    # ADR 040: same posture -- automation config is space bookkeeping
+    # (the node it mints is infra), so read-only modes can still take
+    # "whenever X changes, do Y" requests.
+    "automation": tools.automation_tool,
     # WP23 (ADR 032): delivery, not graph authorship -- queues a file for
     # the transport to attach to the reply; read-only modes can send too.
     "send_file": tools.send_file_tool,

@@ -1,7 +1,9 @@
 # ADR 039: Reactive rule engine — automations as graph nodes
 
 Date: 2026-07-19
-Status: accepted
+Status: accepted (scope amended same day by ADR 040: the no-scripts and
+no-LLM-tool cuts below are superseded — WP32 added the sandboxed
+`run script` action and the `automation` tool)
 
 ## Context
 
@@ -119,7 +121,9 @@ name, case-insensitive); a type the catalog doesn't know degrades to a
 literal, case-insensitive fields-key match rather than erroring, so the
 memory backend works without a space schema.
 
-**Three built-in actions, no user scripts** (a Python snippet in a text
+**Three built-in actions, no user scripts** *(superseded by ADR 040:
+`run script` executes a body-fenced script in a subprocess sandbox)* (a
+Python snippet in a text
 relation is arbitrary code execution for anyone with vault write
 access; a script layer would need sandboxing we don't want to own):
 
@@ -146,7 +150,8 @@ belong to the space, so `Services` shares one `RuleEngine` by
 reference, like the scheduler.
 
 Scope guards: the watchable surface is scalar `Node.fields` properties
-only (not name, summary, body, or relations); no LLM tool in v1 —
+only (not name, summary, body, or relations); no LLM tool in v1
+*(superseded by ADR 040: the `automation` tool)* —
 authoring is the Anytype UI (infra role keeps rules out of traversal;
 `query type="AutomationRule"` is the escape hatch); no cross-space
 rules. The MCP server and CLI have no tick loop, so rules are inert
@@ -181,7 +186,10 @@ there, like scheduled events.
   transitions, at the cost of a second store of record that can drift
   from the space and replay stale state as fresh transitions. Rejected;
   in-memory + baseline-on-start is the semantics we actually want.
-- **Free-form Python in a `script` relation** — code execution for
+- **Free-form Python in a `script` relation** *(revisited by ADR 040:
+  scripts landed, but in the BODY and in a subprocess sandbox — the
+  objections below shaped that design rather than dying)* — code
+  execution for
   anyone with vault write access; sandboxing is a project of its own.
   Built-ins cover the motivating cases; a script layer can be a later
   WP if ever.

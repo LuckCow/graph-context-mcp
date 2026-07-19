@@ -379,6 +379,85 @@ async def schedule_tool(
     )
 
 
+@guarded
+async def automation_tool(
+    services: Services,
+    action: str = "list",
+    name: str = "",
+    rule: str = "",
+    target_type: str = "",
+    watch_property: str = "",
+    condition: str = "",
+    rule_action: str = "",
+    action_property: str = "",
+    action_value: str = "",
+    script: str = "",
+    trigger: str = "",
+) -> str:
+    engine = services.rules
+    if action == "create":
+        node = await engine.create(
+            name, target_type, watch_property, condition, rule_action,
+            action_property=action_property, action_value=action_value,
+            script=script,
+        )
+        await _note_mutation(services)
+        return (
+            f"created automation rule {node.name!r} (id={node.id}). It "
+            "runs on its own a few seconds after a matching change, "
+            "while the assistant is serving this space. Check on it "
+            "with action='list'; simulate it with action='test'."
+        )
+    if action == "update":
+        node = await engine.update(
+            rule or name,
+            target_type=target_type, watch_property=watch_property,
+            condition=condition, action=rule_action,
+            action_property=action_property, action_value=action_value,
+            script=script if script else None,
+        )
+        await _note_mutation(services)
+        return (
+            f"updated automation rule {node.name!r} (id={node.id}). "
+            "Simulate it with action='test' to confirm the new behavior."
+        )
+    if action == "list":
+        views = engine.views()
+        if not views:
+            return (
+                "no automation rules. Create one with action='create' "
+                "(name, target_type, watch_property, condition, "
+                "rule_action)."
+            )
+        lines = [f"automation rules ({len(views)}):"]
+        for view in views:
+            lines.append(f"- {view.node.name} (id={view.node.id}) -- {view.status}")
+            lines.append(f"  {view.summary}")
+        return "\n".join(lines)
+    if action in ("pause", "resume"):
+        node = await engine.set_paused(rule or name, paused=action == "pause")
+        await _note_mutation(services)
+        if action == "pause":
+            return (
+                f"paused {node.name!r} (id={node.id}); it will not fire. "
+                "Resume with action='resume', or in Anytype by setting "
+                "its 'Rule status' back to Active."
+            )
+        return f"resumed {node.name!r} (id={node.id}); it is active again."
+    if action == "test":
+        return await engine.dry_run(
+            identifier=rule, trigger=trigger,
+            target_type=target_type, watch_property=watch_property,
+            condition=condition, action=rule_action,
+            action_property=action_property, action_value=action_value,
+            script=script,
+        )
+    raise GraphContextError(
+        f"unknown action {action!r}; allowed: create, update, list, "
+        "pause, resume, test"
+    )
+
+
 # WP23 (ADR 032): send_file queues into the turn-scoped outbox; the
 # transport does the actual upload after the reply is composed.
 MAX_OUTBOUND_FILE_CHARS = 200_000

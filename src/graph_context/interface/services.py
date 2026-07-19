@@ -23,6 +23,7 @@ from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
+from graph_context.ports.script_runner import ScriptRunner
 from graph_context.ports.view_catalog import ViewCatalog
 
 
@@ -81,6 +82,7 @@ def build_services(
     views: ViewCatalog | None = None,
     session_key: str = "",
     timezone: str = "",
+    script_runner: ScriptRunner | None = None,
 ) -> Services:
     journal = journal or NullJournal()
     return Services(
@@ -94,7 +96,10 @@ def build_services(
         # GC_TIMEZONE (ADR 027): schedules mean the USER's wall clock,
         # not the container's (usually UTC); resolved loudly at startup.
         scheduler=Scheduler(repository, journal=journal, now=local_clock(timezone)),
-        rules=RuleEngine(repository, now=local_clock(timezone)),
+        rules=RuleEngine(
+            repository, now=local_clock(timezone),
+            script_runner=script_runner, journal=journal,
+        ),
         persister=persister,
         journal=journal,
         projector=projector,

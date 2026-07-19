@@ -68,6 +68,11 @@ class TestBindings:
         assert bound.isdisjoint(MUTATION_TOOLS)
         assert bound == set(TOOL_NAMES) - MUTATION_TOOLS
 
+    def test_automation_is_bookkeeping_not_mutation(self) -> None:
+        """ADR 040: like schedule -- read-only modes can still take
+        'whenever X changes, do Y' requests."""
+        assert "automation" in binding_for(AUTHORING)
+
     def test_tool_docs_follow_the_binding(self) -> None:
         docs = modes.tool_docs(AUTHORING, FICTION)
         assert set(docs) == set(binding_for(AUTHORING))

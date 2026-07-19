@@ -38,6 +38,10 @@ something:
   the summary line. Reads must go through ``mapping.body_of``.
 * The PATCH ``markdown`` importer flattens a FIRST-line heading to plain
   text (A9, live-confirmed 2026-07-11); headings on later lines survive.
+* The body round trip drops fenced code blocks' LANGUAGE TAGS (A13,
+  live-confirmed 2026-07-19): a ```python block reads back as a bare
+  ``` fence on the markdown export -- why ``rules.extract_script``
+  accepts untagged fences (WP32).
 * Template objects are readable via the single-object GET, ``markdown``
   carrying the template's body scaffold (live-confirmed by the templates
   spike) -- how the repository detects scaffolded types (ADR 013
@@ -168,6 +172,17 @@ def _flatten_first_line_heading(markdown: str) -> str:
     markup from the body's first line; later headings survive."""
     first, sep, rest = markdown.partition("\n")
     return _LEADING_HEADING.sub("", first) + sep + rest
+
+
+_FENCE_LANGUAGE = re.compile(r"(?m)^(```)[ \t]*\S.*$")
+
+
+def _strip_fence_language(markdown: str) -> str:
+    """A13 (live-confirmed 2026-07-19): the body round trip drops fenced
+    code blocks' language tags -- a ```python block written at create or
+    PATCH reads back as a bare ``` fence on the markdown export. (Why
+    ``rules.extract_script`` accepts untagged fences.)"""
+    return _FENCE_LANGUAGE.sub(r"\1", markdown)
 
 
 class MockAnytype:
@@ -389,7 +404,9 @@ class MockAnytype:
         if "set_property" in changes:
             self._upsert_property_entry(obj, changes["set_property"])
         if "markdown" in changes:
-            obj["markdown"] = changes["markdown"]
+            # A13 applies to human edits too: the editor's code blocks
+            # export without language tags.
+            obj["markdown"] = _strip_fence_language(changes["markdown"])
         self._stamp(obj, PROP_LAST_MODIFIED)
 
     def archive_directly(self, object_id: str) -> None:
@@ -549,7 +566,8 @@ class MockAnytype:
                 "icon": body.get("icon"),
                 "properties": properties,
                 "snippet": "",
-                "markdown": markdown,  # A5: body in, markdown out
+                # A5: body in, markdown out; A13: fence tags dropped.
+                "markdown": _strip_fence_language(markdown),
             }
             self._stamp(self._objects[object_id], PROP_CREATED)
             return httpx.Response(201, json={"object": self._objects[object_id]})
@@ -635,7 +653,9 @@ class MockAnytype:
             # unchanged) -- the create/update field-name mismatch is the
             # documented gotcha the original S6 spike tripped on.
             if "markdown" in body:
-                obj["markdown"] = _flatten_first_line_heading(body["markdown"])
+                obj["markdown"] = _strip_fence_language(
+                    _flatten_first_line_heading(body["markdown"])
+                )
             self._stamp(obj, PROP_LAST_MODIFIED)
             return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":

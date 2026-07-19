@@ -116,6 +116,62 @@ async def test_checkbox_flip_fires_the_rule_end_to_end(repo, raw_api):
     assert (await engine.run_tick()).fired == ()
 
 
+async def test_scripted_rule_round_trips_live(repo, raw_api):
+    """WP32 (ADR 040): the run script action against the real server --
+    fenced body in, sandbox subprocess fire, effect readable off the
+    store, self-write suppression intact."""
+    from graph_context.infrastructure.sandbox.runner import SubprocessScriptRunner
+
+    # A type of its own: the stamp-completion test leaves an ACTIVE rule
+    # watching "E2E Task", which would double-fire on a shared type.
+    await _ensure_type(repo, "E2E Scripted", [
+        {"key": "e2e_s_done", "name": "E2E S Done", "format": "checkbox"},
+        {"key": "e2e_s_completed", "name": "E2E S Completed", "format": "text"},
+    ])
+    done_key = repo.registry.field_property("E2E S Done").key
+    completed_key = repo.registry.field_property("E2E S Completed").key
+    await repo.create_node(NodeDraft(
+        type="Automation Rule", name="e2e scripted stamp", summary="s",
+        fields={
+            rules.FIELD_TARGET_TYPE: "E2E Scripted",
+            rules.FIELD_WATCH_PROPERTY: "E2E S Done",
+            rules.FIELD_CONDITION: "Changed to true",
+            rules.FIELD_ACTION: "Run script",
+        },
+        body=(
+            "```python\n"
+            "set(trigger, 'E2E S Completed', 'scripted at ' + now)\n"
+            "log('live fire')\n"
+            "```"
+        ),
+    ))
+    task = await repo.create_node(NodeDraft(
+        type="E2E Scripted", name="scripted target", summary="a task",
+    ))
+    engine = RuleEngine(
+        repo, now=Clock("2026-07-19 10:00:05"),
+        script_runner=SubprocessScriptRunner(timeout_seconds=15.0),
+    )
+    await engine.run_tick()  # baseline
+
+    await asyncio.sleep(1.5)  # S3: same-second edits are indistinguishable
+    raw_api.set_property(
+        task.id, mapping.property_entry(done_key, "checkbox", True)
+    )
+    assert task.id in await repo.resync()
+    report = await engine.run_tick()
+
+    assert [
+        f.action for f in report.fired if f.rule_name == "e2e scripted stamp"
+    ] == ["run script"]
+    stored = raw_api.get(task.id)
+    assert _property_value(stored, completed_key) == (
+        "scripted at 2026-07-19 10:00:05"
+    )
+    assert await repo.resync() == frozenset()
+    assert (await engine.run_tick()).fired == ()
+
+
 async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api):
     """R2 (ADR 039), answered by a live probe 2026-07-19: a native date
     property REJECTS naive timestamps (space- or T-separated) and accepts

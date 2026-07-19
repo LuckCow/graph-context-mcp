@@ -70,6 +70,11 @@ Representation (v2, space-reflecting):
   it), and the same key is immediately reusable with the new format (a
   fresh property id). ``ensure_schema`` uses this to heal infra
   properties minted under a since-changed format.
+* **A13 (live-confirmed 2026-07-19):** the body round trip drops fenced
+  code blocks' LANGUAGE TAGS -- a ```` ```python ```` block written via
+  create ``body`` or PATCH ``markdown`` reads back as a bare ```` ``` ````
+  fence on the markdown export. Why ``rules.extract_script`` (WP32)
+  accepts untagged fences; the mock strips tags at every markdown write.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")

@@ -124,6 +124,68 @@ class TestParseRuleFields:
         assert rules.CONDITION_CHANGED_TO_TRUE in str(err.value)
 
 
+class TestRunScriptParsing:
+    """WP32 (ADR 040): the script action's parse rules."""
+
+    def test_run_script_needs_no_action_property_or_value(self) -> None:
+        config = rules.parse_rule_fields(fields(**{
+            rules.FIELD_ACTION: "Run script",
+            rules.FIELD_ACTION_PROPERTY: "",
+        }))
+        assert config.action == rules.ACTION_RUN_SCRIPT
+        assert config.action_property == ""
+
+    def test_run_script_still_requires_a_condition(self) -> None:
+        with pytest.raises(SchemaViolation) as err:
+            rules.parse_rule_fields(fields(**{
+                rules.FIELD_ACTION: "Run script",
+                rules.FIELD_CONDITION: "",
+            }))
+        assert "Rule condition" in str(err.value)
+
+    def test_the_seeded_option_label_round_trips(self) -> None:
+        assert rules.normalize_choice("Run script") == rules.ACTION_RUN_SCRIPT
+
+
+class TestExtractScript:
+    def test_the_first_python_fence_wins(self) -> None:
+        body = (
+            "Notes about this rule.\n\n"
+            "```python\nx = 1\n```\n\n"
+            "```python\ny = 2\n```\n"
+        )
+        assert rules.extract_script(body) == "x = 1"
+
+    def test_no_fence_means_no_script(self) -> None:
+        assert rules.extract_script("just prose about tasks") == ""
+        assert rules.extract_script("") == ""
+
+    def test_a_bare_fence_executes_because_a13_strips_the_tag(self) -> None:
+        # The live export drops fence language tags (quirk A13): a
+        # ```python block written at create reads back bare, so bare
+        # fences must count or scripts would never run live.
+        assert rules.extract_script("```\nx = 1\n```") == "x = 1"
+
+    def test_a_foreign_language_fence_never_executes(self) -> None:
+        assert rules.extract_script("```bash\nrm -rf /\n```") == ""
+        # ...and its CLOSING line must not read as a bare opener.
+        body = "```bash\nrm -rf /\n```\nprose\n```python\nx = 1\n```"
+        assert rules.extract_script(body) == "x = 1"
+
+    def test_open_line_is_case_insensitive_and_tolerant(self) -> None:
+        assert rules.extract_script("```Python\nx = 1\n```") == "x = 1"
+        assert rules.extract_script("```python title=x\nx = 1\n```") == "x = 1"
+
+    def test_unterminated_fence_runs_to_the_end(self) -> None:
+        assert rules.extract_script("```python\nx = 1\ny = 2") == "x = 1\ny = 2"
+
+    def test_fence_below_prose_survives_the_a9_first_line_quirk(self) -> None:
+        # A9 only flattens a FIRST-LINE heading; a fence further down --
+        # the normal authored shape -- is untouched.
+        body = "How this works\n\nmore prose\n\n```python\nx = 1\n```"
+        assert rules.extract_script(body) == "x = 1"
+
+
 class TestConditionMet:
     """The truth table. Absence is false: the Anytype adapter drops
     unticked checkboxes from fields ("" ≡ false), the fake stores an

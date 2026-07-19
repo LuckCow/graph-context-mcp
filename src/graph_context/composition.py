@@ -45,6 +45,12 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from graph_context.infrastructure.sandbox.runner import (
+        SubprocessScriptRunner,
+    )
 
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.ranker import Ranker
@@ -129,6 +135,7 @@ async def build_runtime(
     default_project = project or os.environ.get("GC_PROJECT_NAME")
     teardown: list[TeardownHook] = []
     session_labels: dict[str, str] = {}
+    script_runner = _build_script_runner()
 
     logger.info("profile=%s (%s)", profile.name, profile.description)
     # ADR 035: the seed corpus parses loudly on every startup (bad config
@@ -170,6 +177,7 @@ async def build_runtime(
             projector=projector,
             ranker=ranker,
             timezone=os.environ.get("GC_TIMEZONE", ""),
+            script_runner=script_runner,
         )
         base = await _bind_primary(base, registry, session_key)
         return BuiltRuntime(
@@ -266,6 +274,7 @@ async def build_runtime(
         # NodeQuery per call so desktop edits apply immediately.
         views=AnytypeViewCatalog(client),
         timezone=os.environ.get("GC_TIMEZONE", ""),
+        script_runner=script_runner,
     )
     base = await _bind_primary(base, registry, session_key)
     return BuiltRuntime(
@@ -276,6 +285,28 @@ async def build_runtime(
         services_for=_session_seam(base, registry),
         session_labels=session_labels,
     )
+
+
+def _build_script_runner() -> SubprocessScriptRunner:
+    """The rule engine's sandbox (WP32, ADR 040) -- backend-agnostic and
+    zero-dep, so every runtime (dev CLI included) gets scripts.
+
+    ``GC_RULE_SCRIPT_TIMEOUT_SECONDS`` (default 5) is the wall-clock cap
+    per script fire; parsed loudly at startup, like the bot's interval
+    knobs.
+    """
+    from graph_context.infrastructure.sandbox.runner import SubprocessScriptRunner
+
+    raw = os.environ.get("GC_RULE_SCRIPT_TIMEOUT_SECONDS", "5").strip()
+    try:
+        timeout = float(raw)
+    except ValueError:
+        raise GraphContextError(
+            f"GC_RULE_SCRIPT_TIMEOUT_SECONDS must be a number, got {raw!r}"
+        ) from None
+    if timeout <= 0:
+        raise GraphContextError("GC_RULE_SCRIPT_TIMEOUT_SECONDS must be positive")
+    return SubprocessScriptRunner(timeout_seconds=timeout)
 
 
 async def _bind_primary(

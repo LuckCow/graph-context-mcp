@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from graph_context.application.capture_recorder import CaptureRecorder
+from graph_context.domain import rules as rules_domain
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -772,6 +773,178 @@ class TestScheduleTool:
         assert out.startswith("cancelled 'tax reminder'")
         assert "re-enable" in out  # the human's Pending flip is taught
         assert "cancelled" in await tools.schedule_tool(services, action="list")
+
+
+# -- the automation tool (WP32, ADR 040) -------------------------------------
+
+
+class _EchoScriptRunner:
+    """A ScriptRunner fake for the tool surface: parrots one canned
+    effect derived from the payload's trigger."""
+
+    async def run(self, script, payload):  # type: ignore[no-untyped-def]
+        from graph_context.ports.script_runner import ScriptEffect, ScriptOutcome
+        return ScriptOutcome(
+            sets=(ScriptEffect(
+                node_id=payload["trigger"], property="Note", value="scripted",
+            ),),
+            logs=("ran",),
+        )
+
+
+class TestAutomationTool:
+    """The tool surface over the RuleEngine: creation-time validation,
+    lifecycle, and the dry run that applies nothing."""
+
+    def _services(self) -> tools.Services:
+        return build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            script_runner=_EchoScriptRunner(),
+        )
+
+    async def _create(self, services: tools.Services) -> str:
+        return await tools.automation_tool(
+            services, action="create", name="stamp completion",
+            target_type="Task", watch_property="Done",
+            condition="changed to true", rule_action="set property to now",
+            action_property="Completion date",
+        )
+
+    async def test_create_validates_and_reports_the_rule(self) -> None:
+        services = self._services()
+        out = await self._create(services)
+        assert out.startswith("created automation rule 'stamp completion'")
+        assert "action='test'" in out  # teaches the next step
+        stored = next(
+            n for n in services.repository.graph.nodes()
+            if n.name == "stamp completion"
+        )
+        assert stored.fields[rules_domain.FIELD_CONDITION] == "Changed to true"
+        assert stored.fields[rules_domain.FIELD_STATUS] == "Active"
+
+    async def test_create_with_a_bad_action_word_teaches_the_vocabulary(
+        self,
+    ) -> None:
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="x", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="explode",
+        )
+        assert out.startswith("ERROR:")
+        assert "run script" in out  # the allowed words are echoed
+        assert not [
+            n for n in services.repository.graph.nodes() if n.name == "x"
+        ]  # nothing written
+
+    async def test_create_script_rule_stores_the_fenced_body(self) -> None:
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('hi')",
+        )
+        assert out.startswith("created automation rule 'rollup'")
+        stored = next(
+            n for n in services.repository.graph.nodes() if n.name == "rollup"
+        )
+        body = await services.repository.fetch_body(stored.id)
+        assert body == "```python\nlog('hi')\n```"
+
+    async def test_create_script_rule_without_script_errors(self) -> None:
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script",
+        )
+        assert out.startswith("ERROR:") and "'script'" in out
+
+    async def test_list_shows_status_and_config(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(services, action="list")
+        assert "automation rules (1):" in out
+        assert "stamp completion" in out and "active" in out
+        assert "when 'Done' on 'Task'" in out
+
+    async def test_empty_list_guides_creation(self) -> None:
+        out = await tools.automation_tool(self._services(), action="list")
+        assert "no automation rules" in out and "action='create'" in out
+
+    async def test_pause_and_resume_flip_the_status(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="pause", rule="stamp completion",
+        )
+        assert out.startswith("paused")
+        assert "paused" in await tools.automation_tool(services, action="list")
+        out = await tools.automation_tool(
+            services, action="resume", rule="stamp completion",
+        )
+        assert out.startswith("resumed")
+        assert "active" in await tools.automation_tool(services, action="list")
+
+    async def test_update_replaces_config_and_revalidates(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="update", rule="stamp completion",
+            condition="changed",
+        )
+        assert out.startswith("updated")
+        assert "changed ->" in await tools.automation_tool(
+            services, action="list",
+        )
+
+    async def test_test_dry_runs_a_builtin_without_writing(self) -> None:
+        services = self._services()
+        await self._create(services)
+        task = await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="test", rule="stamp completion",
+        )
+        assert "dry run against 'ship it'" in out
+        assert "would set 'ship it'.Completion date" in out
+        assert "nothing was applied" in out
+        assert "Completion date" not in services.repository.graph.node(
+            task.id
+        ).fields
+
+    async def test_test_dry_runs_a_script_draft_before_creation(self) -> None:
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="test", target_type="Task",
+            watch_property="Done", condition="changed to true",
+            rule_action="run script", script="set(trigger, 'Note', 'x')",
+        )
+        assert "script log: ran" in out
+        assert "would set 'ship it'.Note = 'scripted'" in out
+        assert "nothing was applied" in out
+        # And truly nothing was: the task carries no Note.
+        stored = next(
+            n for n in services.repository.graph.nodes()
+            if n.name == "ship it"
+        )
+        assert "Note" not in stored.fields
+
+    async def test_test_without_targets_teaches_the_fix(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="test", rule="stamp completion",
+        )
+        assert out.startswith("ERROR:") and "no objects of type" in out
+
+    async def test_unknown_action_lists_the_verbs(self) -> None:
+        out = await tools.automation_tool(self._services(), action="destroy")
+        assert out.startswith("ERROR:") and "test" in out and "create" in out
 
     async def test_unknown_action_lists_the_allowed_ones(self) -> None:
         services = self._services()

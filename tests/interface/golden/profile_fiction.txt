@@ -279,6 +279,63 @@ prompt, Schedule status, Last fired), so the user can view, edit, or
 create them there too -- an empty status counts as Pending, and a fired
 one-shot is marked Completed automatically.
 
+### automation
+Create and manage Automation Rules: "when a property CHANGES on objects
+of one type, do something" -- automations the system runs on its own a
+few seconds after the change (e.g. "when a Task's Done is checked,
+stamp Completion date"). Rules live as "Automation Rule" objects in
+Anytype, so the user can view, edit, pause, or write them there too.
+
+Tool actions:
+  create -- needs name, target_type, watch_property, condition,
+            rule_action (some rule actions need more, below).
+  update -- change an existing rule; rule=<id or exact name> plus any
+            create params to replace (an empty param keeps the stored
+            value).
+  list   -- every rule: id, config, status (active / paused / error
+            with the last error), last fired.
+  pause / resume -- switch a rule off/on without deleting it (rule=...).
+  test   -- DRY RUN: simulate one fire against a real object and report
+            what WOULD be written; nothing is applied. rule=<id/name>
+            tests a stored rule; passing the create params (+ script)
+            tests a DRAFT before creating it. Optional trigger=<object
+            id or name> picks the simulated object. ALWAYS test a
+            script before creating it.
+
+condition -- the rule watches TRANSITIONS, not states:
+  "changed to true" / "changed to false" (checkbox flips), "changed"
+  (any value change).
+
+rule_action -- what happens when the condition fires:
+  "set property to now"    -- write the current date-time into
+                              action_property (a date-format property
+                              gets the date only).
+  "set property value"     -- write action_value into action_property.
+  "uncheck others of type" -- keep a checkbox exclusive across the
+                              type's objects (condition and
+                              action_property default correctly --
+                              leave them empty).
+  "run script"             -- run the `script` param (Python) in a
+                              sandbox. The script's globals:
+      trigger        -- the changed object:
+                        {"id","type","name","summary","fields"}
+      before / after -- the watched value around the change ("" = empty)
+      now            -- "YYYY-MM-DD HH:MM:SS" server-local (use this,
+                        never the clock)
+      objects(type=None), find(name, type=None), field(obj, prop),
+      neighbors(obj, edge_type=None) -- read any object in the space
+      set(obj_or_id, prop, value) -- queue one write (str/bool/int/
+                        float; max 20 per fire; the property must
+                        already exist on the target's type)
+      log(msg)       -- a line for the system log (print() is discarded)
+      No imports beyond the stdlib, no network, ~5s time limit, and the
+      space snapshot caps at 2000 objects.
+
+Rules fire only on changes the system OBSERVES while running (nothing
+retroactive), rules never trigger other rules, and a broken rule shows
+status Error + "Rule last error" on its object -- it heals on its own
+once fixed.
+
 ### send_file
 Send a FILE to the user, attached to your reply in this chat (use it
 when the deliverable is a document, not a message: an export, a table

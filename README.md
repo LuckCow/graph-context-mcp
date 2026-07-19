@@ -2,7 +2,7 @@
 
 An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the default), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes).
 
-The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing nine tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
+The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing ten tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
 
 **Space-reflecting ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure (Prose, SessionContext, and a few scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)).
 
@@ -45,7 +45,7 @@ The server speaks **stdio** (one process per client; no network port). Run it di
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
 ```
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`, `schedule`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`, `schedule`, `automation`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
 
 ## Running the orchestrator (CLI / Discord / Anytype chat)
 
@@ -117,7 +117,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** You should see the nine tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
+**3. Restart Claude Desktop.** You should see the ten tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
 
 ### Graduating to the live Anytype backend
 
@@ -193,6 +193,7 @@ interface  ──▶  application  ──▶  domain
 | `ports/session_store.py` | Keyed session-snapshot contract | Plain-dict snapshots per required key ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)); lenient load (corrupt → `None`) |
 | `ports/mode_store.py` | Activity-Mode config contract | Plain payload dicts; validation lives in the loader, not the store |
 | `ports/space_context_store.py` | Space-settings singleton contract ([ADR 034](docs/adr/034-space-context-default-mode.md)) | Payloads carry the default-mode link targets; the loader owns the singleton rule |
+| `ports/script_runner.py` | Sandboxed script execution contract ([ADR 040](docs/adr/040-sandboxed-script-action.md)) | Script + snapshot in, queued effects out; every failure is a legible `gc_rule_last_error` message |
 | `ports/semantic.py` | `Embedder` + `SemanticIndex` contracts | Embeddings are a cache keyed by content hash + model, never truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
 | `application/node_reader.py` | `get_node` use-case | Grouped edges + `include_provenance` excerpts |
@@ -208,6 +209,7 @@ interface  ──▶  application  ──▶  domain
 | `composition.py` | Shared service builder | One wiring; all composition roots delegate to it |
 | `infrastructure/memory/` | In-memory repository, session store, mode store, space-context store | Reference impls; certified by `tests/contract` |
 | `infrastructure/semantic/` | Hash + sentence-transformers embedders; memory + SQLite index | `GC_EMBEDDER` selects; the SQLite cache file is disposable |
+| `infrastructure/sandbox/` | The script sandbox ([ADR 040](docs/adr/040-sandboxed-script-action.md)) | `bootstrap.py` = the rlimited `python -I -S` child (stdlib-only, importable for tests); `runner.py` spawns, caps, and kills it |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
 | `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A8) live here |
 | `infrastructure/anytype/registry.py` | `SpaceRegistry`: the space's live types/relations | Resolves requested types & relation labels to existing keys; unknown labels surface for approval |
@@ -221,7 +223,7 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/chat.py` | Chat quirk quarantine + `AnytypeChatClient` | Chat payload/SSE assumptions (C1–C6); the chat analogue of `mapping.py` |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
 | `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The nine tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
+| `interface/tools.py` | The ten tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
 | `interface/context_block.py` | Turn-start context block ([ADR 020](docs/adr/020-curated-cross-turn-context.md)) | Scratchpad + working-set buckets + recent trail, once per turn, budget-degraded |
 | `interface/profiles.py` | Domain profiles (DEPRECATED, ADR 035/WP27) + `ModeSpec` | Docstrings are prompts; golden-pinned per profile |
 | `interface/mode_config.py` | Mode validation seam + seed-TOML parser (ADR 035) | One payload shape feeds the memory store, the Anytype seeder, and the eval runner |

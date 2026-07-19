@@ -237,6 +237,31 @@ async def schedule(
     )
 
 
+@mcp.tool(description=_PROFILE.tool_docs["automation"])
+async def automation(
+    ctx: Context[Any, Any, Any],
+    action: str = "list",
+    name: str = "",
+    rule: str = "",
+    target_type: str = "",
+    watch_property: str = "",
+    condition: str = "",
+    rule_action: str = "",
+    action_property: str = "",
+    action_value: str = "",
+    script: str = "",
+    trigger: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.automation_tool(
+        _services(ctx), action=action, name=name, rule=rule,
+        target_type=target_type, watch_property=watch_property,
+        condition=condition, rule_action=rule_action,
+        action_property=action_property, action_value=action_value,
+        script=script, trigger=trigger,
+    )
+
+
 @mcp.tool(description=_PROFILE.tool_docs["send_file"])
 async def send_file(
     ctx: Context[Any, Any, Any],
