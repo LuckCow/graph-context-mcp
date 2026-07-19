@@ -9,10 +9,17 @@ file, keyed by the space id itself::
     [spaces."bafyre..."]
     profile       = "fiction"      # optional; defaults to GC_PROFILE
     project       = "Ashfall"      # optional cosmetic label
-    modes_file    = "ashfall.toml" # optional; overrides GC_MODES_FILE
+    modes_file    = "ashfall.toml" # optional; the SEED source (ADR 035)
+                                    # for a space with no Activity Mode
+                                    # objects; overrides GC_MODES_FILE
     chat_id       = "bafyre..."    # optional PIN: serve ONLY this chat,
                                     # no discovery (single-chat deployments)
     exclude_chats = ["bafyre..."]  # optional; chat ids the bot ignores
+
+The mode NEW chats start in is NOT declared here (ADR 034, retiring
+WP21's ``default_mode`` key): it lives in the space itself, on the Space
+Context object's default-mode link, next to the Activity Mode objects it
+points at.
 
 By default the bot serves EVERY chat in the space (WP8): each chat is a
 separate THREAD with its own session context (scratchpad / working set /
@@ -38,7 +45,9 @@ from graph_context.errors import GraphContextError
 from graph_context.interface import profiles
 from graph_context.interface.profiles import DomainProfile
 
-_BINDING_KEYS = {"profile", "project", "modes_file", "chat_id", "exclude_chats"}
+_BINDING_KEYS = {
+    "profile", "project", "modes_file", "chat_id", "exclude_chats",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +115,12 @@ def load_space_bindings(
 def _binding_from_mapping(
     space_id: str, body: dict[str, Any], origin: str, default_profile: str | None
 ) -> SpaceBinding:
+    if "default_mode" in body:
+        raise GraphContextError(
+            f"{origin}: default_mode moved into the space itself (ADR 034) "
+            "-- link the Activity Mode object on the space's Space Context "
+            "object instead, and remove this key"
+        )
     unknown = set(body) - _BINDING_KEYS
     if unknown:
         raise GraphContextError(

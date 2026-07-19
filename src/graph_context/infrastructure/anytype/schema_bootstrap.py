@@ -41,12 +41,16 @@ SESSION_TYPE_KEY = "gc_session_context"
 INTENT_TYPE_KEY = "gc_intent"  # WP7/ADR 008: one provenance node per turn
 MODE_TYPE_KEY = "gc_activity_mode"  # ADR 015 amendment: in-space mode config
 SCHEDULED_TYPE_KEY = "gc_scheduled_event"  # WP18/ADR 027: timed prompts
+SPACE_CONTEXT_TYPE_KEY = "gc_space_context"  # ADR 034: space-wide settings
+RULE_TYPE_KEY = "gc_rule"  # WP31/ADR 039: reactive automations
 INFRA_TYPES: dict[str, str] = {
     PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
     INTENT_TYPE_KEY: Role.INTENT.value,
     MODE_TYPE_KEY: "Activity Mode",
     SCHEDULED_TYPE_KEY: "Scheduled Event",
+    SPACE_CONTEXT_TYPE_KEY: "Space Context",
+    RULE_TYPE_KEY: "Automation Rule",
 }
 
 # Types whose fields humans edit in the Anytype UI get their properties
@@ -73,39 +77,13 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
         **mapping.SESSION_PROPERTIES,
         **mapping.SESSION_STATE_PROPERTIES,
     },
+    SPACE_CONTEXT_TYPE_KEY: mapping.SPACE_CONTEXT_PROPERTIES,
+    RULE_TYPE_KEY: mapping.RULE_PROPERTIES,
 }
 
-# Seeded once, when the Activity Mode type is first minted: a template
-# object whose body doubles as the feature's in-space documentation. The
-# human edits or deletes it like any other object; deleting is permanent
-# (only the TYPE is create-if-missing). It loads as a valid read-only
-# mode, so switching to it makes the model explain it is a template.
-EXAMPLE_MODE_NAME = "Example Mode"
-EXAMPLE_MODE_SUMMARY = (
-    "Template: edit this page to define an assistant behavior; "
-    "changes apply when /mode is next used in chat."
-)
-EXAMPLE_MODE_BODY = """\
-Replace this page body with the mode's goal -- the instructions the \
-assistant follows while this mode is active (for example: "Record only \
-what the user explicitly states; organize and link it, but never invent \
-or embellish details.").
-
-How Activity Mode objects work:
-
-- Every object of this type is one mode the assistant can switch into.
-- The object name becomes the /mode name: "Example Mode" -> /mode example_mode.
-- This page body is the goal prompt handed to the model.
-- Tick gc_mode_mutating to let the mode create and update nodes; unticked \
-means read-only.
-- Fill gc_capture_type (and optionally gc_capture_references, \
-gc_capture_min_chars) to auto-capture the assistant's substantial replies \
-as objects of that type.
-- Edits here do NOT apply on their own: send /mode in the chat to reload \
-and list modes, or /mode <name> to switch. An object named after a \
-built-in mode (e.g. world_modeling) overrides it.
-- Archive an object to disable its mode.
-"""
+# The Activity Mode explainer/template moved to mode_seeder.py (ADR 035):
+# it is part of the starter-mode kit, seeded whenever a mode-less space
+# is healed -- no longer tied to the type mint.
 
 # Seeded once, when the Scheduled Event type is first minted (ADR 027):
 # the same explainer pattern as the example mode. Its schedule is left
@@ -140,6 +118,102 @@ You can also just ask the assistant in chat ("remind me a week before \
 taxes are due") -- it creates these objects itself.
 """
 
+# Seeded once, when the Automation Rule type is first minted (WP31,
+# ADR 039): the explainer pattern again. Its config is left EMPTY -- an
+# unconfigured rule is skipped silently, so it can never run; the body
+# documents every field and both canonical recipes.
+EXAMPLE_RULE_NAME = "Example Automation Rule"
+EXAMPLE_RULE_SUMMARY = (
+    "Template: fill the Rule fields to make the assistant react to "
+    "property changes; this example never runs (its config is empty)."
+)
+EXAMPLE_RULE_BODY = """\
+An Automation Rule makes the assistant react on its own when a property \
+changes on objects of one type -- it fires on the CHANGE, never on a \
+value that was already there when the assistant started.
+
+Fields:
+
+- Rule target type -- which object type to watch, e.g. Task.
+- Rule watch property -- the property whose change triggers the rule, \
+by its display name, e.g. Done. Checkbox and select properties work \
+best; a text property saves as you type, so "Changed" can fire on a \
+half-typed value.
+- Rule condition -- Changed to true, Changed to false, or Changed.
+- Rule action -- what happens:
+  - Set property to now writes the current date-time into the Rule \
+action property (e.g. Completion date). A date-format property gets \
+the date only; use a text property if you want the time of day.
+  - Set property value writes the Rule action value into the Rule \
+action property.
+  - Uncheck others of type keeps a checkbox exclusive: when it is \
+ticked on one object, it is unticked on every other object of the \
+type. Leave Rule condition and Rule action property empty for this one.
+  - Run script runs the Python code block in THIS page's body (see \
+Recipe 3) in a sandbox.
+- Rule status -- Active rules run; set Paused to switch one off. Empty \
+counts as Active. The assistant sets Error (with Rule last error) when \
+a rule is misconfigured, and flips it back to Active once it is fixed.
+- Rule last fired / Rule last error -- bookkeeping, written by the \
+assistant.
+
+Recipe 1 -- stamp completion time: target type Task, watch property \
+Done, condition Changed to true, action Set property to now, action \
+property Completion date.
+
+Recipe 2 -- one default at a time: target type Project, watch property \
+Default, action Uncheck others of type.
+
+Recipe 3 -- a script (action Run script, condition Changed): put a \
+python code block in the rule page's body, like this one, which keeps \
+an open-task count on a project:
+
+```python
+open_tasks = [t for t in objects(type="Task")
+              if field(t, "Done") != "true"]
+project = find("Roadmap", type="Project")
+if project:
+    set(project, "Open tasks", len(open_tasks))
+    log(f"{len(open_tasks)} open tasks")
+```
+
+The script sees: trigger (the changed object as a dict), before/after \
+(the watched value around the change; empty means unset), now (the \
+current local date-time as text -- use it instead of the clock), \
+objects(type=None), find(name, type=None), field(obj, prop), \
+neighbors(obj, edge_type=None) to read the space, set(obj, prop, \
+value) to queue writes (at most 20 per fire; the property must \
+already exist), and log(msg) for the assistant's log (print output \
+is discarded). No imports beyond Python's standard library, no \
+network, about 5 seconds of run time, and spaces over 2000 objects \
+are too large for scripts. Text properties save as you type, so \
+prefer checkbox or select watch properties.
+"""
+
+# Seeded once, when the Space Context type is first minted (ADR 034).
+# Unlike the two explainers above, this object IS the config surface: the
+# loader reads its gc_default_mode link on every registry (re)load. Its
+# body documents itself; deleting it just returns new chats to the
+# profile's built-in default mode.
+SPACE_CONTEXT_NAME = "Space Context"
+SPACE_CONTEXT_SUMMARY = (
+    "Space-wide assistant settings: link an Activity Mode under "
+    "Default mode to pick what NEW chats start in."
+)
+SPACE_CONTEXT_BODY = """\
+This object holds space-wide assistant settings; the assistant re-reads \
+it whenever modes reload (send /mode in a chat to apply edits).
+
+- Default mode -- link exactly ONE Activity Mode object here to make it \
+the mode NEW chats start in. Chats that already picked a mode with \
+/mode keep their choice. Leave the link empty to use the assistant's \
+built-in default.
+- Keep exactly one Space Context object in the space -- a second one is \
+a configuration error the assistant reports instead of guessing.
+- Deleting this object simply returns new chats to the built-in \
+default; create a new Space Context object to set one again.
+"""
+
 # Starter relation vocabulary (key, display name). Reusable defaults; the
 # space-reflecting reader also picks up any human-created relation.
 DEFAULT_EDGE_RELATIONS: list[tuple[str, str]] = [
@@ -167,8 +241,9 @@ async def ensure_schema(
     a native date key an assistant profile names may not exist yet in a
     fresh space, and an inline create naming an unknown property 400s.
     """
-    existing_types = {t["key"] async for t in client.list_types()}
-    existing_properties = {p["key"] async for p in client.list_properties()}
+    existing_types = {t["key"]: t async for t in client.list_types()}
+    existing_properties = {p["key"]: p async for p in client.list_properties()}
+    await _heal_select_formats(client, existing_properties)
     for key, name in INFRA_TYPES.items():
         if key not in existing_types:
             logger.info("bootstrap: creating infra type %s", key)
@@ -188,21 +263,32 @@ async def ensure_schema(
             ]
             if inline:
                 payload["properties"] = inline
-                existing_properties.update(entry["key"] for entry in inline)
+                existing_properties.update(
+                    {entry["key"]: entry for entry in inline}
+                )
             await client.create_type(payload)
-            if key == MODE_TYPE_KEY:
-                await _seed_example_mode(client)
             if key == SCHEDULED_TYPE_KEY:
                 await _seed_example_event(client)
+            if key == SPACE_CONTEXT_TYPE_KEY:
+                await _seed_space_context(client)
+            if key == RULE_TYPE_KEY:
+                await _seed_example_rule(client)
+        else:
+            # Upgraded-space path: the type predates a field added to its
+            # inline set (e.g. WP19's gc_mode_activity_detail) -- attach
+            # the missing ones so humans see the field in the editor.
+            await _retrofit_type_fields(
+                client, existing_types[key],
+                _INLINE_TYPE_PROPERTIES.get(key, {}), existing_properties,
+            )
 
     timeline_key, timeline_format = timeline
     if timeline_key not in existing_properties:
         logger.info("bootstrap: creating timeline property %s (%s)",
                     timeline_key, timeline_format)
-        await client.create_property(
+        existing_properties[timeline_key] = await client.create_property(
             {"key": timeline_key, "name": timeline_key, "format": timeline_format}
         )
-        existing_properties.add(timeline_key)
     for key, fmt in mapping.SCALAR_PROPERTIES.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
@@ -225,11 +311,12 @@ async def ensure_schema(
             await client.create_property(
                 {"key": key, "name": _display_name(key), "format": fmt}
             )
-    # Scheduled Event fields (WP18/ADR 027) and attribution stamps (ADR
-    # 028): same coverage posture as the mode fields -- a fresh mint
-    # attaches them inline with the type.
+    # Scheduled Event fields (WP18/ADR 027), attribution stamps (ADR 028),
+    # and the Space Context link (ADR 034): same coverage posture as the
+    # mode fields -- a fresh mint attaches them inline with the type.
     for key, fmt in {
         **mapping.SCHEDULED_PROPERTIES, **mapping.ATTRIBUTION_PROPERTIES,
+        **mapping.SPACE_CONTEXT_PROPERTIES, **mapping.RULE_PROPERTIES,
     }.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)
@@ -240,6 +327,62 @@ async def ensure_schema(
         if key not in existing_properties:
             logger.info("bootstrap: creating relation property %s", key)
             await client.create_property({"key": key, "name": name, "format": "objects"})
+    await _seed_select_options(client)
+
+
+async def _heal_select_formats(
+    client: AnytypeClient, existing_properties: dict[str, dict[str, Any]]
+) -> None:
+    """Re-mint infra selects that were born under an older format.
+
+    Quirk A12: a property's format is immutable (PATCH silently keeps the
+    old one), so the only migration is delete + re-create under the same
+    key -- deleting detaches the field from its types, and the retrofit /
+    mint steps that follow re-attach it as a select. Values set under the
+    old format are lost with it (acceptable: they were about to become
+    unreadable anyway; this ran once, for gc_mode_activity_detail's
+    one-day life as a text property).
+    """
+    for key in mapping.SELECT_OPTIONS:
+        entry = existing_properties.get(key)
+        if entry is None or entry.get("format") == "select":
+            continue
+        logger.info(
+            "bootstrap: property %s exists as %r but must be a select; "
+            "re-minting (A12)", key, entry.get("format"),
+        )
+        await client.delete_property(str(entry["id"]))
+        del existing_properties[key]
+
+
+async def _seed_select_options(client: AnytypeClient) -> None:
+    """Pre-seed the dropdown options of select-format infra properties,
+    so humans pick a value instead of typing the enum (WP19 amendment).
+
+    Find-or-create by case-insensitive name, create-only: renames and
+    recolors made in the UI are human-owned and never clobbered. Options
+    someone added beyond ours are left alone (the loader rejects unknown
+    values naming the object, so a stray option fails loudly when used).
+    """
+    if not mapping.SELECT_OPTIONS:
+        return
+    by_key = {p["key"]: p async for p in client.list_properties()}
+    for key, options in mapping.SELECT_OPTIONS.items():
+        info = by_key.get(key)
+        if info is None:
+            continue  # never minted: nothing to decorate
+        have = {
+            str(tag.get("name", "")).lower()
+            async for tag in client.list_tags(str(info["id"]))
+        }
+        for name in options:
+            if name.lower() in have:
+                continue
+            logger.info("bootstrap: seeding option %r on %s", name, key)
+            await client.create_tag(
+                str(info["id"]),
+                {"name": name, "color": mapping.tag_color(name)},
+            )
 
 
 def _display_name(key: str) -> str:
@@ -247,6 +390,47 @@ def _display_name(key: str) -> str:
     the Anytype editor); keys without one mint under the raw key. Mint
     time only -- names are human-owned afterwards."""
     return mapping.PROPERTY_DISPLAY_NAMES.get(key, key)
+
+
+async def _retrofit_type_fields(
+    client: AnytypeClient,
+    listed: dict[str, Any],
+    expected: dict[str, str],
+    existing_properties: dict[str, dict[str, Any]],
+) -> None:
+    """Attach newly-added infra fields to a type that predates them.
+
+    Quirk A11 (spike_type_update, 2026-07-15): the type-update's
+    ``properties`` list replaces the human-managed fields WHOLESALE, so
+    the type's full fetched list rides along with the additions; name,
+    plural_name, and layout are resent verbatim (human-owned). No-ops
+    when nothing is missing, so a normal startup makes one extra GET per
+    infra type and zero writes.
+    """
+    fetched = await client.get_type(listed["id"])
+    current = fetched.get("properties", [])
+    have = {entry.get("key") for entry in current}
+    missing = [key for key in expected if key not in have]
+    if not missing:
+        return
+    logger.info(
+        "bootstrap: attaching %s to existing type %s",
+        ", ".join(missing), fetched.get("key", listed["id"]),
+    )
+    added = [
+        {"key": key, "name": _display_name(key), "format": expected[key]}
+        for key in missing
+    ]
+    await client.update_type(listed["id"], {
+        "name": fetched["name"],
+        "plural_name": fetched.get("plural_name") or f"{fetched['name']}s",
+        "layout": fetched.get("layout", "basic"),
+        "properties": [
+            {"key": e["key"], "name": e["name"], "format": e["format"]}
+            for e in current
+        ] + added,
+    })
+    existing_properties.update({entry["key"]: entry for entry in added})
 
 
 async def _seed_example_event(client: AnytypeClient) -> None:
@@ -279,24 +463,54 @@ async def _seed_example_event(client: AnytypeClient) -> None:
         )
 
 
-async def _seed_example_mode(client: AnytypeClient) -> None:
-    """The one-time template/explainer object (see EXAMPLE_MODE_BODY).
+async def _seed_example_rule(client: AnytypeClient) -> None:
+    """The Automation Rule explainer object (see EXAMPLE_RULE_BODY).
 
-    Best-effort: a failure here must not block startup -- the feature
-    works without the template, and the README carries the same guide.
+    Best-effort, like the other explainers. Its config is empty, and an
+    unconfigured rule is skipped silently -- it can never run.
     """
     try:
         await client.create_object({
-            "name": EXAMPLE_MODE_NAME,
-            "type_key": MODE_TYPE_KEY,
-            "body": EXAMPLE_MODE_BODY,
+            "name": EXAMPLE_RULE_NAME,
+            "type_key": RULE_TYPE_KEY,
+            "body": EXAMPLE_RULE_BODY,
+            "icon": {"format": "emoji", "emoji": "⚡"},
             "properties": [
                 mapping.property_entry(
-                    mapping.PROP_SUMMARY, "text", EXAMPLE_MODE_SUMMARY
+                    mapping.PROP_SUMMARY, "text", EXAMPLE_RULE_SUMMARY
                 ),
             ],
         })
     except AnytypeApiError:
         logger.warning(
-            "bootstrap: could not seed the example Activity Mode", exc_info=True
+            "bootstrap: could not seed the example Automation Rule",
+            exc_info=True,
         )
+
+
+async def _seed_space_context(client: AnytypeClient) -> None:
+    """The Space Context singleton (ADR 034), seeded with an empty link.
+
+    Best-effort like the explainers: without it new chats simply start in
+    the profile's default mode, and a human can create the object by hand
+    (the loader treats any single non-archived gc_space_context object as
+    THE settings surface).
+    """
+    try:
+        await client.create_object({
+            "name": SPACE_CONTEXT_NAME,
+            "type_key": SPACE_CONTEXT_TYPE_KEY,
+            "body": SPACE_CONTEXT_BODY,
+            "icon": {"format": "emoji", "emoji": "⚙️"},
+            "properties": [
+                mapping.property_entry(
+                    mapping.PROP_SUMMARY, "text", SPACE_CONTEXT_SUMMARY
+                ),
+            ],
+        })
+    except AnytypeApiError:
+        logger.warning(
+            "bootstrap: could not seed the Space Context object", exc_info=True
+        )
+
+

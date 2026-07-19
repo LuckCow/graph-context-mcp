@@ -37,13 +37,25 @@ class TestLoadSpaceBindings:
             tmp_path,
             f'[spaces."{SPACE}"]\n'
             'profile = "assistant"\nproject = "Todos"\n'
-            'modes_file = "todo.toml"\nchat_id = "bafychat"\n',
+            'modes_file = "todo.toml"\n'
+            'chat_id = "bafychat"\n',
         )
         (binding,) = load_space_bindings(path, default_profile="fiction")
         assert binding.profile.name == "assistant"
         assert binding.project == "Todos"
         assert binding.modes_file == "todo.toml"
         assert binding.chat_id == "bafychat"
+
+    def test_retired_default_mode_key_points_at_the_space_context(
+        self, tmp_path: Path
+    ) -> None:
+        """ADR 034: the WP21 key moved into the space itself. A leftover
+        gets a migration pointer, not a generic unknown-key error."""
+        path = _write(
+            tmp_path, f'[spaces."{SPACE}"]\ndefault_mode = "note_taking"\n'
+        )
+        with pytest.raises(GraphContextError, match="Space Context"):
+            load_space_bindings(path, default_profile=None)
 
     def test_unknown_keys_fail_naming_the_space_table(self, tmp_path: Path) -> None:
         path = _write(tmp_path, f'[spaces."{SPACE}"]\nspace_id = "x"\n')

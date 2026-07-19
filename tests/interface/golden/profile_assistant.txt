@@ -51,6 +51,8 @@ fields: {"key": "value"} attributes. Every key MUST match one of the
   shows what a node already carries. The value writes THAT property,
   visible and filterable in Anytype; select options match by name and
   are created when new; multi-select values are comma-separated names.
+  A key that names a RELATION (e.g. "Assignee") also works: its value
+  is a node id or name, and the entry becomes a link, same as links.
   An unmatched key ERRORS, listing the properties you can reuse --
   prefer reusing one. Only when none fits, resend with
   create_missing_fields={"key": "format"} to create a real new property
@@ -91,7 +93,9 @@ space's own properties, by key or display name -- get_node shows what a
 node already carries, and context action='overview' lists each type's
 properties. The value updates THAT property, visible and filterable in
 Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful"). An
+multi-select values are comma-separated names ("Dark, Hopeful"). A key
+that names a RELATION (e.g. "Assignee") also works: its value is a node
+id or name, and the entry becomes a link, same as add_links. An
 unmatched key ERRORS, listing the properties you can reuse -- prefer
 reusing one. Only when none fits, resend with
 create_missing_fields={"key": "format"} to create a real new property
@@ -271,3 +275,110 @@ while the system was down collapse into ONE late fire. Events live as
 prompt, Schedule status, Last fired), so the user can view, edit, or
 create them there too -- an empty status counts as Pending, and a fired
 one-shot is marked Completed automatically.
+
+### automation
+Create and manage Automation Rules: "when a property CHANGES on objects
+of one type, do something" -- automations the system runs on its own a
+few seconds after the change (e.g. "when a Task's Done is checked,
+stamp Completion date"). Rules live as "Automation Rule" objects in
+Anytype, so the user can view, edit, pause, or write them there too.
+
+Tool actions:
+  create -- needs name, target_type, watch_property, condition,
+            rule_action (some rule actions need more, below).
+  update -- change an existing rule; rule=<id or exact name> plus any
+            create params to replace (an empty param keeps the stored
+            value).
+  list   -- every rule: id, config, status (active / paused / error
+            with the last error), last fired.
+  pause / resume -- switch a rule off/on without deleting it (rule=...).
+  test   -- DRY RUN: simulate one fire against a real object and report
+            what WOULD be written; nothing is applied. rule=<id/name>
+            tests a stored rule; passing the create params (+ script)
+            tests a DRAFT before creating it. Optional trigger=<object
+            id or name> picks the simulated object. ALWAYS test a
+            script before creating it.
+
+condition -- the rule watches TRANSITIONS, not states:
+  "changed to true" / "changed to false" (checkbox flips), "changed"
+  (any value change).
+
+rule_action -- what happens when the condition fires:
+  "set property to now"    -- write the current date-time into
+                              action_property (a date-format property
+                              gets the date only).
+  "set property value"     -- write action_value into action_property.
+  "uncheck others of type" -- keep a checkbox exclusive across the
+                              type's objects (condition and
+                              action_property default correctly --
+                              leave them empty).
+  "run script"             -- run the `script` param (Python) in a
+                              sandbox. The script's globals:
+      trigger        -- the changed object:
+                        {"id","type","name","summary","fields"}
+      before / after -- the watched value around the change ("" = empty)
+      now            -- "YYYY-MM-DD HH:MM:SS" server-local (use this,
+                        never the clock)
+      objects(type=None), find(name, type=None), field(obj, prop),
+      neighbors(obj, edge_type=None) -- read any object in the space
+      set(obj_or_id, prop, value) -- queue one write (str/bool/int/
+                        float; max 20 per fire; the property must
+                        already exist on the target's type)
+      log(msg)       -- a line for the system log (print() is discarded)
+      No imports beyond the stdlib, no network, ~5s time limit, and the
+      space snapshot caps at 2000 objects.
+
+Rules fire only on changes the system OBSERVES while running (nothing
+retroactive), rules never trigger other rules, and a broken rule shows
+status Error + "Rule last error" on its object -- it heals on its own
+once fixed.
+
+### send_file
+Send a FILE to the user, attached to your reply in this chat (use it
+when the deliverable is a document, not a message: an export, a table
+as CSV, a longer write-up, code). Give the full filename with its
+extension (e.g. "characters.csv", "summary.md") and the complete text
+content -- the file is created from exactly what you pass; there is no
+appending. Text formats only (csv, md, json, code, ...). Call once per
+file, up to 4 per turn. The file uploads when your reply is delivered;
+keep the reply itself short and let the file carry the bulk.
+
+### schema
+Propose a change to the space's SCHEMA -- a new object type, or new
+properties on an existing type -- for the USER to confirm. The user owns
+the schema: use this to turn "we should track factions" into a concrete
+draft, but the change itself is executed by the system ONLY when the
+user reacts 👍 on the confirmation message that is
+posted after your reply (👎 dismisses it). You have NO
+way to apply a proposal -- never claim a schema change is done unless
+the system reported it applied; a "yes" in words is not a confirmation,
+the reaction is (if the user agrees verbally, point them at the
+confirmation message).
+
+Actions:
+  propose_type   -- draft a NEW type. type=<display name, e.g.
+                    "Faction">, optional plural (defaults to name+"s"),
+                    optional properties (below), optional reason (one
+                    line on why, shown to the user).
+  propose_fields -- draft NEW properties on an EXISTING type.
+                    type=<existing type name>, properties (required),
+                    optional reason.
+  list           -- pending proposals with their ids.
+  cancel         -- discard a proposal (proposal_id): e.g. the user said
+                    no or asked for changes (then re-propose).
+
+properties -- a list of objects, each:
+  {"name": "Status", "format": "select", "options": ["Open", "Done"]}
+  formats: text, number, select, multi_select, date, checkbox, url,
+  email, phone. options only for select/multi_select. A property that
+  already exists in the space with the SAME format is reused (attached
+  to the type); a different format is a conflict -- the error names it.
+  Links between objects are NOT properties: use create_node/update_node
+  links with create_missing_relations for a new edge label.
+
+Don't repeat the draft's contents in your reply -- the confirmation
+message carries them. Proposals are drafts for THIS conversation (they
+do not survive a restart; re-propose if lost). Applied changes are real
+Anytype types and properties -- immediately usable by create_node, and
+the user can rename or refine them in Anytype afterwards (never rename
+what a human set).

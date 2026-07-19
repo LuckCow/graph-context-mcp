@@ -53,6 +53,28 @@ Representation (v2, space-reflecting):
   e.g. a template's property widgets) this is why the connections footer
   is suppressed on types whose template carries a body scaffold (ADR 013
   amendment; ``AnytypeGraphRepository._writes_footer``).
+* **A11 (spike_type_update, 2026-07-15):** ``PATCH /types/{id}`` with a
+  ``properties`` list REPLACES the type's human-managed fields wholesale
+  (an omitted ``gc_`` entry is stripped; server-owned entries like
+  ``tag``/``backlinks`` survive omission, and resending them verbatim is
+  harmless). Entries naming not-yet-minted OR already-minted space
+  properties both attach cleanly; omitting ``properties`` altogether
+  leaves the fields untouched. This is how ``ensure_schema`` retrofits
+  newly-added infra fields onto types that predate them (WP19's
+  ``gc_mode_activity_detail``): fetch, resend everything, append the
+  missing entries.
+* **A12 (live-confirmed 2026-07-15):** a property's FORMAT is immutable
+  -- ``PATCH /properties/{id}`` with a new ``format`` returns 200 and
+  silently keeps the old one. The only migration is DELETE + re-create:
+  deleting detaches the field from every type (an A11 update re-attaches
+  it), and the same key is immediately reusable with the new format (a
+  fresh property id). ``ensure_schema`` uses this to heal infra
+  properties minted under a since-changed format.
+* **A13 (live-confirmed 2026-07-19):** the body round trip drops fenced
+  code blocks' LANGUAGE TAGS -- a ```` ```python ```` block written via
+  create ``body`` or PATCH ``markdown`` reads back as a bare ```` ``` ````
+  fence on the markdown export. Why ``rules.extract_script`` (WP32)
+  accepts untagged fences; the mock strips tags at every markdown write.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -71,12 +93,16 @@ from __future__ import annotations
 
 import logging
 import re
+import zlib
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from graph_context.domain import attribution, scheduling
+from graph_context.domain import attribution, rules, scheduling
+from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
+from graph_context.domain.model_choice import MODEL_CHOICES
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
 from graph_context.domain.schema import FIELD_FORMATS
+from graph_context.domain.thinking_choice import THINKING_LEVELS
 
 if TYPE_CHECKING:
     from graph_context.infrastructure.anytype.registry import SpaceRegistry
@@ -122,15 +148,70 @@ ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 # these live only on mode objects, never on ordinary nodes. The goal is
 # the object BODY (read via body_of), so it needs no property.
 PROP_MODE_MUTATING = "gc_mode_mutating"
+PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
+PROP_MODE_WEB_SEARCH = "gc_mode_web_search"  # WP20, ADR 030
+PROP_MODE_MODEL = "gc_mode_model"  # ADR 033
+PROP_MODE_THINKING = "gc_mode_thinking"  # ADR 037
+PROP_MODE_MAX_TOKENS = "gc_mode_max_tokens"  # ADR 037
+PROP_MODE_SEARCH_MAX_USES = "gc_mode_search_max_uses"  # ADR 037
+PROP_MODE_SEARCH_ALLOWED = "gc_mode_search_allowed_domains"  # ADR 037
+PROP_MODE_SEARCH_BLOCKED = "gc_mode_search_blocked_domains"  # ADR 037
 PROP_CAPTURE_TYPE = "gc_capture_type"
 PROP_CAPTURE_REFERENCES = "gc_capture_references"
 PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
 
 MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_MODE_MUTATING: "checkbox",
+    PROP_MODE_ACTIVITY_DETAIL: "select",
+    PROP_MODE_WEB_SEARCH: "checkbox",
+    PROP_MODE_MODEL: "select",
+    PROP_MODE_THINKING: "select",
+    PROP_MODE_MAX_TOKENS: "number",
+    PROP_MODE_SEARCH_MAX_USES: "number",
+    PROP_MODE_SEARCH_ALLOWED: "text",
+    PROP_MODE_SEARCH_BLOCKED: "text",
     PROP_CAPTURE_TYPE: "text",
     PROP_CAPTURE_REFERENCES: "text",
     PROP_CAPTURE_MIN_CHARS: "number",
+}
+
+# Select-format infra properties whose options bootstrap PRE-SEEDS, so the
+# human picks from a dropdown instead of typing the enum (WP19 amendment).
+# Display names are Title-Case derivations of the canonical levels; the
+# mode loader lowercases on read, so the round trip is exact.
+SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
+    PROP_MODE_ACTIVITY_DETAIL: tuple(
+        level.capitalize() for level in ACTIVITY_DETAIL_LEVELS
+    ),
+    PROP_MODE_MODEL: tuple(
+        choice.capitalize() for choice in MODEL_CHOICES
+    ),
+    # ADR 037: no "Default" option -- the EMPTY select is the default.
+    PROP_MODE_THINKING: tuple(
+        level.capitalize() for level in THINKING_LEVELS
+    ),
+    # Automation Rule vocabulary (WP31, ADR 039): the loader's
+    # normalize_choice lowercases on read, so the round trip is exact.
+    rules.FIELD_CONDITION: tuple(
+        choice.capitalize() for choice in rules.CONDITIONS
+    ),
+    rules.FIELD_ACTION: tuple(
+        choice.capitalize() for choice in rules.ACTIONS
+    ),
+    rules.FIELD_STATUS: (
+        rules.STATUS_ACTIVE, rules.STATUS_PAUSED, rules.STATUS_ERROR,
+    ),
+}
+
+# The Space Context singleton's field (ADR 034): an ``objects``-format
+# link to the Activity Mode object NEW chats start in. Kept OUT of
+# SCALAR_PROPERTIES -- it lives only on the gc_space_context object. On
+# the relation denylist below, so the link never reflects as a graph edge
+# and never surfaces as reusable edge vocabulary: it is server config,
+# not story structure.
+PROP_DEFAULT_MODE = "gc_default_mode"
+SPACE_CONTEXT_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints
+    PROP_DEFAULT_MODE: "objects",
 }
 
 # Session discriminator (WP8, ADR 021): every gc_session_context node
@@ -172,6 +253,33 @@ SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_LAST_FIRED: "text",
 }
 
+# Automation Rule fields (WP31, ADR 039): the human-editable properties
+# of a gc_rule object. Kept OUT of SCALAR_PROPERTIES -- they live only
+# on rule nodes, never on ordinary nodes. The keys live in the domain
+# (rules.py) -- these are the adapter-local aliases. The engine owns
+# gc_rule_last_fired / gc_rule_last_error / the Error status; everything
+# else is human-authored in the Anytype editor.
+PROP_RULE_TARGET_TYPE = rules.FIELD_TARGET_TYPE
+PROP_RULE_WATCH_PROPERTY = rules.FIELD_WATCH_PROPERTY
+PROP_RULE_CONDITION = rules.FIELD_CONDITION
+PROP_RULE_ACTION = rules.FIELD_ACTION
+PROP_RULE_ACTION_PROPERTY = rules.FIELD_ACTION_PROPERTY
+PROP_RULE_ACTION_VALUE = rules.FIELD_ACTION_VALUE
+PROP_RULE_STATUS = rules.FIELD_STATUS
+PROP_RULE_LAST_FIRED = rules.FIELD_LAST_FIRED
+PROP_RULE_LAST_ERROR = rules.FIELD_LAST_ERROR
+RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
+    PROP_RULE_TARGET_TYPE: "text",
+    PROP_RULE_WATCH_PROPERTY: "text",
+    PROP_RULE_CONDITION: "select",
+    PROP_RULE_ACTION: "select",
+    PROP_RULE_ACTION_PROPERTY: "text",
+    PROP_RULE_ACTION_VALUE: "text",
+    PROP_RULE_STATUS: "select",
+    PROP_RULE_LAST_FIRED: "text",  # deliberately text, like gc_last_fired
+    PROP_RULE_LAST_ERROR: "text",
+}
+
 # Human-facing display names for minted properties (people create and
 # edit Scheduled Events directly in the Anytype editor, so the fields
 # must read as fields, not wire keys). Consulted by bootstrap at mint
@@ -180,6 +288,7 @@ SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # "Schedule …"-prefixed to stay clear of common user properties like
 # "Status". Properties absent here mint under their raw key, as before.
 PROPERTY_DISPLAY_NAMES: dict[str, str] = {
+    PROP_DEFAULT_MODE: "Default mode",
     PROP_SCHEDULE: "Schedule",
     PROP_SCHEDULE_PROMPT: "Schedule prompt",
     PROP_SCHEDULE_STATUS: "Schedule status",
@@ -195,6 +304,17 @@ PROPERTY_DISPLAY_NAMES: dict[str, str] = {
     attribution.FIELD_MODEL: "Generated by model",
     attribution.FIELD_MODE: "Generated in mode",
     attribution.FIELD_ORIGIN: "Origin message",
+    # Automation Rule fields (WP31, ADR 039): "Rule …"-prefixed to stay
+    # clear of common user properties like "Status" and "Condition".
+    PROP_RULE_TARGET_TYPE: "Rule target type",
+    PROP_RULE_WATCH_PROPERTY: "Rule watch property",
+    PROP_RULE_CONDITION: "Rule condition",
+    PROP_RULE_ACTION: "Rule action",
+    PROP_RULE_ACTION_PROPERTY: "Rule action property",
+    PROP_RULE_ACTION_VALUE: "Rule action value",
+    PROP_RULE_STATUS: "Rule status",
+    PROP_RULE_LAST_FIRED: "Rule last fired",
+    PROP_RULE_LAST_ERROR: "Rule last error",
 }
 
 # gc_ keys that DO surface in Node.fields and match as fields keys,
@@ -207,6 +327,8 @@ GC_REFLECTED_FIELD_KEYS: frozenset[str] = (
     frozenset(SCHEDULED_PROPERTIES)
     | frozenset(SESSION_PROPERTIES)
     | frozenset(ATTRIBUTION_PROPERTIES)
+    # The Automation Rule surface is human-facing too (WP31, ADR 039).
+    | frozenset(RULE_PROPERTIES)
 )
 
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``
@@ -236,7 +358,10 @@ SYSTEM_PROPERTY_DENYLIST: frozenset[str] = frozenset(
 # already covered by the in-memory reverse index, so reading it would
 # double-count; ``creator``/``last_modified_by`` point at the user account.
 SYSTEM_RELATION_DENYLIST: frozenset[str] = frozenset(
-    {"backlinks", "creator", "last_modified_by"}
+    # gc_default_mode (ADR 034) is server config on the Space Context
+    # singleton: quarantined here so it never reflects as an edge and
+    # never appears as reusable edge vocabulary.
+    {"backlinks", "creator", "last_modified_by", PROP_DEFAULT_MODE}
 )
 
 _VALUE_FIELD = {
@@ -395,6 +520,17 @@ def _property_map(obj: Mapping[str, Any]) -> dict[str, Any]:
         if field is not None:
             out[entry["key"]] = entry.get(field)
     return out
+
+
+# Anytype's tag palette. CreateTagRequest requires a color (live-confirmed);
+# picking by name hash is deterministic without maintaining a mapping, and a
+# human can recolor in the UI without us ever clobbering it (create-only).
+_TAG_COLORS = ("grey", "yellow", "orange", "red", "pink",
+               "purple", "blue", "ice", "teal", "lime")
+
+
+def tag_color(name: str) -> str:
+    return _TAG_COLORS[zlib.crc32(name.strip().lower().encode()) % len(_TAG_COLORS)]
 
 
 def field_value(fmt: str, raw: Any) -> str:

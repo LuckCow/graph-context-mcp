@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from graph_context.application.capture_recorder import CaptureRecorder
+from graph_context.domain import rules as rules_domain
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.session import SessionState
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -585,6 +586,115 @@ class TestFieldCatalogSurface:
         assert out.startswith("ERROR:") and "formats:" in out
 
 
+class TestRelationFieldCoercion:
+    """Live-caught (turn 1bb6286b0e21): Anytype shows an objects-format
+    relation ("Assignee") as a property of the type, so a model wrote it
+    as a fields key -- and the write failed twice. The tool boundary now
+    accepts that spelling and routes it as the edge it is (ADR 006)."""
+
+    def _services(self) -> tools.Services:
+        from graph_context.domain.models import FieldSpec
+
+        repository = InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Due date", format="date", key="due_date"),
+            FieldSpec(name="Assignee", format="objects", key="assignee"),
+        ])
+        return build_services(repository, SessionState(project="t"))
+
+    async def _seed_member(self, services: tools.Services):
+        return await services.writer.create_node(
+            NodeDraft("Person", name="Luckcow", summary="moo")
+        )
+
+    def _edges_to(self, services: tools.Services, name: str, target_id: str):
+        from graph_context.domain.graph import Direction
+
+        graph = services.repository.graph
+        node = graph.resolve(name)
+        return node, [
+            e for e in graph.edges(node.id, Direction.OUT)
+            if e.target == target_id
+        ]
+
+    async def test_relation_named_field_becomes_a_link(self) -> None:
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow"},
+        )
+        assert out.startswith("created:")
+        node, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+        assert not node.fields  # an edge landed, never a scalar shadow
+
+    async def test_field_and_link_naming_the_same_edge_land_once(self) -> None:
+        """The exact failing call: fields={'Assignee': ...} AND the same
+        edge in links. One edge results; nothing errors."""
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow"},
+            links=[{"edge_type": "assignee", "other": member.id}],
+        )
+        assert out.startswith("created:")
+        _, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+
+    async def test_update_relation_field_adds_the_link(self) -> None:
+        services = self._services()
+        member = await self._seed_member(services)
+        await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+        )
+        out = await tools.update_node_tool(
+            services, node_id="Ship it", fields={"Assignee": "Luckcow"},
+        )
+        assert out.startswith("updated:")
+        _, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+
+    async def test_unresolvable_relation_value_errors_actionably(self) -> None:
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Nobody"},
+        )
+        assert out.startswith("ERROR:") and "Nobody" in out
+
+    async def test_declaration_for_a_relation_key_is_dropped(self) -> None:
+        """A create_missing_fields declaration must not mint a scalar
+        shadow of the relation -- the entry still becomes the edge."""
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow"},
+            create_missing_fields={"Assignee": "text"},
+        )
+        assert out.startswith("created:")
+        node, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+        assert not node.fields
+        catalog = services.repository.field_catalog()
+        assert "Assignee" not in {
+            spec.name for specs in catalog.values() for spec in specs
+        }
+
+    async def test_scalar_fields_pass_through_beside_a_relation_key(self) -> None:
+        services = self._services()
+        member = await self._seed_member(services)
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            fields={"Assignee": "Luckcow", "Due date": "2026-08-01"},
+        )
+        assert out.startswith("created:")
+        node, edges = self._edges_to(services, "Ship it", member.id)
+        assert len(edges) == 1
+        assert node.fields["due_date"] == "2026-08-01"
+
+
 # -- the schedule tool (WP18, ADR 027) ---------------------------------------
 
 
@@ -664,6 +774,178 @@ class TestScheduleTool:
         assert "re-enable" in out  # the human's Pending flip is taught
         assert "cancelled" in await tools.schedule_tool(services, action="list")
 
+
+# -- the automation tool (WP32, ADR 040) -------------------------------------
+
+
+class _EchoScriptRunner:
+    """A ScriptRunner fake for the tool surface: parrots one canned
+    effect derived from the payload's trigger."""
+
+    async def run(self, script, payload):  # type: ignore[no-untyped-def]
+        from graph_context.ports.script_runner import ScriptEffect, ScriptOutcome
+        return ScriptOutcome(
+            sets=(ScriptEffect(
+                node_id=payload["trigger"], property="Note", value="scripted",
+            ),),
+            logs=("ran",),
+        )
+
+
+class TestAutomationTool:
+    """The tool surface over the RuleEngine: creation-time validation,
+    lifecycle, and the dry run that applies nothing."""
+
+    def _services(self) -> tools.Services:
+        return build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            script_runner=_EchoScriptRunner(),
+        )
+
+    async def _create(self, services: tools.Services) -> str:
+        return await tools.automation_tool(
+            services, action="create", name="stamp completion",
+            target_type="Task", watch_property="Done",
+            condition="changed to true", rule_action="set property to now",
+            action_property="Completion date",
+        )
+
+    async def test_create_validates_and_reports_the_rule(self) -> None:
+        services = self._services()
+        out = await self._create(services)
+        assert out.startswith("created automation rule 'stamp completion'")
+        assert "action='test'" in out  # teaches the next step
+        stored = next(
+            n for n in services.repository.graph.nodes()
+            if n.name == "stamp completion"
+        )
+        assert stored.fields[rules_domain.FIELD_CONDITION] == "Changed to true"
+        assert stored.fields[rules_domain.FIELD_STATUS] == "Active"
+
+    async def test_create_with_a_bad_action_word_teaches_the_vocabulary(
+        self,
+    ) -> None:
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="x", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="explode",
+        )
+        assert out.startswith("ERROR:")
+        assert "run script" in out  # the allowed words are echoed
+        assert not [
+            n for n in services.repository.graph.nodes() if n.name == "x"
+        ]  # nothing written
+
+    async def test_create_script_rule_stores_the_fenced_body(self) -> None:
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('hi')",
+        )
+        assert out.startswith("created automation rule 'rollup'")
+        stored = next(
+            n for n in services.repository.graph.nodes() if n.name == "rollup"
+        )
+        body = await services.repository.fetch_body(stored.id)
+        assert body == "```python\nlog('hi')\n```"
+
+    async def test_create_script_rule_without_script_errors(self) -> None:
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script",
+        )
+        assert out.startswith("ERROR:") and "'script'" in out
+
+    async def test_list_shows_status_and_config(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(services, action="list")
+        assert "automation rules (1):" in out
+        assert "stamp completion" in out and "active" in out
+        assert "when 'Done' on 'Task'" in out
+
+    async def test_empty_list_guides_creation(self) -> None:
+        out = await tools.automation_tool(self._services(), action="list")
+        assert "no automation rules" in out and "action='create'" in out
+
+    async def test_pause_and_resume_flip_the_status(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="pause", rule="stamp completion",
+        )
+        assert out.startswith("paused")
+        assert "paused" in await tools.automation_tool(services, action="list")
+        out = await tools.automation_tool(
+            services, action="resume", rule="stamp completion",
+        )
+        assert out.startswith("resumed")
+        assert "active" in await tools.automation_tool(services, action="list")
+
+    async def test_update_replaces_config_and_revalidates(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="update", rule="stamp completion",
+            condition="changed",
+        )
+        assert out.startswith("updated")
+        assert "changed ->" in await tools.automation_tool(
+            services, action="list",
+        )
+
+    async def test_test_dry_runs_a_builtin_without_writing(self) -> None:
+        services = self._services()
+        await self._create(services)
+        task = await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="test", rule="stamp completion",
+        )
+        assert "dry run against 'ship it'" in out
+        assert "would set 'ship it'.Completion date" in out
+        assert "nothing was applied" in out
+        assert "Completion date" not in services.repository.graph.node(
+            task.id
+        ).fields
+
+    async def test_test_dry_runs_a_script_draft_before_creation(self) -> None:
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="test", target_type="Task",
+            watch_property="Done", condition="changed to true",
+            rule_action="run script", script="set(trigger, 'Note', 'x')",
+        )
+        assert "script log: ran" in out
+        assert "would set 'ship it'.Note = 'scripted'" in out
+        assert "nothing was applied" in out
+        # And truly nothing was: the task carries no Note.
+        stored = next(
+            n for n in services.repository.graph.nodes()
+            if n.name == "ship it"
+        )
+        assert "Note" not in stored.fields
+
+    async def test_test_without_targets_teaches_the_fix(self) -> None:
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="test", rule="stamp completion",
+        )
+        assert out.startswith("ERROR:") and "no objects of type" in out
+
+    async def test_unknown_action_lists_the_verbs(self) -> None:
+        out = await tools.automation_tool(self._services(), action="destroy")
+        assert out.startswith("ERROR:") and "test" in out and "create" in out
+
     async def test_unknown_action_lists_the_allowed_ones(self) -> None:
         services = self._services()
         out = await tools.schedule_tool(services, action="fire")
@@ -704,3 +986,132 @@ class TestScheduleTool:
         assert abs(
             (services.scheduler.now() - expected).total_seconds()
         ) < 5
+
+
+class TestSendFileTool:
+    """WP23 (ADR 032): send_file queues into the turn-scoped outbox; the
+    transport uploads after the reply -- the tool itself does no I/O."""
+
+    async def test_a_valid_file_queues_and_confirms(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.send_file_tool(
+            services, name="report.md", content="# Report"
+        )
+        assert "report.md" in out and "queued" in out
+        (queued,) = services.outbox
+        assert queued.name == "report.md"
+        assert queued.content == "# Report"
+
+    async def test_path_segments_are_stripped_from_the_name(
+        self, services: tools.Services
+    ) -> None:
+        await tools.send_file_tool(
+            services, name="../../etc/notes.txt", content="x"
+        )
+        assert services.outbox[-1].name == "notes.txt"
+
+    async def test_validation_errors_echo_the_fix(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.send_file_tool(services, name="", content="x")
+        assert out.startswith("ERROR:") and "filename" in out
+        out = await tools.send_file_tool(services, name="noext", content="x")
+        assert out.startswith("ERROR:") and "extension" in out
+        out = await tools.send_file_tool(services, name="a.md", content="")
+        assert out.startswith("ERROR:") and "empty" in out
+        assert services.outbox == []
+
+    async def test_oversize_and_per_turn_caps(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.send_file_tool(
+            services, name="big.md",
+            content="x" * (tools.MAX_OUTBOUND_FILE_CHARS + 1),
+        )
+        assert out.startswith("ERROR:") and "cap" in out
+        for i in range(tools.MAX_OUTBOUND_FILES_PER_TURN):
+            await tools.send_file_tool(
+                services, name=f"f{i}.md", content="x"
+            )
+        out = await tools.send_file_tool(services, name="one-more.md", content="x")
+        assert out.startswith("ERROR:") and "next turn" in out
+
+
+class TestSchemaTool:
+    """WP33 (ADR 041 v2): the model DRAFTS schema changes; the confirm
+    message + 👍 reaction belong to the harness. The tool surface has no
+    apply -- that absence is the guarantee."""
+
+    def _services(self) -> tools.Services:
+        return build_services(InMemoryGraphRepository(), SessionState(project="t"))
+
+    async def _propose_faction(self, services: tools.Services) -> str:
+        return await tools.schema_tool(
+            services, action="propose_type", type="Faction",
+            properties=[
+                {"name": "Motto", "format": "text"},
+                {"name": "Alignment", "format": "select",
+                 "options": ["Good", "Evil"]},
+            ],
+            reason="track allegiances",
+        )
+
+    async def test_propose_renders_the_draft_and_the_contract(self) -> None:
+        services = self._services()
+        out = await self._propose_faction(services)
+        assert "NEW TYPE 'Faction'" in out
+        assert "Motto (text)" in out
+        assert "Alignment (select: Good, Evil)" in out
+        assert "reacts \N{THUMBS UP SIGN}" in out  # the contract is taught
+        assert "cannot apply it yourself" in out
+        # Nothing touched the space, and the draft awaits the harness.
+        assert "Faction" not in services.repository.known_node_types()
+        assert [p.id for p in services.proposals.drafted] == ["p1"]
+
+    async def test_apply_is_not_a_model_action(self) -> None:
+        services = self._services()
+        await self._propose_faction(services)
+        out = await tools.schema_tool(services, action="apply", proposal_id="p1")
+        assert out.startswith("ERROR:")
+        assert "not a model action" in out
+        assert "Faction" not in services.repository.known_node_types()
+        assert services.proposals.pending()  # the draft survives
+
+    async def test_propose_fields_drafts_against_an_existing_type(self) -> None:
+        services = self._services()
+        out = await tools.schema_tool(
+            services, action="propose_fields", type="Character",
+            properties=[{"name": "Influence", "format": "number"}],
+        )
+        assert "NEW PROPERTIES on existing type 'Character'" in out
+        assert not out.startswith("ERROR:")
+
+    async def test_malformed_property_entry_is_an_actionable_error(self) -> None:
+        services = self._services()
+        out = await tools.schema_tool(
+            services, action="propose_type", type="Faction",
+            properties=[{"name": "HQ", "format": "banana"}],
+        )
+        assert out.startswith("ERROR:")
+        assert "formats:" in out  # the menu is echoed
+
+    async def test_list_and_cancel_manage_the_ledger(self) -> None:
+        services = self._services()
+        assert "no pending schema proposals" in await tools.schema_tool(
+            services, action="list"
+        )
+        await self._propose_faction(services)
+        listed = await tools.schema_tool(services, action="list")
+        assert "[p1]" in listed and "Faction" in listed
+        assert "you cannot apply them" in listed
+        out = await tools.schema_tool(services, action="cancel", proposal_id="p1")
+        assert out.startswith("cancelled proposal p1")
+        assert "no pending schema proposals" in await tools.schema_tool(
+            services, action="list"
+        )
+
+    async def test_unknown_action_lists_the_menu(self) -> None:
+        out = await tools.schema_tool(self._services(), action="destroy")
+        assert out.startswith("ERROR:")
+        assert "propose_type" in out and "cancel" in out

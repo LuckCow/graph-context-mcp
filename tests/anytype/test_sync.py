@@ -46,8 +46,10 @@ class TestHydrate:
         # N+1 per-OBJECT GETs. Members are the one per-item exception
         # (S11: fetchable only individually), and there are none here.
         # (The cap moves only when bootstrap grows enough properties for
-        # another page at page_limit=10 -- ADR 027 added the third.)
-        assert len(get_calls) <= 10
+        # another page at page_limit=10 -- ADR 027 added the third,
+        # ADR 033's gc_mode_model tipped the fourth, ADR 039's nine
+        # gc_rule_* properties the fifth.)
+        assert len(get_calls) <= 12
         assert not any("/objects/" in p for p in get_calls)
 
     async def test_hydrate_keeps_open_edges_but_skips_dangling(self, mock, client, repo):

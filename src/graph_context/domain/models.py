@@ -12,11 +12,13 @@ from the repository. This keeps id-generation policy out of the domain.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from graph_context.domain import schema
 from graph_context.domain.schema import Role
+from graph_context.errors import SchemaViolation
 
 NodeId = str
 """Opaque node identifier, owned by the storage layer."""
@@ -66,6 +68,70 @@ class FieldSpec:
         if self.options:
             return f"{self.name} ({self.format}: {', '.join(self.options)})"
         return f"{self.name} ({self.format})"
+
+
+@dataclass(frozen=True, slots=True)
+class PropertyDraft:
+    """One NEW scalar property in a schema proposal (WP33, ADR 041).
+
+    The LLM-drafted half of a user-confirmed schema change: a display
+    ``name``, a :data:`graph_context.domain.schema.FIELD_FORMATS` format,
+    and (for selects) the option names to seed. Scalars only -- a
+    relation is an edge (ADR 006) and is minted through links +
+    ``create_missing_relations``, never through a schema proposal.
+    Invariants are enforced at construction so a malformed draft can
+    never reach a repository.
+    """
+
+    name: str
+    format: str
+    options: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise SchemaViolation("property 'name' must be a non-empty string")
+        if self.name.strip().lower().startswith("gc_"):
+            raise SchemaViolation(
+                f"property name {self.name!r} uses the reserved gc_ prefix "
+                "(infrastructure vocabulary); pick a human name"
+            )
+        if self.format.strip().lower() not in schema.FIELD_FORMATS:
+            raise SchemaViolation(
+                f"unknown format {self.format!r} for property {self.name!r}; "
+                f"formats: {', '.join(sorted(schema.FIELD_FORMATS))}. "
+                "A link to other objects is a relation, not a property -- "
+                "create it on a write via links + create_missing_relations"
+            )
+        if self.options and self.format not in {"select", "multi_select"}:
+            raise SchemaViolation(
+                f"property {self.name!r} ({self.format}) cannot carry "
+                "options; only select and multi_select do"
+            )
+        if any(not option.strip() for option in self.options):
+            raise SchemaViolation(
+                f"property {self.name!r} has an empty option name"
+            )
+
+    def render_hint(self) -> str:
+        """Same one-line shape as :meth:`FieldSpec.render_hint`."""
+        if self.options:
+            return f"{self.name} ({self.format}: {', '.join(self.options)})"
+        return f"{self.name} ({self.format})"
+
+
+def validate_property_drafts(drafts: Sequence[PropertyDraft]) -> None:
+    """Cross-draft invariant of one schema proposal: no duplicate names.
+
+    (Per-draft invariants live in :class:`PropertyDraft` itself.)
+    """
+    seen: set[str] = set()
+    for draft in drafts:
+        lowered = draft.name.strip().lower()
+        if lowered in seen:
+            raise SchemaViolation(
+                f"property {draft.name!r} appears twice in one proposal"
+            )
+        seen.add(lowered)
 
 
 @dataclass(frozen=True, slots=True)

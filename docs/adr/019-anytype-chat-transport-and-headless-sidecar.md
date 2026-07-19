@@ -1,7 +1,11 @@
 # ADR 019: Anytype in-space chat as a transport; headless CLI sidecar
 
 Date: 2026-07-07
-Status: accepted (transport shipped; sidecar prepared, cutover deferred)
+Status: accepted (transport shipped; sidecar prepared, cutover deferred).
+Amended by ADR 029 (WP19): the "Processing…" placeholder is now claimed
+as a live activity message while the turn streams and the reply posts as
+a fresh message; a mode whose `activity_detail` is `off` keeps this
+ADR's original edit-into-reply lifecycle.
 
 ## Context
 
@@ -62,7 +66,13 @@ Behavioral contracts:
   position fast-forwards past its history — a freshly bound chat must
   not run a turn per historical message. Losing the file degrades to
   exactly that first-run behavior; the cursor advances *before* the
-  turn runs, so a failing turn cannot loop.
+  turn runs, so a failing turn cannot loop. *Amendment (2026-07-17):*
+  a chat the rescan watcher discovers mid-run is **adopted from its
+  beginning** (`ChatCursor.begin` records the empty position, persisted,
+  before its serve task starts) — the chat was born while the bot ran,
+  so anything typed before the subscription opened (typically the
+  thread's opener, sent inside the discovery poll's interval) is
+  unanswered conversation, not skippable history.
 * **Intent nodes point at their triggering message**: `handle_message`
   and `IntentRecorder.record_turn` carry an `origin` field
   (`anytype:<chat_id>:<message_id>`) — the "which conversation moment

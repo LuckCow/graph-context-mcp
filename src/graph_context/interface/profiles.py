@@ -1,10 +1,21 @@
 """Domain profiles: the deployment's *framing* of the graph (WP5).
 
+DEPRECATED (ADR 035 / WP27). Profiles are a transitional framing layer on
+the way out: activity modes already moved in-space (the profile's mode
+specs are GONE -- the space's Activity Mode objects are the only live
+source, with ``interface/mode_config.py`` seeding starters). What remains
+here keeps working until WP27 retires it: ``tool_docs`` will collapse to
+one neutral code-owned set; ``role_overrides`` variance will be dropped;
+``time_property``/``time_format`` will be REPLACED by a redesigned
+general-purpose timeline feature (not migrated as-is); ``ranking``
+variance moves to deployment config. Do not add new profile fields --
+new configuration belongs in the space (Space Context, ADR 034) or in
+deployment config.
+
 The schema is space-reflecting and domain-neutral (ADR 006); what actually
 differs between a story world and a work knowledge base is framing — the
 tool docstrings (which are prompts, WP2), their worked examples, and which
-native type keys map to semantic roles. A :class:`DomainProfile` bundles
-exactly that and nothing else. Storage keys (``gc_story_time``,
+native type keys map to semantic roles. Storage keys (``gc_story_time``,
 ``gc_prose``, …), tool names, and parameter names are frozen across
 profiles: a profile changes words, never wire format.
 
@@ -22,12 +33,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from graph_context.application.ranker import RankingWeights
+from graph_context.domain.activity import (
+    ACTIVITY_DETAIL_LEVELS,
+    DEFAULT_ACTIVITY_DETAIL,
+)
+from graph_context.domain.model_choice import (
+    MODEL_CHOICES,
+    model_id,
+    thinking_locked,
+)
 from graph_context.domain.schema import FIELD_FORMATS, Role
 from graph_context.domain.session import (
     DEFAULT_FULL_SLOTS,
     DEFAULT_SUMMARY_SLOTS,
     SCRATCHPAD_MAX_CHARS,
 )
+from graph_context.domain.thinking_choice import THINKING_LEVELS, THINKING_OFF
 from graph_context.errors import GraphContextError
 
 TOOL_NAMES: tuple[str, ...] = (
@@ -40,6 +61,9 @@ TOOL_NAMES: tuple[str, ...] = (
     "find_node",
     "query",
     "schedule",
+    "automation",
+    "send_file",
+    "schema",
 )
 
 
@@ -58,6 +82,13 @@ class CapturePolicy:
     min_chars: int = 200
 
 
+# WP19 (ADR 029): ACTIVITY_DETAIL_LEVELS / DEFAULT_ACTIVITY_DETAIL come
+# from domain.activity (imported above) -- how much live turn activity a
+# mode streams into the chat. A MODE property (not a session setting):
+# picking a mode picks its verbosity; the vocabulary is domain-homed so
+# the Anytype adapter can mint the select options from it.
+
+
 @dataclass(frozen=True, slots=True)
 class ModeSpec:
     """One activity mode: data, not an enum member (ADR 015).
@@ -65,38 +96,106 @@ class ModeSpec:
     ``goal`` is the system-prompt fragment handed to the LLM driver --
     specs are prompts and get the golden-test review bar. ``mutating``
     picks the tool binding (full surface vs read-only + context);
-    ``capture`` enables harness-side auto-capture of substantial replies.
+    ``capture`` enables harness-side auto-capture of substantial replies;
+    ``activity_detail`` sets how much live progress a turn streams into
+    the chat (WP19, ADR 029); ``web_search`` admits the provider's
+    server-side web search tool for this mode's decisions (WP20, ADR 030
+    -- executed on Anthropic's servers, never by the harness; default off
+    so graph-grounded modes stay graph-grounded); ``model`` pins which
+    Claude model runs this mode's decisions (ADR 033 -- a canonical
+    ``MODEL_CHOICES`` name; empty = the deployment's configured default).
+
+    ADR 037 driver options -- all "empty/zero = not set", API-driver
+    surfaces (the subscription driver maps what it can and documents the
+    rest): ``thinking`` is a ``THINKING_LEVELS`` choice (a level implies
+    adaptive thinking at that effort; ``off`` disables thinking -- and
+    is rejected here when the mode pins a Fable/Mythos model, where
+    thinking cannot be turned off); ``max_tokens`` caps one decision's
+    output; ``web_search_max_uses`` / ``web_search_allowed_domains`` /
+    ``web_search_blocked_domains`` bound the server-side search tool
+    (inert unless ``web_search`` is on; the API takes at most ONE of the
+    domain lists per request, so setting both is a spec error).
     """
 
     name: str
     goal: str
     mutating: bool = False
     capture: CapturePolicy | None = None
+    activity_detail: str = DEFAULT_ACTIVITY_DETAIL
+    web_search: bool = False
+    model: str = ""
+    thinking: str = ""
+    max_tokens: int = 0
+    web_search_max_uses: int = 0
+    web_search_allowed_domains: tuple[str, ...] = ()
+    web_search_blocked_domains: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.name.replace("_", "").isalnum():
             raise ValueError(f"mode name must be a slug, got {self.name!r}")
         if not self.goal.strip():
             raise ValueError(f"mode {self.name!r} needs a non-empty goal prompt")
+        if self.activity_detail not in ACTIVITY_DETAIL_LEVELS:
+            raise ValueError(
+                f"mode {self.name!r} has unknown activity_detail "
+                f"{self.activity_detail!r}; allowed: "
+                f"{', '.join(ACTIVITY_DETAIL_LEVELS)}"
+            )
+        if self.model and self.model not in MODEL_CHOICES:
+            raise ValueError(
+                f"mode {self.name!r} has unknown model {self.model!r}; "
+                f"allowed: {', '.join(MODEL_CHOICES)}"
+            )
+        if self.thinking and self.thinking not in THINKING_LEVELS:
+            raise ValueError(
+                f"mode {self.name!r} has unknown thinking {self.thinking!r}; "
+                f"allowed: {', '.join(THINKING_LEVELS)}"
+            )
+        if self.thinking == THINKING_OFF and thinking_locked(model_id(self.model)):
+            raise ValueError(
+                f"mode {self.name!r} sets thinking = off but pins "
+                f"{self.model!r}, which cannot turn thinking off"
+            )
+        if self.max_tokens < 0 or self.web_search_max_uses < 0:
+            raise ValueError(
+                f"mode {self.name!r}: max_tokens and web_search_max_uses "
+                "must be non-negative (0 = not set)"
+            )
+        if self.web_search_allowed_domains and self.web_search_blocked_domains:
+            raise ValueError(
+                f"mode {self.name!r} sets both allowed and blocked search "
+                "domains; the search tool takes at most one list"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class DomainProfile:
-    """One deployment's framing: prompt text, roles, and activity modes."""
+    """One deployment's framing: prompt text and roles.
+
+    DEPRECATED (ADR 035 / WP27): activity modes left this dataclass for
+    the space's Activity Mode objects; every remaining field is on the
+    WP27 retirement list (see the module docstring).
+    """
 
     name: str
     description: str
+    # DEPRECATED (WP27): collapses to one neutral code-owned set.
     tool_docs: Mapping[str, str]
+    # DEPRECATED (WP27): variance dropped; only Role.EVENT ever changed
+    # behavior (timeline), and the timeline itself is being redesigned.
     role_overrides: Mapping[str, Role]
-    mode_specs: tuple[ModeSpec, ...] = ()
-    default_mode: str = "world_modeling"
     # The Event-role timeline source (ADR 015): a property key + format.
     # Fiction keeps the gc_story_time number; a date-axis profile names a
     # native date property (ISO strings order lexicographically).
+    # DEPRECATED (WP27): replaced by a redesigned general-purpose
+    # timeline feature, not migrated as-is -- the seam to preserve is
+    # that the pair flows as a parameter through composition.build_runtime.
     time_property: str = "gc_story_time"
     time_format: str = "number"
     # Ranking signal weights (ADR 016) -- data, tuned against the eval
     # golden. Fiction leaves recency at zero; the assistant raises it.
+    # DEPRECATED (WP27): moves to deployment config; the seam to preserve
+    # is Ranker taking RankingWeights via constructor.
     ranking: RankingWeights = RankingWeights()
 
     def __post_init__(self) -> None:
@@ -107,18 +206,13 @@ class DomainProfile:
                 f"profile {self.name!r} tool_docs mismatch: "
                 f"missing={sorted(missing)} extra={sorted(extra)}"
             )
-        names = [spec.name for spec in self.mode_specs]
-        if len(names) != len(set(names)):
-            raise ValueError(f"profile {self.name!r} has duplicate mode names")
-        if self.mode_specs and self.default_mode not in names:
-            raise ValueError(
-                f"profile {self.name!r} default_mode {self.default_mode!r} "
-                f"is not among its modes {names}"
-            )
 
 
 def get_profile(name: str | None) -> DomainProfile:
     """Resolve ``GC_PROFILE`` (or an explicit name) to a profile.
+
+    DEPRECATED (ADR 035 / WP27): profiles are being retired; new
+    configuration belongs in the space, not in a new profile.
 
     ``None``/empty defaults to ``fiction`` — existing setups see zero
     change. The error, like all our errors, lists the allowed values.
@@ -164,7 +258,9 @@ space's own properties, by key or display name -- get_node shows what a
 node already carries, and context action='overview' lists each type's
 properties. The value updates THAT property, visible and filterable in
 Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful"). An
+multi-select values are comma-separated names ("Dark, Hopeful"). A key
+that names a RELATION (e.g. "Assignee") also works: its value is a node
+id or name, and the entry becomes a link, same as add_links. An
 unmatched key ERRORS, listing the properties you can reuse -- prefer
 reusing one. Only when none fits, resend with
 create_missing_fields={{"key": "format"}} to create a real new property
@@ -186,6 +282,8 @@ fields: {{"key": "value"}} attributes. Every key MUST match one of the
   shows what a node already carries. The value writes THAT property,
   visible and filterable in Anytype; select options match by name and
   are created when new; multi-select values are comma-separated names.
+  A key that names a RELATION (e.g. "Assignee") also works: its value
+  is a node id or name, and the entry becomes a link, same as links.
   An unmatched key ERRORS, listing the properties you can reuse --
   prefer reusing one. Only when none fits, resend with
   create_missing_fields={{"key": "format"}} to create a real new property
@@ -275,6 +373,119 @@ while the system was down collapse into ONE late fire. Events live as
 prompt, Schedule status, Last fired), so the user can view, edit, or
 create them there too -- an empty status counts as Pending, and a fired
 one-shot is marked Completed automatically.
+"""
+
+
+_AUTOMATION_DOC = """\
+Create and manage Automation Rules: "when a property CHANGES on objects
+of one type, do something" -- automations the system runs on its own a
+few seconds after the change (e.g. "when a Task's Done is checked,
+stamp Completion date"). Rules live as "Automation Rule" objects in
+Anytype, so the user can view, edit, pause, or write them there too.
+
+Tool actions:
+  create -- needs name, target_type, watch_property, condition,
+            rule_action (some rule actions need more, below).
+  update -- change an existing rule; rule=<id or exact name> plus any
+            create params to replace (an empty param keeps the stored
+            value).
+  list   -- every rule: id, config, status (active / paused / error
+            with the last error), last fired.
+  pause / resume -- switch a rule off/on without deleting it (rule=...).
+  test   -- DRY RUN: simulate one fire against a real object and report
+            what WOULD be written; nothing is applied. rule=<id/name>
+            tests a stored rule; passing the create params (+ script)
+            tests a DRAFT before creating it. Optional trigger=<object
+            id or name> picks the simulated object. ALWAYS test a
+            script before creating it.
+
+condition -- the rule watches TRANSITIONS, not states:
+  "changed to true" / "changed to false" (checkbox flips), "changed"
+  (any value change).
+
+rule_action -- what happens when the condition fires:
+  "set property to now"    -- write the current date-time into
+                              action_property (a date-format property
+                              gets the date only).
+  "set property value"     -- write action_value into action_property.
+  "uncheck others of type" -- keep a checkbox exclusive across the
+                              type's objects (condition and
+                              action_property default correctly --
+                              leave them empty).
+  "run script"             -- run the `script` param (Python) in a
+                              sandbox. The script's globals:
+      trigger        -- the changed object:
+                        {"id","type","name","summary","fields"}
+      before / after -- the watched value around the change ("" = empty)
+      now            -- "YYYY-MM-DD HH:MM:SS" server-local (use this,
+                        never the clock)
+      objects(type=None), find(name, type=None), field(obj, prop),
+      neighbors(obj, edge_type=None) -- read any object in the space
+      set(obj_or_id, prop, value) -- queue one write (str/bool/int/
+                        float; max 20 per fire; the property must
+                        already exist on the target's type)
+      log(msg)       -- a line for the system log (print() is discarded)
+      No imports beyond the stdlib, no network, ~5s time limit, and the
+      space snapshot caps at 2000 objects.
+
+Rules fire only on changes the system OBSERVES while running (nothing
+retroactive), rules never trigger other rules, and a broken rule shows
+status Error + "Rule last error" on its object -- it heals on its own
+once fixed.
+"""
+
+
+_SEND_FILE_DOC = """\
+Send a FILE to the user, attached to your reply in this chat (use it
+when the deliverable is a document, not a message: an export, a table
+as CSV, a longer write-up, code). Give the full filename with its
+extension (e.g. "characters.csv", "summary.md") and the complete text
+content -- the file is created from exactly what you pass; there is no
+appending. Text formats only (csv, md, json, code, ...). Call once per
+file, up to 4 per turn. The file uploads when your reply is delivered;
+keep the reply itself short and let the file carry the bulk.
+"""
+
+
+_SCHEMA_DOC = """\
+Propose a change to the space's SCHEMA -- a new object type, or new
+properties on an existing type -- for the USER to confirm. The user owns
+the schema: use this to turn "we should track factions" into a concrete
+draft, but the change itself is executed by the system ONLY when the
+user reacts \N{THUMBS UP SIGN} on the confirmation message that is
+posted after your reply (\N{THUMBS DOWN SIGN} dismisses it). You have NO
+way to apply a proposal -- never claim a schema change is done unless
+the system reported it applied; a "yes" in words is not a confirmation,
+the reaction is (if the user agrees verbally, point them at the
+confirmation message).
+
+Actions:
+  propose_type   -- draft a NEW type. type=<display name, e.g.
+                    "Faction">, optional plural (defaults to name+"s"),
+                    optional properties (below), optional reason (one
+                    line on why, shown to the user).
+  propose_fields -- draft NEW properties on an EXISTING type.
+                    type=<existing type name>, properties (required),
+                    optional reason.
+  list           -- pending proposals with their ids.
+  cancel         -- discard a proposal (proposal_id): e.g. the user said
+                    no or asked for changes (then re-propose).
+
+properties -- a list of objects, each:
+  {"name": "Status", "format": "select", "options": ["Open", "Done"]}
+  formats: text, number, select, multi_select, date, checkbox, url,
+  email, phone. options only for select/multi_select. A property that
+  already exists in the space with the SAME format is reused (attached
+  to the type); a different format is a conflict -- the error names it.
+  Links between objects are NOT properties: use create_node/update_node
+  links with create_missing_relations for a new edge label.
+
+Don't repeat the draft's contents in your reply -- the confirmation
+message carries them. Proposals are drafts for THIS conversation (they
+do not survive a restart; re-propose if lost). Applied changes are real
+Anytype types and properties -- immediately usable by create_node, and
+the user can rename or refine them in Anytype afterwards (never rename
+what a human set).
 """
 
 
@@ -513,39 +724,20 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
     query(order_by=["modified_at desc"], limit=10)
 """),
     "schedule": _SCHEDULE_DOC,
+    "automation": _AUTOMATION_DOC,
+    "send_file": _SEND_FILE_DOC,
+    "schema": _SCHEMA_DOC,
 }
 
-_FICTION_MODES = (
-    ModeSpec(
-        name="world_modeling",
-        goal=(
-            "You are building and maintaining a story-world knowledge graph. "
-            "Create and update nodes for characters, places, events, and "
-            "ideas as the user develops the world; link them as you go; keep "
-            "every summary current. The graph is the source of truth -- "
-            "capture decisions into it rather than leaving them in chat."
-        ),
-        mutating=True,
-    ),
-    ModeSpec(
-        name="authoring",
-        goal=(
-            "You are writing prose inside an established story world. Gather "
-            "context with the read tools (explore from the scene's nodes; "
-            "get_node for full descriptions) and write in the world's voice. "
-            "You cannot modify the graph in this mode -- substantial passages "
-            "you produce are captured automatically with their sources."
-        ),
-        capture=CapturePolicy(artifact_type="gc_prose"),
-    ),
-)
+# Starter activity modes live in mode_seeds/*.toml since ADR 035 -- the
+# space's Activity Mode objects are the only live source; profiles no
+# longer carry mode specs.
 
 FICTION = DomainProfile(
     name="fiction",
     description="story-world building and prose rendering (the original surface)",
     tool_docs=_FICTION_DOCS,
     role_overrides={},  # DEFAULT_TYPE_ROLES already speaks fiction
-    mode_specs=_FICTION_MODES,
 )
 
 
@@ -654,38 +846,15 @@ EXAMPLES:
           order_by=["story_time"])
 """),
     "schedule": _SCHEDULE_DOC,
+    "automation": _AUTOMATION_DOC,
+    "send_file": _SEND_FILE_DOC,
+    "schema": _SCHEMA_DOC,
 }
-
-_WORKSPACE_MODES = (
-    ModeSpec(
-        name="world_modeling",
-        goal=(
-            "You are maintaining a work knowledge base. Create and update "
-            "nodes for people, teams, projects, meetings, and decisions as "
-            "the user works; link them as you go; keep every summary "
-            "current. The graph is the source of truth -- capture decisions "
-            "into it rather than leaving them in chat."
-        ),
-        mutating=True,
-    ),
-    ModeSpec(
-        name="authoring",
-        goal=(
-            "You are drafting work documents (briefs, summaries, reports) "
-            "from an established knowledge base. Gather context with the "
-            "read tools and write clearly. You cannot modify the graph in "
-            "this mode -- substantial drafts you produce are captured "
-            "automatically with their sources."
-        ),
-        capture=CapturePolicy(artifact_type="gc_prose"),
-    ),
-)
 
 WORKSPACE = DomainProfile(
     name="workspace",
     description="work knowledge base (people, teams, projects, meetings, decisions)",
     tool_docs=_WORKSPACE_DOCS,
-    mode_specs=_WORKSPACE_MODES,
     role_overrides={
         # Only Role.EVENT changes behavior (story_time invariant + as_of
         # timeline); the rest are cosmetic role names for error suggestions.
@@ -795,44 +964,10 @@ EXAMPLES:
     query(type="Meeting", linked_to="Alice", order_by=["story_time desc"])
 """),
     "schedule": _SCHEDULE_DOC,
+    "automation": _AUTOMATION_DOC,
+    "send_file": _SEND_FILE_DOC,
+    "schema": _SCHEMA_DOC,
 }
-
-_ASSISTANT_MODES = (
-    ModeSpec(
-        name="organizing",
-        goal=(
-            "You are a work assistant maintaining the user's knowledge "
-            "base. Create and update nodes for tasks, procedures, notes, "
-            "meetings, and people as the user works; link them as you go; "
-            "keep every summary current. The graph is the source of truth "
-            "-- capture decisions into it rather than leaving them in chat."
-        ),
-        mutating=True,
-    ),
-    ModeSpec(
-        name="record_procedure",
-        goal=(
-            "The user is doing something they want to be able to repeat. "
-            "Notate each step they describe -- commands, clicks, decisions, "
-            "gotchas -- as a clean numbered procedure, naming the systems "
-            "and items involved by their node names where they exist. Ask "
-            "for the step outcome when it is unclear. Your write-up is "
-            "captured automatically as a procedure with its references."
-        ),
-        capture=CapturePolicy(artifact_type="procedure", min_chars=120),
-    ),
-    ModeSpec(
-        name="meeting_notes",
-        goal=(
-            "The user is in or has just left a meeting. Turn what they "
-            "tell you into structured notes: attendees, decisions, action "
-            "items, open questions -- naming people and projects by their "
-            "node names where they exist. Your notes are captured "
-            "automatically with their references."
-        ),
-        capture=CapturePolicy(artifact_type="note", min_chars=120),
-    ),
-)
 
 ASSISTANT = DomainProfile(
     name="assistant",
@@ -845,8 +980,6 @@ ASSISTANT = DomainProfile(
         "milestone": Role.EVENT,
         "tool": Role.TECHNOLOGY,
     },
-    mode_specs=_ASSISTANT_MODES,
-    default_mode="organizing",
     time_property="event_date",
     time_format="date",
     # "The deploy task" usually means the live one: recency matters here

@@ -25,21 +25,46 @@ from graph_context.interface.services import build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
+    _maybe_turn,
+    _rule_tick_seconds,
     _serve_chat,
     _watch_chats,
     _watch_graph,
+    _watch_rules,
 )
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
     ChatCursor,
+    ChatTitler,
 )
 from graph_context.orchestrator.channels import ChannelRoute
-from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver
-from graph_context.orchestrator.modes import load_registry
+from graph_context.orchestrator.drivers import (
+    LLMTurn,
+    ScriptedDriver,
+    ToolCall,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding
+from tests.orchestrator.mode_fixtures import fiction_registry
 
 FICTION = get_profile("fiction")
+
+
+class _SpyDriver(ScriptedDriver):
+    """Scripted-empty, but keeps what the pipeline showed it."""
+
+    def __init__(self) -> None:
+        super().__init__([LLMTurn(reply="seen")])
+        self.transcripts: list[tuple[TranscriptEvent, ...]] = []
+
+    async def decide(
+        self, transcript, tools, goal: str = "", *, options=None,
+    ) -> LLMTurn:
+        self.transcripts.append(tuple(transcript))
+        return await super().decide(transcript, tools, goal)
+
 
 
 async def _noop_lister(binding: object) -> list[tuple[str, str]]:
@@ -56,9 +81,10 @@ class TestStartup:
 
 
 def _wired_chat(
-    mock: MockAnytype, turns: list[LLMTurn], cursor: ChatCursor
+    mock: MockAnytype, turns: list[LLMTurn], cursor: ChatCursor,
+    chat_name: str = "General",
 ) -> tuple[AnytypeChatClient, str, AnytypeChatTurnHandler]:
-    chat_id = mock.seed_chat("General")
+    chat_id = mock.seed_chat(chat_name)
     config = AnytypeConfig(api_key="test", space_id=mock.space_id)
     chat_client = AnytypeChatClient(AnytypeClient(config, transport=mock.transport))
     services = build_services(
@@ -67,7 +93,7 @@ def _wired_chat(
     )
     orchestrator = Orchestrator(
         services=services, driver=ScriptedDriver(turns),
-        profile=FICTION, registry=load_registry(FICTION),
+        profile=FICTION, registry=fiction_registry(),
     )
     handler = AnytypeChatTurnHandler(
         routes={chat_id: ChannelRoute(orchestrator=orchestrator)},
@@ -156,7 +182,7 @@ class TestLiveDiscovery:
                 SessionState(project="Ashfall"),
             ),
             driver=ScriptedDriver([LLMTurn(reply="served the new thread")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         ))
         runtimes = bootstrap.SpaceRuntimes(
             routes={}, spaces={}, descriptions={}, help_line="",
@@ -185,19 +211,69 @@ class TestLiveDiscovery:
                         await asyncio.sleep(0.01)
                     await asyncio.sleep(0.05)  # serve task's catch-up settles
                     mock.post_chat_message_directly(chat_id, "human", "hello?")
-                    while True:  # placeholder first, then the edit lands
+                    # WP19: the placeholder became the activity message,
+                    # the reply posted fresh, and the trace was deleted --
+                    # the reply ends up the ONLY bot post in the chat.
+                    while True:
                         replies = [
-                            m for m in mock.chat_messages(chat_id)
+                            m["content"]["text"]
+                            for m in mock.chat_messages(chat_id)
                             if m["creator"] == mock.api_member_id
                         ]
-                        if any(
-                            m["content"]["text"] == "served the new thread"
-                            for m in replies
-                        ):
+                        if replies == ["served the new thread"]:
                             break
                         await asyncio.sleep(0.01)
                 assert runtimes.spaces[chat_id] == mock.space_id
-                assert replies[0]["content"]["text"] == "served the new thread"
+                raise _Done
+        except* _Done:
+            pass
+
+    async def test_a_message_typed_before_discovery_is_answered(self) -> None:
+        """The thread's opening message predates the bot's subscription
+        (the user types, THEN the rescan finds the chat); discovery adopts
+        the chat from its beginning so catch-up answers it."""
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        chat_client = AnytypeChatClient(AnytypeClient(config, transport=mock.transport))
+        binding = SpaceBinding(space_id=mock.space_id, profile=FICTION)
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(
+                InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+                SessionState(project="Ashfall"),
+            ),
+            driver=ScriptedDriver([LLMTurn(reply="answered the opener")]),
+            profile=FICTION, registry=fiction_registry(),
+        ))
+        runtimes = bootstrap.SpaceRuntimes(
+            routes={}, spaces={}, descriptions={}, help_line="",
+            teardown=[], space_routes={mock.space_id: route},
+            space_bindings={mock.space_id: binding},
+            session_labels={mock.space_id: {}},
+        )
+        handler = AnytypeChatTurnHandler(routes=runtimes.routes, spaces=runtimes.spaces)
+        # The chat and its opener exist BEFORE the watcher runs at all.
+        chat_id = mock.seed_chat("A New Arc")
+        mock.post_chat_message_directly(chat_id, "human", "anyone there?")
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(_watch_chats(
+                    handler, chat_client, binding, runtimes, tg, interval=0.02
+                ))
+                async with asyncio.timeout(5):
+                    while True:
+                        replies = [
+                            m["content"]["text"]
+                            for m in mock.chat_messages(chat_id)
+                            if m["creator"] == mock.api_member_id
+                        ]
+                        if replies == ["answered the opener"]:
+                            break
+                        await asyncio.sleep(0.01)
+                assert handler.cursor.has(chat_id)  # positioned past it
                 raise _Done
         except* _Done:
             pass
@@ -215,7 +291,7 @@ class TestPeriodicGraphResync:
         route = ChannelRoute(orchestrator=Orchestrator(
             services=build_services(repository, SessionState(project="Todo")),
             driver=ScriptedDriver([]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         ))
         repository.stage_out_of_band(
             NodeDraft("Project", name="Garden", summary="Yard work.")
@@ -232,6 +308,88 @@ class TestPeriodicGraphResync:
             await asyncio.gather(watcher, return_exceptions=True)
 
 
+class TestRuleWatcher:
+    """ADR 039: the fourth watcher resyncs, diffs, and fires rules."""
+
+    def _route(self) -> tuple[ChannelRoute, InMemoryGraphRepository]:
+        repository = InMemoryGraphRepository()
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(repository, SessionState(project="Todo")),
+            driver=ScriptedDriver([]),
+            profile=FICTION, registry=fiction_registry(),
+        ))
+        return route, repository
+
+    async def test_a_ui_checkbox_flip_fires_the_rule_through_the_watcher(
+        self,
+    ) -> None:
+        from graph_context.domain import rules
+
+        route, repository = self._route()
+        await repository.create_node(NodeDraft(
+            type="gc_rule", name="stamp completion", summary="s",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_WATCH_PROPERTY: "Done",
+                rules.FIELD_CONDITION: "Changed to true",
+                rules.FIELD_ACTION: "Set property to now",
+                rules.FIELD_ACTION_PROPERTY: "Completion date",
+            },
+        ))
+        task = await repository.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        watcher = asyncio.ensure_future(
+            _watch_rules(route, "space-1", interval=0.01)
+        )
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            await repository.update_node(task.id, fields={"Done": "true"})
+            async with asyncio.timeout(5):
+                while "Completion date" not in repository.graph.node(task.id).fields:
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_crashing_tick_never_takes_the_watcher_down(self) -> None:
+        route, repository = self._route()
+        calls = {"count": 0}
+        engine = route.orchestrator.services.rules
+        original = engine.run_tick
+
+        async def flaky():  # type: ignore[no-untyped-def]
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise GraphContextError("transient")
+            return await original()
+
+        engine.run_tick = flaky  # type: ignore[method-assign]
+        watcher = asyncio.ensure_future(
+            _watch_rules(route, "space-1", interval=0.01)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while calls["count"] < 3:  # kept ticking past the failure
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    def test_rule_tick_interval_parses_and_disables(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("GC_RULE_TICK_SECONDS", raising=False)
+        assert _rule_tick_seconds() == 5
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "off")
+        assert _rule_tick_seconds() is None
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "2.5")
+        assert _rule_tick_seconds() == 2.5
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "soon")
+        with pytest.raises(GraphContextError):
+            _rule_tick_seconds()
+
+
 class TestServeLoop:
     async def test_a_streamed_message_round_trips_to_a_posted_reply(self) -> None:
         mock = MockAnytype()
@@ -244,8 +402,9 @@ class TestServeLoop:
         try:
             await asyncio.sleep(0.05)  # catch-up done, stream open
             mock.post_chat_message_directly(chat_id, "human", "hi bot")
-            # The first bot post is the "Processing…" placeholder; wait for
-            # the edit that turns it into the reply.
+            # The first bot post is the "Processing…" placeholder; WP19
+            # claims it as the activity message, posts the reply fresh,
+            # then DELETES the trace -- the reply alone remains.
             async with asyncio.timeout(5):
                 while True:
                     texts = [
@@ -253,14 +412,13 @@ class TestServeLoop:
                         for m in mock.chat_messages(chat_id)
                         if m["creator"] == mock.api_member_id
                     ]
-                    if "hello from the graph" in texts:
+                    if texts == ["hello from the graph"]:
                         break
                     await asyncio.sleep(0.01)
-            assert texts == ["hello from the graph"]  # edited in place
-            # The bot's own reply echoed back on the stream but ran no turn
+            # The bot's own posts echoed back on the stream but ran no turn
             # (echo suppression) -- give it a beat to prove it.
             await asyncio.sleep(0.05)
-            assert len(mock.chat_messages(chat_id)) == 2  # hi + one reply
+            assert len(mock.chat_messages(chat_id)) == 2  # hi + reply
         finally:
             serve.cancel()
             await asyncio.gather(serve, return_exceptions=True)
@@ -287,7 +445,9 @@ class TestServeLoop:
             for m in mock.chat_messages(chat_id)
             if m["creator"] == mock.api_member_id
         ]
-        assert replies == ["caught up"]  # one turn: the offline message only
+        # One turn (the offline message only): its reply, the activity
+        # trace already deleted.
+        assert replies == ["caught up"]
         assert seen_id  # the pre-cursor message ran no turn
 
     async def test_a_first_run_chat_skips_its_history(self) -> None:
@@ -303,6 +463,30 @@ class TestServeLoop:
         ]
         assert replies == []
         assert handler.cursor.has(chat_id)  # positioned past the history
+
+    async def test_a_mid_turn_crash_deletes_the_activity_message(self) -> None:
+        """WP19: once the sink claimed the placeholder, a crashed turn
+        must post its error fresh AND delete the activity message --
+        nothing strands as "Processing…" or "working…"."""
+
+        class _Explodes(ScriptedDriver):
+            async def decide(
+                self, transcript, tools, goal: str = "", *, options=None,
+            ) -> LLMTurn:
+                raise RuntimeError("driver fell over")
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        handler.cursor.fast_forward(chat_id, "o0")  # not a first-run chat
+        handler.routes[chat_id].orchestrator.driver = _Explodes([])
+        mock.post_chat_message_directly(chat_id, "human", "crash please")
+        await _catch_up(handler, chat_client, chat_id, handler.cursor)
+        texts = [
+            m["content"]["text"]
+            for m in mock.chat_messages(chat_id)
+            if m["creator"] == mock.api_member_id
+        ]
+        assert texts == [TURN_FAILED_NOTICE]
 
 
 class TestScheduledEventWatcher:
@@ -387,3 +571,242 @@ class TestScheduledEventWatcher:
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
+
+
+class TestAutoTitling:
+    """WP21 (ADR 031): an untitled chat gets a harness-generated title
+    after its first real exchange -- one driver side-call, one rename,
+    once per chat lifetime; failures never fail the turn."""
+
+    @staticmethod
+    def _message(text: str, order_id: str = "!!a"):
+        from graph_context.infrastructure.anytype.chat import ChatMessage
+
+        return ChatMessage(
+            id=f"m-{order_id}", creator="human", text=text, order_id=order_id
+        )
+
+    async def test_the_first_exchange_titles_an_untitled_chat(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock,
+            # Turn 1 answers the message; turn 2 is the titling side-call.
+            [LLMTurn(reply="They throw rocks."),
+             LLMTurn(reply='"Siege Engines 101."')],
+            ChatCursor(), chat_name="",
+        )
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("how do siege engines work?"), chat_client, titler,
+        )
+        names = dict(await chat_client.list_chats())
+        assert names[chat_id] == "Siege Engines 101"  # sanitized
+        assert titler.names[chat_id] == "Siege Engines 101"
+
+    async def test_a_second_exchange_never_retitles(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock,
+            [LLMTurn(reply="one"), LLMTurn(reply="First Title"),
+             LLMTurn(reply="two"), LLMTurn(reply="WRONG: second title")],
+            ChatCursor(), chat_name="",
+        )
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("q1", "!!a"), chat_client, titler,
+        )
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("q2", "!!b"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == "First Title"
+
+    async def test_a_humans_title_is_never_overwritten(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [LLMTurn(reply="answer")], ChatCursor(),
+            chat_name="Trip planning",
+        )
+        titler = ChatTitler(names={chat_id: "Trip planning"})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("hello"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == "Trip planning"
+
+    async def test_commands_never_trigger_titling(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [], ChatCursor(), chat_name="",
+        )
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("/mode"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert titler.needs_title(chat_id)  # the attempt was not consumed
+
+    async def test_a_failed_turn_defers_the_attempt(self) -> None:
+        class _Explodes(ScriptedDriver):
+            async def decide(
+                self, transcript, tools, goal: str = "", *, options=None,
+            ) -> LLMTurn:
+                raise RuntimeError("driver fell over")
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [], ChatCursor(), chat_name="",
+        )
+        route = handler.routes[chat_id]
+        route.orchestrator.driver = _Explodes([])
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("hello"), chat_client, titler,
+        )
+        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert titler.needs_title(chat_id)  # retry on the next exchange
+
+    async def test_a_failing_rename_never_fails_the_turn(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [LLMTurn(reply="answer"), LLMTurn(reply="A Title")],
+            ChatCursor(), chat_name="",
+        )
+
+        async def broken_rename(chat_id: str, name: str) -> None:
+            raise GraphContextError("rename endpoint down")
+
+        chat_client.rename = broken_rename  # type: ignore[method-assign]
+        titler = ChatTitler(names={chat_id: ""})
+        await _maybe_turn(
+            handler, mock.space_id, chat_id,
+            self._message("hello"), chat_client, titler,
+        )
+        # The reply still reached the chat; the attempt is spent (no storm).
+        texts = [m["content"]["text"] for m in mock.chat_messages(chat_id)]
+        assert any("answer" in t for t in texts)
+        assert not titler.needs_title(chat_id)
+
+
+class TestInboundFiles:
+    """WP23 end-to-end over MockAnytype: a human's file drop reaches the
+    model -- text inlined as a fence, images as native attachments."""
+
+    async def test_a_text_file_folds_into_the_user_message(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        driver = _SpyDriver()
+        handler.routes[chat_id].orchestrator.driver = driver
+        file_id = mock.seed_file("data", b"a,b\n1,2\n", media="text/csv",
+                                 extension="csv")
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "what does this say?",
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        (transcript,) = driver.transcripts
+        user_event = transcript[-1]
+        assert "what does this say?" in user_event.text
+        assert '<file name="data.csv">' in user_event.text
+        assert "a,b" in user_event.text
+        assert user_event.images == ()
+
+    async def test_an_image_rides_as_a_native_attachment(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        driver = _SpyDriver()
+        handler.routes[chat_id].orchestrator.driver = driver
+        file_id = mock.seed_file("photo", b"\x89PNG-bytes", media="image/png",
+                                 extension="png")
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "",  # bare file drop: still a turn
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        (transcript,) = driver.transcripts
+        user_event = transcript[-1]
+        (image,) = user_event.images
+        assert image.name == "photo.png"
+        assert image.media_type == "image/png"
+        import base64 as b64
+
+        assert b64.b64decode(image.data_base64) == b"\x89PNG-bytes"
+        assert "image" in user_event.text  # the fallback caption
+
+    async def test_an_oversized_file_degrades_to_a_note(self) -> None:
+        from graph_context.orchestrator.anytype_chat_transport import (
+            MAX_TEXT_BYTES,
+        )
+
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        driver = _SpyDriver()
+        handler.routes[chat_id].orchestrator.driver = driver
+        file_id = mock.seed_file(
+            "big", b"x" * (MAX_TEXT_BYTES + 1), media="text/csv",
+            extension="csv",
+        )
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "read this",
+            attachments=[{"target": file_id, "type": "file"}],
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        (transcript,) = driver.transcripts
+        user_event = transcript[-1]
+        assert "[attached file: big.csv" in user_event.text
+        assert "xxx" not in user_event.text  # content never inlined
+
+
+class TestOutboundFiles:
+    """WP23: the send_file tool's queued files become real chat uploads
+    attached to the reply."""
+
+    async def test_a_queued_file_posts_as_an_upload(self) -> None:
+        mock = MockAnytype()
+        chat_client, chat_id, handler = _wired_chat(
+            mock,
+            [LLMTurn(tool_calls=(
+                ToolCall("send_file",
+                         {"name": "table.csv", "content": "a,b\n1,2\n"}),
+            ),),
+             LLMTurn(reply="sent you the table")],
+            ChatCursor(),
+        )
+        message_id = mock.post_chat_message_directly(
+            chat_id, "human", "export that as csv"
+        )
+        (raw,) = [m for m in mock.chat_messages(chat_id) if m["id"] == message_id]
+        from graph_context.infrastructure.anytype.chat import to_chat_message
+
+        await _maybe_turn(
+            handler, mock.space_id, chat_id, to_chat_message(raw), chat_client
+        )
+        bot_messages = [
+            m for m in mock.chat_messages(chat_id)
+            if m["creator"] == mock.api_member_id and m["attachments"]
+        ]
+        (file_message,) = bot_messages
+        (envelope,) = file_message["attachments"]
+        assert envelope["type"] == "file"
+        content, media = await chat_client.fetch_file(envelope["target"])
+        assert content == b"a,b\n1,2\n"
+        assert "table.csv" in file_message["content"]["text"]

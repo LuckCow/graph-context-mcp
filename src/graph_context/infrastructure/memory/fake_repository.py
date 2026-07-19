@@ -32,10 +32,16 @@ from graph_context.domain.models import (
     Node,
     NodeDraft,
     NodeId,
+    PropertyDraft,
     TimelineValue,
 )
 from graph_context.domain.schema import Role
-from graph_context.errors import UnknownFieldKey
+from graph_context.errors import (
+    SchemaChangeConflict,
+    UnknownFieldKey,
+    UnknownNodeType,
+    UnknownRelationLabel,
+)
 
 
 @dataclass(frozen=True)
@@ -68,31 +74,45 @@ class InMemoryGraphRepository:
         # Type-identifier -> template, mirroring the Anytype adapter applying a
         # type's template on create (default field values + scaffold body).
         self._templates: dict[str, FakeTemplate] = dict(templates or {})
-        # The space's scalar-property catalog (ADR 023). None keeps the
-        # historical open behavior -- any field key, stored verbatim -- so
-        # the memory backend and demos need no vocabulary. A catalog turns
-        # on the strict contract: story-node field keys must match a spec
-        # (by key or name) or be declared via create_missing_fields. An
-        # ``objects``-format spec models a RELATION (an edge, ADR 006):
-        # never a fields target, and a fields key naming one redirects to
-        # ``links`` -- mirroring the adapter's registry.
-        self._field_specs: list[FieldSpec] | None = (
-            list(field_catalog) if field_catalog is not None else None
-        )
-        if self._field_specs is not None:
-            # Bootstrap parity (ADR 028): the Anytype adapter's
-            # ensure_schema guarantees the attribution properties exist,
-            # so recorder writes resolve without an opt-in. The fake's
-            # catalog carries the same guarantee.
-            existing_keys = {spec.key for spec in self._field_specs}
-            self._field_specs.extend(
-                FieldSpec(name=key, format=fmt, key=key)
-                for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
-                if key not in existing_keys
-            )
+        # The space's property catalog (ADR 023). None keeps the
+        # historical open behavior -- any field key or edge label, stored
+        # verbatim -- so the memory backend and demos need no vocabulary.
+        # A catalog turns on the strict contract: story-node field keys
+        # must match a spec (by key or name) or be declared via
+        # create_missing_fields, and link labels must match an ``objects``
+        # spec (canonicalizing to its name) or be minted via
+        # create_missing_relations. An ``objects``-format spec models a
+        # RELATION (an edge, ADR 006): never a fields target, and a fields
+        # key naming one redirects to ``links`` -- mirroring the adapter's
+        # registry.
+        self._field_specs: list[FieldSpec] | None = None
+        if field_catalog is not None:
+            self._adopt_catalog(field_catalog)
+        # Types minted through the WP33 schema-change port surface:
+        # display name -> the type's own property specs. The adapter keys
+        # per-type properties off its registry; this is the fake's mirror.
+        self._minted_types: dict[str, list[FieldSpec]] = {}
         # Space members reflected as read-only nodes (S11), mirroring the
         # Anytype adapter's member fetch: first-class, linkable (an
         # assignee-style edge needs a target IN the index), no role.
+        self._reflect_members(members)
+
+    def _adopt_catalog(self, field_catalog: Sequence[FieldSpec]) -> None:
+        specs = self._field_specs or []
+        specs.extend(field_catalog)
+        # Bootstrap parity (ADR 028): the Anytype adapter's
+        # ensure_schema guarantees the attribution properties exist,
+        # so recorder writes resolve without an opt-in. The fake's
+        # catalog carries the same guarantee.
+        existing_keys = {spec.key for spec in specs}
+        specs.extend(
+            FieldSpec(name=key, format=fmt, key=key)
+            for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
+            if key not in existing_keys
+        )
+        self._field_specs = specs
+
+    def _reflect_members(self, members: Sequence[str]) -> None:
         for name in members:
             self._graph.upsert_node(Node(
                 id=f"member-{next(self._ids):04d}",
@@ -149,7 +169,12 @@ class InMemoryGraphRepository:
             self._bodies[node.id] = body
         try:
             for link in links:
-                self._graph.add_edge(link.to_edge(anchor=node.id))
+                label = self._resolve_link_label(
+                    link.edge_type, create_missing_relations
+                )
+                self._graph.add_edge(
+                    replace(link, edge_type=label).to_edge(anchor=node.id)
+                )
         except Exception:
             # Composite-create contract: never leave a half-applied write.
             self._graph.remove_node(node.id)
@@ -196,7 +221,8 @@ class InMemoryGraphRepository:
     async def add_link(
         self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
     ) -> Edge:
-        edge = link.to_edge(anchor=anchor)
+        label = self._resolve_link_label(link.edge_type, create_missing_relations)
+        edge = replace(link, edge_type=label).to_edge(anchor=anchor)
         self._graph.add_edge(edge)
         return edge
 
@@ -208,20 +234,162 @@ class InMemoryGraphRepository:
 
     def known_node_types(self) -> frozenset[str]:
         # The in-memory backend has an open vocabulary; surface the mapped
-        # (non-infra) roles as helpful create_node suggestions.
-        return frozenset(r.value for r in Role if r not in schema.INFRA_ROLES)
+        # (non-infra) roles as helpful create_node suggestions, plus any
+        # types minted through the WP33 schema-change surface.
+        return frozenset(
+            r.value for r in Role if r not in schema.INFRA_ROLES
+        ) | frozenset(self._minted_types)
+
+    # -- schema changes (WP33, ADR 041) ----------------------------------
+
+    async def create_type(
+        self,
+        name: str,
+        *,
+        plural: str = "",
+        properties: Sequence[PropertyDraft] = (),
+    ) -> str:
+        display = name.strip()
+        taken = {t.lower() for t in self.known_node_types()}
+        if display.lower() in taken:
+            raise SchemaChangeConflict(
+                f"a type matching {display!r} already exists in this "
+                "space; propose new properties on it instead"
+            )
+        self._minted_types[display] = [
+            self._adopt_property_draft(draft) for draft in properties
+        ]
+        return display
+
+    async def add_type_properties(
+        self, type_identifier: str, properties: Sequence[PropertyDraft]
+    ) -> str:
+        display = self._existing_type_name(type_identifier)
+        specs = self._minted_types.setdefault(display, [])
+        for draft in properties:
+            target = draft.name.strip().lower()
+            held = next(
+                (s for s in specs if s.name.strip().lower() == target), None
+            )
+            if held is not None:
+                # Same on-type semantics as the adapter: a matching format
+                # is an idempotent no-op, a mismatch stops the change (A12).
+                if held.format != draft.format:
+                    raise SchemaChangeConflict(
+                        f"{display} already has a property named "
+                        f"{draft.name!r} with format {held.format!r}, not "
+                        f"{draft.format!r}; formats are immutable (A12) -- "
+                        "reuse it as-is or pick another name"
+                    )
+                continue
+            specs.append(self._adopt_property_draft(draft))
+        return display
+
+    def _existing_type_name(self, identifier: str) -> str:
+        target = identifier.strip().lower()
+        for name in self.known_node_types():
+            if name.lower() == target:
+                return name
+        role = schema.resolve_role(identifier, self._role_overrides)
+        if role is not None and role not in schema.INFRA_ROLES:
+            return role.value
+        raise UnknownNodeType(identifier, tuple(sorted(self.known_node_types())))
+
+    def _adopt_property_draft(self, draft: PropertyDraft) -> FieldSpec:
+        """The fake's half of the adapter's ``_property_entry`` contract:
+        reuse an existing same-format property, conflict on a format
+        mismatch (A12) or a relation name (ADR 006), else mint -- joining
+        the catalog in catalog mode so writes resolve it thereafter."""
+        if self._relation_spec_for(draft.name) is not None:
+            raise SchemaChangeConflict(
+                f"{draft.name!r} names an existing relation -- an edge, not "
+                "a scalar property; pick a different name"
+            )
+        existing = (
+            self._spec_for(draft.name) if self._field_specs is not None else None
+        )
+        if existing is not None:
+            if existing.format != draft.format:
+                raise SchemaChangeConflict(
+                    f"a property named {existing.name!r} already exists in "
+                    f"this space with format {existing.format!r}, not "
+                    f"{draft.format!r}; formats are immutable (A12) -- "
+                    "reuse it as-is or pick another name"
+                )
+            return existing
+        spec = FieldSpec(
+            name=draft.name, format=draft.format,
+            key=draft.name.strip().lower().replace(" ", "_"),
+            options=draft.options,
+        )
+        if self._field_specs is not None:
+            self._field_specs.append(spec)
+        return spec
 
     def known_edge_labels(self) -> frozenset[str]:
-        # No predefined relation vocabulary off a live space.
-        return frozenset()
+        if self._field_specs is None:
+            # Open mode: no predefined relation vocabulary off a live space.
+            return frozenset()
+        return frozenset(
+            spec.name for spec in self._field_specs if spec.format == "objects"
+        )
+
+    def _resolve_link_label(self, label: str, create_missing: bool) -> str:
+        """The fake's half of the adapter's ``_resolve_relation`` contract.
+
+        Open mode (no catalog): any label lands verbatim, as ever. Catalog
+        mode: a link's ``edge_type`` must match an existing ``objects``
+        relation (by key or display name, case-insensitive) and canonicalizes
+        to that relation's label -- an unmatched label is surfaced for
+        approval unless ``create_missing`` mints a new relation, which then
+        joins the vocabulary for reuse.
+        """
+        if self._field_specs is None:
+            return label
+        spec = self._relation_spec_for(label)
+        if spec is not None:
+            return spec.name
+        if not create_missing:
+            raise UnknownRelationLabel(label, tuple(self.known_edge_labels()))
+        minted = FieldSpec(
+            name=label, format="objects",
+            key=label.strip().lower().replace(" ", "_"),
+        )
+        self._field_specs.append(minted)
+        return minted.name
+
+    def relation_label_for(self, field_key: str) -> str | None:
+        spec = self._relation_spec_for(field_key)
+        return None if spec is None else spec.name
+
+    def _relation_spec_for(self, label: str) -> FieldSpec | None:
+        """Objects relations only, by key or display name -- the fake's
+        ``key_for_label``. Open mode has no relation vocabulary: None."""
+        if self._field_specs is None:
+            return None
+        target = label.strip().lower()
+        for spec in self._field_specs:
+            if spec.format == "objects" and target in (
+                spec.key.strip().lower(), spec.name.strip().lower()
+            ):
+                return spec
+        return None
 
     def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
         if not self._field_specs:
-            return {}
+            # Open mode: only WP33-minted types carry a catalog (their
+            # own properties); everything else stays vocabulary-free.
+            return {
+                name: tuple(s for s in own if s.format != "objects")
+                for name, own in self._minted_types.items()
+                if own
+            }
         # No per-type property attachment in the fake: the whole catalog is
-        # offered under every known (non-infra) type name. Relations
-        # (objects format) are edges, not fields-key vocabulary; the
-        # attribution stamps are recorder-owned (ADR 028), not offered.
+        # offered under every known (non-infra) type name -- WP33-minted
+        # properties joined ``_field_specs`` at creation, so they are in
+        # here too. Relations (objects format) are edges, not fields-key
+        # vocabulary; the attribution stamps are recorder-owned (ADR 028),
+        # not offered.
         specs = tuple(
             s for s in self._field_specs
             if s.format != "objects" and s.key not in attribution.ATTRIBUTION_FIELDS
@@ -329,6 +497,21 @@ class InMemoryGraphRepository:
         fetch. Test/eval surface only; not part of the port.
         """
         self._out_of_band.append(draft)
+
+    def stage_space_vocabulary(
+        self,
+        field_catalog: Sequence[FieldSpec] = (),
+        members: Sequence[str] = (),
+    ) -> None:
+        """Adopt a space's property catalog and reflected members after
+        construction -- same semantics as the constructor arguments of the
+        same names. Any catalog (even one staged empty) switches fields
+        resolution to the strict contract. Test/eval surface only, like
+        :meth:`stage_out_of_band`: production composition passes the
+        vocabulary at construction; only the eval fixture stages a
+        case-specific space into an already-built runtime."""
+        self._adopt_catalog(field_catalog)
+        self._reflect_members(members)
 
     async def hydrate(self) -> None:
         """No backing store: the index is already authoritative here."""

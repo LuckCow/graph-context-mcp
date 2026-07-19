@@ -227,6 +227,14 @@ class RawApi:
     def rename(self, obj_id: str, name: str) -> None:
         self._send("PATCH", obj_id, json={"name": name})
 
+    def set_property(self, obj_id: str, entry: dict[str, Any]) -> None:
+        """A human editing one property value in the UI (WP31 e2e)."""
+        self._send("PATCH", obj_id, json={"properties": [entry]})
+
+    def get(self, obj_id: str) -> dict[str, Any]:
+        payload: dict[str, Any] = self._send("GET", obj_id).json()
+        return payload.get("object", payload)
+
     def archive(self, obj_id: str) -> None:
         self._send("DELETE", obj_id)
 

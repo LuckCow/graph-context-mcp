@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NoReturn
@@ -46,11 +45,13 @@ from graph_context.domain.models import (
     Node,
     NodeDraft,
     NodeId,
+    PropertyDraft,
     TimelineValue,
 )
 from graph_context.domain.schema import Role
 from graph_context.errors import (
     GraphContextError,
+    SchemaChangeConflict,
     UnknownFieldKey,
     UnknownNodeType,
     UnknownRelationLabel,
@@ -61,6 +62,7 @@ from graph_context.infrastructure.anytype.config import AnytypeApiError
 from graph_context.infrastructure.anytype.registry import (
     PropertyInfo,
     SpaceRegistry,
+    TypeInfo,
     load_registry,
 )
 
@@ -83,17 +85,6 @@ _INVALID_OPTION_MARKERS = ("invalid select option", "invalid multi_select option
 def _slugify(label: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
     return slug or "relation"
-
-
-# Anytype's tag palette. CreateTagRequest requires a color (live-confirmed);
-# picking by name hash is deterministic without maintaining a mapping, and a
-# human can recolor in the UI without us ever clobbering it (create-only).
-_TAG_COLORS = ("grey", "yellow", "orange", "red", "pink",
-               "purple", "blue", "ice", "teal", "lime")
-
-
-def _tag_color(name: str) -> str:
-    return _TAG_COLORS[zlib.crc32(name.strip().lower().encode()) % len(_TAG_COLORS)]
 
 
 class AnytypeGraphRepository:
@@ -182,6 +173,10 @@ class AnytypeGraphRepository:
 
     def known_edge_labels(self) -> frozenset[str]:
         return self._registry.known_edge_labels()
+
+    def relation_label_for(self, field_key: str) -> str | None:
+        key = self._registry.key_for_label(field_key)
+        return None if key is None else self._registry.label_for(key)
 
     def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
         """Reflectable scalar properties per non-infra type (ADR 023).
@@ -506,6 +501,188 @@ class AnytypeGraphRepository:
             updated = await self._client.update_object(edge.source, payload)
             self._graph.remove_edge(edge)
             self._track_watermark(updated)
+
+    # -- schema changes (WP33, ADR 041) -------------------------------------
+
+    async def create_type(
+        self,
+        name: str,
+        *,
+        plural: str = "",
+        properties: Sequence[PropertyDraft] = (),
+    ) -> str:
+        display = name.strip()
+        if self._registry.type_key_for(display) is not None:
+            raise SchemaChangeConflict(
+                f"a type matching {display!r} already exists in this "
+                "space; propose new properties on it instead"
+            )
+        entries = [self._property_entry(draft) for draft in properties]
+        async with self._writer():
+            created = await self._client.create_type({
+                "key": _slugify(display),
+                "name": display,
+                "plural_name": plural.strip() or f"{display}s",
+                "layout": "basic",
+                "properties": entries,
+            })
+            info = self._adopt_type(
+                created, fallback_key=_slugify(display), fallback_name=display
+            )
+            await self._seed_property_options(info, properties)
+        logger.info("created type %r (WP33 user-confirmed change)", info.name)
+        return info.name
+
+    async def add_type_properties(
+        self, type_identifier: str, properties: Sequence[PropertyDraft]
+    ) -> str:
+        key = self._registry.type_key_for(type_identifier)
+        if key is None:
+            raise UnknownNodeType(
+                type_identifier, tuple(self._registry.known_node_types())
+            )
+        listed = self._registry.types_by_key[key]
+        if not listed.id:
+            raise GraphContextError(
+                f"type {listed.name!r} has no object id in the registry; "
+                "resync (context action='resync') and retry"
+            )
+        async with self._writer():
+            fetched = await self._client.get_type(listed.id)
+            current = fetched.get("properties", [])
+            on_type: dict[str, dict[str, Any]] = {}
+            for entry in current:
+                for label in (entry.get("key"), entry.get("name")):
+                    if label:
+                        on_type[str(label).strip().lower()] = entry
+            additions: list[dict[str, Any]] = []
+            for draft in properties:
+                held = on_type.get(draft.name.strip().lower()) or on_type.get(
+                    _slugify(draft.name)
+                )
+                if held is not None:
+                    if held.get("format") != draft.format:
+                        raise SchemaChangeConflict(
+                            f"{listed.name} already has a property named "
+                            f"{draft.name!r} with format "
+                            f"{held.get('format')!r}, not {draft.format!r}; "
+                            "formats are immutable (A12) -- reuse it as-is "
+                            "or pick another name"
+                        )
+                    continue  # already attached with this format: no-op
+                additions.append(self._property_entry(draft))
+            if not additions:
+                return listed.name
+            # Quirk A11: the properties list replaces the type's fields
+            # wholesale, so the full fetched list rides along with the
+            # additions; name/plural_name/layout are resent verbatim
+            # (human-owned), same discipline as bootstrap's retrofit.
+            updated = await self._client.update_type(listed.id, {
+                "name": fetched["name"],
+                "plural_name": fetched.get("plural_name") or f"{fetched['name']}s",
+                "layout": fetched.get("layout", "basic"),
+                "properties": [
+                    {
+                        "key": e["key"],
+                        "name": e.get("name", e["key"]),
+                        "format": e.get("format", ""),
+                    }
+                    for e in current
+                ] + additions,
+            })
+            info = self._adopt_type(
+                updated, fallback_key=key, fallback_name=listed.name
+            )
+            await self._seed_property_options(info, properties)
+        logger.info(
+            "attached %d propert%s to type %r (WP33 user-confirmed change)",
+            len(additions), "y" if len(additions) == 1 else "ies", info.name,
+        )
+        return info.name
+
+    def _property_entry(self, draft: PropertyDraft) -> dict[str, Any]:
+        """One proposed property as a type-payload entry: reuse an existing
+        same-format property (the type PATCH/POST attaches it), conflict on
+        a format mismatch (A12: formats are immutable) or a relation name
+        (an edge must never gain a scalar shadow, ADR 006), else mint."""
+        if self._registry.key_for_label(draft.name) is not None:
+            raise SchemaChangeConflict(
+                f"{draft.name!r} names an existing relation -- an edge, not "
+                "a scalar property; pick a different name"
+            )
+        existing = self._registry.field_property(draft.name)
+        if existing is not None:
+            if existing.format != draft.format:
+                raise SchemaChangeConflict(
+                    f"a property named {existing.name!r} already exists in "
+                    f"this space with format {existing.format!r}, not "
+                    f"{draft.format!r}; formats are immutable (A12) -- "
+                    "reuse it as-is or pick another name"
+                )
+            return {
+                "key": existing.key,
+                "name": existing.name,
+                "format": existing.format,
+            }
+        return {
+            "key": _slugify(draft.name),
+            "name": draft.name,
+            "format": draft.format,
+        }
+
+    def _adopt_type(
+        self, payload: dict[str, Any], *, fallback_key: str, fallback_name: str
+    ) -> TypeInfo:
+        """Register a create/update response's type in the live registry so
+        this session can use it immediately (no resync)."""
+        props = tuple(
+            PropertyInfo(
+                key=p["key"], name=p.get("name", p["key"]),
+                format=p.get("format", ""), id=p.get("id", ""),
+            )
+            for p in payload.get("properties", [])
+            if p.get("key")
+        )
+        info = TypeInfo(
+            key=payload.get("key") or fallback_key,
+            name=payload.get("name") or fallback_name,
+            id=payload.get("id", ""),
+            properties=props,
+        )
+        self._registry.register_type(info)
+        return info
+
+    async def _seed_property_options(
+        self, info: TypeInfo, drafts: Sequence[PropertyDraft]
+    ) -> None:
+        """Seed proposed select options as tags on the freshly attached
+        properties -- find-or-create by case-insensitive name, create-only,
+        like bootstrap's option seeding (human renames/recolors survive)."""
+        wanted = {
+            draft.name.strip().lower(): draft.options
+            for draft in drafts
+            if draft.options
+        }
+        if not wanted:
+            return
+        for prop in info.properties:
+            options = wanted.get(prop.name.strip().lower()) or wanted.get(prop.key)
+            if (
+                not options
+                or prop.format not in {"select", "multi_select"}
+                or not prop.id
+            ):
+                continue
+            have = {
+                str(tag.get("name", "")).lower()
+                async for tag in self._client.list_tags(prop.id)
+            }
+            for option in options:
+                if option.lower() in have:
+                    continue
+                await self._client.create_tag(
+                    prop.id, {"name": option, "color": mapping.tag_color(option)}
+                )
 
     # -- internals ----------------------------------------------------------
 
@@ -870,7 +1047,7 @@ class AnytypeGraphRepository:
             info.id,
             # `color` is REQUIRED by CreateTagRequest (live-confirmed);
             # derived from the name so it is stable and human-recolorable.
-            {"name": value.strip(), "color": _tag_color(value)},
+            {"name": value.strip(), "color": mapping.tag_color(value)},
         )
         logger.info("created tag %r on property %s", value.strip(), info.key)
         self._unsettled_tags.add(str(created["key"]))

@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from evals.dataset import EvalCase, SeedNode
-from graph_context.domain.models import LinkSpec, NodeDraft, NodeId
+from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft, NodeId
 from graph_context.infrastructure.memory.fake_repository import (
     InMemoryGraphRepository,
 )
@@ -40,6 +40,26 @@ class SeedResult:
 async def seed_world(repository: GraphRepository, case: EvalCase) -> SeedResult:
     ids: dict[str, NodeId] = {}
     staged: set[str] = set()  # out-of-band handles: in the space, no id yet
+    if case.seed_fields or case.seed_members:
+        # The space's own vocabulary: its property catalog (switches the
+        # fake to the catalog-strict fields contract) and its reflected
+        # members. Staged FIRST so seed nodes validate against it, exactly
+        # as a live space would reject them. Fake-only, like out_of_band.
+        if not isinstance(repository, InMemoryGraphRepository):
+            raise SeedError(
+                f"case {case.id!r}: seed.field / seed.members require "
+                "the in-memory backend"
+            )
+        repository.stage_space_vocabulary(
+            field_catalog=[
+                FieldSpec(
+                    name=spec.name, format=spec.format,
+                    key=spec.key, options=spec.options,
+                )
+                for spec in case.seed_fields
+            ],
+            members=case.seed_members,
+        )
     for spec in case.seed_nodes:
         if spec.handle in ids or spec.handle in staged:
             raise SeedError(

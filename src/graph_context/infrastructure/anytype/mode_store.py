@@ -62,13 +62,54 @@ class AnytypeModeStore:
             min_chars = props.get(mapping.PROP_CAPTURE_MIN_CHARS)
             if min_chars is not None:
                 capture["min_chars"] = min_chars
-        return {
+        payload = {
+            # The object id (ADR 034): the Space Context's gc_default_mode
+            # link resolves against it to pick the default mode.
+            "id": str(obj.get("id") or ""),
             "name": name,
             # Stripped: the live markdown export pads the body with
             # trailing whitespace/newline (observed 2026-07-06), and a
             # goal prompt's edges are never meaningful.
             "goal": mapping.body_of(obj).strip(),
             "mutating": bool(props.get(mapping.PROP_MODE_MUTATING)),
+            "web_search": bool(props.get(mapping.PROP_MODE_WEB_SEARCH)),
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
         }
+        # A select: the value is a tag envelope, normalized to the option's
+        # display name. Empty means "not set" -- the loader applies the
+        # default; a set value is validated there (lowercased, so the
+        # Title-Case options match) and a typo names this object (WP19).
+        detail = mapping.field_value(
+            "select", props.get(mapping.PROP_MODE_ACTIVITY_DETAIL)
+        ).strip()
+        if detail:
+            payload["activity_detail"] = detail
+        # Same select rule for the mode's pinned model (ADR 033).
+        model = mapping.field_value(
+            "select", props.get(mapping.PROP_MODE_MODEL)
+        ).strip()
+        if model:
+            payload["model"] = model
+        # ADR 037 driver options -- all "unset means default": the
+        # thinking select follows the WP19 rule, the numbers ride only
+        # when non-zero, the domain lists only when non-empty (the
+        # loader parses the human-typed text into a tuple).
+        thinking = mapping.field_value(
+            "select", props.get(mapping.PROP_MODE_THINKING)
+        ).strip()
+        if thinking:
+            payload["thinking"] = thinking
+        max_tokens = props.get(mapping.PROP_MODE_MAX_TOKENS)
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        max_uses = props.get(mapping.PROP_MODE_SEARCH_MAX_USES)
+        if max_uses:
+            payload["web_search_max_uses"] = max_uses
+        allowed = str(props.get(mapping.PROP_MODE_SEARCH_ALLOWED) or "").strip()
+        if allowed:
+            payload["web_search_allowed_domains"] = allowed
+        blocked = str(props.get(mapping.PROP_MODE_SEARCH_BLOCKED) or "").strip()
+        if blocked:
+            payload["web_search_blocked_domains"] = blocked
+        return payload

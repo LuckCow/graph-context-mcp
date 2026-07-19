@@ -39,6 +39,7 @@ from graph_context import composition
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.errors import GraphContextError
+from graph_context.interface import mode_config
 from graph_context.interface.profiles import get_profile
 from graph_context.orchestrator.drivers import DecideUsage, LLMDriver, ScriptedDriver
 from graph_context.orchestrator.modes import binding_for, load_registry
@@ -185,20 +186,43 @@ async def _run_trial(
     try:
         seed = await seed_world(built.services.repository, case)
         services = await built.services_for(session_id)
-        # Case modes ride the same in-space seam real space modes use
-        # (modes._parse_in_space validates and slugifies); they override
-        # same-named profile modes, so a case can shadow a built-in.
-        registry = load_registry(profile, in_space=[
-            {"name": m.name, "goal": m.goal, "mutating": m.mutating,
-             "origin": f"case {case.id} mode {i}"}
-            for i, m in enumerate(case.modes, 1)
-        ])
+        # ADR 035: an eval world is a freshly seeded space -- the
+        # profile's packaged starter corpus plus the case's own modes,
+        # riding the same in-space seam real space modes use
+        # (modes._parse_in_space validates and slugifies). A case mode
+        # shadowing a seeded slug KEEPS the seed's id, so the fabricated
+        # Space Context default link below never dangles.
+        seeds = mode_config.load_seed_modes(None, profile.name)
+        merged = {
+            mode_config.slugify(p["name"]): p
+            for p in mode_config.seed_payloads(seeds)
+        }
+        for i, m in enumerate(case.modes, 1):
+            slug = mode_config.slugify(m.name)
+            kept_id = (
+                merged[slug]["id"] if slug in merged else f"case:{slug}"
+            )
+            merged[slug] = {
+                "id": kept_id, "name": m.name, "goal": m.goal,
+                "mutating": m.mutating,
+                "origin": f"case {case.id} mode {i}",
+            }
+        registry = load_registry(
+            in_space=list(merged.values()),
+            space_context=[{
+                "name": "Space Context",
+                "origin": "Space Context (eval runner)",
+                "default_mode_ids": [
+                    f"seed:{mode_config.default_seed(seeds).name}"
+                ],
+            }],
+        )
         mode = case.mode or registry.default
         spec = registry.get(mode)
         if spec is None:
             raise RunnerError(
-                f"case {case.id!r}: mode {mode!r} is not in profile "
-                f"{profile.name!r}; loaded: {', '.join(registry.names())}"
+                f"case {case.id!r}: mode {mode!r} is not loaded; "
+                f"loaded: {', '.join(registry.names())}"
             )
         usage_sink: list[DecideUsage] = []
         recorder = RecordingDriver(_build_inner_driver(case, config, usage_sink.append))

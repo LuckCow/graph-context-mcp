@@ -86,3 +86,17 @@ class TestValidateNewNode:
 
     def test_neutral_role_does_not_require_story_time(self) -> None:
         schema.validate_new_node(None, "A realization", "Realized something.", None)
+
+
+class TestValidateTypeName:
+    def test_ordinary_display_name_passes(self) -> None:
+        schema.validate_type_name("Faction")
+        schema.validate_type_name("Meeting Notes")
+
+    def test_empty_name_errors(self) -> None:
+        with pytest.raises(SchemaViolation, match="non-empty"):
+            schema.validate_type_name("   ")
+
+    def test_gc_prefix_is_reserved(self) -> None:
+        with pytest.raises(SchemaViolation, match="reserved gc_"):
+            schema.validate_type_name("gc_faction")

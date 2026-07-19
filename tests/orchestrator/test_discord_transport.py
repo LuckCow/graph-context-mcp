@@ -32,8 +32,8 @@ from graph_context.orchestrator.drivers import (
     ScriptedDriver,
     TranscriptEvent,
 )
-from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
+from tests.orchestrator.mode_fixtures import fiction_registry
 
 FICTION = get_profile("fiction")
 ALLOWED_CHANNEL = 1523551542123298896
@@ -48,7 +48,7 @@ def _route(turns: list[LLMTurn] | None = None, project: str = "Ashfall") -> Chan
     )
     orchestrator = Orchestrator(
         services=services, driver=ScriptedDriver(turns or []),
-        profile=FICTION, registry=load_registry(FICTION),
+        profile=FICTION, registry=fiction_registry(),
     )
     return ChannelRoute(orchestrator=orchestrator)
 
@@ -120,7 +120,9 @@ class TestTurn:
                 super().__init__([LLMTurn(reply="hi Nick")])
                 self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
-            async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+            async def decide(
+                self, transcript, tools, goal: str = "", *, options=None,
+            ) -> LLMTurn:
                 self.transcripts.append(tuple(transcript))
                 return await super().decide(transcript, tools, goal)
 
@@ -131,7 +133,7 @@ class TestTurn:
         )
         orchestrator = Orchestrator(
             services=services, driver=driver, profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
         )
         handler = DiscordTurnHandler(
             routes={ALLOWED_CHANNEL: ChannelRoute(orchestrator=orchestrator)}
@@ -163,7 +165,7 @@ class TestTurn:
         overlaps: list[int] = []
 
         class SlowDriver:
-            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal="", *, options=None):  # type: ignore[no-untyped-def]
                 nonlocal active
                 active += 1
                 overlaps.append(active)
@@ -226,7 +228,7 @@ class TestRouting:
         overlaps: list[int] = []
 
         class SlowDriver:
-            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal="", *, options=None):  # type: ignore[no-untyped-def]
                 nonlocal active
                 active += 1
                 overlaps.append(active)
@@ -255,7 +257,7 @@ class TestRouting:
         overlaps: list[int] = []
 
         class SlowDriver:
-            async def decide(self, transcript, tools, goal=""):  # type: ignore[no-untyped-def]
+            async def decide(self, transcript, tools, goal="", *, options=None):  # type: ignore[no-untyped-def]
                 nonlocal active
                 active += 1
                 overlaps.append(active)

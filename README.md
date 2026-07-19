@@ -2,7 +2,7 @@
 
 An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the default), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes).
 
-The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing nine tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
+The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing eleven tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
 
 **Space-reflecting ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure (Prose, SessionContext, and a few scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)).
 
@@ -17,24 +17,25 @@ Try it without Anytype: `PYTHONPATH=src python scripts/demo_wp2_tools.py` drives
 
 ## Domain profiles (GC_PROFILE)
 
-The schema is space-reflecting and domain-neutral; a profile changes **framing and behavior configuration**: the tool docstrings the LLM reads (they are prompts), type-key → role mappings, the orchestrator's **activity modes** (each a goal prompt + tool binding + capture policy), and the **timeline source**. Tool names and parameters are identical across profiles.
+The schema is space-reflecting and domain-neutral; a profile changes **framing and behavior configuration**: the tool docstrings the LLM reads (they are prompts), type-key → role mappings, the **timeline source**, and which **starter mode corpus** seeds a new space. Tool names and parameters are identical across profiles. *Profiles are deprecated ([ADR 035](docs/adr/035-in-space-only-activity-modes.md) / WP27): the remaining pieces will collapse to neutral defaults or move into space/deployment config — don't build on them.*
 
 | | `fiction` (default) | `workspace` | `assistant` |
 |---|---|---|---|
 | Framing | characters, scenes, foreshadowing | people, projects, meetings, decisions | tasks, procedures, notes |
-| Activity modes | `world_modeling`, `authoring` (captures prose) | `world_modeling`, `authoring` (captures drafts) | `organizing`, `record_procedure` (captures `procedure` nodes), `meeting_notes` (captures `note` nodes) |
+| Starter modes (seeded) | `world_modeling`, `authoring` (captures prose) | `world_modeling`, `authoring` (captures drafts) | `organizing`, `record_procedure` (captures `procedure` nodes), `meeting_notes` (captures `note` nodes) |
 | Timeline | `gc_story_time` (a story number) | `gc_story_time` (epoch/YYYYMMDD) | `event_date` (real ISO dates; `as_of="2026-07-04"`) |
 
-Select with `GC_PROFILE=<name>` (unset = `fiction`). Deployments can add or override activity modes via a `GC_MODES_FILE` TOML file — *Record Procedure is a configuration entry, not a fork*.
+Select with `GC_PROFILE=<name>` (unset = `fiction`).
 
-### Editing modes inside Anytype
+### Activity modes live in the space (ADR 035)
 
-Modes are also configurable **in the space itself**: every object of the bootstrap-minted **Activity Mode** type defines one mode (the first run seeds an *Example Mode* template whose body walks through the fields):
+The space's **Activity Mode** objects are the ONLY live source of modes: every object of the bootstrap-minted type defines one mode, and a space that has none is **seeded once** with the profile's starter corpus (`src/graph_context/interface/mode_seeds/*.toml`) plus an *Example Mode* template whose body walks through the fields. A `GC_MODES_FILE` (or a binding's `modes_file`) replaces the packaged corpus as the **seed source** — it never merges at load; after seeding, edit the objects in Anytype:
 
-- The object **name** becomes the `/mode` name ("Faithful Scribe" → `/mode faithful_scribe`); naming it after a built-in overrides that mode.
+- The object **name** becomes the `/mode` name ("Faithful Scribe" → `/mode faithful_scribe`).
 - The **page body** is the goal prompt the model follows.
-- Tick **`gc_mode_mutating`** to allow graph edits; fill **`gc_capture_type`** (plus optional `gc_capture_references`, `gc_capture_min_chars`) to auto-capture substantial replies; **archive** the object to disable the mode.
-- Edits apply when `/mode` is next used in chat, no restart. Precedence: profile defaults < `GC_MODES_FILE` < in-space.
+- Tick **`gc_mode_mutating`** to allow graph edits; fill **`gc_capture_type`** (plus optional `gc_capture_references`, `gc_capture_min_chars`) to auto-capture substantial replies; **archive** the object to disable the mode. Archive or delete *every* mode object and the next restart reseeds the starter corpus.
+- Edits apply when `/mode` is next used in chat, no restart.
+- The mode **new chats start in** is in-space too ([ADR 034](docs/adr/034-space-context-default-mode.md)): the bootstrap-seeded **Space Context** object carries a *Default mode* link — point it at an Activity Mode object (exactly one; the seeder links the corpus's marked default for you). Empty = the alphabetically first mode; chats that already picked a mode with `/mode` keep it.
 
 ## Running the MCP server
 
@@ -44,7 +45,7 @@ The server speaks **stdio** (one process per client; no network port). Run it di
 GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
 ```
 
-Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`, `schedule`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
+Tools exposed: `context`, `create_node`, `update_node`, `get_node`, `explore`, `find_path`, `find_node`, `query`, `schedule`, `automation`. Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
 
 ## Running the orchestrator (CLI / Discord / Anytype chat)
 
@@ -59,7 +60,7 @@ python -m graph_context.orchestrator.anytype_chat_bot                       # An
 
 `serve` is the consolidated entry point: one process running the Anytype chat bot (always), the Discord bot (only when the token file has content **and** at least one channel is bound — an empty secret file or a zero-table channels file is the "Discord off" switch), and the inspection server in a daemon thread. One transport's crash takes the whole process down loudly; restarts belong to the supervisor.
 
-`GC_DRIVER=anthropic_subscription` (default) talks to the model on your Claude subscription; `GC_DRIVER=anthropic_api` talks to it over the Anthropic Messages API instead — an explicit opt-in that bills API credits and requires `ANTHROPIC_API_KEY` (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune either); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). The values are vendor-namespaced so other providers can slot in later; the legacy names `claude`/`subscription` and `anthropic`/`api` still resolve as aliases. The **mode** is per-chat (`/mode <name>` switches it). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
+`GC_DRIVER=anthropic_subscription` (default) talks to the model on your Claude subscription; `GC_DRIVER=anthropic_api` talks to it over the Anthropic Messages API instead — an explicit opt-in that bills API credits and requires `ANTHROPIC_API_KEY` (`GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` tune either); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). The values are vendor-namespaced so other providers can slot in later; the legacy names `claude`/`subscription` and `anthropic`/`api` still resolve as aliases. The **mode** is per-chat (`/mode <name>` switches it) and carries its own live **activity detail** ([ADR 029](docs/adr/029-live-turn-activity-streaming.md)): while a turn runs, the Anytype bot streams its progress into one edited-in-place activity message, then posts the reply fresh and collapses the trace to a done-summary. Each mode declares how much to show — `activity_detail = "off" | "minimal" | "tools" | "full"` (default `minimal`) on the Activity Mode object's `gc_mode_activity_detail` field (a seed TOML can pre-fill it, ADR 035) — so switching modes switches verbosity (`off` restores the plain `Processing…`-becomes-reply behavior). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes).
 
 ### Anytype chat (the all-in path)
 
@@ -77,7 +78,7 @@ The bot reads its token from `DISCORD_BOT_TOKEN_FILE` and serves **only** the ch
 space_id   = "bafyre..."           # required
 profile    = "fiction"             # optional; defaults to GC_PROFILE
 project    = "Ashfall"             # optional cosmetic label
-modes_file = "ashfall-modes.toml"  # optional; overrides GC_MODES_FILE for this channel
+modes_file = "ashfall-modes.toml"  # optional; the seed source for a mode-less space (ADR 035)
 ```
 
 It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer; the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty.
@@ -116,7 +117,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** You should see the nine tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
+**3. Restart Claude Desktop.** You should see the eleven tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
 
 ### Graduating to the live Anytype backend
 
@@ -187,9 +188,12 @@ interface  ──▶  application  ──▶  domain
 | `domain/traversal.py` | Bounded BFS (`explore`) | Pure function; filters prune subtrees; `as_of` hides future events |
 | `domain/pathfinding.py` | Bounded shortest path (`find_path`) | Undirected walk, direction-preserving result |
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
+| `domain/rules.py` | Automation Rule vocabulary + matching ([ADR 039](docs/adr/039-reactive-rule-engine.md)) | Pure `parse_rule_fields`/`condition_met`; lenient status select; errors echo the allowed words |
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand descriptions/prose |
 | `ports/session_store.py` | Keyed session-snapshot contract | Plain-dict snapshots per required key ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)); lenient load (corrupt → `None`) |
 | `ports/mode_store.py` | Activity-Mode config contract | Plain payload dicts; validation lives in the loader, not the store |
+| `ports/space_context_store.py` | Space-settings singleton contract ([ADR 034](docs/adr/034-space-context-default-mode.md)) | Payloads carry the default-mode link targets; the loader owns the singleton rule |
+| `ports/script_runner.py` | Sandboxed script execution contract ([ADR 040](docs/adr/040-sandboxed-script-action.md)) | Script + snapshot in, queued effects out; every failure is a legible `gc_rule_last_error` message |
 | `ports/semantic.py` | `Embedder` + `SemanticIndex` contracts | Embeddings are a cache keyed by content hash + model, never truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
 | `application/node_reader.py` | `get_node` use-case | Grouped edges + `include_provenance` excerpts |
@@ -199,11 +203,13 @@ interface  ──▶  application  ──▶  domain
 | `application/intent_recorder.py` | One `gc_intent` node per mutating turn | Provenance is a harness responsibility ([ADR 008](docs/adr/008-provenance-as-harness-responsibility.md)) |
 | `application/semantic_projector.py` | The embedding cache tracks the graph | Full pass + prune after hydrate; incremental from resync; store touches never re-embed |
 | `application/ranker.py` | Graph-aware retrieval ([ADR 016](docs/adr/016-graph-aware-ranking.md)) | Recall seeds → graph recruits → activation scores; every hit carries evidence |
+| `application/rule_engine.py` | `RuleEngine` tick over Automation Rules ([ADR 039](docs/adr/039-reactive-rule-engine.md)) | In-memory baseline diff: transitions not states; the engine's own writes never trigger rules |
 | `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh`; keyed |
 | `application/session_registry.py` | The one source of live sessions ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)) | Lazy keyed `(SessionState, persister)` cache; `flush_all` at teardown |
 | `composition.py` | Shared service builder | One wiring; all composition roots delegate to it |
-| `infrastructure/memory/` | In-memory repository, session store, mode store | Reference impls; certified by `tests/contract` |
+| `infrastructure/memory/` | In-memory repository, session store, mode store, space-context store | Reference impls; certified by `tests/contract` |
 | `infrastructure/semantic/` | Hash + sentence-transformers embedders; memory + SQLite index | `GC_EMBEDDER` selects; the SQLite cache file is disposable |
+| `infrastructure/sandbox/` | The script sandbox ([ADR 040](docs/adr/040-sandboxed-script-action.md)) | `bootstrap.py` = the rlimited `python -I -S` child (stdlib-only, importable for tests); `runner.py` spawns, caps, and kills it |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
 | `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A8) live here |
 | `infrastructure/anytype/registry.py` | `SpaceRegistry`: the space's live types/relations | Resolves requested types & relation labels to existing keys; unknown labels surface for approval |
@@ -211,16 +217,20 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/sync.py` | Hydrate / resync engine | Lenient reads, strict writes; search-based modified-since |
 | `infrastructure/anytype/repository.py` | `AnytypeGraphRepository` | Persist-first write-through; composite rollback; self-write suppression |
 | `infrastructure/anytype/session_repository.py` | `AnytypeSessionStore` | Snapshot JSON in a per-key `SessionContext` node (discriminated by `gc_session_key`) |
+| `infrastructure/anytype/mode_seeder.py` | Starter-mode heal (ADR 035) | Seeds a space with ZERO Activity Mode objects, links the default, never touches a space that has any |
 | `infrastructure/anytype/mode_store.py` | `AnytypeModeStore` | One mode per `gc_activity_mode` object: name → `/mode` slug, page body → goal, archive = disable |
+| `infrastructure/anytype/space_context_store.py` | `AnytypeSpaceContextStore` | The `gc_space_context` singleton's `gc_default_mode` link → the mode new chats start in |
 | `infrastructure/anytype/chat.py` | Chat quirk quarantine + `AnytypeChatClient` | Chat payload/SSE assumptions (C1–C6); the chat analogue of `mapping.py` |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
 | `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The nine tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
+| `interface/tools.py` | The eleven tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
 | `interface/context_block.py` | Turn-start context block ([ADR 020](docs/adr/020-curated-cross-turn-context.md)) | Scratchpad + working-set buckets + recent trail, once per turn, budget-degraded |
-| `interface/profiles.py` | Domain profiles + `ModeSpec` defaults | Docstrings are prompts; golden-pinned per profile |
+| `interface/profiles.py` | Domain profiles (DEPRECATED, ADR 035/WP27) + `ModeSpec` | Docstrings are prompts; golden-pinned per profile |
+| `interface/mode_config.py` | Mode validation seam + seed-TOML parser (ADR 035) | One payload shape feeds the memory store, the Anytype seeder, and the eval runner |
+| `interface/mode_seeds/` | Packaged starter corpora (one TOML per profile) | Seeds a mode-less space once; never merged at load |
 | `interface/server.py` | MCP composition root | Only module importing the MCP SDK; lifespan wiring |
 | `orchestrator/pipeline.py` | `handle_message` turn loop | Per-turn tool budget; opens with the context block + conversation memory (`/clear` resets it); drains the journal into an intent node at turn end |
-| `orchestrator/modes.py` | `ModeSpec` loader (profile < `GC_MODES_FILE` < in-space) | Unbound tools don't exist in the session — unavailable, not refused; `/mode` re-reads all sources |
+| `orchestrator/modes.py` | `ModeSpec` loader (in-space ONLY, ADR 035) | Unbound tools don't exist in the session — unavailable, not refused; `/mode` re-reads the space |
 | `orchestrator/drivers.py` | `LLMDriver` seam + scripted/manual drivers | Transcript + tool docs + mode goal in; tool calls or a reply out |
 | `orchestrator/claude_driver.py` | The real model behind the seam | claude-agent-sdk on your Claude subscription; the SDK never executes tools — calls are harvested and returned as the decision |
 | `orchestrator/capture.py` | Authoring auto-capture | Exact-name entity linking; the harness records what tools used to ask for |
@@ -234,6 +244,7 @@ interface  ──▶  application  ──▶  domain
 | `orchestrator/spaces.py` | Space→chat bindings (`GC_SPACES_FILE`, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)/[021](docs/adr/021-per-chat-keyed-sessions.md)) | Table key IS the space id; serve-all-chats minus `exclude_chats`, or a `chat_id` pin |
 | `orchestrator/rendering.py` | Shared reply rendering | `render` prefixes + `chunk`ing, shared by the chat transports |
 | `orchestrator/anytype_chat_transport.py` + `anytype_chat_bot.py` | Anytype in-space chat adapter | Echo suppression, persisted chat cursor (offline catch-up), `anytype://` deep links; only the composition root touches infrastructure |
+| `orchestrator/turn_activity.py` | Live turn activity ([ADR 029](docs/adr/029-live-turn-activity-streaming.md)) | Folds decisions/tool results into one edited-in-place chat message per the active mode's `activity_detail`; leading-edge edit coalescing; collapses to a done-summary |
 
 ## Conventions
 

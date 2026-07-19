@@ -1,4 +1,4 @@
-"""WP7: exactly one intent node per mutating turn; none for read-only."""
+"""WP7/ADR 038: one intent node per working turn; none for plain answers."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ async def test_mutating_turn_yields_one_intent_node_with_edges_to_every_touch():
     assert f"created: {mira}" in body and f"modified: {keep}" in body
 
 
-async def test_read_only_turn_writes_nothing():
+async def test_a_plain_answer_writes_nothing():
     repository = InMemoryGraphRepository()
     before = repository.graph.node_count()
     result = await _recorder(repository).record_turn(
@@ -66,6 +66,42 @@ async def test_read_only_turn_writes_nothing():
     )
     assert result is None
     assert repository.graph.node_count() == before
+
+
+async def test_a_process_trace_alone_records_the_turn():
+    """ADR 038: background work is reason enough -- the node carries the
+    trace as gc:process, marks nothing touched, and links nothing."""
+    repository = InMemoryGraphRepository()
+    node = await _recorder(repository).record_turn(
+        prompt="How big is the world?",
+        mutations=[],
+        process_trace="**Decision 1**\n\n-> explore({})",
+        user_id="cli:local", model="scripted", mode="world_modeling",
+    )
+    assert node is not None
+    assert node.role is Role.INTENT
+    body = await repository.fetch_body(node.id)
+    assert "### gc:process\n**Decision 1**" in body
+    assert "### gc:touched\n(none)" in body
+    assert list(repository.graph.edges(node.id)) == []
+
+
+async def test_the_process_trace_supersedes_the_condensed_tool_list():
+    """One rendering of the turn, not two: gc:process replaces
+    gc:tool_trace when both inputs are supplied."""
+    repository = InMemoryGraphRepository()
+    mira, _ = await _world(repository)
+    node = await _recorder(repository).record_turn(
+        prompt="Add Mira.",
+        mutations=[MutationRecord(mira, "created")],
+        trace=[ToolTrace("create_node", 'name="Mira"')],
+        process_trace="**Decision 1**\n\n-> create_node({...})",
+    )
+    assert node is not None
+    body = await repository.fetch_body(node.id)
+    assert "### gc:process" in body
+    assert "### gc:tool_trace" not in body
+    assert f"created: {mira}" in body  # touched detail is unchanged
 
 
 async def test_body_cap_and_truncation_marker():

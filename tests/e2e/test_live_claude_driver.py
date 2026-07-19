@@ -77,6 +77,71 @@ async def test_a_transcript_with_the_result_becomes_a_reply(tools):
     assert "mira" in turn.reply.lower()
 
 
+async def test_web_search_answers_a_current_information_question(tools):
+    """WP20 (ADR 030): the WebSearch built-in works headless on
+    subscription auth -- the search runs server-side INSIDE the decide
+    and surfaces as server_tool_calls, never as pipeline work."""
+    driver = ClaudeAgentDriver()
+    turn = await driver.decide(
+        [TranscriptEvent(
+            "user",
+            "Use web search to find what today's date is according to any "
+            "news site, then answer with what you found.",
+        )],
+        tools,
+        goal=GOAL,
+        web_search=True,
+    )
+    assert turn.reply, "expected a searched answer, got no reply"
+    assert not turn.tool_calls, (
+        f"WebSearch leaked into pipeline tool_calls: {turn.tool_calls!r}"
+    )
+    assert turn.server_tool_calls, "the model never searched"
+    assert turn.server_tool_calls[0].name == "WebSearch"
+    # WP22: the raw result payload rides along for next-decide replay.
+    assert any(raw for raw in turn.server_tool_results), (
+        "no search result payload was captured from the stream"
+    )
+
+
+async def test_an_inbound_image_reaches_the_model(tools):
+    """WP23: the message-dict query form carries native image blocks into
+    the CLI on subscription auth -- the one wire shape that can. A solid
+    red PNG the model must describe by color."""
+    import base64
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        piece = struct.pack(">I", len(data)) + tag + data
+        return piece + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * 8 for _ in range(8))
+    png = (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    )
+
+    from graph_context.orchestrator.drivers import ImageAttachment
+
+    driver = ClaudeAgentDriver()
+    turn = await driver.decide(
+        [TranscriptEvent(
+            "user",
+            "Answer with the dominant color of the attached image, one word.",
+            images=(ImageAttachment(
+                name="swatch.png", media_type="image/png",
+                data_base64=base64.b64encode(png).decode("ascii"),
+            ),),
+        )],
+        tools,
+        goal=GOAL,
+    )
+    assert turn.reply, "expected a color answer, got no reply"
+    assert "red" in turn.reply.lower(), f"model did not see the image: {turn.reply!r}"
+
+
 async def test_the_live_session_exposes_only_the_bound_gc_tools(tools):
     """The capability boundary, checked against the CLI's own init report:
     no Read/Write/Bash/... -- the binding's mcp__gc__* tools are the whole

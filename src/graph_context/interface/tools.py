@@ -46,8 +46,15 @@ from functools import wraps
 from typing import Any
 
 from graph_context.application.scheduler import Scheduler
+from graph_context.application.schema_proposals import SchemaProposal
 from graph_context.domain import schema
-from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
+from graph_context.domain.models import (
+    Edge,
+    Node,
+    NodeDraft,
+    NodeId,
+    PropertyDraft,
+)
 from graph_context.domain.overview import build_overview
 from graph_context.domain.query import (
     NodeQuery,
@@ -58,15 +65,15 @@ from graph_context.domain.traversal import ExploreQuery
 from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
 from graph_context.interface.presenters import Detail
-from graph_context.interface.services import Services
+from graph_context.interface.services import OutboundFile, Services
 from graph_context.interface.tool_args import (
     _edge_type_set,
     _node_type_set,
     _parse_detail,
     _parse_edge_type,
     _parse_field_declarations,
+    _parse_fields_and_links,
     _parse_hold_detail,
-    _parse_links,
     _parse_node_type,
     _parse_order_by,
     _parse_predicates,
@@ -119,6 +126,15 @@ def guarded(
         return body
 
     return wrapper
+
+
+def is_error_result(result: str) -> bool:
+    """Whether a rendered tool result is :func:`guarded`'s error form.
+
+    The ``ERROR: `` prefix rule lives in this file; consumers (the
+    pipeline's activity observer, WP19) ask instead of re-spelling it.
+    """
+    return result.startswith("ERROR: ")
 
 
 async def _note_mutation(services: Services) -> None:
@@ -371,6 +387,235 @@ async def schedule_tool(
 
 
 @guarded
+async def automation_tool(
+    services: Services,
+    action: str = "list",
+    name: str = "",
+    rule: str = "",
+    target_type: str = "",
+    watch_property: str = "",
+    condition: str = "",
+    rule_action: str = "",
+    action_property: str = "",
+    action_value: str = "",
+    script: str = "",
+    trigger: str = "",
+) -> str:
+    engine = services.rules
+    if action == "create":
+        node = await engine.create(
+            name, target_type, watch_property, condition, rule_action,
+            action_property=action_property, action_value=action_value,
+            script=script,
+        )
+        await _note_mutation(services)
+        return (
+            f"created automation rule {node.name!r} (id={node.id}). It "
+            "runs on its own a few seconds after a matching change, "
+            "while the assistant is serving this space. Check on it "
+            "with action='list'; simulate it with action='test'."
+        )
+    if action == "update":
+        node = await engine.update(
+            rule or name,
+            target_type=target_type, watch_property=watch_property,
+            condition=condition, action=rule_action,
+            action_property=action_property, action_value=action_value,
+            script=script if script else None,
+        )
+        await _note_mutation(services)
+        return (
+            f"updated automation rule {node.name!r} (id={node.id}). "
+            "Simulate it with action='test' to confirm the new behavior."
+        )
+    if action == "list":
+        views = engine.views()
+        if not views:
+            return (
+                "no automation rules. Create one with action='create' "
+                "(name, target_type, watch_property, condition, "
+                "rule_action)."
+            )
+        lines = [f"automation rules ({len(views)}):"]
+        for view in views:
+            lines.append(f"- {view.node.name} (id={view.node.id}) -- {view.status}")
+            lines.append(f"  {view.summary}")
+        return "\n".join(lines)
+    if action in ("pause", "resume"):
+        node = await engine.set_paused(rule or name, paused=action == "pause")
+        await _note_mutation(services)
+        if action == "pause":
+            return (
+                f"paused {node.name!r} (id={node.id}); it will not fire. "
+                "Resume with action='resume', or in Anytype by setting "
+                "its 'Rule status' back to Active."
+            )
+        return f"resumed {node.name!r} (id={node.id}); it is active again."
+    if action == "test":
+        return await engine.dry_run(
+            identifier=rule, trigger=trigger,
+            target_type=target_type, watch_property=watch_property,
+            condition=condition, action=rule_action,
+            action_property=action_property, action_value=action_value,
+            script=script,
+        )
+    raise GraphContextError(
+        f"unknown action {action!r}; allowed: create, update, list, "
+        "pause, resume, test"
+    )
+
+
+# WP33 (ADR 041): the schema tool -- the LLM drafts a type change, the
+# user confirms, only then does apply touch the space.
+
+
+def _parse_property_drafts(
+    properties: list[dict[str, Any]] | None,
+) -> tuple[PropertyDraft, ...]:
+    """Property entries as the tool surface takes them:
+    ``{"name": ..., "format": ..., "options": [...]}`` (options may also
+    arrive as one comma-separated string). Domain validation runs inside
+    ``PropertyDraft``; here we only reshape and reject non-dict entries."""
+    drafts: list[PropertyDraft] = []
+    for entry in properties or []:
+        if not isinstance(entry, dict):
+            raise GraphContextError(
+                "each properties entry must be an object like "
+                "{'name': 'Status', 'format': 'select', "
+                "'options': ['Open', 'Done']}"
+            )
+        options = entry.get("options") or ()
+        if isinstance(options, str):
+            options = [o.strip() for o in options.split(",") if o.strip()]
+        drafts.append(PropertyDraft(
+            name=str(entry.get("name", "")),
+            format=str(entry.get("format", "")).strip().lower(),
+            options=tuple(str(o) for o in options),
+        ))
+    return tuple(drafts)
+
+
+def _render_proposal(proposal: SchemaProposal) -> str:
+    lines = [f"proposal {proposal.id} (drafted, NOT applied):"]
+    lines.extend(proposal.summary())
+    lines.append(
+        "A confirmation message will be posted right after your reply; "
+        "the change applies ONLY if the user reacts \N{THUMBS UP SIGN} "
+        "on it (\N{THUMBS DOWN SIGN} dismisses). You cannot apply it "
+        "yourself -- do not claim the change is made, and do not repeat "
+        "the proposal's contents in your reply (the confirmation message "
+        "carries them). If the user asks for changes, cancel and "
+        "re-propose."
+    )
+    return "\n".join(lines)
+
+
+@guarded
+async def schema_tool(
+    services: Services,
+    action: str = "list",
+    type: str = "",
+    plural: str = "",
+    properties: list[dict[str, Any]] | None = None,
+    reason: str = "",
+    proposal_id: str = "",
+) -> str:
+    proposals = services.proposals
+    if action == "propose_type":
+        proposal = proposals.propose_type(
+            services.repository, type, plural=plural,
+            properties=_parse_property_drafts(properties), reason=reason,
+        )
+        return _render_proposal(proposal)
+    if action == "propose_fields":
+        proposal = proposals.propose_fields(
+            services.repository, type,
+            _parse_property_drafts(properties), reason=reason,
+        )
+        return _render_proposal(proposal)
+    if action == "list":
+        pending = proposals.pending()
+        if not pending:
+            return (
+                "no pending schema proposals. Draft one with "
+                "action='propose_type' (type, plural, properties) or "
+                "action='propose_fields' (type, properties)."
+            )
+        lines = [f"pending schema proposals ({len(pending)}):"]
+        for proposal in pending:
+            lines.append(f"[{proposal.id}]")
+            lines.extend(proposal.summary())
+        lines.append(
+            "Each applies only when the user reacts \N{THUMBS UP SIGN} "
+            "on its confirmation message; you cannot apply them."
+        )
+        return "\n".join(lines)
+    if action == "apply":
+        # ADR 041 v2: apply is DELIBERATELY not a model action -- the
+        # guarantee is that only a human's reaction executes a change.
+        raise GraphContextError(
+            "apply is not a model action: the change executes only when "
+            "the USER reacts \N{THUMBS UP SIGN} on the proposal's "
+            "confirmation message in the chat. If they agreed in words, "
+            "point them at the confirmation message"
+        )
+    if action == "cancel":
+        proposal = proposals.cancel(proposal_id)
+        return (
+            f"cancelled proposal {proposal.id} ({proposal.type_name!r}); "
+            "nothing was changed. Re-propose any time."
+        )
+    raise GraphContextError(
+        f"unknown action {action!r}; allowed: propose_type, "
+        "propose_fields, list, cancel"
+    )
+
+
+# WP23 (ADR 032): send_file queues into the turn-scoped outbox; the
+# transport does the actual upload after the reply is composed.
+MAX_OUTBOUND_FILE_CHARS = 200_000
+MAX_OUTBOUND_FILES_PER_TURN = 4
+
+
+@guarded
+async def send_file_tool(
+    services: Services,
+    name: str,
+    content: str,
+) -> str:
+    filename = name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if not filename:
+        raise GraphContextError(
+            "name must be a filename like 'report.md' or 'data.csv'"
+        )
+    if "." not in filename:
+        raise GraphContextError(
+            f"name {filename!r} needs an extension (e.g. {filename}.md) so "
+            "the chat knows what kind of file it is"
+        )
+    if not content:
+        raise GraphContextError(
+            "content is empty -- pass the file's complete text"
+        )
+    if len(content) > MAX_OUTBOUND_FILE_CHARS:
+        raise GraphContextError(
+            f"content is {len(content)} characters; the cap is "
+            f"{MAX_OUTBOUND_FILE_CHARS}. Split it into smaller files."
+        )
+    if len(services.outbox) >= MAX_OUTBOUND_FILES_PER_TURN:
+        raise GraphContextError(
+            f"already {MAX_OUTBOUND_FILES_PER_TURN} files queued this turn "
+            "-- deliver these first and send more next turn"
+        )
+    services.outbox.append(OutboundFile(name=filename, content=content))
+    return (
+        f"queued {filename!r} ({len(content)} characters); it will be "
+        "attached to your reply when the turn ends. Do NOT repeat the "
+        "file's content in your reply text."
+    )
+
+
+@guarded
 async def create_node_tool(
     services: Services,
     type: str,
@@ -384,6 +629,9 @@ async def create_node_tool(
     create_missing_relations: bool = False,
     create_missing_fields: dict[str, str] | None = None,
 ) -> str:
+    fields, parsed_links, declarations = await _parse_fields_and_links(
+        services, fields, links, _parse_field_declarations(create_missing_fields)
+    )
     draft = NodeDraft(
         type=_parse_node_type(type),
         name=name,
@@ -396,9 +644,9 @@ async def create_node_tool(
     )
     node = await services.writer.create_node(
         draft,
-        await _parse_links(links, services),
+        parsed_links,
         create_missing_relations=create_missing_relations,
-        create_missing_fields=_parse_field_declarations(create_missing_fields),
+        create_missing_fields=declarations,
     )
     await _note_mutation(services)
     view = await services.reader.get_node(node.id)
@@ -429,6 +677,9 @@ async def update_node_tool(
         )
         for i in remove_links or []
     ]
+    fields, parsed_add_links, declarations = await _parse_fields_and_links(
+        services, fields, add_links, _parse_field_declarations(create_missing_fields)
+    )
     node = await services.writer.update_node(
         node_id,
         name=name,
@@ -436,10 +687,10 @@ async def update_node_tool(
         description=description,
         story_time=story_time,
         fields=fields,
-        add_links=await _parse_links(add_links, services),
+        add_links=parsed_add_links,
         remove_links=removals,
         create_missing_relations=create_missing_relations,
-        create_missing_fields=_parse_field_declarations(create_missing_fields),
+        create_missing_fields=declarations,
     )
     await _note_mutation(services)
     stale_note = (

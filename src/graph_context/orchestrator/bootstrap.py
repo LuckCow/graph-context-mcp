@@ -25,7 +25,7 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from graph_context import composition
 from graph_context.application.intent_recorder import IntentRecorder
@@ -38,6 +38,8 @@ from graph_context.orchestrator import modes
 from graph_context.orchestrator.channels import ChannelRoute, load_channel_bindings
 from graph_context.orchestrator.discord_transport import parse_channel_allowlist
 from graph_context.orchestrator.drivers import (
+    DEFAULT_OPTIONS,
+    DecideOptions,
     LLMDriver,
     LLMTurn,
     ToolCall,
@@ -86,6 +88,8 @@ class ManualDriver:
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         last = transcript[-1]
         if last.kind == "tool":
@@ -118,12 +122,15 @@ _DRIVER_ALIASES = {
 }
 
 
-def build_driver() -> tuple[LLMDriver, str, str]:
+def build_driver(turn_log: TurnLog | None = None) -> tuple[LLMDriver, str, str]:
     """GC_DRIVER resolution -> (driver, attribution model name, help line).
 
     ``anthropic_subscription`` (default) | ``anthropic_api`` | ``manual``.
     Unknown values and a missing SDK fail loudly at startup, like every
-    other config error (specs, GC_EMBEDDER).
+    other config error (specs, GC_EMBEDDER). When the turn diary is on,
+    it becomes the driver's ``on_result`` sink (ADR 037): per-decide
+    token/cost usage was previously computed and discarded outside the
+    eval harness.
     """
     raw = os.environ.get("GC_DRIVER", "anthropic_subscription").strip().lower()
     choice = _DRIVER_ALIASES.get(raw, raw)
@@ -148,7 +155,10 @@ def build_driver() -> tuple[LLMDriver, str, str]:
                 "container rebuild installs the [orchestrator] extra); "
                 "GC_DRIVER=manual runs without it"
             ) from err
-        driver = ClaudeAgentDriver(model=model, effort=effort)  # type: ignore[arg-type]
+        driver = ClaudeAgentDriver(
+            model=model, effort=effort,  # type: ignore[arg-type]
+            on_result=turn_log.usage if turn_log else None,
+        )
         help_line = (
             "talking to the model on your Claude subscription; /mode [name] "
             "inspects/switches mode; /clear resets conversation memory."
@@ -182,7 +192,8 @@ def build_driver() -> tuple[LLMDriver, str, str]:
             "not the Claude subscription"
         )
         anthropic_driver = AnthropicDriver(
-            model=model or DEFAULT_MODEL, effort=effort
+            model=model or DEFAULT_MODEL, effort=effort,
+            on_result=turn_log.usage if turn_log else None,
         )
         help_line = (
             "talking to the model over the Anthropic API (bills API "
@@ -277,6 +288,9 @@ class SpaceRuntimes:
     space_routes: Mapping[str, ChannelRoute]  # space id -> its shared route
     space_bindings: Mapping[str, SpaceBinding]  # space id -> binding
     session_labels: Mapping[str, dict[str, str]]  # space id -> label sink
+    # chat id -> its current name as last listed (WP21: the auto-titler's
+    # untitled test reads it; the rescan watcher keeps it fresh).
+    chat_names: dict[str, str] = field(default_factory=dict)
 
 
 def register_chat(
@@ -291,6 +305,7 @@ def register_chat(
     binding = runtimes.space_bindings[space_id]
     runtimes.routes[chat_id] = runtimes.space_routes[space_id]
     runtimes.spaces[chat_id] = space_id
+    runtimes.chat_names[chat_id] = name.strip()  # "" = untitled (WP21)
     label = name.strip() or chat_id
     runtimes.descriptions[chat_id] = (
         f"{label} (space={space_id}, profile={binding.profile.name})"
@@ -314,29 +329,30 @@ async def _assemble_runtime(
     Everything space-bound multiplies per call -- the journal included
     (a shared journal would attribute one channel's mutations to another
     channel's intent node); the driver and turn log are shared, both
-    per-turn stateless. ``modes_file`` overrides ``GC_MODES_FILE`` for
-    this runtime (per-channel modes, ADR 017).
+    per-turn stateless. ``modes_file`` (or ``GC_MODES_FILE``) is the SEED
+    source since ADR 035 -- composition mints starter Activity Mode
+    objects into a mode-less space; the space's own objects are the only
+    live source, and the Space Context object picks the default (ADR
+    034). The reload closure re-reads both stores on every /mode
+    command, so an edit made in Anytype applies without a restart.
     """
     provenance_on = _knob_on("GC_PROVENANCE")
     store_prompt = _knob_on("GC_STORE_LLM_INPUT")
     journal = MutationJournal() if provenance_on else None
     built = await composition.build_runtime(
-        profile, journal=journal, space_id=space_id, project=project
+        profile, journal=journal, space_id=space_id, project=project,
+        modes_file=modes_file or os.environ.get("GC_MODES_FILE"),
     )
     services = built.services
     recorder = (
         IntentRecorder(services.repository, store_prompt=store_prompt)
         if provenance_on else None
     )
-    # ADR 015: profile defaults, overlaid by the modes file TOML and by
-    # the space's own Activity Mode objects (in-space wins). The same
-    # closure re-reads all three sources on every /mode command, so an
-    # edit made in Anytype applies without a restart.
-    modes_file = modes_file or os.environ.get("GC_MODES_FILE")
 
     async def reload_registry() -> modes.ModeRegistry:
         return modes.load_registry(
-            profile, modes_file, in_space=await built.mode_store.load()
+            in_space=await built.mode_store.load(),
+            space_context=await built.space_context_store.load(),
         )
 
     registry = await reload_registry()  # startup: bad specs fail loudly here
@@ -364,9 +380,10 @@ async def build_orchestrator() -> Runtime:
     here, before any loop starts.
     """
     profile = profiles.get_profile(os.environ.get("GC_PROFILE"))
-    driver, model_name, help_line = build_driver()
+    turn_log = build_turn_log()
+    driver, model_name, help_line = build_driver(turn_log)
     return await _assemble_runtime(
-        profile, driver, model_name, help_line, build_turn_log()
+        profile, driver, model_name, help_line, turn_log
     )
 
 
@@ -389,8 +406,8 @@ async def build_channel_runtimes() -> ChannelRuntimes:
             "both GC_CHANNELS_FILE and GC_DISCORD_CHANNELS are set; the "
             "channels file replaces the allowlist -- unset one"
         )
-    driver, model_name, help_line = build_driver()
     turn_log = build_turn_log()
+    driver, model_name, help_line = build_driver(turn_log)
 
     if not channels_file:
         allowed = parse_channel_allowlist(legacy_raw)
@@ -468,8 +485,8 @@ async def build_space_runtimes(
             '[spaces."<space-id>"] bindings (see spaces.toml at the repo root)'
         )
     bindings = load_space_bindings(spaces_file, os.environ.get("GC_PROFILE"))
-    driver, model_name, help_line = build_driver()
     turn_log = build_turn_log()
+    driver, model_name, help_line = build_driver(turn_log)
     teardown: list[TeardownHook] = []
     space_routes: dict[str, ChannelRoute] = {}
     space_bindings: dict[str, SpaceBinding] = {}

@@ -47,12 +47,23 @@ class Role(StrEnum):
     # prompt the orchestrator hands the LLM when it comes due. Humans edit
     # them in Anytype; the LLM manages them through the `schedule` tool.
     SCHEDULED = "ScheduledEvent"
+    # The space-settings singleton (ADR 034): space-wide assistant config
+    # humans edit in Anytype -- today, which Activity Mode new chats start
+    # in. The LLM's traversal never sees it.
+    SPACE_CONTEXT = "SpaceContext"
+    # Automation Rule nodes (WP31, ADR 039): a watched property
+    # transition plus a built-in action the rule engine runs. Humans
+    # author them in Anytype; the engine writes status back.
+    RULE = "AutomationRule"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
 # excluded from the story-node stats count.
 INFRA_ROLES: frozenset[Role] = frozenset(
-    {Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE, Role.SCHEDULED}
+    {
+        Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE,
+        Role.SCHEDULED, Role.SPACE_CONTEXT, Role.RULE,
+    }
 )
 
 
@@ -76,6 +87,8 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_intent": Role.INTENT,
     "gc_activity_mode": Role.MODE,
     "gc_scheduled_event": Role.SCHEDULED,
+    "gc_space_context": Role.SPACE_CONTEXT,
+    "gc_rule": Role.RULE,
     # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
     # the gc_ keys above; backends without a key registry (the in-memory
     # repository, eval worlds) see the display name as the type, and these
@@ -83,6 +96,8 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     # about what find_node can see.
     "activity mode": Role.MODE,
     "scheduled event": Role.SCHEDULED,
+    "space context": Role.SPACE_CONTEXT,
+    "automation rule": Role.RULE,
 }
 
 
@@ -153,6 +168,21 @@ def validate_field_declarations(
                 f"unknown format {fmt!r} for new field {key!r}; "
                 f"formats: {allowed}"
             )
+
+
+def validate_type_name(name: str) -> None:
+    """Well-formedness of a proposed NEW type's display name (WP33).
+
+    Whether the name collides with an existing type is the repository's
+    call (:class:`graph_context.errors.SchemaChangeConflict`), not ours.
+    """
+    if not name.strip():
+        raise SchemaViolation("type 'name' must be a non-empty string")
+    if name.strip().lower().startswith("gc_"):
+        raise SchemaViolation(
+            f"type name {name!r} uses the reserved gc_ prefix "
+            "(infrastructure vocabulary); pick a human name"
+        )
 
 
 def validate_new_node(

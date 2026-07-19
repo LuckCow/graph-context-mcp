@@ -19,12 +19,20 @@ from graph_context.interface.profiles import get_profile
 from graph_context.interface.services import build_services
 from graph_context.orchestrator.anytype_chat_transport import (
     MAX_ATTACHMENTS,
+    MAX_IMAGE_BYTES,
+    MAX_TEXT_BYTES,
+    MAX_TITLE_CHARS,
     PROCESSING_NOTICE,
     AnytypeChatTurnHandler,
     ChatCursor,
+    ChatTitler,
+    InboundAttachment,
     InboundChatMessage,
     SentMessages,
     TurnReply,
+    attachment_note,
+    classify_attachment,
+    fenced_file,
     object_references,
     plainify,
 )
@@ -32,9 +40,11 @@ from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import (
     LLMTurn,
     ScriptedDriver,
+    ToolCall,
     TranscriptEvent,
 )
-from graph_context.orchestrator.pipeline import Orchestrator
+from graph_context.orchestrator.pipeline import Orchestrator, ReplyEvent
+from graph_context.orchestrator.turn_activity import ChatActivity
 
 FICTION = get_profile("fiction")
 SPACE = "bafyspacealphaalphaalphaalpha"
@@ -46,7 +56,7 @@ def _route(
     turns: list[LLMTurn] | None = None,
     driver: ScriptedDriver | None = None,
 ) -> ChannelRoute:
-    from graph_context.orchestrator.modes import load_registry
+    from tests.orchestrator.mode_fixtures import fiction_registry
 
     services = build_services(
         InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
@@ -54,7 +64,7 @@ def _route(
     )
     orchestrator = Orchestrator(
         services=services, driver=driver or ScriptedDriver(turns or []),
-        profile=FICTION, registry=load_registry(FICTION),
+        profile=FICTION, registry=fiction_registry(),
     )
     return ChannelRoute(orchestrator=orchestrator)
 
@@ -85,9 +95,10 @@ class _ChatRecorder:
         self.messages: list[dict[str, object]] = []
         self.posted: list[str] = []  # send texts, pre-edit, in post order
         self.edited: list[str] = []  # ids that received an edit
+        self.deleted: list[str] = []  # ids removed from the chat
 
     async def send(self, text: str, attachments: tuple[str, ...] = ()) -> str:
-        message_id = f"sent-{len(self.messages) + 1}"
+        message_id = f"sent-{len(self.posted) + 1}"
         self.messages.append(
             {"id": message_id, "text": text, "attachments": attachments}
         )
@@ -101,6 +112,10 @@ class _ChatRecorder:
         message["text"] = text
         message["attachments"] = attachments
         self.edited.append(message_id)
+
+    async def delete(self, message_id: str) -> None:
+        self.messages = [m for m in self.messages if m["id"] != message_id]
+        self.deleted.append(message_id)
 
     def texts(self) -> list[str]:
         return [str(m["text"]) for m in self.messages]
@@ -169,7 +184,9 @@ class _TranscriptRecordingDriver(ScriptedDriver):
         super().__init__(turns)
         self.transcripts: list[tuple[TranscriptEvent, ...]] = []
 
-    async def decide(self, transcript, tools, goal: str = "") -> LLMTurn:
+    async def decide(
+        self, transcript, tools, goal: str = "", *, options=None,
+    ) -> LLMTurn:
         self.transcripts.append(tuple(transcript))
         return await super().decide(transcript, tools, goal)
 
@@ -215,6 +232,29 @@ class TestTurn:
         assert all(a == () for a in recorder.attachments()[1:])
         assert "[Mira](" not in recorder.texts()[0]  # plainified: name only
 
+    async def test_explicit_attach_merges_with_scraped_references(
+        self,
+    ) -> None:
+        """ADR 038: ``ReplyEvent.attach`` (the turn's intent card) rides
+        ahead of ids scraped from the text, deduped, first chunk only --
+        the same C7 card surface either way."""
+        from graph_context.orchestrator.pipeline import ReplyEvent
+
+        handler = _handler([])
+        recorder = _ChatRecorder()
+        reply = handler.reply(recorder.send, recorder.edit)
+        intent_id = OBJECT_ID.replace("bafyreid", "bafyreie")
+        await handler.deliver_events(
+            [ReplyEvent(
+                f"made [Mira]({OBJECT_ID})\n" + "pad " * 700,
+                attach=(intent_id, OBJECT_ID),  # OBJECT_ID also in text
+            )],
+            reply,
+        )
+        assert len(recorder.messages) > 1  # chunked
+        assert recorder.attachments()[0] == (intent_id, OBJECT_ID)  # deduped
+        assert all(a == () for a in recorder.attachments()[1:])
+
     async def test_a_processed_message_is_not_eligible_twice(self) -> None:
         handler = _handler([LLMTurn(reply="once")])
         message = _message()
@@ -237,7 +277,12 @@ class TestTurn:
 class TestProcessingPlaceholder:
     """The turn posts a visible placeholder at once, then EDITS it into
     the real reply -- the user sees progress instead of silence while
-    turns (which serialize per space) run."""
+    turns (which serialize per space) run.
+
+    Since WP19 this lifecycle is the NO-ACTIVITY contract: it is what a
+    turn without a live-activity sink (and, via the sink's inertness, a
+    mode whose ``activity_detail`` is ``off``) must keep doing
+    bit-for-bit."""
 
     async def test_the_placeholder_posts_first_and_becomes_the_reply(
         self,
@@ -266,6 +311,15 @@ class TestProcessingPlaceholder:
         assert recorder.texts() == ["[error] boom"]
         assert "sent-1" in sent  # error posts feed echo suppression too
 
+    async def test_command_turns_skip_the_placeholder(self) -> None:
+        # /clear (and /mode) are answered instantly by the pipeline; a
+        # placeholder would only add a notification, so the output posts
+        # alone, fresh.
+        recorder = await _run(_handler(), _message(text="/clear"))
+        assert PROCESSING_NOTICE not in recorder.posted
+        assert recorder.edited == []
+        assert len(recorder.messages) == 1
+
     async def test_an_eventless_turn_does_not_strand_the_placeholder(
         self,
     ) -> None:
@@ -277,6 +331,81 @@ class TestProcessingPlaceholder:
         await reply.finish()
         assert recorder.texts() == ["(the turn produced no reply)"]
         assert recorder.edited == ["sent-1"]
+
+
+async def _run_streaming(
+    handler: AnytypeChatTurnHandler, message: InboundChatMessage
+) -> _ChatRecorder:
+    """run_turn with a live-activity sink, edits uncoalesced for testing."""
+    recorder = _ChatRecorder()
+    reply = handler.reply(recorder.send, recorder.edit)
+    activity = ChatActivity(
+        reply=reply, edit=recorder.edit, delete=recorder.delete,
+        min_interval=0.0,
+    )
+    await handler.run_turn(message, reply, activity)
+    return recorder
+
+
+class TestActivityStreaming:
+    """WP19 (ADR 029): with a sink attached, the placeholder becomes a
+    live activity message edited as the turn runs, the reply posts as a
+    fresh message, and the activity message is DELETED once the reply
+    is delivered -- the reply alone remains in the chat."""
+
+    async def test_activity_streams_then_is_deleted_and_the_reply_posts_fresh(
+        self,
+    ) -> None:
+        probe = ToolCall("context", {"action": "get"})
+        handler = _handler([
+            LLMTurn(tool_calls=(probe,)), LLMTurn(reply="the answer"),
+        ])
+        recorder = await _run_streaming(handler, _message())
+        assert recorder.posted[0] == PROCESSING_NOTICE
+        # Live edits landed on the placeholder while the turn ran; the
+        # reply posted fresh and the trace left the chat.
+        assert set(recorder.edited) == {"sent-1"}
+        assert len(recorder.edited) >= 2
+        assert recorder.deleted == ["sent-1"]
+        assert recorder.texts() == ["the answer"]
+
+    async def test_every_message_id_is_echo_suppressed(self) -> None:
+        probe = ToolCall("context", {"action": "get"})
+        handler = _handler([
+            LLMTurn(tool_calls=(probe,)), LLMTurn(reply="done"),
+        ])
+        recorder = await _run_streaming(handler, _message())
+        for message in recorder.messages:
+            assert str(message["id"]) in handler.sent
+        # The deleted activity message stays in the ledger too: its id
+        # was recorded at open() and deletion never rewrites history.
+        assert "sent-1" in handler.sent
+
+    async def test_command_turns_post_only_their_output(self) -> None:
+        # /mode is answered instantly (no model turn, and it returns
+        # before the pipeline's turn_started so the sink stays inert):
+        # no placeholder posts, only the notice -- one notification.
+        handler = _handler([])
+        recorder = await _run_streaming(
+            handler, _message(text="/mode authoring")
+        )
+        assert recorder.edited == []
+        assert len(recorder.messages) == 1
+        assert "mode switched to authoring" in recorder.texts()[0]
+
+    async def test_a_replyless_streamed_turn_strands_nothing(self) -> None:
+        # The driver script runs dry -> budget notice; the activity
+        # message is still deleted and nothing strands as "Processing…".
+        probe = ToolCall("context", {"action": "get"})
+        route = _route([LLMTurn(tool_calls=(probe,))] * 99)
+        route.orchestrator.max_tool_calls = 3
+        handler = AnytypeChatTurnHandler(
+            routes={CHAT: route}, spaces={CHAT: SPACE}
+        )
+        recorder = await _run_streaming(handler, _message())
+        assert recorder.deleted == ["sent-1"]
+        assert PROCESSING_NOTICE not in recorder.texts()
+        assert "working…" not in " ".join(recorder.texts())
 
 
 class TestReplyPreparation:
@@ -366,13 +495,35 @@ class TestCursor:
         cursor.fast_forward(CHAT, "o3")  # replayed old event must not rewind
         assert json.loads(Path(path).read_text()) == {CHAT: "o9"}
 
+    def test_begin_adopts_a_chat_with_every_message_still_new(
+        self, tmp_path: Path
+    ) -> None:
+        """Live discovery's position: the chat reads as resumed, and the
+        messages typed before the subscription opened are the gap."""
+        path = str(tmp_path / "cursor.json")
+        cursor = ChatCursor(path)
+        cursor.begin(CHAT)
+        assert cursor.has(CHAT)
+        assert cursor.is_new(_message(order_id="o1"))
+        reborn = ChatCursor(path)  # persisted: survives a crash unserved
+        assert reborn.has(CHAT)
+
+    def test_begin_never_rewinds_an_existing_position(
+        self, tmp_path: Path
+    ) -> None:
+        path = str(tmp_path / "cursor.json")
+        cursor = ChatCursor(path)
+        cursor.fast_forward(CHAT, "o9")
+        cursor.begin(CHAT)
+        assert not cursor.is_new(_message(order_id="o9"))
+
 
 class TestIntentOrigin:
     async def test_a_mutating_turn_records_the_triggering_message(self) -> None:
         from graph_context.application.intent_recorder import IntentRecorder
         from graph_context.application.mutation_journal import MutationJournal
         from graph_context.orchestrator.drivers import ToolCall
-        from graph_context.orchestrator.modes import load_registry
+        from tests.orchestrator.mode_fixtures import fiction_registry
 
         repository = InMemoryGraphRepository(role_overrides=FICTION.role_overrides)
         journal = MutationJournal()
@@ -388,7 +539,7 @@ class TestIntentOrigin:
                 LLMTurn(reply="made her"),
             ]),
             profile=FICTION,
-            registry=load_registry(FICTION),
+            registry=fiction_registry(),
             provenance=IntentRecorder(repository),
         )
         handler = AnytypeChatTurnHandler(
@@ -587,7 +738,7 @@ class TestScheduledTurn:
         from graph_context.domain import scheduling
 
         class _ExplodingDriver(ScriptedDriver):
-            async def decide(self, transcript, tools, goal):  # type: ignore[override]
+            async def decide(self, transcript, tools, goal, *, options=None):  # type: ignore[override]
                 raise RuntimeError("driver down")
 
         handler = _handler(routes={CHAT: _route(driver=_ExplodingDriver([]))})
@@ -607,3 +758,262 @@ class TestScheduledTurn:
         assert raised
         stored = repository.graph.node(node.id)
         assert stored.fields.get(scheduling.FIELD_LAST_FIRED)  # at-most-once
+
+
+class TestChatTitler:
+    """WP21 (ADR 031): the pure titling policy -- untitled test, one
+    attempt per chat, defensive title shaping."""
+
+    def test_untitled_names_need_a_title_and_real_names_do_not(self) -> None:
+        titler = ChatTitler(names={
+            "c1": "", "c2": "Chat", "c3": "New chat", "c4": "Trip planning",
+        })
+        assert titler.needs_title("c1")
+        assert titler.needs_title("c2")
+        assert titler.needs_title("c3")
+        assert not titler.needs_title("c4")
+        assert titler.needs_title("unknown-chat")  # no name on record yet
+
+    def test_an_attempt_is_spent_win_or_lose(self) -> None:
+        titler = ChatTitler(names={"c1": ""})
+        titler.mark_attempted("c1")
+        assert not titler.needs_title("c1")
+
+    def test_recording_a_title_updates_the_shared_names(self) -> None:
+        names: dict[str, str] = {"c1": ""}
+        titler = ChatTitler(names=names)
+        titler.record("c1", "Siege Engines 101")
+        assert names["c1"] == "Siege Engines 101"  # aliased, not copied
+
+    def test_sanitize_strips_wrappers_and_trailing_punctuation(self) -> None:
+        assert ChatTitler.sanitize('"Siege Engines 101."') == "Siege Engines 101"
+        assert ChatTitler.sanitize("**Bold title**") == "Bold title"
+        assert ChatTitler.sanitize("  Title:\nexplanation line") == "Title"
+        assert ChatTitler.sanitize("many   inner\tspaces") == "many inner spaces"
+
+    def test_sanitize_caps_length_at_a_word_boundary(self) -> None:
+        long = "word " * 40
+        title = ChatTitler.sanitize(long)
+        assert len(title) <= MAX_TITLE_CHARS
+        assert not title.endswith(" ")
+
+    def test_sanitize_of_nothing_usable_is_empty(self) -> None:
+        assert ChatTitler.sanitize("") == ""
+        assert ChatTitler.sanitize("\n\n  \n") == ""
+
+    def test_prompt_events_snip_long_inputs(self) -> None:
+        (event,) = ChatTitler.prompt_events("u" * 2000, "r" * 2000)
+        assert event.kind == "user"
+        assert len(event.text) < 1200  # both sides snipped
+        assert "…" in event.text
+
+
+class TestAttachmentClassification:
+    """WP23: the pure inbound policy -- what to do with an attachment,
+    from pre-download facts alone."""
+
+    def test_images_within_the_cap_are_images(self) -> None:
+        assert classify_attachment("image", 1024, "png") == "image"
+        assert classify_attachment("image", MAX_IMAGE_BYTES + 1, "png") == "stub"
+
+    def test_text_files_go_by_extension_and_size(self) -> None:
+        assert classify_attachment("file", 100, "csv") == "text"
+        assert classify_attachment("file", 100, ".MD") == "text"  # normalized
+        assert classify_attachment("file", MAX_TEXT_BYTES + 1, "csv") == "stub"
+        assert classify_attachment("file", 100, "pdf") == "stub"
+        assert classify_attachment("file", 100, "") == "stub"
+
+    def test_media_and_plain_objects_split(self) -> None:
+        assert classify_attachment("video", 100, "mp4") == "stub"
+        assert classify_attachment("audio", 100, "mp3") == "stub"
+        assert classify_attachment("page", 0, "") == "object"
+        assert classify_attachment("task", 0, "") == "object"
+
+    def test_fences_and_notes_shape(self) -> None:
+        assert fenced_file("a.csv", "x,y") == '<file name="a.csv">\nx,y\n</file>'
+        note = attachment_note("big.csv", 999, "too large to read here")
+        assert "big.csv" in note and "999" in note and "too large" in note
+
+
+class TestAttachmentGate:
+    def test_a_bare_file_drop_is_a_turn(self) -> None:
+        handler = AnytypeChatTurnHandler(
+            routes={"c1": ChannelRoute(orchestrator=None)},  # type: ignore[arg-type]
+            spaces={"c1": "s1"},
+        )
+        with_file = InboundChatMessage(
+            space_id="s1", chat_id="c1", message_id="m1", creator="human",
+            text="", order_id="!!a",
+            attachments=(InboundAttachment(target="f1", type="file"),),
+        )
+        empty = InboundChatMessage(
+            space_id="s1", chat_id="c1", message_id="m2", creator="human",
+            text="  ", order_id="!!b",
+        )
+        assert handler.accepts(with_file)
+        assert not handler.accepts(empty)
+
+
+class TestFileDelivery:
+    """WP23: file reply events post as real uploads when the reply has a
+    send_file primitive, and degrade to fenced text without one."""
+
+    @staticmethod
+    def _reply(sent_files: list, sent_texts: list, with_primitive: bool):
+        async def send(text, attachments=()):
+            sent_texts.append(text)
+            return f"m{len(sent_texts)}"
+
+        async def edit(message_id, text, attachments=()):
+            sent_texts.append(f"edit:{text}")
+
+        async def send_file(name, content):
+            sent_files.append((name, content))
+            return f"f{len(sent_files)}"
+
+        return TurnReply(
+            send=send, edit=edit, sent=SentMessages(),
+            send_file=send_file if with_primitive else None,
+        )
+
+    async def test_a_file_event_uses_the_primitive(self) -> None:
+        files: list = []
+        texts: list = []
+        reply = self._reply(files, texts, with_primitive=True)
+        handler = AnytypeChatTurnHandler(routes={}, spaces={})
+        await handler.deliver_events(
+            [ReplyEvent("the answer"),
+             ReplyEvent("a,b\n1,2", kind="file", file_name="data.csv")],
+            reply,
+        )
+        assert files == [("data.csv", "a,b\n1,2")]
+        assert texts == ["the answer"]  # content never doubles as text
+
+    async def test_without_the_primitive_files_degrade_to_fences(self) -> None:
+        files: list = []
+        texts: list = []
+        reply = self._reply(files, texts, with_primitive=False)
+        handler = AnytypeChatTurnHandler(routes={}, spaces={})
+        await handler.deliver_events(
+            [ReplyEvent("a,b", kind="file", file_name="data.csv")], reply
+        )
+        assert files == []
+        assert texts and "data.csv" in texts[0] and "a,b" in texts[0]
+
+    async def test_delivered_file_messages_join_the_echo_ledger(self) -> None:
+        files: list = []
+        reply = self._reply(files, [], with_primitive=True)
+        await reply.deliver_file("x.md", "hi")
+        assert "f1" in reply.sent
+
+
+class TestSchemaConfirmFlow:
+    """WP33 (ADR 041 v2): schema changes execute on a HUMAN's reaction --
+    the confirm message is harness-authored and the apply path never
+    touches the model."""
+
+    _PROPOSE = ToolCall("schema", {
+        "action": "propose_type", "type": "Faction",
+        "properties": [{"name": "Motto", "format": "text"}],
+    })
+
+    async def _proposed(
+        self, **overrides: object
+    ) -> tuple[AnytypeChatTurnHandler, _ChatRecorder]:
+        handler = _handler(
+            [LLMTurn(tool_calls=(self._PROPOSE,)), LLMTurn(reply="drafted!")],
+            **overrides,
+        )
+        recorder = await _run(handler, _message())
+        return handler, recorder
+
+    def _services(self, handler: AnytypeChatTurnHandler):
+        services = handler.routes[CHAT].orchestrator.services_of(
+            f"anytype:{CHAT}"
+        )
+        assert services is not None
+        return services
+
+    async def test_confirm_posts_as_its_own_tracked_message(self) -> None:
+        handler, recorder = await self._proposed()
+        confirm = recorder.messages[-1]
+        text = str(confirm["text"])
+        assert "Schema proposal p1:" in text
+        assert "NEW TYPE 'Faction'" in text
+        assert "APPLY" in text and "\N{THUMBS UP SIGN}" in text
+        assert recorder.texts()[0] == "drafted!"  # the reply stays its own
+        assert handler.pending_confirms == {str(confirm["id"]): (CHAT, "p1")}
+        assert str(confirm["id"]) in handler.sent  # echo-suppressed
+        # Drafting touched nothing.
+        repo = self._services(handler).repository
+        assert "Faction" not in repo.known_node_types()
+
+    async def test_a_humans_thumbs_up_applies_without_a_model_turn(
+        self,
+    ) -> None:
+        handler, recorder = await self._proposed()
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS UP SIGN}": ("human-identity",)}, recorder.send,
+        )
+        services = self._services(handler)
+        assert "Faction" in services.repository.known_node_types()
+        assert services.proposals.pending() == ()
+        assert handler.pending_confirms == {}
+        outcome = recorder.texts()[-1]
+        assert "applied p1" in outcome and "'Faction'" in outcome
+        assert str(recorder.messages[-1]["id"]) in handler.sent
+
+    async def test_the_bots_own_reaction_never_applies(self) -> None:
+        handler, recorder = await self._proposed(bot_identity="bot-identity")
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS UP SIGN}": ("bot-identity",)}, recorder.send,
+        )
+        assert message_id in handler.pending_confirms  # still armed
+        repo = self._services(handler).repository
+        assert "Faction" not in repo.known_node_types()
+
+    async def test_a_thumbs_down_dismisses_the_draft(self) -> None:
+        handler, recorder = await self._proposed()
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS DOWN SIGN}": ("human-identity",)}, recorder.send,
+        )
+        services = self._services(handler)
+        assert services.proposals.pending() == ()
+        assert handler.pending_confirms == {}
+        assert "dismissed proposal p1" in recorder.texts()[-1]
+        assert "Faction" not in services.repository.known_node_types()
+
+    async def test_reactions_on_untracked_messages_cost_nothing(self) -> None:
+        handler, recorder = await self._proposed()
+        before = len(recorder.messages)
+        await handler.handle_reaction(
+            CHAT, "unrelated-message",
+            {"\N{THUMBS UP SIGN}": ("human-identity",)}, recorder.send,
+        )
+        assert len(recorder.messages) == before
+        assert handler.pending_confirms  # untouched
+
+    async def test_a_failed_apply_reports_and_keeps_the_watch(self) -> None:
+        handler, recorder = await self._proposed()
+        # The space changed under the draft: the type now exists.
+        await self._services(handler).repository.create_type("Faction")
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS UP SIGN}": ("human-identity",)}, recorder.send,
+        )
+        assert "failed to apply" in recorder.texts()[-1]
+        assert message_id in handler.pending_confirms  # 👎 still possible
+        assert self._services(handler).proposals.pending()  # draft kept
+
+    async def test_confirms_in_names_only_the_chats_own_watches(self) -> None:
+        handler, _ = await self._proposed()
+        (message_id,) = handler.pending_confirms
+        assert handler.confirms_in(CHAT) == (message_id,)
+        assert handler.confirms_in("other-chat") == ()

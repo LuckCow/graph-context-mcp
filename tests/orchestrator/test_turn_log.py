@@ -22,9 +22,9 @@ from graph_context.interface.profiles import get_profile
 from graph_context.interface.services import Services, build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.drivers import LLMTurn, ScriptedDriver, ToolCall
-from graph_context.orchestrator.modes import load_registry
 from graph_context.orchestrator.pipeline import Orchestrator
 from graph_context.orchestrator.turn_log import TurnLog
+from tests.orchestrator.mode_fixtures import fiction_registry
 
 FICTION = get_profile("fiction")
 
@@ -101,6 +101,45 @@ class TestTurnLogFile:
             "The task needs an assignee edge; find the node first."
         )
 
+    def test_server_tool_calls_are_logged_beside_the_decision(
+        self, tmp_path
+    ) -> None:
+        """WP20 (ADR 030): provider-executed searches already ran -- no
+        tool_result event follows, so the decision entry is their only
+        record in the diary."""
+        path = tmp_path / "turns.jsonl"
+        log = TurnLog(path, now=lambda: "T0")
+        log.llm_turn("t0", "s1", "researcher", LLMTurn(
+            reply="Searched the web.",
+            server_tool_calls=(
+                ToolCall("web_search", {"query": "anytype api"}),
+            ),
+        ))
+        (entry,) = _entries(path)
+        assert entry["server_tool_calls"] == [
+            {"name": "web_search", "arguments": {"query": "anytype api"}}
+        ]
+        assert entry["reply"] == "Searched the web."
+
+    def test_server_results_log_as_digests_never_raw(self, tmp_path) -> None:
+        """WP22: the diary shows WHAT a search returned, but the raw
+        payload (bulky encrypted_content) never lands in the log."""
+        path = tmp_path / "turns.jsonl"
+        log = TurnLog(path, now=lambda: "T0")
+        raw = (
+            '{"content": [{"title": "Anytype API", "url": "https://a", '
+            '"encrypted_content": "OPAQUE-BYTES"}]}'
+        )
+        log.llm_turn("t0", "s1", "researcher", LLMTurn(
+            reply="Found it.",
+            server_tool_calls=(ToolCall("web_search", {"query": "q"}),),
+            server_tool_results=(raw,),
+        ))
+        (entry,) = _entries(path)
+        (call,) = entry["server_tool_calls"]
+        assert call["result"] == "- Anytype API (https://a)"
+        assert "OPAQUE-BYTES" not in path.read_text()
+
     def test_oldest_entries_drop_once_the_budget_is_exceeded(
         self, tmp_path
     ) -> None:
@@ -166,7 +205,7 @@ def _orchestrator(
 ) -> Orchestrator:
     return Orchestrator(
         services=services, driver=ScriptedDriver(turns), profile=FICTION,
-        registry=load_registry(FICTION), turn_log=log,
+        registry=fiction_registry(), turn_log=log,
     )
 
 
@@ -311,7 +350,7 @@ class TestPipelineTurnLogging:
     ) -> None:
         orchestrator = Orchestrator(
             services=services, driver=ScriptedDriver([LLMTurn(reply="ok")]),
-            profile=FICTION, registry=load_registry(FICTION),
+            profile=FICTION, registry=fiction_registry(),
         )
         events = await orchestrator.handle_message("s1", "u1", "hello")
         assert events[-1].kind == "reply"

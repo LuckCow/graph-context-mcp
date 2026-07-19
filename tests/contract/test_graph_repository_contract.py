@@ -13,10 +13,22 @@ import asyncio
 import pytest
 
 from graph_context.domain import attribution
-from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft
+from graph_context.domain.graph import Direction
+from graph_context.domain.models import (
+    FieldSpec,
+    LinkSpec,
+    NodeDraft,
+    PropertyDraft,
+)
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
-from graph_context.errors import NodeNotFound, UnknownFieldKey
+from graph_context.errors import (
+    NodeNotFound,
+    SchemaChangeConflict,
+    UnknownFieldKey,
+    UnknownNodeType,
+    UnknownRelationLabel,
+)
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.infrastructure.anytype.mock_server import MockAnytype
@@ -251,12 +263,31 @@ class FieldCatalogContract:
     "Due date" (date), "Status" (select: To Do, In Progress), and an
     "Assignee" objects-format RELATION (an edge, never a fields key)."""
 
+    async def test_relation_label_for_matches_key_and_display_name(
+        self, catalog_repo
+    ):
+        """The tool boundary routes a relation-named fields key into links
+        (turn 1bb6286b0e21); this is the question it asks, and it must
+        match exactly like fields-key resolution: key or display name,
+        case-insensitive."""
+        for spelling in ("assignee", "Assignee", "ASSIGNEE"):
+            label = catalog_repo.relation_label_for(spelling)
+            assert label is not None and label.lower() == "assignee"
+
+    async def test_relation_label_for_is_none_for_scalars_and_unknowns(
+        self, catalog_repo
+    ):
+        assert catalog_repo.relation_label_for("Due date") is None
+        assert catalog_repo.relation_label_for("due_date") is None
+        assert catalog_repo.relation_label_for("nonesuch") is None
+
     async def test_relation_named_as_a_field_redirects_to_links(
         self, catalog_repo
     ):
-        """Live-caught: a model wrote fields={'Assignee': ...} because the
-        relation is invisible in the scalar catalog; the error must point
-        at links, not at minting a shadowing scalar property."""
+        """Port-level backstop: the tool boundary coerces a relation-named
+        fields key into a link, so a direct repository caller that skips
+        that boundary still gets redirected -- the error must point at
+        links, not at minting a shadowing scalar property."""
         with pytest.raises(UnknownFieldKey) as err:
             await catalog_repo.create_node(
                 NodeDraft("Item", name="Ship it", summary="s.",
@@ -276,6 +307,67 @@ class FieldCatalogContract:
                           fields={"Assignee": "Nick"}),
                 create_missing_fields={"Assignee": "text"},
             )
+
+    async def test_unknown_link_label_errors_with_existing_relations(
+        self, catalog_repo
+    ):
+        """Live-caught (turn 1bb6286b0e21): a model invented 'assigned_to'
+        where the space's relation is 'assignee'. The error must offer the
+        existing vocabulary and the explicit opt-in, and the composite
+        create must roll back -- no node, no junk-labelled edge."""
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        with pytest.raises(UnknownRelationLabel) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s."),
+                links=[LinkSpec(edge_type="assigned_to", other=target.id)],
+            )
+        message = str(err.value)
+        assert "create_missing_relations" in message
+        assert "assignee" in message.lower()
+        with pytest.raises(NodeNotFound):
+            catalog_repo.graph.resolve("Ship it")
+
+    async def test_link_label_matches_by_key_or_display_name(
+        self, catalog_repo
+    ):
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        for spelling in ("assignee", "Assignee"):
+            node = await catalog_repo.create_node(
+                NodeDraft("Item", name=f"Task via {spelling}", summary="s."),
+                links=[LinkSpec(edge_type=spelling, other=target.id)],
+            )
+            edge = next(iter(catalog_repo.graph.edges(node.id, Direction.OUT)))
+            # Both spellings canonicalize to the SAME relation.
+            assert edge.type.lower() == "assignee"
+
+    async def test_create_missing_relations_mints_a_reusable_relation(
+        self, catalog_repo
+    ):
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        first = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s."),
+            links=[LinkSpec(edge_type="approved_by", other=target.id)],
+            create_missing_relations=True,
+        )
+        assert any(
+            e.type.lower() == "approved_by"
+            for e in catalog_repo.graph.edges(first.id, Direction.OUT)
+        )
+        # Now part of the space's vocabulary: reusable without the opt-in.
+        second = await catalog_repo.create_node(
+            NodeDraft("Item", name="Land it", summary="s."),
+            links=[LinkSpec(edge_type="approved_by", other=target.id)],
+        )
+        assert any(
+            e.type.lower() == "approved_by"
+            for e in catalog_repo.graph.edges(second.id, Direction.OUT)
+        )
 
     async def test_relations_stay_out_of_the_fields_catalog(
         self, catalog_repo
@@ -419,6 +511,133 @@ class TestAnytypeFieldCatalog(FieldCatalogContract):
         )
         await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
         await client.create_tag(status["id"], {"name": "In Progress", "color": "lime"})
+        await client.create_property(
+            {"key": "assignee", "name": "Assignee", "format": "objects"}
+        )
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class SchemaChangeContract:
+    """WP33 (ADR 041): user-confirmed schema changes behave identically in
+    every implementation. Seeded with a "Status" select property and an
+    "Assignee" objects-format relation so the reuse/conflict semantics
+    have something to bite on."""
+
+    async def test_created_type_is_immediately_a_create_target(self, schema_repo):
+        name = await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        assert name == "Faction"
+        assert "Faction" in schema_repo.known_node_types()
+        node = await schema_repo.create_node(
+            NodeDraft("Faction", name="Iron Pact", summary="s.")
+        )
+        assert schema_repo.graph.node(node.id).name == "Iron Pact"
+
+    async def test_created_type_offers_its_properties_as_fields(self, schema_repo):
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        specs = schema_repo.field_catalog().get("Faction", ())
+        assert any(s.name == "Motto" and s.format == "text" for s in specs)
+
+    async def test_create_type_conflicts_with_an_existing_type(self, schema_repo):
+        with pytest.raises(SchemaChangeConflict, match="already exists"):
+            await schema_repo.create_type("Item")
+
+    async def test_added_properties_join_without_stripping_existing_ones(
+        self, schema_repo
+    ):
+        """The A11 assertion: the type update replaces the property list
+        wholesale on the wire, so additions must ride with the fetched
+        list -- a careless adapter strips 'Motto' here."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Influence", format="number"),)
+        )
+        names = {s.name for s in schema_repo.field_catalog().get("Faction", ())}
+        assert {"Motto", "Influence"} <= names
+
+    async def test_add_properties_to_unknown_type_raises(self, schema_repo):
+        with pytest.raises(UnknownNodeType):
+            await schema_repo.add_type_properties(
+                "NoSuchType", (PropertyDraft(name="X", format="text"),)
+            )
+
+    async def test_existing_same_format_property_is_reused(self, schema_repo):
+        """A draft naming the seeded "Status" select attaches the existing
+        property; a subsequent write resolves it under its canonical key."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Status", format="select"),)
+        )
+        node = await schema_repo.create_node(
+            NodeDraft("Faction", name="Iron Pact", summary="s.",
+                      fields={"Status": "To Do"})
+        )
+        assert node.fields.get("status") == "To Do"
+
+    async def test_existing_other_format_property_conflicts(self, schema_repo):
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await schema_repo.create_type(
+                "Faction",
+                properties=(PropertyDraft(name="Status", format="date"),),
+            )
+
+    async def test_relation_named_property_conflicts(self, schema_repo):
+        with pytest.raises(SchemaChangeConflict, match="relation"):
+            await schema_repo.create_type(
+                "Faction",
+                properties=(PropertyDraft(name="Assignee", format="text"),),
+            )
+
+    async def test_readding_an_attached_property_is_a_noop(self, schema_repo):
+        """Retry safety: a confirmed proposal applied twice changes nothing."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Motto", format="text"),)
+        )
+        specs = schema_repo.field_catalog().get("Faction", ())
+        assert sum(1 for s in specs if s.name == "Motto") == 1
+
+    async def test_readding_under_another_format_conflicts(self, schema_repo):
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await schema_repo.add_type_properties(
+                "Faction", (PropertyDraft(name="Motto", format="number"),)
+            )
+
+
+class TestInMemorySchemaChanges(SchemaChangeContract):
+    @pytest.fixture
+    def schema_repo(self):
+        return InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Status", format="select", key="status",
+                      options=("To Do", "In Progress")),
+            FieldSpec(name="Assignee", format="objects", key="assignee"),
+        ])
+
+
+class TestAnytypeSchemaChanges(SchemaChangeContract):
+    @pytest.fixture
+    async def schema_repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        status = await client.create_property(
+            {"key": "status", "name": "Status", "format": "select"}
+        )
+        await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
         await client.create_property(
             {"key": "assignee", "name": "Assignee", "format": "objects"}
         )

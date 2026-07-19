@@ -1658,6 +1658,614 @@ deliver to the bound space's default Anytype chat until a Discord loop
 exists); firing is at-most-once — a crash between marking and replying
 surfaces as an in-chat `[error]`, never a re-fire loop.
 
+## WP19 — Live turn activity streaming (ADR 029) — **shipped 2026-07-14**
+
+**Status:** complete. Instead of staring at `Processing…` for a whole
+multi-tool turn, the user watches the turn happen: the placeholder
+becomes a live **activity message** edited in place as the pipeline
+works (Anytype has no write-side streaming API, but every PATCH reaches
+watching clients instantly over their SSE subscription — edit-in-place
+IS the streaming mechanism), the final reply posts as a **fresh
+message**, and the activity message is **deleted** once the reply is
+delivered (amended 2026-07-17: originally it collapsed into a
+`✓ 4 tool calls · 3 decisions` done-summary; that edit survives only as
+the degrade path when the delete fails — the trace is live scaffolding,
+not history, and the turn log keeps the record).
+
+What shipped:
+
+* **The mid-turn seam**: `Orchestrator.handle_message` takes an optional
+  per-call `observer: TurnObserver | None` (async protocol:
+  `turn_started` / `decision` / `tool_result`), fired beside the
+  existing `turn_log` taps. A parameter, not a field — its identity is
+  per-turn — and `None` (CLI, Discord, MCP, scheduled turns, every
+  existing caller) costs nothing. Observers must not raise; command
+  turns return before `turn_started` and never stream. The `ok` reading
+  of a tool result asks `interface.tools.is_error_result` (the
+  `ERROR: ` rule stays single-homed with `guarded`).
+* **Mode-owned detail levels** `off | minimal | tools | full` (amended
+  2026-07-15): the level is a `ModeSpec` property (`activity_detail`,
+  default `minimal`), so picking a mode picks its verbosity. Settable in
+  all three mode-config sources — profile specs, `GC_MODES_FILE`
+  (`activity_detail = "tools"`), and in-space Activity Mode objects via
+  the new `gc_mode_activity_detail` SELECT property, its dropdown
+  options (Off/Minimal/Tools/Full) pre-seeded by bootstrap so humans
+  pick instead of type (minted inline with the other mode fields on a
+  fresh space; existing spaces are RETROFITTED -- ensure_schema attaches
+  missing inline fields to a pre-existing type via the type-update
+  endpoint, quirk A11: the update's `properties` list is wholesale, so
+  the full fetched list is resent with the additions, live-verified by
+  `scripts/spike_type_update.py`; a property minted under an older
+  format is healed by delete + re-create, quirk A12: formats are
+  immutable; empty = default; unknown values fail at load naming the
+  source). Bare `/mode` reports the active mode's level; the
+  pipeline persists nothing and hands `spec.activity_detail` to the
+  observer. What each level shows lives in ONE place, the renderer.
+  `off` = the WP14 lifecycle bit-for-bit (`TestProcessingPlaceholder`
+  now pins the no-activity contract).
+* **`orchestrator/turn_activity.py`** (pure, like the transport):
+  `ActivityLog` folds events into the message text per level and
+  degrades deterministically under the 2000-char budget (excerpts drop
+  from all but the newest decision, then oldest decisions collapse into
+  one `… n earlier steps` line); `ChatActivity` (the sink) claims the
+  placeholder via `TurnReply.claim_placeholder` — once claimed,
+  `deliver` posts fresh and `finish` no-ops — and coalesces edits on
+  the leading edge (≥2s apart, `ACTIVITY_EDIT_SECONDS`; the closing
+  delete is unconditional), keeping worst-case traffic under half the
+  API's ~1 req/s sustained budget. Activity edit failures degrade to a
+  warning, never the turn.
+* **Wiring**: `run_turn(message, reply, activity=None)` forwards the
+  sink and closes it after delivery; `_maybe_turn` builds it and closes
+  `ok=False` on the error paths (a crashed turn posts its error fresh
+  and still deletes its trace). Echo suppression is free — the
+  activity message IS the placeholder whose id was already recorded.
+  Scheduled turns (ADR 027) stay silent; Discord unchanged.
+
+## WP20 — Mode-gated web search (ADR 030) — **shipped 2026-07-16**
+
+**Status:** complete. Both drivers can hand the model Anthropic's
+SERVER-SIDE web search tool — executed on Anthropic's infrastructure,
+never by the harness, so the devcontainer's egress firewall is a
+non-issue (`api.anthropic.com` is already allowlisted; nothing else is
+contacted). Availability is a **mode property, default off**, mirroring
+WP19's `activity_detail` end-to-end: `ModeSpec.web_search`, settable in
+profile specs, `GC_MODES_FILE` (`web_search = true`), and the in-space
+Activity Mode object's new `gc_mode_web_search` checkbox
+(minted/retrofitted by bootstrap; explainer body updated). The pipeline
+forwards `web_search=spec.web_search` on every `decide()` (new
+keyword-only protocol parameter).
+
+* **Subscription driver**: `tools=["WebSearch"]` re-admits exactly one
+  CLI built-in; the permission gate (`permission_gate`, extracted for
+  testability) allows it and still denies-with-interrupt everything
+  else. The search runs server-side INSIDE the session, so one decide
+  covers search + answer; harvested `WebSearch` ToolUseBlocks land in
+  `LLMTurn.server_tool_calls`, never in pipeline `tool_calls`. Live
+  behavior pinned by a gated test in `test_live_claude_driver.py`.
+* **API driver**: appends the server tool block after the sorted graph
+  tools (`web_search_20260209` on dynamic-filtering models, the basic
+  `web_search_20250305` otherwise); `turn_from_response` tolerates
+  `server_tool_use` + `web_search_tool_result` blocks (error-object
+  results included); a `pause_turn` stop is resumed in-decide with the
+  partial assistant content appended (≤5 resumes, usage summed, the
+  metrics tap fires once, a refusal discards the partial).
+* **Observability**: `server_tool_calls` in the turn diary (beside the
+  decision — no tool_result follows) and in the WP19 activity stream
+  (rendered already-resolved, FIFO pairing undisturbed). Bare `/mode`
+  reports `web search: on/off`.
+
+## WP21 — Chat auto-titling + per-space default mode (ADR 031) — **shipped 2026-07-16**
+
+**Status:** complete. Claude-app parity for new chats: an untitled chat
+names itself after its first real exchange, and each space can choose
+the mode new chats start in.
+
+### Spike S12 results (2026-07-16, live sidecar, API `2025-11-08`)
+
+`scripts/spike_chat_rename.py`, run against the headless sidecar's
+GC-E2E space:
+
+* `POST /chats {}` → 201, the chat is born with `name: ""` (what a
+  fresh unnamed chat looks like to discovery).
+* `GET /chats/:cid` → **404**; `PATCH /chats/:cid {"name"}` → **404**
+  (`404 page not found` — the route does not exist).
+* `PATCH /objects/:cid {"name"}` → **200**, and the fresh `/chats`
+  re-list reflects the new name; `GET /objects/:cid` agrees. **Chats
+  are renameable via the generic object route** — pinned as quirk C9
+  in `chat.py`, modeled by the mock (`/objects/:id` GET/PATCH now serve
+  chats), and pinned live by the E2E chat round-trip.
+* Bonus: `DELETE /chats/:cid` → 200 (unused, recorded for the future).
+
+What shipped:
+
+* **`AnytypeClient.rename_chat` / `AnytypeChatClient.rename`** (C9:
+  `update_object` underneath, named for the intent).
+* **`ChatTitler`** (transport policy, pure): untitled test over the
+  runtime's live chat-name registry (`""`/`"Chat"`/`"New chat"` read as
+  untitled; a human's title is never overwritten — the rescan watcher
+  refreshes names, so a UI rename reaches the test within one poll),
+  one attempt per chat lifetime (no persistence: the name check
+  re-derives state across restarts), the titling prompt, and
+  defensive sanitization (first line, wrappers stripped, ≤60 chars).
+* **`anytype_chat_bot._maybe_title`**: after a successful non-command
+  turn in an untitled chat — `run_turn` now returns its `ReplyEvent`s —
+  ONE side-call through the existing driver abstraction (works on the
+  subscription driver with no API key; one extra CLI session per chat
+  lifetime, off the user-visible path) and ONE rename PATCH. Failures
+  log and never fail the turn; error-only turns defer the attempt.
+* **`default_mode` in `spaces.toml`** (per-space, sibling of
+  `profile`/`modes_file`): overrides the profile's default when the
+  registry loads — new chats start there; chats with a persisted mode
+  keep it. Unknown mode fails LOUDLY at startup naming the value and
+  the loaded modes; the `/mode` reload closure re-applies the override.
+  **[Superseded by WP25/ADR 034: the key is retired; the default is
+  the Space Context object's link.]**
+
+## WP22 — Lossless server-tool continuity across decides (ADR 030 amendment) — **shipped 2026-07-16**
+
+**Status:** complete. Retires ADR 030's v1 limitation: when one decision
+both searches the web AND calls a local tool, the next decide's rebuilt
+conversation now carries the search calls *and results* — not just what
+the model wrote as text. The Anthropic API supports this fully (echo the
+`server_tool_use` + `web_search_tool_result` blocks, `encrypted_content`
+included — that field exists precisely for multi-turn replay); the gap
+was that our `TranscriptEvent` had nowhere to hold them. Live-verified
+on the subscription driver (the stream delivers the raw result payloads
+and the harvest captures them).
+
+**Design: the transcript stays provider-neutral; payloads ride as
+opaque JSON.**
+
+1. **`drivers.py`** — `LLMTurn.server_tool_results: tuple[str, ...]`
+   (JSON-serialized raw result blocks, paired to `server_tool_calls` by
+   `tool_use_id`); the same two fields on the mid-turn assistant
+   `TranscriptEvent`. Turn-local like `thinking` — cross-turn
+   `ConversationMemory` keeps only the spoken halves, unchanged.
+2. **Harvest** — `anthropic_driver.turn_from_response` keeps the
+   `web_search_tool_result` blocks it currently skips (serialize via
+   `model_dump()` with a `vars()` fallback for test fixtures);
+   `claude_driver` additionally harvests `ServerToolUseBlock` /
+   `ServerToolResultBlock` (the SDK's native server-tool types;
+   `ToolUseBlock`-named-`WebSearch` stays as the live-verified path).
+   `merged_turn` (pause chains) concatenates.
+3. **Pipeline** — copy both fields onto the recorded decision event,
+   beside `thinking` (one line).
+4. **API-driver replay** — `messages_from_transcript` rebuilds a
+   searching decision's assistant content as
+   `[text?] + server_tool_use... + web_search_tool_result... + tool_use...`,
+   deserializing stored result JSON VERBATIM so `encrypted_content`
+   round-trips untouched. Never send an unpaired half (a call whose
+   result wasn't captured degrades to today's omission — the API 400s
+   on dangling blocks). Local `tool_use` id registration unchanged.
+5. **Subscription-driver replay** — fresh CLI sessions take text, so
+   `render_transcript` folds a `search_digest(results_json)` (title /
+   url / snippet per result, capped) into the assistant section as a
+   fenced block — the ADR 030 "digest" mitigation, now fed by real
+   captured results. Digest helper single-homed in `driver_common.py`.
+6. **Turn log** — never log raw payloads (`encrypted_content` bloat):
+   log the digest + result count per search.
+
+**Tests.** Anthropic driver: mixed decision → the next request's
+messages carry the verbatim server blocks, pairing intact, encrypted
+content byte-identical; unpaired-half guard. Claude driver: digest in
+the rendered transcript. Pipeline: propagation onto the event. One
+gated live run per driver (a mode that searches then calls `find_node`
+in the same decision; the follow-up decide must 200 and the final
+answer reference searched facts).
+
+**Residual risks (watch in dogfooding).**
+- The API may be stricter about replayed block ORDERING than the
+  reconstruction preserves (the rebuild emits text, then call/result
+  pairs, then local tool_use — not the original interleaving). Fallback
+  if a live mixed-decision turn 400s: capture the whole raw
+  `response.content` verbatim on the event (the pause_turn pattern).
+- Replayed server blocks alongside our dropped thinking blocks may trip
+  thinking-ordering rules on some models; if so, searching decisions
+  also replay their thinking blocks unchanged.
+- Payload growth: `encrypted_content` is large; if transcripts bloat,
+  cap replayed results per decision (newest N) and note the drop.
+
+## WP23 — Chat files, to and from the model (ADR 032) — **shipped 2026-07-16**
+
+**Status:** complete. Drop a file into an Anytype chat and the model can
+read it; ask for a document and it sends a real file back.
+
+### Spike S13 results (2026-07-16, live sidecar, API `2025-11-08`)
+
+Quirk **C10** (pinned in `chat.py`, modeled by the mock, live-verified
+by the E2E round trip):
+
+* `POST /v1/spaces/:sid/files` uploads (multipart field `file`; FLAT
+  response `object_id`/`name`/`media`/`extension`/`size_in_bytes`; the
+  client's default JSON Content-Type must be overridden per request or
+  the server answers "missing file in request" — live-caught). The
+  server sniffs MIME from the bytes; the upload is a REAL object
+  (type `image` for images, `file` otherwise, with size/extension
+  properties but NOT the MIME type).
+* `GET /files/:id` serves the raw bytes directly, Content-Type header
+  as the read-side media source (no `/content` sub-route; no list
+  route — both 404).
+* Chat attachments are the C7 envelopes; **inbound messages expose
+  them** (we had been dropping the field in `to_chat_message`).
+
+What shipped:
+
+* **Inbound**: the gate accepts bare file drops; the bot resolves each
+  attachment (`_resolve_attachments`: facts first, bytes only for what
+  the model gets) against the transport's pure policy
+  (`classify_attachment`; caps 5 MB image / 200 KB text). Text files
+  fold into the user message as fenced `<file name="...">` blocks;
+  images ride `TranscriptEvent.images` (turn-local, like thinking) into
+  native image blocks on BOTH drivers — the SDK driver switches
+  `query()` to the message-dict form (`query_payload`), live-verified
+  on subscription auth (the model described a red test swatch);
+  everything else degrades to a name+size note. The turn diary redacts
+  image base64 to a size note.
+* **Outbound**: a `send_file(name, content)` tool in every mode (text
+  formats, ≤200 K chars, ≤4/turn, filenames sanitized) queues into the
+  TURN-scoped `Services.outbox`; the pipeline drains it into `file`
+  reply events after the reply text; the Anytype transport uploads and
+  posts a `📎 name` message carrying the file card; Discord/CLI/MCP
+  degrade to fenced content. The outbox clears at turn start.
+
+---
+
+## WP24 — Per-mode model selection (ADR 033) — **shipped 2026-07-17**
+
+**Status:** complete. Each activity mode can pin which Claude model
+runs its decisions — Sonnet 5, Opus 4.8, or Fable 5 — from any of the
+three mode-config sources; unset keeps the deployment default.
+
+What shipped:
+
+* `ModeSpec.model` (canonical choices in `domain/model_choice.py`,
+  which also maps them to full provider model ids), validated at spec
+  load like `activity_detail` — an unknown model fails loudly naming
+  the config source.
+* The in-space surface: a `gc_mode_model` SELECT on the Activity Mode
+  type (minted + retrofitted by bootstrap, options pre-seeded
+  "Sonnet 5"/"Opus 4.8"/"Fable 5", explainer body updated); the mode
+  store forwards the picked option like the detail select.
+* The seam: `decide(..., model=<resolved id>)` — a per-decision
+  override of the driver's configured default on both driver paths
+  (session options on the subscription driver; request model + web
+  search tool variant on the API driver).
+* `/mode` reports `model: <choice|default>`; intent nodes stamp the
+  resolved model id when a mode pins one (ADR 028's `gc_model`).
+
+---
+
+## WP25 — Space Context: the default mode moves in-space (ADR 034) — **shipped 2026-07-17**
+
+**Status:** complete. Which mode NEW chats start in is now space
+content, not deployment config: a seeded `gc_space_context` singleton
+("Space Context", infra role `SpaceContext`) carries a
+`gc_default_mode` **object link** to the Activity Mode object new
+chats start in, superseding WP21's `spaces.toml` `default_mode` key
+(now a loud migration error pointing at the object).
+
+What shipped:
+
+* The type + singleton: minted/retrofitted by bootstrap with the link
+  field inline, seeded ONCE with an explainer body and an empty link
+  (like the ADR 015/027 explainers, but this object IS the config
+  surface). Deleting it reverts to the profile default; the role joins
+  `INFRA_ROLES`, so traversal never sees it.
+* **`SpaceContextStore`** port (fake + Anytype adapter, contract-tested
+  like ModeStore): payloads of `{name, default_mode_ids, origin}`;
+  ModeStore payloads gained the object `id` the link resolves against.
+* Loader resolution in `modes.load_registry` (the `default` param is
+  gone): singleton rule (two objects → loud, naming both), link arity
+  (exactly one), dangling links (loud, naming the object and id); an
+  empty link falls back to the profile default. Startup fails loudly,
+  the `/mode` refresh degrades — and because the reload closure
+  re-reads the store, relinking applies on the next `/mode`, no
+  restart.
+* Edge quarantine: `gc_default_mode` joined `SYSTEM_RELATION_DENYLIST`
+  — never a graph edge, never reusable edge vocabulary (pinned at the
+  `to_edges` seam).
+* Live E2E: the link round-trips through the store against the real
+  server.
+
+---
+
+## WP26 — In-space-only activity modes; TOML demoted to seeder (ADR 035) — **shipped 2026-07-17**
+
+**Status:** complete. The space's Activity Mode objects are the ONLY
+live source of mode specs; profile `mode_specs`/`default_mode` are
+deleted and the modes TOML now SEEDS starter objects into a mode-less
+space instead of merging at load. First step of the DomainProfile
+deprecation (rest in WP27).
+
+What shipped:
+
+* **`interface/mode_config.py`** — the layering-neutral home for the
+  validation seam (`spec_from_mapping`/`slugify`, moved from
+  `orchestrator/modes.py`; nothing may import the orchestrator) plus
+  the seed-TOML parser (`[modes.<name>]` tables + seed-only
+  `default`/`icon` keys) and `seed_payloads` (ModeStore-port shape,
+  synthetic `seed:<slug>` ids — ONE representation feeds the memory
+  store, the Anytype seeder, and the eval runner).
+* **Packaged corpora** `interface/mode_seeds/{fiction,workspace,
+  assistant}.toml` — the retired profile mode specs verbatim, pinned by
+  `tests/interface/test_mode_config.py`; a binding's `modes_file` or
+  `GC_MODES_FILE` overrides the packaged set (same keys, repurposed
+  semantics, announced by a startup log line).
+* **`load_registry(in_space, space_context)`** — no profile, no file;
+  empty space fails loudly pointing at reseeding; no default link →
+  alphabetically first mode with a logged hint; a registry loading
+  ONLY `example_mode` logs the missed-migration warning.
+* **`infrastructure/anytype/mode_seeder.py`** — zero-visible-objects
+  heal (fresh mint ≡ empty space; archived objects never block it and
+  are never touched): mints one object per seed + the Example Mode
+  explainer (moved out of `ensure_schema`), bounded searchability poll
+  (fresh-object settle), links the marked default on the Space Context
+  when the link is empty. Loud failures; a space with any mode object
+  is never touched.
+* Memory backend = a freshly seeded space (stores pre-filled, default
+  linked); eval runner overlays `[[case.modes]]` on the profile's
+  corpus (seed ids preserved under shadowing so the default link never
+  dangles); demo scripts load from the built stores.
+* Deprecation markers across `profiles.py` (tool_docs, role_overrides,
+  time_property/format, ranking → WP27); ADR 015/029/030/033/034
+  amendment banners.
+* Migration for pre-035 spaces (TestWorld, Todolist): archive the
+  mint-time "Example Mode" object in each space, restart, verify with
+  `/mode` — no spaces.toml change (`profile` selects the corpus).
+
+## WP27 — Profile retirement (stub; roadmap per ADR 035)
+
+Drop `DomainProfile` and `GC_PROFILE`. Contents, roughly in order:
+
+* One neutral code-owned tool-doc set (docstrings are prompts — golden
+  review + behavioral evals gate the wording change); drop
+  `name`/`description` and role-override variance.
+* A redesigned **general-purpose timeline** replacing
+  `time_property`/`time_format` (NOT a migration of the current pair —
+  seam preserved: the timeline tuple flows as a parameter through
+  `composition.build_runtime`).
+* Ranking weights to deployment config (seam preserved: `Ranker` takes
+  `RankingWeights` via constructor; only `recency` ever varied).
+* `ModeSpec`/`CapturePolicy` move to `interface/mode_config.py`
+  (re-export flip; the module already imports them from profiles).
+* Seed-corpus selection stops keying off `profile.name` (becomes pure
+  deployment config, e.g. `modes_file` everywhere or one default
+  corpus).
+
+---
+
+## WP28 — Chat text formatting via marks (ADR 036) — **shipped 2026-07-17**
+
+**Status:** complete. The model's markdown links (and inline styles)
+render clickable/styled in the Anytype chat instead of as literal
+glyphs.
+
+### Spike S14 results (2026-07-17, live sidecar, API `2025-11-08`)
+
+Quirk **C11** (pinned in `chat.py` + `marks.py`, modeled by the mock,
+live-verified by the E2E round trip):
+
+* Messages accept `marks` (`{"from","to","type"}` + `"param"` for
+  links) on create and edit; they round-trip verbatim at
+  `content.marks` and replace wholesale on edit (C8).
+* Offsets are **UTF-16 code units** (an emoji-prefixed text
+  bounds-checks at its UTF-16 length, not its code-point count).
+* Invalid ranges (negative, inverted, out-of-bounds) **500** — and the
+  client retries 500s, so a bad mark stalls the turn rather than
+  failing fast. Unknown mark types / param-less links land silently; a
+  non-list `marks` 400s.
+
+What shipped:
+
+* `infrastructure/anytype/marks.py` — pure markdown→(text, marks)
+  converter: links, bare URLs, bold/italic/strikethrough/inline code
+  (→ `keyboard`), nesting via recursion, fenced-block shielding,
+  underscore emphasis deliberately unparsed (`gc_` keys), every mark
+  bounds-validated against the emitted text before it leaves.
+* `_message_body` applies it to every outbound message (replies,
+  activity edits, file captions); mock mirrors storage + the 400/500
+  validation split; live E2E round-trips an emoji-prefixed link.
+* **API-driver inline citations (ADR 036 amendment, same day):** with
+  the deployment preparing to default to `anthropic_api`,
+  `turn_from_response` folds each cited text block's web-search
+  sources in as inline ` ([domain](url))` markdown links (deduped,
+  URL parens escaped) and concatenates ADJACENT text blocks verbatim —
+  citation splits land mid-sentence; the old join-all-with-`\n\n`
+  shattered cited paragraphs (latent WP20 bug, fixed). Subscription
+  driver deliberately untouched (its SDK exposes text only).
+* Not done (follow-ups if they bite): inbound marks→markdown
+  reconstruction (a human link mark's URL currently doesn't reach the
+  model).
+
+---
+
+## WP29 — Mode-level driver options (ADR 037) — **shipped 2026-07-17**
+
+**Status:** complete. Five new Activity Mode properties tune the driver
+per mode, ahead of the `anthropic_api` default cutover.
+
+* `gc_mode_thinking` select (Off/Low/Medium/High/Xhigh/Max; EMPTY = the
+  default — no "Default" option): a level = adaptive thinking at that
+  `output_config.effort`; Off = disabled, rejected loudly for
+  Fable/Mythos (always-on thinking) at spec load AND at the driver
+  (effective-model guard). Precedence: mode level > `GC_DRIVER_EFFORT`
+  > model default. Every adaptive request now carries
+  `display: "summarized"` — thinking text used to arrive EMPTY.
+* `gc_mode_max_tokens`, `gc_mode_search_max_uses`,
+  `gc_mode_search_allowed_domains`/`_blocked_domains` (at most one
+  list; inert without `web_search`) — zero/empty = unset; the limits
+  ride the search-tool definition on the API driver.
+* `DecideOptions` (one frozen value via `modes.decide_options(spec)`)
+  replaced the per-knob `decide()` kwargs on the protocol and all
+  drivers. Subscription driver: thinking level → SDK `effort`;
+  off/max_tokens/limits skipped with one warning
+  (`inexpressible_options`).
+* `/mode` reports `thinking:` + only-if-set extras. Vocabulary in
+  `domain/thinking_choice.py`; select options minted table-driven.
+* Audit quick win: `bootstrap.build_driver` wires `on_result` →
+  `TurnLog.usage` — per-decide tokens/cache/cost stop being discarded
+  in production. Known discards documented in ADR 037 (redacted
+  thinking, thinking signatures, response id/model, server-tool usage
+  counts); eval `[[case.modes]]` overlay gap unchanged.
+
+## WP30 — The turn-trace card (ADR 038) — **shipped 2026-07-17**
+
+**Status:** complete. Claude-app-style disclosure, Anytype-shaped: a
+reply that did background work carries an object card opening the
+turn's intent node, whose body holds the full process trace.
+
+* Intent nodes now record WORKING read-only turns too (deliberately
+  supersedes WP7's read-only-writes-nothing): work = tools ran /
+  provider searched / thinking produced. Plain answers still write
+  nothing. Working-only nodes link nothing; `gc:touched` reads
+  `(none)`.
+* `orchestrator/process_trace.py` (`ProcessTrace`): archive-grade fold
+  beside the observer/turn-log taps — thinking, interim text, calls,
+  search digests, results; per-item caps, no collapsing; rendered ONCE
+  at turn end into the body's `### gc:process` (supersedes the
+  condensed `gc:tool_trace`). Write-once body policy intact — complete
+  at creation, no post-turn PATCH.
+* `ReplyEvent.attach` + `_finish_turn` returning the intent node; the
+  Anytype transport merges explicit attach ids ahead of text-scraped
+  refs (dedupe, cap 8, first chunk). WP19's live activity message
+  still deletes on close — ephemeral scaffolding vs durable card.
+
+---
+
+## WP31 — Reactive rule engine (ADR 039) — **shipped 2026-07-19**
+
+**Status:** complete. Scheduled Events initiate on *time*; Automation
+Rules initiate on *state transitions* — "Done flips true → stamp the
+completion date", "one Default checkbox at a time" — authored entirely
+in the Anytype UI as `gc_rule` objects, no deployment config.
+
+* **Structural twin of WP18**: `domain/rules.py` (pure vocabulary +
+  `parse_rule_fields`/`condition_met`, no clocks), `application/
+  rule_engine.py` (`RuleEngine`, injected `local_clock(GC_TIMEZONE)`,
+  rules read off `repository.graph` by `Role.RULE` — no new port),
+  `_watch_rules` fourth sibling watcher (`GC_RULE_TICK_SECONDS`,
+  default 5, `off` disables; runs its OWN resync under the route lock
+  so reactions never wait on the 60s graph poll).
+* **Transitions, not states**: an in-memory per-space baseline of
+  watched values, diffed per tick and rebuilt from the POST-action
+  index — nothing fires on restart/replay, the engine's own writes can
+  never trigger a rule (no cascades or loops, by construction), and a
+  consumed transition never retries. Change detection is REST polling
+  by decision: the gRPC event backbone stays shelved
+  (`docs/spikes/grpc-event-backbone.md`).
+* **Nine `gc_rule_*` properties** (all in `GC_REFLECTED_FIELD_KEYS` —
+  the ADR 027-amendment lesson), select vocabularies pre-seeded,
+  display names "Rule …"-prefixed, an "Example Automation Rule"
+  explainer minted with the type. Status select is lenient (empty =
+  Active; `Error` is engine-owned and self-heals once the config
+  parses; the engine never writes `Paused`). Broken configs surface as
+  `Error` + "Rule last error" ON the rule object, change-only writes.
+* **Three built-in actions, no user scripts** (v1 scope): set property
+  to now, set property value (format-checked at validation), uncheck
+  others of type (same-tick double-flip resolves last-writer-wins in
+  node-id order). Watchable surface = scalar `Node.fields` only.
+* R2 resolved by live probe (2026-07-19): native date properties
+  reject naive timestamps (accept RFC 3339 with timezone, or a bare
+  date), so `set-property-to-now` is format-aware — date targets get
+  the bare local date, text targets the full stamp;
+  `tests/e2e/test_live_rules.py` certifies both live.
+
+---
+
+## WP32 — Sandboxed script action + the `automation` tool (ADR 040) — **shipped 2026-07-19**
+
+**Status:** complete. WP31's two scope cuts, un-cut the same day: rules
+gained a fourth action, `run script`, and the assistant gained a tenth
+tool, `automation`, so "whenever a task's Done is checked, …" is a
+one-tool-call request.
+
+* **Scripts live in the rule node's BODY** as the first fenced
+  ```` ```python ```` block (`rules.extract_script`; prose never
+  executes), fetched via `fetch_body` and cached per rule by
+  `modified_at` — a body edit swaps the script in.
+* **Subprocess sandbox** (`ports/script_runner.py` +
+  `infrastructure/sandbox/`, stdlib only): `python -I -S bootstrap.py`
+  per fire, scrubbed env, child self-applied rlimits (CPU/AS/FSIZE/
+  NOFILE/NPROC), parent wall-clock kill (`GC_RULE_SCRIPT_TIMEOUT_SECONDS`,
+  default 5s) + output caps. Chosen for robustness before security: an
+  in-process runaway would hang the bot under the turn lock. Kill path
+  gotcha, load-bearing: after SIGKILL the pipes are drained to EOF or
+  `process.wait()` hangs on the undisconnected pipe transport. Threat
+  model (ADR): contains the owner's accidents, not a hostile author.
+* **Read a snapshot, queue effects**: the child gets every non-infra
+  node + edges (cap 2000, loud) and the trigger context; its API is
+  `objects/find/field/neighbors/set/log` + injected `now`. The engine
+  validates ALL queued writes (existence, non-infra, per-type property
+  resolution, value parse, ≤20) then applies through `_write_field` —
+  so WP31's rebaseline/loop-prevention/at-most-once semantics hold
+  unchanged: scripts can never trigger rules.
+* **The `automation` tool** (bound in every mode beside `schedule`;
+  MCP-registered): create/update with tool-boundary validation, list,
+  pause/resume (no hard delete — the port has no archive), and
+  **test** — a dry run through the real sandbox + the production
+  validation path, reporting `would set …` lines while applying
+  nothing; works on stored rules AND inline drafts, so the model
+  iterates before creating.
+* `tests/sandbox/` runs the REAL subprocess battery (loop kill, memory
+  bomb, stdout bomb, env scrub) in ~1.4s inside the normal suite.
+
+---
+
+## WP33 — Schema proposals: reaction-confirmed type changes (ADR 041) — **shipped 2026-07-19**
+
+**Status:** complete (v2 same day: confirmation moved from an
+LLM-interpreted "yes" to a mechanical 👍 reaction). The eleventh tool,
+`schema`, lets the LLM DRAFT a new type or new scalar properties on an
+existing type; only a HUMAN's reaction on the harness-posted
+confirmation message executes it — ADR 006's "the server never invents
+vocabulary" amended with one human-gated path the model cannot walk.
+
+### Spike S15 results (2026-07-19, live sidecar, API `2025-11-08`) — quirk C12
+
+* `POST .../chats/:cid/messages/:mid/reactions {"emoji": "👍"}` → 200
+  (empty body); TOGGLE semantics — a second identical POST removes it.
+* Message `reactions`: `{"<emoji>": ["<account identity>", ...]}` —
+  ACCOUNT identities (the C6 suffix), not member ids.
+* Toggling emits SSE `event: reactions_updated` with payload
+  `{"id": <message id>, "reactions": {...}}` — bare, NO `message`
+  envelope; reaction frames are NOT replayed with the connect backlog
+  (consumers re-list on reconnect; messages carry `reactions` inline).
+
+### The shipped shape
+
+* **The model drafts only.** `propose_type` / `propose_fields` land
+  `PropertyDraft`s (construction-validated; ADR 023 `FIELD_FORMATS`,
+  scalars only) in a session-scoped ledger (cap 5, in-memory — drafts,
+  not records); `list`/`cancel` manage it. There is NO apply action —
+  attempting one is an error that teaches the contract.
+* **The confirm message is harness-authored.** Drafts drain after the
+  reply as `confirm` reply events (WP23-outbox discipline), rendered
+  from the STORED proposal — the human confirms the exact change, never
+  the model's paraphrase. The Anytype transport posts each as its OWN
+  message (+ "React 👍 to APPLY / 👎 to dismiss") and arms a watch on
+  the id; Discord/CLI render a where-to-confirm note instead.
+* **The reaction handler applies with no model turn.** SSE
+  `reactions_updated` frames (plus a tracked-message re-list sweep on
+  every reconnect — C12 frames don't replay) route into
+  `handle_reaction`: 👍 from any non-bot identity applies under the
+  route lock, 👎 dismisses, the bot's own identity never counts; the
+  outcome posts as ✅/🗑/⚠ messages. A restart clears watches and
+  drafts together — a stale 👍 is inert.
+* **Two new port methods** on `GraphRepository` — `create_type` /
+  `add_type_properties` — contract-tested against both backends. Reuse
+  a same-name property when formats agree; `SchemaChangeConflict` on
+  format mismatch (A12), relation-name shadowing, or an existing type
+  name; retry-safe no-op when a draft is already on the type.
+* **A11-safe by construction**: the adapter re-fetches the type inside
+  the single-writer section and resends the FULL property list plus
+  additions (bootstrap's retrofit discipline) — a human's fields
+  survive the PATCH. Created types register into the live
+  `SpaceRegistry` (`register_type`), so `create_node` can target them
+  with no resync; select options seed find-or-create as tags.
+* Bound in every mode beside `schedule`/`automation` (drafting is
+  harmless everywhere; the human alone executes); MCP-registered as
+  the `schema` tool.
+
 ---
 
 ## Sequencing

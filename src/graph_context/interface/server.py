@@ -237,6 +237,58 @@ async def schedule(
     )
 
 
+@mcp.tool(description=_PROFILE.tool_docs["automation"])
+async def automation(
+    ctx: Context[Any, Any, Any],
+    action: str = "list",
+    name: str = "",
+    rule: str = "",
+    target_type: str = "",
+    watch_property: str = "",
+    condition: str = "",
+    rule_action: str = "",
+    action_property: str = "",
+    action_value: str = "",
+    script: str = "",
+    trigger: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.automation_tool(
+        _services(ctx), action=action, name=name, rule=rule,
+        target_type=target_type, watch_property=watch_property,
+        condition=condition, rule_action=rule_action,
+        action_property=action_property, action_value=action_value,
+        script=script, trigger=trigger,
+    )
+
+
+@mcp.tool(description=_PROFILE.tool_docs["schema"])
+async def schema(
+    ctx: Context[Any, Any, Any],
+    action: str = "list",
+    type: str = "",
+    plural: str = "",
+    properties: list[dict[str, Any]] | None = None,
+    reason: str = "",
+    proposal_id: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.schema_tool(
+        _services(ctx), action=action, type=type, plural=plural,
+        properties=properties, reason=reason, proposal_id=proposal_id,
+    )
+
+
+@mcp.tool(description=_PROFILE.tool_docs["send_file"])
+async def send_file(
+    ctx: Context[Any, Any, Any],
+    name: str,
+    content: str,
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.send_file_tool(_services(ctx), name=name, content=content)
+
+
 @mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
     ctx: Context[Any, Any, Any],

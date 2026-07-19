@@ -27,7 +27,12 @@ async def main() -> None:
     orchestrator = Orchestrator(
         services=services,
         profile=profile,
-        registry=load_registry(profile),
+        # ADR 035: the memory runtime's stores come pre-seeded with the
+        # profile's starter modes -- load the registry the way the bot does.
+        registry=load_registry(
+            in_space=await built.mode_store.load(),
+            space_context=await built.space_context_store.load(),
+        ),
         driver=ClaudeAgentDriver(model=os.environ.get("GC_DRIVER_MODEL") or None),
         model_name=os.environ.get("GC_DRIVER_MODEL", "claude-code-default"),
     )

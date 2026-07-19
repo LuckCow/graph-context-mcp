@@ -26,7 +26,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from graph_context.orchestrator.drivers import LLMTurn, ToolCall
+from graph_context.orchestrator.driver_common import search_digest
+from graph_context.orchestrator.drivers import DecideUsage, LLMTurn, ToolCall
+
+
+def _server_result(turn: LLMTurn, position: int) -> str:
+    """The raw payload paired with the position-th server call, if any."""
+    if position < len(turn.server_tool_results):
+        return turn.server_tool_results[position]
+    return ""
 
 if TYPE_CHECKING:
     from graph_context.orchestrator.pipeline import ReplyEvent
@@ -146,6 +154,23 @@ class TurnLog:
         }
         if turn.thinking:
             entry["thinking"] = turn.thinking
+        if turn.server_tool_calls:
+            # Provider-executed (web search, ADR 030): they already ran
+            # inside the provider -- no tool_result event will follow.
+            # Results log as DIGESTS (WP22): the raw payloads carry bulky
+            # encrypted_content the diary has no use for.
+            entry["server_tool_calls"] = [
+                {
+                    "name": call.name,
+                    "arguments": dict(call.arguments),
+                    **(
+                        {"result": search_digest(raw)}
+                        if (raw := _server_result(turn, position))
+                        else {}
+                    ),
+                }
+                for position, call in enumerate(turn.server_tool_calls)
+            ]
         if turn.tool_calls:
             entry["tool_calls"] = [
                 {"name": call.name, "arguments": dict(call.arguments)}
@@ -155,6 +180,25 @@ class TurnLog:
                 entry["reply"] = turn.reply
         else:
             entry["reply"] = turn.reply
+        self._append(entry)
+
+    def usage(self, usage: DecideUsage) -> None:
+        """One decide's cost/usage (ADR 037): tokens, cache stats, and --
+        on the subscription driver -- dollars, which production
+        previously computed and DISCARDED (``on_result`` was only ever
+        wired by the eval harness). No turn id: the driver's callback
+        fires outside the pipeline's turn scope, so adjacency to the
+        surrounding ``llm_turn`` lines is the correlation."""
+        entry: dict[str, Any] = {
+            "event": "usage",
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cache_creation_tokens": usage.cache_creation_tokens,
+            "duration_ms": usage.duration_ms,
+        }
+        if usage.total_cost_usd is not None:
+            entry["total_cost_usd"] = usage.total_cost_usd
         self._append(entry)
 
     def tool_result(

@@ -3,9 +3,11 @@
 The Anytype sibling of ``discord_transport``: everything the bot decides
 per message -- the echo/backlog/creator gate, the ``anytype:<id>``
 identity mapping, plain-text rendering + object attachments, the
-"Processing" placeholder that the reply edits in place, chunked sends --
-is plain logic
+"Processing" placeholder, chunked sends -- is plain logic
 over primitives, so the whole policy tests without httpx or a server.
+The placeholder is edited into the first reply chunk UNLESS a
+live-activity sink claims it first (WP19, ADR 029: ``turn_activity``
+streams the turn into it and the reply posts fresh).
 Only the composition root (``anytype_chat_bot``) touches infrastructure;
 import-linter holds that line.
 
@@ -36,11 +38,16 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from graph_context.application.scheduler import DueEvent
+from graph_context.errors import GraphContextError
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.drivers import ImageAttachment, TranscriptEvent
 from graph_context.orchestrator.pipeline import (
     ReplyEvent,
+    TurnObserver,
+    is_command,
     scheduled_prompt,
     sender_attributed,
 )
@@ -67,8 +74,36 @@ MAX_ATTACHMENTS = 8  # per message; the reader wants cards, not a wall
 # so the user must see the bot working, not silence.
 PROCESSING_NOTICE = "Processing…"
 
+# WP33 (ADR 041 v2): the reaction vocabulary on a schema-proposal
+# confirmation message, and the instruction line appended to it. THIS
+# transport executes reactions; the render() fallback other surfaces use
+# says confirmation lives here.
+CONFIRM_APPLY_EMOJI = "\N{THUMBS UP SIGN}"
+CONFIRM_DISMISS_EMOJI = "\N{THUMBS DOWN SIGN}"
+CONFIRM_INSTRUCTION = (
+    f"React {CONFIRM_APPLY_EMOJI} to APPLY this schema change, "
+    f"{CONFIRM_DISMISS_EMOJI} to dismiss it."
+)
+
 SendFn = Callable[[str, tuple[str, ...]], Awaitable[str]]
 EditFn = Callable[[str, str, tuple[str, ...]], Awaitable[None]]
+# WP19: remove a message by id -- the activity sink deletes its trace
+# once the reply is delivered.
+DeleteFn = Callable[[str], Awaitable[None]]
+# WP23: (filename, text content) -> the posted message's id. The bot's
+# primitive uploads the file and posts a message carrying it as a card.
+SendFileFn = Callable[[str, str], Awaitable[str]]
+
+
+class ActivityObserver(TurnObserver, Protocol):
+    """What ``run_turn`` needs from a live-activity sink (WP19): the
+    pipeline's per-turn observer, plus the transport-sequenced cleanup
+    ("after the reply posts" is a fact only the transport knows). The
+    concrete sink is ``turn_activity.ChatActivity``, built by the
+    composition root -- named here as a protocol so the policy module
+    never imports it."""
+
+    async def close(self, ok: bool) -> None: ...
 
 
 def object_references(text: str) -> tuple[str, ...]:
@@ -107,6 +142,17 @@ def plainify(text: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class InboundAttachment:
+    """One attachment envelope on an inbound message (WP23): the target
+    object id plus the sender's advisory envelope type. Transport-level
+    data -- the infrastructure ChatAttachment maps onto it at the
+    composition root, keeping this module infrastructure-free."""
+
+    target: str
+    type: str = "link"
+
+
+@dataclass(frozen=True, slots=True)
 class InboundChatMessage:
     """The slice of a chat message the policy needs."""
 
@@ -120,6 +166,7 @@ class InboundChatMessage:
     # the pipeline shows it to the model so "assign this to me"-shaped
     # requests are answerable. "" degrades to an unattributed message.
     creator_name: str = ""
+    attachments: tuple[InboundAttachment, ...] = ()
 
 
 class SentMessages:
@@ -211,6 +258,18 @@ class ChatCursor:
             self._seen[chat_id] = order_id
             self._save()
 
+    def begin(self, chat_id: str) -> None:
+        """Adopt a chat from its very beginning: record the empty position,
+        under which every real order_id counts as new. Live discovery calls
+        this for a chat born while the bot runs -- whatever was typed before
+        the subscription opened (typically the thread's first message) must
+        be answered, not skipped as first-run history. A no-op when a
+        position already exists; persisted, so the promise survives a crash
+        between discovery and catch-up."""
+        if chat_id not in self._seen:
+            self._seen[chat_id] = ""
+            self._save()
+
     def _save(self) -> None:
         if not self._path:
             return
@@ -225,6 +284,132 @@ class ChatCursor:
                 "cannot persist chat cursor to %s; positions are in-memory "
                 "for this process", self._path,
             )
+
+
+# -- inbound file attachments (WP23, ADR 032) ------------------------------
+
+# The provider-required image MIME set: anything else (tiff, bmp, svg...)
+# degrades to a stub note even when Anytype types it as an image.
+IMAGE_MEDIA_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_TEXT_BYTES = 200 * 1024
+# Extensions read as text and inlined (fenced) into the user message.
+# Anytype types non-image uploads as plain `file`, so the extension is
+# the only text/binary signal available before downloading.
+TEXT_FILE_EXTENSIONS = frozenset({
+    "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "yaml", "yml",
+    "toml", "xml", "html", "css", "js", "ts", "py", "sh", "sql", "log",
+    "ini", "cfg", "rst",
+})
+
+
+def classify_attachment(
+    type_key: str, size_in_bytes: int, extension: str
+) -> str:
+    """What to DO with an attachment, from pre-download facts alone.
+
+    ``image``/``text`` -> fetch and hand to the model; ``stub`` -> a
+    file the model should know exists but cannot read (wrong type or
+    over budget); ``object`` -> an ordinary graph-object card, not a
+    file at all (mentioned by name so the model can look it up).
+    """
+    if type_key == "image":
+        return "image" if size_in_bytes <= MAX_IMAGE_BYTES else "stub"
+    if type_key == "file":
+        readable = extension.lower().lstrip(".") in TEXT_FILE_EXTENSIONS
+        return "text" if readable and size_in_bytes <= MAX_TEXT_BYTES else "stub"
+    if type_key in ("video", "audio"):
+        return "stub"
+    return "object"
+
+
+def fenced_file(name: str, text: str) -> str:
+    """An inlined text attachment, fenced and named for the model."""
+    return f'<file name="{name}">\n{text}\n</file>'
+
+
+def attachment_note(name: str, size_in_bytes: int, reason: str) -> str:
+    """The stub line for a file the model gets no content for."""
+    return f"[attached file: {name} ({size_in_bytes} bytes) -- {reason}]"
+
+
+# Chat names that read as "untitled" to the auto-titler (WP21): the API
+# births a nameless chat with "" (quirk C9 / spike S12); "Chat" is the
+# generic default the UI-created chats have shown. A human's deliberate
+# title -- anything else -- is never overwritten.
+UNTITLED_CHAT_NAMES = frozenset({"", "Chat", "New chat"})
+
+# The auto-title side-call's inputs (the goal is the driver's system-
+# prompt fragment; the prompt is one user turn). Consumers are an LLM.
+TITLE_GOAL = (
+    "You title conversations for a chat sidebar. Answer with the title "
+    "only: 2-6 plain words, no quotes, no trailing punctuation."
+)
+TITLE_PROMPT = (
+    "Write a title for the conversation that begins with this exchange.\n\n"
+    "User: {user}\n\nAssistant: {reply}"
+)
+_TITLE_INPUT_SNIP = 500  # per side; a title needs the gist, not the essay
+MAX_TITLE_CHARS = 60
+
+
+@dataclass
+class ChatTitler:
+    """Claude-app-style auto-titling policy (WP21, ADR 031) -- pure state
+    and text shaping; the composition root owns the driver call and the
+    rename I/O.
+
+    ``names`` is ALIASED from the runtime's chat-name registry (the same
+    live-discovery maps the handler shares), so a chat a human titled --
+    at startup, or spotted by the rescan watcher -- never gets renamed.
+    ``_attempted`` guards against retry storms within one process; it
+    needs no persistence because the name check re-derives the state
+    after a restart (a successfully titled chat re-lists with its title).
+    """
+
+    names: dict[str, str]
+    _attempted: set[str] = field(default_factory=set)
+
+    def needs_title(self, chat_id: str) -> bool:
+        if chat_id in self._attempted:
+            return False
+        return self.names.get(chat_id, "").strip() in UNTITLED_CHAT_NAMES
+
+    def mark_attempted(self, chat_id: str) -> None:
+        self._attempted.add(chat_id)
+
+    def record(self, chat_id: str, title: str) -> None:
+        self.names[chat_id] = title
+
+    @staticmethod
+    def prompt_events(
+        user_text: str, reply_text: str
+    ) -> list[TranscriptEvent]:
+        """The one-shot transcript for the titling side-call."""
+        return [TranscriptEvent("user", TITLE_PROMPT.format(
+            user=_snip(user_text.strip(), _TITLE_INPUT_SNIP),
+            reply=_snip(reply_text.strip(), _TITLE_INPUT_SNIP),
+        ))]
+
+    @staticmethod
+    def sanitize(raw: str) -> str:
+        """Model output -> a chat title, defensively: first line only,
+        wrapper quotes/emphasis stripped, whitespace collapsed, length
+        capped. ``""`` means "no usable title" -- the caller skips."""
+        line = next(
+            (piece.strip() for piece in raw.splitlines() if piece.strip()), ""
+        )
+        line = line.strip("\"'`*_")
+        line = re.sub(r"\s+", " ", line).rstrip(".!?,;:")
+        if len(line) > MAX_TITLE_CHARS:
+            line = line[:MAX_TITLE_CHARS].rsplit(" ", 1)[0].rstrip(".!?,;: ")
+        return line
+
+
+def _snip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @dataclass
@@ -246,12 +431,28 @@ class TurnReply:
     send: SendFn
     edit: EditFn
     sent: SentMessages
+    # WP23: native file posting; None (Discord-less surfaces, tests)
+    # degrades file events to fenced text through the ordinary path.
+    send_file: SendFileFn | None = None
     _placeholder_id: str | None = None
 
     async def open(self) -> None:
         if self._placeholder_id is None:
             self._placeholder_id = await self.send(PROCESSING_NOTICE, ())
             self.sent.add(self._placeholder_id)
+
+    def claim_placeholder(self) -> str | None:
+        """Hand the placeholder to a live-activity sink (WP19, ADR 029).
+
+        Once claimed, the placeholder is the sink's activity message and
+        no longer this reply's: ``deliver`` posts every chunk fresh and
+        ``finish`` no-ops. ``None`` when there is nothing to claim
+        (``open`` failed or never ran) -- the caller stays inert. The id
+        is already in the sent ledger; claiming transfers ownership, not
+        identity.
+        """
+        claimed, self._placeholder_id = self._placeholder_id, None
+        return claimed
 
     async def deliver(
         self, text: str, attachments: tuple[str, ...] = ()
@@ -261,6 +462,22 @@ class TurnReply:
             await self.edit(placeholder, text, attachments)
         else:
             self.sent.add(await self.send(text, attachments))
+
+    async def deliver_file(self, name: str, content: str) -> None:
+        """Upload + post one queued file (WP23). Never consumes the
+        placeholder -- a file is an addition to the reply, not the reply."""
+        if self.send_file is None:
+            raise RuntimeError("deliver_file needs a send_file primitive")
+        self.sent.add(await self.send_file(name, content))
+
+    async def post(self, text: str, attachments: tuple[str, ...] = ()) -> str:
+        """Post a fresh message OUTSIDE the placeholder lifecycle (WP33:
+        the schema-confirm message must be its OWN message so a reaction
+        on it is unambiguous). The id lands in the sent ledger and is
+        returned for tracking."""
+        message_id = await self.send(text, attachments)
+        self.sent.add(message_id)
+        return message_id
 
     async def finish(self) -> None:
         """A turn that delivered nothing must not strand the placeholder.
@@ -296,6 +513,11 @@ class AnytypeChatTurnHandler:
     # need is identical: a persisted per-chat order_id watermark.
     clear_marks: ChatCursor = field(default_factory=ChatCursor)
     bot_identity: str = ""
+    # WP33 (ADR 041 v2): posted schema-confirm messages awaiting a
+    # human's reaction -- message id -> (chat id, proposal id). In-memory
+    # like the proposals themselves: a restart clears both sides
+    # together, so a stale 👍 is silently inert.
+    pending_confirms: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def accepts(self, message: InboundChatMessage) -> bool:
         """The gate, separate from the turn (mirrors DiscordTurnHandler)."""
@@ -307,7 +529,8 @@ class AnytypeChatTurnHandler:
             return False  # ours even if the send's id was never recorded
         if not self.cursor.is_new(message):  # backlog replay / reconnect
             return False
-        if not message.text.strip():  # noqa: SIM103 -- gate reads as a checklist
+        # A bare file drop (WP23) is a turn; a truly empty message is not.
+        if not message.text.strip() and not message.attachments:  # noqa: SIM103 -- gate reads as a checklist
             return False
         return True
 
@@ -355,25 +578,50 @@ class AnytypeChatTurnHandler:
                 )
         return seed
 
-    def reply(self, send: SendFn, edit: EditFn) -> TurnReply:
+    def reply(
+        self, send: SendFn, edit: EditFn,
+        send_file: SendFileFn | None = None,
+    ) -> TurnReply:
         """The outbound surface for one turn, wired to this handler's
         echo ledger."""
-        return TurnReply(send=send, edit=edit, sent=self.sent)
+        return TurnReply(
+            send=send, edit=edit, sent=self.sent, send_file=send_file
+        )
 
     async def run_turn(
-        self, message: InboundChatMessage, reply: TurnReply
-    ) -> None:
+        self,
+        message: InboundChatMessage,
+        reply: TurnReply,
+        activity: ActivityObserver | None = None,
+        images: Sequence[ImageAttachment] = (),
+    ) -> list[ReplyEvent]:
         """One accepted message -> placeholder -> turn -> n deliveries.
+        Returns the turn's reply events (the auto-titler reads the first
+        exchange off them; delivery already happened). ``images`` (WP23)
+        are the message's resolved inbound images -- the composition root
+        fetched and classified them; here they just ride to the pipeline.
 
         The cursor advances BEFORE the turn: a failing turn must not make
         the same message eligible again on the next stream event. The
         placeholder posts BEFORE the route lock, so a queued message
-        shows progress even while an earlier turn holds the space.
-        Replies go out as plain text (quirk C7) with every referenced
-        object attached to the first chunk as a card.
+        shows progress even while an earlier turn holds the space --
+        EXCEPT for command turns (``/mode``, ``/clear``), which the
+        pipeline answers instantly without a model turn: those hold off
+        and post only the output, so a command never costs the user two
+        notifications (``deliver`` without a placeholder is a plain
+        send). Replies go out as plain text (quirk C7) with every
+        referenced object attached to the first chunk as a card.
+
+        ``activity`` (WP19, ADR 029) streams the turn into the chat: the
+        pipeline feeds it each decision and tool result, it claims the
+        placeholder as its live activity message, and after the reply is
+        delivered it DELETES that message -- the trace is live scaffolding,
+        not history (the turn log keeps the record). ``None`` (and detail
+        ``off``) keeps the pre-WP19 placeholder lifecycle.
         """
         self.cursor.advance(message)
-        await reply.open()
+        if not is_command(message.text):
+            await reply.open()
         if message.text.strip() == "/clear":
             # The orchestrator empties the in-memory ring; the watermark
             # makes the clear survive a restart (seeding stops here).
@@ -387,17 +635,43 @@ class AnytypeChatTurnHandler:
                 # Intent nodes point back at the triggering chat message.
                 origin=f"anytype:{message.chat_id}:{message.message_id}",
                 sender=message.creator_name,
+                observer=activity,
+                images=images,
             )
-        await self.deliver_events(events, reply)
+        await self.deliver_events(events, reply, chat_id=message.chat_id)
+        if activity is not None:
+            await activity.close(ok=True)
+        return list(events)
 
     async def deliver_events(
-        self, events: Sequence[ReplyEvent], reply: TurnReply
+        self, events: Sequence[ReplyEvent], reply: TurnReply,
+        chat_id: str = "",
     ) -> None:
         """A turn's reply events -> plain-text chunked chat deliveries,
-        every referenced object attached to the first chunk as a card."""
+        every referenced object attached to the first chunk as a card.
+        File events (WP23) post as real uploads when the reply carries a
+        ``send_file`` primitive; without one they degrade to the fenced
+        rendering like any other surface. Confirm events (WP33) post as
+        their OWN messages with the reaction instruction appended, and
+        arm the reaction watch (``chat_id`` names the chat the watch
+        fires in; ``""`` -- bare tests -- degrades to the render path)."""
         for event in events:
+            if event.kind == "file" and reply.send_file is not None:
+                await reply.deliver_file(event.file_name, event.text)
+                continue
+            if event.kind == "confirm" and chat_id and event.confirm_id:
+                message_id = await reply.post(
+                    plainify(f"{event.text}\n{CONFIRM_INSTRUCTION}")
+                )
+                self.pending_confirms[message_id] = (chat_id, event.confirm_id)
+                continue
             rendered = render(event)
-            attachments = object_references(rendered)
+            # ADR 038: explicit attachments (the turn's intent node) ride
+            # ahead of ids scraped from the text, deduped, same cap.
+            merged = tuple(dict.fromkeys(
+                (*event.attach, *object_references(rendered))
+            ))[:MAX_ATTACHMENTS]
+            attachments = merged
             for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):
                 await reply.deliver(piece, attachments)
                 attachments = ()  # cards ride the first chunk only
@@ -449,4 +723,112 @@ class AnytypeChatTurnHandler:
                 # Intent nodes point back at the event node that fired.
                 origin=f"schedule:{due.node_id}",
             )
-        await self.deliver_events(events, reply)
+        await self.deliver_events(events, reply, chat_id=chat_id)
+
+    def confirms_in(self, chat_id: str) -> tuple[str, ...]:
+        """Message ids with an armed reaction watch in one chat -- the
+        reconnect sweep asks before paying a message re-list (C12:
+        reaction frames are not replayed with the backlog)."""
+        return tuple(
+            message_id
+            for message_id, (chat, _) in self.pending_confirms.items()
+            if chat == chat_id
+        )
+
+    async def handle_reaction(
+        self,
+        chat_id: str,
+        message_id: str,
+        reactions: Mapping[str, Sequence[str]],
+        send: SendFn,
+    ) -> None:
+        """A reaction change on a tracked confirm message -> the WP33
+        apply/dismiss, executed by the HARNESS -- no model turn, which is
+        the guarantee ADR 041 v2 exists for. Any non-bot account identity
+        counts as the human (C12 lists ACCOUNT identities; with no
+        discovered bot identity -- the desktop endpoint, where bot and
+        human share an account -- every identity counts). 👍 wins over a
+        simultaneous 👎. Untracked messages are ignored, so the bot's own
+        posts and ordinary reactions cost nothing.
+        """
+        tracked = self.pending_confirms.get(message_id)
+        if tracked is None or tracked[0] != chat_id:
+            return
+        proposal_id = tracked[1]
+
+        def human_reacted(emoji: str) -> bool:
+            return any(
+                identity != self.bot_identity or not self.bot_identity
+                for identity in reactions.get(emoji, ())
+            )
+
+        apply, dismiss = (
+            human_reacted(CONFIRM_APPLY_EMOJI),
+            human_reacted(CONFIRM_DISMISS_EMOJI),
+        )
+        if not apply and not dismiss:
+            return  # a reaction was removed / something unrelated
+        route = self.routes.get(chat_id)
+        services = (
+            route.orchestrator.services_of(f"anytype:{chat_id}")
+            if route is not None else None
+        )
+        if route is None or services is None:
+            # The session vanished under the watch (restart mid-flight);
+            # the proposal ledger went with it.
+            del self.pending_confirms[message_id]
+            self.sent.add(await send(
+                f"[notice] proposal {proposal_id} is no longer pending; "
+                "ask for it again.", (),
+            ))
+            return
+        async with route.lock:
+            if not any(
+                p.id == proposal_id for p in services.proposals.pending()
+            ):
+                del self.pending_confirms[message_id]
+                self.sent.add(await send(
+                    f"[notice] proposal {proposal_id} is no longer "
+                    "pending; ask for it again.", (),
+                ))
+                return
+            if not apply:
+                proposal = services.proposals.cancel(proposal_id)
+                del self.pending_confirms[message_id]
+                self.sent.add(await send(
+                    f"\N{WASTEBASKET} dismissed proposal {proposal.id} "
+                    f"({proposal.type_name!r}); nothing was changed.", (),
+                ))
+                return
+            try:
+                proposal, type_name = await services.proposals.apply(
+                    services.repository, proposal_id
+                )
+            except GraphContextError as err:
+                # Kept tracked: the space may heal (or the user 👎s).
+                self.sent.add(await send(
+                    f"\N{WARNING SIGN} proposal {proposal_id} failed to "
+                    f"apply: {err}", (),
+                ))
+                return
+            if services.persister is not None:
+                await services.persister.note_mutation()
+        del self.pending_confirms[message_id]
+        if proposal.kind == "new_type":
+            outcome = (
+                f"\N{WHITE HEAVY CHECK MARK} applied {proposal.id}: created "
+                f"type {type_name!r} with "
+                f"{len(proposal.properties)} propert"
+                f"{'y' if len(proposal.properties) == 1 else 'ies'}."
+            )
+        else:
+            added = ", ".join(d.name for d in proposal.properties)
+            outcome = (
+                f"\N{WHITE HEAVY CHECK MARK} applied {proposal.id}: "
+                f"{type_name!r} now carries {added}."
+            )
+        self.sent.add(await send(outcome, ()))
+        logger.info(
+            "schema proposal %s applied via reaction (chat=%s)",
+            proposal_id, chat_id,
+        )

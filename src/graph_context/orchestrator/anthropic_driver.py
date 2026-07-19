@@ -20,6 +20,19 @@ decision as an ``assistant`` TranscriptEvent (paired to results by
 Like every driver, ``decide`` is single-decision and stateless: the
 pipeline owns the agentic loop (ADR 007), executes the returned calls,
 and feeds results back on the next decide.
+
+Web search (ADR 030): when a mode admits it, the request carries the
+provider's SERVER-SIDE web search tool -- searches run on Anthropic's
+infrastructure inside the same ``messages.create`` call and never
+round-trip through the pipeline. A searching decision's raw result
+blocks are captured as opaque payloads on the decision event (WP22),
+so when the same decision ALSO called local tools, the transcript
+rebuilt for the next decide replays the search verbatim
+(``encrypted_content`` untouched) -- the model keeps what the search
+returned, not just what it wrote about it. A cited reply's citations
+fold into the reply text as inline markdown links (ADR 036 amendment,
+``_cited_block_text``) -- this driver is the only one that sees them;
+the subscription SDK exposes reply text without citation metadata.
 """
 
 from __future__ import annotations
@@ -28,6 +41,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlparse
 
 from anthropic import (
     APIConnectionError,
@@ -36,6 +50,8 @@ from anthropic import (
     RateLimitError,
 )
 
+from graph_context.domain.model_choice import thinking_locked
+from graph_context.domain.thinking_choice import THINKING_OFF
 from graph_context.errors import GraphContextError
 from graph_context.orchestrator.driver_common import (
     assembled_system_prompt,
@@ -43,6 +59,8 @@ from graph_context.orchestrator.driver_common import (
     fenced_tool_result,
 )
 from graph_context.orchestrator.drivers import (
+    DEFAULT_OPTIONS,
+    DecideOptions,
     DecideUsage,
     LLMTurn,
     ToolCall,
@@ -51,6 +69,97 @@ from graph_context.orchestrator.drivers import (
 
 DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULT_MAX_TOKENS = 16000
+
+# Server-side web search paused mid-turn (the provider's internal loop hit
+# its iteration cap): resume by re-sending with the partial assistant
+# content appended. Bounded -- a turn that keeps pausing is cut off.
+_MAX_PAUSE_RESUMES = 5
+
+# Models whose web search tool supports dynamic filtering (the _20260209
+# variant); everything older takes the basic _20250305 tool. Prefix match:
+# dated snapshots and future point releases of these lines stay covered.
+_DYNAMIC_FILTER_MODELS = (
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable",
+    "claude-mythos",
+)
+
+
+def web_search_tool(model: str, options: DecideOptions) -> dict[str, Any]:
+    """The server-side web search tool definition for ``model``.
+
+    The mode's search limits (ADR 037) ride the definition only when
+    set: ``max_uses`` caps searches per decision; the domain lists scope
+    results (spec validation guarantees at most one list is present --
+    the API rejects both on one request)."""
+    kind = (
+        "web_search_20260209"
+        if model.startswith(_DYNAMIC_FILTER_MODELS)
+        else "web_search_20250305"
+    )
+    tool: dict[str, Any] = {"type": kind, "name": "web_search"}
+    if options.web_search_max_uses:
+        tool["max_uses"] = options.web_search_max_uses
+    if options.web_search_allowed_domains:
+        tool["allowed_domains"] = list(options.web_search_allowed_domains)
+    if options.web_search_blocked_domains:
+        tool["blocked_domains"] = list(options.web_search_blocked_domains)
+    return tool
+
+
+def thinking_params(
+    choice: str, model: str, default_effort: str | None
+) -> dict[str, Any]:
+    """The request's thinking/effort parameters for one decision (ADR 037).
+
+    Precedence: the mode's thinking level > the deployment effort
+    (``GC_DRIVER_EFFORT``) > the model default. Adaptive thinking is
+    always requested EXPLICITLY (omitting it runs without thinking on
+    some current models) and always with ``display: "summarized"`` --
+    the default ``omitted`` streams thinking blocks with EMPTY text, and
+    the turn diary, activity stream, and intent-node trace all want the
+    real summaries. ``off`` sends ``disabled`` -- rejected here for
+    models that cannot turn thinking off (spec validation catches the
+    pinned-model case; this guard covers a Fable/Mythos deployment
+    default the spec cannot see)."""
+    if choice == THINKING_OFF:
+        if thinking_locked(model):
+            raise GraphContextError(
+                f"this mode sets thinking = off but the decision runs on "
+                f"{model}, which cannot turn thinking off -- pick a level "
+                "or a different model"
+            )
+        return {"thinking": {"type": "disabled"}}
+    adaptive: dict[str, Any] = {
+        "thinking": {"type": "adaptive", "display": "summarized"}
+    }
+    effort = choice or default_effort
+    if effort:
+        adaptive["output_config"] = {"effort": effort}
+    return adaptive
+
+
+def _as_data(value: Any) -> Any:
+    """A response content block -> plain JSON-serializable data.
+
+    Real SDK blocks are pydantic models (``model_dump``); test fixtures
+    are namespaces; either way the captured payload must round-trip
+    ``json.dumps``/``loads`` byte-faithfully (``encrypted_content`` is
+    the part the API requires back verbatim)."""
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump()
+    if isinstance(value, Mapping):
+        return {key: _as_data(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_as_data(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {key: _as_data(item) for key, item in vars(value).items()}
+    return value
 
 _REFUSAL_NOTICE = (
     "(the model declined this request for safety reasons; rephrase or "
@@ -79,6 +188,12 @@ def messages_from_transcript(
     * A ``tool_result`` block is only valid against a ``tool_use`` block
       already in the list; a tool event whose ``tool_use_id`` matches
       nothing (or is empty) falls back to fenced text in a user turn.
+    * A decision's provider-executed searches (WP22) replay as
+      ``server_tool_use`` + raw result block PAIRS, each result verbatim
+      from capture (``encrypted_content`` untouched -- the API's
+      multi-turn requirement). An unpaired half is never sent: a call
+      whose result was not captured is omitted whole (the pre-WP22
+      behavior for that search), because a dangling block is a 400.
     """
     messages: list[dict[str, Any]] = []
     known_tool_use_ids: set[str] = set()
@@ -90,10 +205,26 @@ def messages_from_transcript(
     while index < len(events):
         event = events[index]
         if event.kind == "assistant":
-            if event.tool_calls:
+            if event.tool_calls or event.server_tool_calls:
                 content: list[dict[str, Any]] = []
                 if event.text.strip():
                     content.append({"type": "text", "text": event.text})
+                for position, call in enumerate(event.server_tool_calls):
+                    raw = (
+                        event.server_tool_results[position]
+                        if position < len(event.server_tool_results) else ""
+                    )
+                    if not raw:
+                        continue  # never replay an unpaired half
+                    content.append(
+                        {
+                            "type": "server_tool_use",
+                            "id": call.id,
+                            "name": call.name,
+                            "input": dict(call.arguments),
+                        }
+                    )
+                    content.append(json.loads(raw))
                 for call in event.tool_calls:
                     known_tool_use_ids.add(call.id)
                     content.append(
@@ -104,6 +235,11 @@ def messages_from_transcript(
                             "input": dict(call.arguments),
                         }
                     )
+                if not content:
+                    # Every search was unpaired and the decision carried
+                    # no text or local calls: nothing valid to replay.
+                    index += 1
+                    continue
                 messages.append({"role": "assistant", "content": content})
             elif not messages:
                 # Orphaned reply half at the top of replayed history.
@@ -136,6 +272,24 @@ def messages_from_transcript(
             if results:
                 messages.append({"role": "user", "content": results})
             continue
+        if event.images:
+            # WP23: inbound images ride the user turn as native blocks,
+            # ahead of the text (the API's recommended order).
+            blocks: list[dict[str, Any]] = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type,
+                        "data": image.data_base64,
+                    },
+                }
+                for image in event.images
+            ]
+            blocks.append({"type": "text", "text": event.text})
+            messages.append({"role": "user", "content": blocks})
+            index += 1
+            continue
         append_user_text(event.text)
         index += 1
     return messages
@@ -165,35 +319,109 @@ def anthropic_tools(
     return definitions
 
 
+def _cited_block_text(block: Any) -> str:
+    """A text block's text, its web-search citations folded in as
+    markdown links right after the cited span.
+
+    With citations the API splits the reply into a text block PER CITED
+    SPAN and hangs the sources on the block -- the block boundary IS the
+    placement information. Each distinct source URL becomes one
+    ``[domain](url)`` link appended in parentheses, so downstream
+    markdown surfaces render it natively and the Anytype transport's
+    marks conversion (ADR 036) makes it clickable. Parens in URLs are
+    percent-escaped -- a raw ``)`` would end the markdown target early.
+    Citation shapes without a ``url`` (non-web citation types) are
+    skipped rather than guessed at."""
+    text = str(block.text)
+    seen: set[str] = set()
+    links: list[str] = []
+    for citation in getattr(block, "citations", None) or ():
+        url = str(getattr(citation, "url", "") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        host = urlparse(url).netloc.removeprefix("www.") or url
+        target = url.replace("(", "%28").replace(")", "%29")
+        links.append(f"[{host}]({target})")
+    if not links or not text.strip():
+        return text
+    body = text.rstrip()  # the marker hugs the span, not its whitespace
+    return f"{body} ({', '.join(links)}){text[len(body):]}"
+
+
 def turn_from_response(response: Any) -> LLMTurn:
     """A Messages-API response -> the driver's decision.
 
-    Text blocks join into the reply, ``tool_use`` blocks become
-    ToolCalls (real API ids preserved -- the pipeline echoes them back on
-    the result events), ``thinking`` blocks land in ``LLMTurn.thinking``
-    when non-empty (adaptive thinking streams them with empty text by
-    default) -- diagnostics for the turn diary, never reply text.
+    Text blocks assemble into the reply: ADJACENT text blocks
+    concatenate verbatim -- with citations enabled the API splits text
+    mid-sentence at cited-span boundaries, so a separator there would
+    shatter paragraphs -- while text separated by other block kinds
+    keeps a paragraph break. A block's web-search citations are folded
+    in as inline markdown links (``_cited_block_text``). ``tool_use``
+    blocks become ToolCalls (real API ids preserved -- the pipeline
+    echoes them back on the result events), ``thinking`` blocks land in
+    ``LLMTurn.thinking`` when non-empty (adaptive thinking streams them
+    with empty text by default) -- diagnostics for the turn diary, never
+    reply text. ``server_tool_use`` blocks (web search, ADR 030) already
+    ran on the provider's side: they surface as ``server_tool_calls``
+    for the turn diary and activity stream, never as pipeline work.
+    Their result companions (``web_search_tool_result`` -- error-object
+    results included) are captured as OPAQUE raw payloads in
+    ``server_tool_results``, position-paired by ``tool_use_id`` (WP22:
+    the next decide replays them so the model keeps what the search
+    returned; ``""`` marks a result that never arrived).
     ``stop_reason`` outcomes the pipeline should see are folded into the
     reply text: a refusal yields a harness-visible notice instead of
     silence, and a ``max_tokens`` cut is annotated so truncation is not
     mistaken for a complete answer."""
     reply_parts: list[str] = []
+    text_run: list[str] = []
     thinking_parts: list[str] = []
     calls: list[ToolCall] = []
+    server_calls: list[ToolCall] = []
+    results_by_id: dict[str, str] = {}
+
+    def flush_text_run() -> None:
+        run = "".join(text_run)
+        text_run.clear()
+        if run.strip():
+            reply_parts.append(run)
+
     for block in response.content:
         if block.type == "text":
-            reply_parts.append(block.text)
-        elif block.type == "thinking":
+            text_run.append(_cited_block_text(block))
+            continue
+        flush_text_run()
+        if block.type == "thinking":
             thinking_parts.append(block.thinking)
         elif block.type == "tool_use":
             calls.append(ToolCall(block.name, dict(block.input), id=block.id))
-    reply = "\n\n".join(part for part in reply_parts if part.strip()).strip()
+        elif block.type == "server_tool_use":
+            server_calls.append(
+                ToolCall(block.name, dict(block.input), id=block.id)
+            )
+        elif block.type.endswith("_tool_result"):
+            # A server tool's result: keep the WHOLE raw block (the API
+            # wants encrypted_content back verbatim on replay).
+            results_by_id[str(getattr(block, "tool_use_id", ""))] = json.dumps(
+                _as_data(block), default=str
+            )
+    flush_text_run()
+    reply = "\n\n".join(reply_parts).strip()
     thinking = "\n\n".join(part for part in thinking_parts if part.strip()).strip()
     if response.stop_reason == "refusal":
         return LLMTurn(reply=_REFUSAL_NOTICE)
     if response.stop_reason == "max_tokens":
         reply = f"{reply}\n\n{_TRUNCATION_NOTE}".strip()
-    return LLMTurn(reply=reply, tool_calls=tuple(calls), thinking=thinking)
+    return LLMTurn(
+        reply=reply,
+        tool_calls=tuple(calls),
+        thinking=thinking,
+        server_tool_calls=tuple(server_calls),
+        server_tool_results=tuple(
+            results_by_id.get(call.id, "") for call in server_calls
+        ),
+    )
 
 
 def usage_from_response(response: Any, duration_ms: int) -> DecideUsage:
@@ -215,6 +443,45 @@ def usage_from_response(response: Any, duration_ms: int) -> DecideUsage:
             getattr(usage, "cache_creation_input_tokens", 0) or 0
         ),
         num_turns=1,
+    )
+
+
+def usage_from_responses(responses: Sequence[Any], duration_ms: int) -> DecideUsage:
+    """Summed usage across one decide's requests (pause_turn resumes
+    included) -- the metrics tap fires ONCE per decide, so eval reports
+    keep counting decides, not wire round trips."""
+    parts = [usage_from_response(response, duration_ms) for response in responses]
+    return DecideUsage(
+        duration_ms=duration_ms,
+        duration_api_ms=duration_ms,
+        total_cost_usd=None,
+        input_tokens=sum(p.input_tokens for p in parts),
+        output_tokens=sum(p.output_tokens for p in parts),
+        cache_read_tokens=sum(p.cache_read_tokens for p in parts),
+        cache_creation_tokens=sum(p.cache_creation_tokens for p in parts),
+        num_turns=1,
+    )
+
+
+def merged_turn(turns: Sequence[LLMTurn]) -> LLMTurn:
+    """One logical decision from a pause_turn chain of responses.
+
+    The provider pauses MID-decision (its server-tool loop hit an
+    iteration cap), so each resumed response holds only continuation
+    content -- reply text, thinking, and (server) tool calls concatenate
+    in order to reconstruct the whole decision."""
+    if len(turns) == 1:
+        return turns[0]
+    return LLMTurn(
+        reply="\n\n".join(t.reply for t in turns if t.reply).strip(),
+        tool_calls=tuple(c for t in turns for c in t.tool_calls),
+        thinking="\n\n".join(t.thinking for t in turns if t.thinking).strip(),
+        server_tool_calls=tuple(
+            c for t in turns for c in t.server_tool_calls
+        ),
+        server_tool_results=tuple(
+            r for t in turns for r in t.server_tool_results
+        ),
     )
 
 
@@ -260,34 +527,78 @@ class AnthropicDriver:
 
     def render_prompt(self, transcript: Sequence[TranscriptEvent]) -> str:
         # The diary shows the true wire shape: the same mapping decide()
-        # sends, serialized.
-        return json.dumps(messages_from_transcript(transcript), indent=2)
+        # sends, serialized -- except image data (WP23), which is redacted
+        # to a size note; megabytes of base64 are noise the diary's budget
+        # would immediately evict everything else for.
+        messages = messages_from_transcript(transcript)
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                source = block.get("source") if isinstance(block, dict) else None
+                if isinstance(source, dict) and "data" in source:
+                    source = dict(source)
+                    source["data"] = f"<{len(source['data'])} base64 chars>"
+                    block["source"] = source
+        return json.dumps(messages, indent=2)
 
     async def decide(
         self,
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
+        # ADR 033: the active mode's pinned model wins over the
+        # constructor default for this decision.
+        effective_model = options.model or self._model
+        tool_defs = anthropic_tools(tools, self._schemas)
+        if options.web_search:
+            # Deterministic tail position (after the sorted graph tools)
+            # keeps requests cache-friendly across decides.
+            tool_defs.append(web_search_tool(effective_model, options))
+        messages = messages_from_transcript(transcript)
         request: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": self._max_tokens,
+            "model": effective_model,
+            # ADR 037: the mode's cap wins over the constructor default.
+            "max_tokens": options.max_tokens or self._max_tokens,
             "system": assembled_system_prompt(goal),
-            # Explicit even where it is the model default: omitting it
-            # runs WITHOUT thinking on some current models.
-            "thinking": {"type": "adaptive"},
-            "tools": anthropic_tools(tools, self._schemas),
-            "messages": messages_from_transcript(transcript),
+            "tools": tool_defs,
+            "messages": messages,
             # No temperature/top_p/top_k: removed on current models (400).
             # Prompt caching deferred: once turn transcripts routinely
             # exceed the model's cacheable minimum, a top-level
             # cache_control={"type": "ephemeral"} is the one-kwarg upgrade.
+            **thinking_params(options.thinking, effective_model, self._effort),
         }
-        if self._effort is not None:
-            request["output_config"] = {"effort": self._effort}
         started = time.perf_counter()
+        responses: list[Any] = []
+        for _ in range(_MAX_PAUSE_RESUMES + 1):
+            responses.append(await self._create(request))
+            if responses[-1].stop_reason != "pause_turn":
+                break
+            # A server-tool turn paused mid-decision: re-send with the
+            # partial assistant content appended; the server resumes where
+            # it left off (no synthetic user nudge).
+            messages = [
+                *messages,
+                {"role": "assistant", "content": responses[-1].content},
+            ]
+            request["messages"] = messages
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        if self._on_result is not None:
+            self._on_result(usage_from_responses(responses, duration_ms))
+        if responses[-1].stop_reason == "refusal":
+            # A mid-chain partial before a refusal is discarded, not
+            # presented as an answer.
+            return turn_from_response(responses[-1])
+        return merged_turn([turn_from_response(r) for r in responses])
+
+    async def _create(self, request: dict[str, Any]) -> Any:
         try:
-            response = await self._client.messages.create(**request)
+            return await self._client.messages.create(**request)
         except RateLimitError as err:
             raise GraphContextError(
                 "anthropic API rate limit exhausted (after SDK retries); "
@@ -301,7 +612,3 @@ class AnthropicDriver:
             raise GraphContextError(
                 "could not reach api.anthropic.com (network/egress?)"
             ) from err
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        if self._on_result is not None:
-            self._on_result(usage_from_response(response, duration_ms))
-        return turn_from_response(response)

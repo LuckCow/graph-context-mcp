@@ -40,17 +40,28 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.application.rule_engine import RuleTickReport
 from graph_context.application.scheduler import SchedulerTick
+from graph_context.domain.model_choice import model_id
+from graph_context.domain.models import Node
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.services import Services
-from graph_context.interface.tools import resync_out_of_band
+from graph_context.interface.tools import is_error_result, resync_out_of_band
 from graph_context.orchestrator import capture, modes
-from graph_context.orchestrator.drivers import LLMDriver, TranscriptEvent
+from graph_context.orchestrator.drivers import (
+    ImageAttachment,
+    LLMDriver,
+    LLMTurn,
+    ToolCall,
+    TranscriptEvent,
+)
 from graph_context.orchestrator.modes import ModeRegistry
+from graph_context.orchestrator.process_trace import ProcessTrace
 from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
@@ -74,11 +85,51 @@ class ReplyEvent:
 
     ``kind``: ``reply`` (the model's answer), ``notice`` (harness-produced
     -- mode switches, budget exhaustion), ``error`` (harness-produced,
-    actionable).
+    actionable), ``file`` (WP23: ``text`` is the file's CONTENT and
+    ``file_name`` its name -- transports with a file surface upload it;
+    the rest render it fenced).
+
+    ``attach`` (ADR 038) names graph objects the event should carry as
+    object cards INDEPENDENT of its text -- the turn's intent node, so
+    the reply links its own background-process record. Transports
+    without an attachment surface ignore it.
+
+    ``confirm`` events (WP33, ADR 041 v2) carry a schema proposal's
+    harness-rendered confirmation text with ``confirm_id`` naming the
+    proposal. The Anytype transport posts one as its OWN message and
+    arms the 👍-reaction watch on it; other transports render the text
+    like a notice (their text says confirmation lives in the Anytype
+    chat).
     """
 
     text: str
     kind: str = "reply"
+    file_name: str = ""
+    attach: tuple[str, ...] = ()
+    confirm_id: str = ""
+
+
+class TurnObserver(Protocol):
+    """Async per-turn event tap for live activity surfaces (WP19, ADR 029).
+
+    Passed per ``handle_message`` call (its identity is per-turn -- a chat
+    transport binds it to one chat's activity message), unlike the
+    process-lifetime ``turn_log`` field. ``None`` observers cost nothing.
+    ``turn_started``'s ``detail`` is the ACTIVE MODE's ``activity_detail``
+    (a ModeSpec property: picking a mode picks its verbosity; the renderer
+    alone interprets the levels). Contract: implementations MUST NOT raise
+    -- delivery failures degrade internally (the TurnLog posture: a
+    diagnostic never takes a turn down). Command turns (``/mode``,
+    ``/clear``) return before ``turn_started``, so they never stream.
+    """
+
+    async def turn_started(self, mode: str, detail: str) -> None: ...
+
+    async def decision(self, turn: LLMTurn) -> None: ...
+
+    async def tool_result(
+        self, call: ToolCall, result: str, ok: bool
+    ) -> None: ...
 
 
 def scheduled_prompt(name: str, prompt: str) -> str:
@@ -110,6 +161,19 @@ def sender_attributed(text: str, sender: str) -> str:
     leaves the message bare.
     """
     return f"[from {sender}] {text}" if sender else text
+
+
+def is_command(text: str) -> bool:
+    """Whether ``handle_message`` answers this text instantly -- a
+    ``/``-command handled before the model runs (``/mode``, ``/clear``).
+
+    Transports use this to skip work-in-progress affordances (the
+    Anytype "Processing…" placeholder): a command's output arrives at
+    once, so a placeholder would only add a notification. The command
+    vocabulary lives here, next to the dispatch that implements it.
+    """
+    stripped = text.strip()
+    return stripped.startswith("/mode") or stripped == "/clear"
 
 
 DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
@@ -254,6 +318,13 @@ class Orchestrator:
         """Stamp an event as fired (call BEFORE its turn runs)."""
         await self.services.scheduler.mark_fired(node_id)
 
+    async def rule_tick(self) -> RuleTickReport:
+        """One Automation Rule diff-fire pass (WP31, ADR 039). The
+        transports' rule loop calls this after a resync, under the
+        route's turn lock; the shared bundle is correct here too --
+        rules belong to the space, not to any one session."""
+        return await self.services.rules.run_tick()
+
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
         if spec is None:
@@ -271,8 +342,12 @@ class Orchestrator:
 
     async def handle_message(
         self, session_id: str, user_id: str, text: str, origin: str = "",
-        sender: str = "",
+        sender: str = "", observer: TurnObserver | None = None,
+        images: Sequence[ImageAttachment] = (),
     ) -> list[ReplyEvent]:
+        """``images`` (WP23) are inbound image attachments riding this
+        turn's user message; the driver shows them to the model as native
+        image blocks. Turn-local: conversation memory keeps only text."""
         state = await self._session(session_id)
         stripped = text.strip()
         # One id per handle_message call ties this turn's diary records --
@@ -284,32 +359,35 @@ class Orchestrator:
                 turn_id, session_id, state.mode, user_id, stripped,
                 sender=sender,
             )
-        if stripped.startswith("/mode"):
-            mode_events = await self._switch_mode(state, stripped)
+        if is_command(stripped):
+            if stripped.startswith("/mode"):
+                command_events = await self._switch_mode(state, stripped)
+            else:  # /clear
+                state.memory.clear()
+                command_events = [ReplyEvent(
+                    "conversation memory cleared. The scratchpad and working "
+                    "set are kept -- reset those with the context tool "
+                    "(action='note' with empty text / action='clear').",
+                    kind="notice",
+                )]
             if self.turn_log:
                 # state.mode is post-switch: the mode the session is IN now.
                 self.turn_log.turn_end(
-                    turn_id, session_id, state.mode, mode_events
+                    turn_id, session_id, state.mode, command_events
                 )
-            return mode_events
-        if stripped == "/clear":
-            state.memory.clear()
-            clear_events = [ReplyEvent(
-                "conversation memory cleared. The scratchpad and working "
-                "set are kept -- reset those with the context tool "
-                "(action='note' with empty text / action='clear').",
-                kind="notice",
-            )]
-            if self.turn_log:
-                self.turn_log.turn_end(
-                    turn_id, session_id, state.mode, clear_events
-                )
-            return clear_events
+            return command_events
 
         spec = self._spec(state)
+        # WP23: the outbox is TURN-scoped -- files a crashed earlier turn
+        # left behind must not ride out with this one's reply. WP33: same
+        # discipline for schema drafts awaiting their confirm messages.
+        state.services.outbox.clear()
+        state.services.proposals.drafted.clear()
         logger.info(
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
+        if observer:
+            await observer.turn_started(spec.name, spec.activity_detail)
         tools = modes.tool_docs(spec, self.profile)
         if self.turn_log:
             fingerprint = (spec.name, spec.goal, tuple(sorted(tools)))
@@ -330,7 +408,7 @@ class Orchestrator:
                     turn_id, session_id, spec.name, context_block
                 )
         spoken = sender_attributed(stripped, sender)
-        transcript.append(TranscriptEvent("user", spoken))
+        transcript.append(TranscriptEvent("user", spoken, images=tuple(images)))
         if self.turn_log:
             # The assembled prompt as the driver will render it for the
             # FIRST decision; later decisions add only tool results, which
@@ -341,14 +419,24 @@ class Orchestrator:
             )
         events: list[ReplyEvent] = []
         trace: list[ToolTrace] = []
+        # ADR 038: the archive-grade fold of this turn's background work,
+        # fed beside the observer/turn-log taps; rendered once at turn end
+        # into the intent node the reply's card opens.
+        process = ProcessTrace()
         reply_text = ""
         for decisions_left in range(self.max_tool_calls, 0, -1):
             final_decision = decisions_left == 1
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
-            turn = await self.driver.decide(transcript, tools, spec.goal)
+            turn = await self.driver.decide(
+                transcript, tools, spec.goal,
+                options=modes.decide_options(spec),
+            )
             if self.turn_log:
                 self.turn_log.llm_turn(turn_id, session_id, spec.name, turn)
+            if observer:
+                await observer.decision(turn)
+            process.note_decision(turn)
             if not turn.tool_calls:
                 reply_text = turn.reply
                 events.append(ReplyEvent(reply_text))
@@ -369,6 +457,12 @@ class Orchestrator:
                 TranscriptEvent(
                     "assistant", turn.reply, tool_calls=tool_calls,
                     thinking=turn.thinking,
+                    # WP22: the decision's provider-executed searches ride
+                    # along (calls + opaque raw results) so the next
+                    # decide replays what the search returned. Turn-local,
+                    # like thinking.
+                    server_tool_calls=turn.server_tool_calls,
+                    server_tool_results=turn.server_tool_results,
                 )
             )
             for call in tool_calls:
@@ -378,6 +472,7 @@ class Orchestrator:
                 result = await modes.invoke(
                     spec, call.name, state.services, call.arguments
                 )
+                unavailable = result is None
                 if result is None:
                     # The binding boundary's runtime face: actionable for a
                     # driver, visible to the user as a notice.
@@ -391,6 +486,15 @@ class Orchestrator:
                     self.turn_log.tool_result(
                         turn_id, session_id, spec.name, call, result
                     )
+                if observer:
+                    await observer.tool_result(
+                        call, result,
+                        ok=not (unavailable or is_error_result(result)),
+                    )
+                process.note_result(
+                    call.name, result,
+                    ok=not (unavailable or is_error_result(result)),
+                )
                 transcript.append(
                     TranscriptEvent(
                         "tool", result, tool_name=call.name, tool_use_id=call.id
@@ -409,9 +513,39 @@ class Orchestrator:
                 "text despite the warning; the turn was cut short.",
                 kind="notice",
             ))
-        await self._finish_turn(
-            state.services, spec, user_id, stripped, reply_text, trace, origin
+        # WP23: files the model queued with send_file ride out AFTER the
+        # reply text, as file events the transport turns into uploads.
+        for outbound in state.services.outbox:
+            events.append(ReplyEvent(
+                outbound.content, kind="file", file_name=outbound.name
+            ))
+        state.services.outbox.clear()
+        # WP33 (ADR 041 v2): schema drafts ride out after the reply as
+        # confirm events -- the text is the STORED draft's rendering (the
+        # human confirms the exact change, never the model's paraphrase);
+        # each transport appends its own confirmation instruction. The
+        # Anytype transport posts one per event and arms the reaction
+        # watch; the human, not the model, applies.
+        for proposal in state.services.proposals.drain_drafted():
+            events.append(ReplyEvent(
+                proposal.confirm_text(),
+                kind="confirm", confirm_id=proposal.id,
+            ))
+        intent = await self._finish_turn(
+            state.services, spec, user_id, stripped, reply_text, trace,
+            origin, process.render() if process.worked else "",
         )
+        if intent is not None and process.worked:
+            # ADR 038: the reply carries its background-process record as
+            # an object card -- only on turns that DID background work
+            # (a plain answer stays a plain answer, even when capture
+            # minted a node for it).
+            for index in range(len(events) - 1, -1, -1):
+                if events[index].kind == "reply":
+                    events[index] = dataclasses.replace(
+                        events[index], attach=(intent.id,)
+                    )
+                    break
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
             # The attributed form: replayed history must keep who spoke.
@@ -436,12 +570,14 @@ class Orchestrator:
         reply_text: str,
         trace: list[ToolTrace],
         origin: str = "",
-    ) -> None:
+        process_trace: str = "",
+    ) -> Node | None:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
-        drain -> intent node. ``services`` is the session's view; its
+        drain -> intent node (returned so the caller can attach it to the
+        reply, ADR 038). ``services`` is the session's view; its
         repository/capture/journal are the runtime's shared instances."""
         if self.provenance is None:
-            return
+            return None
         policy = spec.capture
         if policy is not None and reply_text:
             references = capture.entity_links(
@@ -464,14 +600,18 @@ class Orchestrator:
             prompt=prompt,
             mutations=mutations,
             trace=trace,
+            process_trace=process_trace,
             user_id=user_id,
-            model=self.model_name,
+            # ADR 033: a mode-pinned model is what actually generated the
+            # turn; only unpinned modes stamp the deployment default.
+            model=model_id(spec.model) or self.model_name,
             mode=spec.name,
             origin=origin,
         )
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
                         intent.id, len(mutations))
+        return intent
 
     async def _session(self, session_id: str) -> _SessionState:
         """The per-session state, created (with I/O) on first sight.
@@ -520,9 +660,36 @@ class Orchestrator:
             state.mode = self.registry.default
         argument = command.removeprefix("/mode").strip().lower()
         if not argument:
+            current = self.registry.get(state.mode)
+            detail = current.activity_detail if current else ""
+            search = "on" if current and current.web_search else "off"
+            model = (current.model if current else "") or "default"
+            thinking = (current.thinking if current else "") or "default"
+            extras = ""
+            if current:
+                # ADR 037 knobs report only when set -- the default line
+                # stays short for the common unconfigured mode.
+                parts = []
+                if current.max_tokens:
+                    parts.append(f"max tokens: {current.max_tokens}")
+                if current.web_search_max_uses:
+                    parts.append(f"search uses: {current.web_search_max_uses}")
+                if current.web_search_allowed_domains:
+                    parts.append(
+                        "search domains: "
+                        + ", ".join(current.web_search_allowed_domains)
+                    )
+                if current.web_search_blocked_domains:
+                    parts.append(
+                        "blocked domains: "
+                        + ", ".join(current.web_search_blocked_domains)
+                    )
+                extras = "".join(f"; {part}" for part in parts)
             events.append(ReplyEvent(
-                f"mode: {state.mode}; switch with /mode "
-                f"{{{' | '.join(self.registry.names())}}}",
+                f"mode: {state.mode} (activity detail: {detail}; "
+                f"web search: {search}; model: {model}; "
+                f"thinking: {thinking}{extras}); "
+                f"switch with /mode {{{' | '.join(self.registry.names())}}}",
                 kind="notice",
             ))
             return events

@@ -36,17 +36,57 @@ version header) lives here, pinned by spike S10 and mirrored by
         value, and attachments ABSENT from the body are removed
         (live-confirmed 2026-07-11 against the sidecar). An edit that
         wants to keep or add cards must re-send their envelopes.
+    C9. A chat object has NO single-chat route: GET and PATCH on
+        ``/chats/<id>`` both 404 (spike S12). It IS addressable through
+        the generic ``/objects/<id>`` routes -- ``PATCH`` there renames
+        it and the new name shows in the next ``/chats`` re-list. A chat
+        created without a name is born with ``name: ""`` (what a fresh
+        UI-created chat looks like to discovery).
+    C10. Files (spike S13): ``POST /files`` uploads (multipart field
+        ``file``; FLAT response -- object_id/name/media/extension/
+        size_in_bytes, no envelope; the client's default JSON
+        Content-Type must be overridden or the server sees no file);
+        ``GET /files/<id>`` serves the raw bytes directly with the
+        Content-Type header as the read-side media source (no
+        ``/content`` sub-route; no list route). The upload is a REAL
+        object (type key ``image`` for images, ``file`` otherwise;
+        ``size_in_bytes``/``file_ext`` properties, but NOT the MIME
+        type). Chat messages reference files through the same
+        ``attachments`` envelopes as C7 (``{"target", "type"}``), and
+        inbound messages EXPOSE their attachments.
+    C12. Reactions (spike S15, live sidecar 2026-07-19): ``POST
+        .../messages/<id>/reactions {"emoji": "👍"}`` TOGGLES the calling
+        account's reaction (a second POST removes it; 200 with an empty
+        body either way). A message's ``reactions`` is ``{"<emoji>":
+        ["<account identity>", ...]}`` -- ACCOUNT identities (the C6
+        suffix), not member ids. Toggling emits an SSE frame ``event:
+        reactions_updated`` whose payload is ``{"id": <message id>,
+        "reactions": {...}}`` -- the message id + map DIRECTLY, with NO
+        ``message`` envelope (unlike message_added/updated). Reaction
+        frames are NOT replayed with the connect-time backlog, so a
+        consumer that must not miss one re-reads the message list on
+        reconnect (messages carry ``reactions`` inline).
+    C11. Rich text rides ``marks`` beside ``text`` (spike S14):
+        ``{"from", "to", "type"}`` + ``"param"`` for links, offsets in
+        UTF-16 CODE UNITS. Ranges are bounds-checked server-side and an
+        invalid one 500s (which the client retries!), so outbound text
+        is converted markdown -> plain text + validated marks in ONE
+        place (``marks.to_marked_text``, applied by ``_message_body``).
+        Marks round-trip at ``content.marks`` and replace wholesale on
+        edit like the rest of the content (C8). Full pinned detail in
+        ``marks.py``'s module docstring.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from graph_context.infrastructure.anytype.client import AnytypeClient
+from graph_context.infrastructure.anytype.marks import to_marked_text
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +96,21 @@ MESSAGE_EVENT_KINDS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class ChatAttachment:
+    """One message attachment envelope (C7/C10): an object id plus the
+    sender's envelope type (``link`` for object cards, ``file`` for
+    files -- advisory only; the TARGET object's type is authoritative)."""
+
+    target: str
+    type: str = "link"
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
-    """One chat message, reduced to what the transport needs (C3/C4)."""
+    """One chat message, reduced to what the transport needs (C3/C4).
+
+    ``reactions`` (C12): emoji -> the ACCOUNT identities that reacted --
+    read by the schema-confirm sweep (WP33), ``{}`` otherwise."""
 
     id: str
     creator: str
@@ -65,14 +118,33 @@ class ChatMessage:
     order_id: str
     created_at: int = 0
     creator_name: str = ""
+    attachments: tuple[ChatAttachment, ...] = ()
+    reactions: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ChatEvent:
-    """One SSE frame: a message event, or a keepalive heartbeat."""
+    """One SSE frame: a message event, or a keepalive heartbeat.
+
+    ``reactions_updated`` frames (C12) carry no message envelope --
+    ``message`` stays ``None`` and the payload surfaces as
+    ``message_id`` + ``reactions`` instead."""
 
     kind: str  # one of MESSAGE_EVENT_KINDS, or "heartbeat"
     message: ChatMessage | None = None
+    message_id: str = ""
+    reactions: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+def _to_reactions(raw: Any) -> dict[str, tuple[str, ...]]:
+    """The C12 reactions map, defensively: emoji -> identity tuple."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(emoji): tuple(str(identity) for identity in identities)
+        for emoji, identities in raw.items()
+        if isinstance(identities, list)
+    }
 
 
 def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
@@ -84,6 +156,15 @@ def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
         order_id=str(raw.get("order_id", "")),
         created_at=int(raw.get("created_at") or 0),
         creator_name=str(raw.get("creator_name", "")),
+        attachments=tuple(
+            ChatAttachment(
+                target=str(entry.get("target", "")),
+                type=str(entry.get("type", "link")),
+            )
+            for entry in raw.get("attachments") or []
+            if isinstance(entry, dict) and entry.get("target")
+        ),
+        reactions=_to_reactions(raw.get("reactions")),
     )
 
 
@@ -109,19 +190,29 @@ async def parse_sse(lines: AsyncIterator[str]) -> AsyncIterator[ChatEvent]:
             continue
         if line == "" and (event_kind or data_parts):
             kind, message = event_kind, None
+            message_id = ""
+            reactions: dict[str, tuple[str, ...]] = {}
             try:
                 payload = json.loads("".join(data_parts)) if data_parts else {}
                 kind = payload.get("type", event_kind) or event_kind
-                raw = (payload.get("payload") or {}).get("message")
+                envelope = payload.get("payload") or {}
+                raw = envelope.get("message")
                 if raw is not None:
                     message = to_chat_message(raw)
+                elif kind == "reactions_updated":
+                    # C12: no message envelope -- id + reactions ride bare.
+                    message_id = str(envelope.get("id", ""))
+                    reactions = _to_reactions(envelope.get("reactions"))
             except (ValueError, TypeError):
                 logger.warning("dropping malformed SSE frame (event=%r)", event_kind)
                 event_kind, data_parts = "", []
                 continue
             event_kind, data_parts = "", []
             if kind in MESSAGE_EVENT_KINDS:
-                yield ChatEvent(kind=kind, message=message)
+                yield ChatEvent(
+                    kind=kind, message=message,
+                    message_id=message_id, reactions=reactions,
+                )
             # unknown kinds are dropped silently: forward-compatible
 
 
@@ -153,12 +244,20 @@ async def discover_bot_identity(client: AnytypeClient) -> str:
     return ""
 
 
-def _message_body(text: str, attachments: Sequence[str]) -> dict[str, Any]:
-    """The create/edit payload: object ids become C7 link envelopes."""
-    body: dict[str, Any] = {"text": text}
+def _message_body(
+    text: str, attachments: Sequence[str], attachment_type: str = "link"
+) -> dict[str, Any]:
+    """The create/edit payload: markdown becomes plain text + marks
+    (C11 -- links go clickable, C7's plain-text rendering shows the
+    rest unstyled otherwise), object ids become C7/C10 envelopes."""
+    plain, marks = to_marked_text(text)
+    body: dict[str, Any] = {"text": plain}
+    if marks:
+        body["marks"] = marks
     if attachments:
         body["attachments"] = [
-            {"target": object_id, "type": "link"} for object_id in attachments
+            {"target": object_id, "type": attachment_type}
+            for object_id in attachments
         ]
     return body
 
@@ -183,6 +282,47 @@ class AnytypeChatClient:
             (str(c["id"]), str(c.get("name") or ""))
             async for c in self._client.list_chats()
         ]
+
+    async def rename(self, chat_id: str, name: str) -> None:
+        """Set a chat's title (C9: via the generic object PATCH -- the
+        chat namespace has no update route). WP21's auto-titling caller."""
+        await self._client.rename_chat(chat_id, name)
+
+    async def attachment_facts(self, target: str) -> dict[str, Any]:
+        """What the transport needs to CLASSIFY an attachment before
+        deciding to fetch it (WP23): the target object's name, type key,
+        size, and extension. The MIME type is absent on the read side
+        (C10) -- it arrives with the bytes."""
+        obj = await self._client.get_object(target)
+        props: dict[str, Any] = {}
+        for entry in obj.get("properties", []):
+            fmt = entry.get("format", "")
+            props[entry.get("key", "")] = entry.get(fmt)
+        return {
+            "name": str(obj.get("name") or ""),
+            "type_key": str((obj.get("type") or {}).get("key") or ""),
+            "size_in_bytes": int(props.get("size_in_bytes") or 0),
+            "extension": str(props.get("file_ext") or ""),
+        }
+
+    async def fetch_file(self, file_id: str) -> tuple[bytes, str]:
+        """A file object's raw bytes + media type (C10)."""
+        return await self._client.download_file(file_id)
+
+    async def upload_file(self, filename: str, content: bytes) -> str:
+        """Upload a file into the space; answers the new file OBJECT id,
+        attachable to a message like any object (C7/C10 envelopes)."""
+        uploaded = await self._client.upload_file(filename, content)
+        return str(uploaded["object_id"])
+
+    async def send_file_message(
+        self, chat_id: str, text: str, file_id: str
+    ) -> str:
+        """Post a message carrying one uploaded file (C10: same envelope
+        family as C7, ``type: "file"`` so clients render a file card)."""
+        return await self._client.create_chat_message(
+            chat_id, _message_body(text, (file_id,), attachment_type="file")
+        )
 
     async def recent_messages(
         self, chat_id: str, *, limit: int = 100
@@ -210,6 +350,17 @@ class AnytypeChatClient:
         await self._client.edit_chat_message(
             chat_id, message_id, _message_body(text, attachments)
         )
+
+    async def delete(self, chat_id: str, message_id: str) -> None:
+        """Remove a message (WP19: the live activity trace is deleted
+        once the reply has posted)."""
+        await self._client.delete_chat_message(chat_id, message_id)
+
+    async def toggle_reaction(
+        self, chat_id: str, message_id: str, emoji: str
+    ) -> None:
+        """Toggle this account's reaction on a message (quirk C12)."""
+        await self._client.toggle_chat_reaction(chat_id, message_id, emoji)
 
     async def stream(
         self, chat_id: str, *, heartbeat_seconds: int = 30

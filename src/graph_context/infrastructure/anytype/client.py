@@ -82,19 +82,40 @@ class AnytypeClient:
         signal rather than transience (S9: a sourceless set's execution
         500s permanently) -- retrying those just burns the whole backoff
         ladder before the caller's skip-handling runs."""
+        response = await self._send(
+            method, path, params=params, json=json, retry=retry
+        )
+        return response.json() if response.content else {}
+
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        retry: bool = True,
+    ) -> httpx.Response:
+        """The bounded-retry request loop, response un-decoded (the file
+        endpoints speak bytes; everything else JSON-decodes in request)."""
         last_error: AnytypeApiError | None = None
         max_retries = self._config.max_retries if retry else 0
         for attempt in range(max_retries + 1):
             self.request_count += 1
             try:
-                response = await self._http.request(method, path, params=params, json=json)
+                response = await self._http.request(
+                    method, path, params=params, json=json,
+                    content=content, headers=headers,
+                )
             except httpx.HTTPError as err:
                 # Transport-level failure (connection refused, timeout, ...):
                 # translate so callers see one error family, per the module
                 # contract. status=0 marks "no HTTP response at all".
                 raise AnytypeApiError(0, "transport", str(err), path) from err
             if response.status_code < 400:
-                return response.json() if response.content else {}
+                return response
             error = self._to_error(response, path)
             if response.status_code not in _RETRYABLE_STATUSES:
                 raise error
@@ -228,12 +249,36 @@ class AnytypeClient:
         payload = await self.request("POST", f"{self._space}/types", json=body)
         return _unwrap(payload, "type")
 
+    async def get_type(self, type_id: str) -> dict[str, Any]:
+        """One type by object ID (not key), properties included."""
+        payload = await self.request("GET", f"{self._space}/types/{type_id}")
+        return _unwrap(payload, "type")
+
+    async def update_type(
+        self, type_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """PATCH a type. Quirk A11: a ``properties`` list REPLACES the
+        type's human-managed fields wholesale (omitted ``gc_`` entries are
+        stripped; server-owned ones like ``tag``/``backlinks`` survive
+        either way), so callers resend the full fetched list alongside any
+        additions; omitting ``properties`` leaves the fields untouched."""
+        payload = await self.request(
+            "PATCH", f"{self._space}/types/{type_id}", json=body
+        )
+        return _unwrap(payload, "type")
+
     def list_properties(self) -> AsyncIterator[dict[str, Any]]:
         return self.paginate(f"{self._space}/properties")
 
     async def create_property(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = await self.request("POST", f"{self._space}/properties", json=body)
         return _unwrap(payload, "property")
+
+    async def delete_property(self, property_id: str) -> None:
+        """Delete a property (by object ID). Quirk A12: formats are
+        immutable, so delete + re-create under the same key is the only
+        format migration; deleting detaches the field from every type."""
+        await self.request("DELETE", f"{self._space}/properties/{property_id}")
 
     def list_tags(self, property_id: str) -> AsyncIterator[dict[str, Any]]:
         """Select/multi_select options ("tags", ADR 012). Property ID, not key."""
@@ -287,6 +332,48 @@ class AnytypeClient:
         payload = await self.request("POST", f"{self._space}/chats", json=body)
         return _unwrap(payload, "object")
 
+    async def rename_chat(self, chat_id: str, name: str) -> None:
+        """Rename a chat object. Quirk C9 (spike S12): the ``/chats``
+        namespace has no single-chat GET or PATCH (both 404) -- a chat
+        renames only through the GENERIC object route, and the new name
+        shows in the next ``/chats`` re-list."""
+        await self.update_object(chat_id, {"name": name})
+
+    # -- files (WP23; quirk C10, spike S13) --------------------------------
+
+    async def upload_file(self, filename: str, content: bytes) -> dict[str, Any]:
+        """Upload a binary file; the server sniffs the media type.
+
+        C10: multipart field ``file``; the response is FLAT
+        (``object_id``/``name``/``media``/``extension``/``size_in_bytes``,
+        no envelope) and the created object's type follows the sniffed
+        media (``image`` for images, ``file`` otherwise). The client's
+        default JSON Content-Type MUST be overridden per request -- with
+        it in place the server answers "missing file in request"
+        (live-caught) -- so the multipart body is encoded by a bare
+        request and sent with its own boundary header."""
+        bare = httpx.Request(
+            "POST", "http://multipart.encode",
+            files={"file": (filename, content)},
+        )
+        response = await self._send(
+            "POST", f"{self._space}/files",
+            content=bare.read(),
+            headers={"Content-Type": bare.headers["content-type"]},
+        )
+        data: dict[str, Any] = response.json()
+        return data
+
+    async def download_file(self, file_id: str) -> tuple[bytes, str]:
+        """A file object's raw bytes and Content-Type header.
+
+        C10: ``GET /files/:id`` serves the binary DIRECTLY (no
+        ``/content`` sub-route -- that 404s); the header is the one
+        reliable media-type source on the read side (object properties
+        carry size/extension but not the MIME type)."""
+        response = await self._send("GET", f"{self._space}/files/{file_id}")
+        return response.content, response.headers.get("content-type", "")
+
     async def list_chat_messages(
         self, chat_id: str, *, limit: int = 100
     ) -> list[dict[str, Any]]:
@@ -325,6 +412,17 @@ class AnytypeClient:
     async def delete_chat_message(self, chat_id: str, message_id: str) -> None:
         await self.request(
             "DELETE", f"{self._space}/chats/{chat_id}/messages/{message_id}"
+        )
+
+    async def toggle_chat_reaction(
+        self, chat_id: str, message_id: str, emoji: str
+    ) -> None:
+        """Toggle the calling account's reaction on a message (C12: a
+        second identical POST removes it; the 200 body is empty)."""
+        await self.request(
+            "POST",
+            f"{self._space}/chats/{chat_id}/messages/{message_id}/reactions",
+            json={"emoji": emoji},
         )
 
     async def stream_lines(

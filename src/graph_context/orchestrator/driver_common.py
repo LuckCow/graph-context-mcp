@@ -97,6 +97,57 @@ def fenced_tool_result(tool_name: str, text: str) -> str:
     return f'<tool_result tool="{tool_name}">\n{text}\n</tool_result>'
 
 
+SEARCH_DIGEST_MAX_RESULTS = 8
+_SEARCH_DIGEST_LINE_CHARS = 200
+
+
+def search_digest(result_json: str) -> str:
+    """One captured server-tool result payload -> a plain-text digest.
+
+    WP22's text-transcript replay (and the turn diary): the payload is an
+    OPAQUE provider-shaped raw block, so parsing is defensive -- a result
+    list yields one ``- title (url)`` line per hit (a ``text`` item yields
+    its snipped text), an error object names its code, and anything
+    unrecognizable degrades to a placeholder rather than raising. Raw
+    payloads (with their bulky ``encrypted_content``) never surface here.
+    """
+    try:
+        payload = json.loads(result_json)
+    except ValueError:
+        return "(unreadable search result payload)"
+    content = payload.get("content") if isinstance(payload, dict) else payload
+    if isinstance(content, dict):
+        code = content.get("error_code")
+        return f"search failed: {code}" if code else "(no results)"
+    if isinstance(content, str):  # SDK ToolResultBlock text-shaped result
+        text = content.strip()
+        if len(text) > _SEARCH_DIGEST_LINE_CHARS * SEARCH_DIGEST_MAX_RESULTS:
+            text = text[: _SEARCH_DIGEST_LINE_CHARS * SEARCH_DIGEST_MAX_RESULTS - 1] + "…"
+        return text or "(no results)"
+    if not isinstance(content, list):
+        return "(no results)"
+    lines: list[str] = []
+    for item in content[:SEARCH_DIGEST_MAX_RESULTS]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        text = str(item.get("text") or "").strip()
+        if title or url:
+            line = " ".join(p for p in (title, f"({url})" if url else "") if p)
+        elif text:
+            line = text
+        else:
+            continue
+        if len(line) > _SEARCH_DIGEST_LINE_CHARS:
+            line = line[: _SEARCH_DIGEST_LINE_CHARS - 1] + "…"
+        lines.append(f"- {line}")
+    dropped = len(content) - SEARCH_DIGEST_MAX_RESULTS
+    if dropped > 0:
+        lines.append(f"- … {dropped} more result(s)")
+    return "\n".join(lines) or "(no results)"
+
+
 def fenced_tool_call(call: ToolCall) -> str:
     """A prior call rendered WITH its arguments: without them the model
     cannot tell which searches it already tried, so a fruitless call gets
@@ -114,10 +165,12 @@ def render_transcript(events: Sequence[TranscriptEvent]) -> str:
     earlier calls' output from user text. A mid-turn assistant decision
     replays everything the (stateless) next session needs to continue its
     own train of thought: the reasoning that chose the calls, any bundled
-    text, and the calls themselves with their arguments -- each followed
-    in order by its ``<tool_result>``. An assistant event with nothing to
-    show (scripted decisions carry no text) is skipped rather than fenced
-    empty.
+    text, provider-executed searches as call + digest pairs (WP22 -- a
+    text transcript cannot carry raw provider blocks, so the digest is
+    what the search returned), and the calls themselves with their
+    arguments -- each followed in order by its ``<tool_result>``. An
+    assistant event with nothing to show (scripted decisions carry no
+    text) is skipped rather than fenced empty.
     """
     parts: list[str] = []
     for event in events:
@@ -129,6 +182,16 @@ def render_transcript(events: Sequence[TranscriptEvent]) -> str:
                 inner.append(f"<thinking>\n{event.thinking}\n</thinking>")
             if event.text.strip():
                 inner.append(event.text)
+            for index, call in enumerate(event.server_tool_calls):
+                inner.append(fenced_tool_call(call))
+                raw = (
+                    event.server_tool_results[index]
+                    if index < len(event.server_tool_results) else ""
+                )
+                if raw:
+                    inner.append(
+                        fenced_tool_result(call.name, search_digest(raw))
+                    )
             inner.extend(fenced_tool_call(call) for call in event.tool_calls)
             if inner:
                 joined = "\n\n".join(inner)
@@ -136,7 +199,18 @@ def render_transcript(events: Sequence[TranscriptEvent]) -> str:
                     f"<assistant_earlier>\n{joined}\n</assistant_earlier>"
                 )
         else:
-            parts.append(event.text)
+            text = event.text
+            if event.images:
+                # WP23: the pixels travel as native blocks (each driver's
+                # concern); the transcript notes their presence so replays
+                # and the diary stay legible.
+                notes = "\n".join(
+                    f'[image attached: {image.name or "(unnamed)"} '
+                    f"({image.media_type})]"
+                    for image in event.images
+                )
+                text = f"{text}\n\n{notes}".strip()
+            parts.append(text)
     return "\n\n".join(parts)
 
 

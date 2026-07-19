@@ -146,6 +146,16 @@ class SpaceRegistry:
         """Record a newly created relation so later writes can reuse it."""
         self.properties_by_key[info.key] = info
 
+    def register_type(self, info: TypeInfo) -> None:
+        """Record a created/re-fetched type so this session can use it
+        without a resync (WP33) -- the type-level ``register_property``.
+        The type's properties join the space-wide vocabulary too (a type
+        create/update mints its inline properties as real space
+        properties)."""
+        self.types_by_key[info.key] = info
+        for prop in info.properties:
+            self.properties_by_key.setdefault(prop.key, prop)
+
     # -- scalar fields (ADR 012) -----------------------------------------
 
     def reflects_field(self, key: str, fmt: str) -> bool:

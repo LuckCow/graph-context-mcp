@@ -45,12 +45,19 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from graph_context.infrastructure.sandbox.runner import (
+        SubprocessScriptRunner,
+    )
 
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_registry import SessionRegistry
 from graph_context.errors import GraphContextError
+from graph_context.interface import mode_config
 from graph_context.interface.profiles import DomainProfile
 from graph_context.interface.services import (
     Services,
@@ -60,6 +67,7 @@ from graph_context.interface.services import (
 from graph_context.ports.graph_repository import GraphRepository
 from graph_context.ports.mode_store import ModeStore
 from graph_context.ports.semantic import Embedder, SemanticIndex
+from graph_context.ports.space_context_store import SpaceContextStore
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +90,7 @@ class BuiltRuntime:
 
     services: Services
     mode_store: ModeStore
+    space_context_store: SpaceContextStore
     teardown: list[TeardownHook]
     services_for: Callable[[str], Awaitable[Services]]
     session_labels: dict[str, str]
@@ -94,13 +103,18 @@ async def build_runtime(
     space_id: str | None = None,
     project: str | None = None,
     session_key: str | None = None,
+    modes_file: str | None = None,
 ) -> BuiltRuntime:
     """Build the full service bundle for one runtime.
 
     The returned teardown hooks run in reverse order on shutdown (session
     flushes before client close). The mode store reads the space's Activity
-    Mode config objects (ADR 015 amendment); the memory backend's is empty,
-    so profile defaults apply.
+    Mode config objects -- the ONLY live mode source since ADR 035. A
+    space with none is seeded here from ``modes_file`` (or the packaged
+    starter set matching the profile) and never touched again; the
+    memory backend's store is pre-filled with the same seed payloads, so
+    dev/CLI behavior matches a freshly seeded space, default link
+    included.
 
     ``space_id``/``project`` override ``ANYTYPE_SPACE_ID``/``GC_PROJECT_NAME``
     so one process can host several runtimes bound to different spaces
@@ -121,8 +135,19 @@ async def build_runtime(
     default_project = project or os.environ.get("GC_PROJECT_NAME")
     teardown: list[TeardownHook] = []
     session_labels: dict[str, str] = {}
+    script_runner = _build_script_runner()
 
     logger.info("profile=%s (%s)", profile.name, profile.description)
+    # ADR 035: the seed corpus parses loudly on every startup (bad config
+    # must not wait for the one space that happens to need a heal).
+    if modes_file:
+        logger.info(
+            "modes_file %s is a SEED source (ADR 035): it fills a space "
+            "that has no Activity Mode objects; the space's own objects "
+            "are authoritative", modes_file,
+        )
+    seeds = mode_config.load_seed_modes(modes_file, profile.name)
+    seed_mode_payloads = mode_config.seed_payloads(seeds)
     if backend == "memory":
         from graph_context.infrastructure.memory.fake_mode_store import (
             InMemoryModeStore,
@@ -132,6 +157,9 @@ async def build_runtime(
         )
         from graph_context.infrastructure.memory.fake_session_store import (
             InMemorySessionStore,
+        )
+        from graph_context.infrastructure.memory.fake_space_context_store import (
+            InMemorySpaceContextStore,
         )
 
         logger.info("backend=memory (development mode; nothing persists)")
@@ -149,11 +177,22 @@ async def build_runtime(
             projector=projector,
             ranker=ranker,
             timezone=os.environ.get("GC_TIMEZONE", ""),
+            script_runner=script_runner,
         )
         base = await _bind_primary(base, registry, session_key)
         return BuiltRuntime(
             services=base,
-            mode_store=InMemoryModeStore(),
+            # ADR 035: the memory backend IS a freshly seeded space --
+            # same payloads, same Space Context default link, so the
+            # dev/CLI path exercises the exact production resolution.
+            mode_store=InMemoryModeStore(seed_mode_payloads),
+            space_context_store=InMemorySpaceContextStore([{
+                "name": "Space Context",
+                "origin": "Space Context (memory)",
+                "default_mode_ids": [
+                    f"seed:{mode_config.default_seed(seeds).name}"
+                ],
+            }]),
             teardown=teardown,
             services_for=_session_seam(base, registry),
             session_labels=session_labels,
@@ -161,11 +200,17 @@ async def build_runtime(
 
     from graph_context.infrastructure.anytype.client import AnytypeClient
     from graph_context.infrastructure.anytype.config import AnytypeConfig
+    from graph_context.infrastructure.anytype.mode_seeder import (
+        seed_activity_modes,
+    )
     from graph_context.infrastructure.anytype.mode_store import AnytypeModeStore
     from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
     from graph_context.infrastructure.anytype.schema_bootstrap import ensure_schema
     from graph_context.infrastructure.anytype.session_repository import (
         AnytypeSessionStore,
+    )
+    from graph_context.infrastructure.anytype.space_context_store import (
+        AnytypeSpaceContextStore,
     )
     from graph_context.infrastructure.anytype.view_catalog import AnytypeViewCatalog
 
@@ -174,6 +219,13 @@ async def build_runtime(
     teardown.append(client.aclose)
     timeline = (profile.time_property, profile.time_format)  # ADR 015
     await ensure_schema(client, timeline=timeline)
+    # ADR 035: a space with no Activity Mode objects gets the starter set
+    # (once); a space with any is human territory and is never touched.
+    if await seed_activity_modes(client, seed_mode_payloads):
+        logger.info(
+            "space %s had no Activity Modes; seeded the starter set",
+            config.space_id,
+        )
     # GC_FIELD_DENYLIST (ADR 012): comma-separated property keys to hide
     # from field reflection, on top of the built-in system-noise denylist.
     field_denylist = frozenset(
@@ -222,15 +274,39 @@ async def build_runtime(
         # NodeQuery per call so desktop edits apply immediately.
         views=AnytypeViewCatalog(client),
         timezone=os.environ.get("GC_TIMEZONE", ""),
+        script_runner=script_runner,
     )
     base = await _bind_primary(base, registry, session_key)
     return BuiltRuntime(
         services=base,
         mode_store=AnytypeModeStore(client),
+        space_context_store=AnytypeSpaceContextStore(client),
         teardown=teardown,
         services_for=_session_seam(base, registry),
         session_labels=session_labels,
     )
+
+
+def _build_script_runner() -> SubprocessScriptRunner:
+    """The rule engine's sandbox (WP32, ADR 040) -- backend-agnostic and
+    zero-dep, so every runtime (dev CLI included) gets scripts.
+
+    ``GC_RULE_SCRIPT_TIMEOUT_SECONDS`` (default 5) is the wall-clock cap
+    per script fire; parsed loudly at startup, like the bot's interval
+    knobs.
+    """
+    from graph_context.infrastructure.sandbox.runner import SubprocessScriptRunner
+
+    raw = os.environ.get("GC_RULE_SCRIPT_TIMEOUT_SECONDS", "5").strip()
+    try:
+        timeout = float(raw)
+    except ValueError:
+        raise GraphContextError(
+            f"GC_RULE_SCRIPT_TIMEOUT_SECONDS must be a number, got {raw!r}"
+        ) from None
+    if timeout <= 0:
+        raise GraphContextError("GC_RULE_SCRIPT_TIMEOUT_SECONDS must be positive")
+    return SubprocessScriptRunner(timeout_seconds=timeout)
 
 
 async def _bind_primary(

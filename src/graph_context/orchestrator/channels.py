@@ -8,7 +8,9 @@ profile, project label, and modes file, declared once at startup in a
     space_id   = "bafyre..."       # required
     profile    = "fiction"         # optional; defaults to GC_PROFILE
     project    = "Ashfall"         # optional cosmetic label
-    modes_file = "ashfall.toml"    # optional; overrides GC_MODES_FILE
+    modes_file = "ashfall.toml"    # optional; the SEED source (ADR 035)
+                                   # for a space with no Activity Mode
+                                   # objects; overrides GC_MODES_FILE
 
 Like ``modes.py`` this stays plain logic over primitives -- no discord.py,
 no infrastructure -- so bindings parse and validate without either. Bad

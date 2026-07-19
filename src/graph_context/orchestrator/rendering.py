@@ -21,6 +21,21 @@ _PREFIXES = {"reply": "", "notice": "[notice] ", "error": "[error] "}
 
 def render(event: ReplyEvent) -> str:
     """Transport-neutral event -> chat text (plain prefixes, like the CLI)."""
+    if event.kind == "file":
+        # WP23 degrade path for surfaces without native file posting
+        # (Discord, the CLI): the content arrives fenced under its name.
+        return f"[file: {event.file_name}]\n```\n{event.text}\n```"
+    if event.kind == "confirm":
+        # WP33 degrade path for surfaces without a reaction channel
+        # (Discord, the CLI): show the draft and say where the human can
+        # actually confirm it. The Anytype transport never renders
+        # confirms through here -- it posts its own message and arms the
+        # 👍-reaction watch.
+        return (
+            f"[schema proposal]\n{event.text}\n(Confirmation happens with "
+            "a \N{THUMBS UP SIGN} reaction in the Anytype chat; this "
+            "surface cannot apply it.)"
+        )
     return f"{_PREFIXES[event.kind]}{event.text}"
 
 

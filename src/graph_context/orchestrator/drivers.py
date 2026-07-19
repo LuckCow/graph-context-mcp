@@ -32,6 +32,21 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageAttachment:
+    """An inbound image riding a user event (WP23).
+
+    ``media_type`` is the exact provider-required MIME type (png / jpeg /
+    gif / webp -- the transport's classification enforces the set);
+    ``data_base64`` is the encoded bytes. Turn-local: cross-turn
+    conversation memory keeps only the spoken text, so a follow-up turn
+    no longer sees the pixels (like ``thinking``)."""
+
+    name: str
+    media_type: str
+    data_base64: str
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptEvent:
     """One entry of a turn's working transcript.
 
@@ -49,6 +64,14 @@ class TranscriptEvent:
     decision. Stateless drivers (a fresh session per decide) replay it so
     the model keeps its own train of thought across decisions; it stays
     turn-local -- cross-turn memory keeps only the spoken halves.
+
+    ``server_tool_calls``/``server_tool_results`` (WP22, ADR 030
+    amendment) carry a decision's provider-executed searches so the NEXT
+    decide can replay what the search returned, not just what the model
+    wrote about it. Results are OPAQUE provider-shaped payloads
+    (JSON-serialized raw blocks), position-paired with the calls; ``""``
+    means the result was never captured, and drivers must never replay
+    an unpaired half. Turn-local, like ``thinking``.
     """
 
     kind: str
@@ -57,6 +80,12 @@ class TranscriptEvent:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_use_id: str = ""
     thinking: str = ""
+    server_tool_calls: tuple[ToolCall, ...] = ()
+    server_tool_results: tuple[str, ...] = ()
+    # Inbound images on a user event (WP23); drivers turn them into
+    # provider image blocks. Text-file attachments need no field -- they
+    # arrive folded into the text as fenced blocks.
+    images: tuple[ImageAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,11 +100,57 @@ class LLMTurn:
     ``thinking`` is the model's reasoning text when the provider streams
     extended-thinking blocks. Diagnostics only: the turn diary records it
     so a human can see WHY a decision was made; it never re-enters the
-    transcript and never counts as reply text."""
+    transcript and never counts as reply text.
+
+    ``server_tool_calls`` are provider-executed tool invocations (web
+    search, ADR 030) that ALREADY RAN inside the provider before the
+    decision came back. The pipeline must never execute them; it copies
+    them (with ``server_tool_results``, the position-paired opaque raw
+    result payloads -- ``""`` = not captured) onto the recorded decision
+    event so the next decide replays what the search returned (WP22),
+    and the turn log / activity stream show them."""
 
     reply: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     thinking: str = ""
+    server_tool_calls: tuple[ToolCall, ...] = ()
+    server_tool_results: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DecideOptions:
+    """The active mode's per-decision driver options (ADRs 030/033/037).
+
+    One value object instead of a kwarg per knob, so a new option is one
+    field here plus the drivers that honor it. Everything follows the
+    mode-property idiom "empty/zero = not set" -- an unset knob keeps the
+    driver's configured default.
+
+    * ``web_search`` admits the provider's server-side search tool
+      (ADR 030); ``web_search_max_uses`` caps searches per decision and
+      the domain tuples scope results (at most ONE of allowed/blocked --
+      spec validation enforces it; API-driver only).
+    * ``model`` is a provider model id overriding the driver default
+      (ADR 033 -- already resolved from the canonical choice).
+    * ``thinking`` is a ``THINKING_LEVELS`` choice (ADR 037): a level
+      means adaptive thinking at that effort with summarized display;
+      ``off`` disables thinking (the API driver refuses it for models
+      that cannot); empty keeps the driver's configured effort.
+    * ``max_tokens`` caps one decision's output tokens (API driver).
+    """
+
+    web_search: bool = False
+    model: str = ""
+    thinking: str = ""
+    max_tokens: int = 0
+    web_search_max_uses: int = 0
+    web_search_allowed_domains: tuple[str, ...] = ()
+    web_search_blocked_domains: tuple[str, ...] = ()
+
+
+# The all-defaults value, shared as the ``decide`` argument default
+# (frozen, so sharing is safe).
+DEFAULT_OPTIONS = DecideOptions()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,9 +187,15 @@ class LLMDriver(Protocol):
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str,
+        *,
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         """Choose the next step given the transcript, bound tools, and the
-        active mode's goal prompt (ADR 015 -- the system-prompt fragment)."""
+        active mode's goal prompt (ADR 015 -- the system-prompt fragment).
+
+        ``options`` carries the active mode's per-decision driver knobs
+        (:class:`DecideOptions`); a driver honors what it can express and
+        ignores the rest (documenting the gaps)."""
         ...
 
     def system_prompt(self, goal: str) -> str:
@@ -160,6 +241,8 @@ class ScriptedDriver:
         transcript: Sequence[TranscriptEvent],
         tools: Mapping[str, str],
         goal: str = "",
+        *,
+        options: DecideOptions = DEFAULT_OPTIONS,
     ) -> LLMTurn:
         if self._cursor >= len(self._turns):
             return LLMTurn(reply="(script exhausted)")

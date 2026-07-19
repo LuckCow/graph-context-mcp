@@ -13,7 +13,11 @@ Startup catch-up (user requirement, ADR 019): the chat cursor persists
 (``GC_CHAT_CURSOR``, default ``logs/chat_cursor.json``; ``0``/``off``
 disables). A chat WITH a persisted position first answers every message
 that arrived while the bot was down (up to the API's recency window);
-only a chat with NO position fast-forwards past its history.
+only a chat with NO position fast-forwards past its history. A chat the
+rescan watcher discovers mid-run is adopted from its beginning instead
+(``ChatCursor.begin``): it was born while the bot ran, so the messages
+typed before the subscription opened are unanswered conversation, not
+history.
 
 Reconnects: the client's SSE read timeout is tied to the heartbeat, so a
 half-dead stream raises instead of hanging; this loop reconnects with
@@ -25,7 +29,9 @@ agnostic: the desktop app today, the headless sidecar after cutover),
 GC_SPACES_FILE (required), GC_CHAT_CURSOR, GC_CHAT_RESCAN_SECONDS (live
 chat discovery), GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
 both default 60, ``off`` disables), GC_SCHEDULE_TICK_SECONDS (scheduled-
-event firing, ADR 027; default 30, ``off`` disables), plus the usual
+event firing, ADR 027; default 30, ``off`` disables),
+GC_RULE_TICK_SECONDS (automation-rule firing, ADR 039; default 5,
+``off`` disables), plus the usual
 GC_DRIVER / GC_PROFILE / GC_MODES_FILE / provenance knobs.
 
 Run:  python -m graph_context.orchestrator.anytype_chat_bot
@@ -34,9 +40,12 @@ Run:  python -m graph_context.orchestrator.anytype_chat_bot
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
 import logging
 import os
 import random
+from collections.abc import Mapping
 from pathlib import Path
 
 from graph_context import composition
@@ -51,16 +60,29 @@ from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_transport import (
+    IMAGE_MEDIA_TYPES,
+    MAX_TEXT_BYTES,
+    TITLE_GOAL,
     AnytypeChatTurnHandler,
     ChatCursor,
+    ChatTitler,
+    DeleteFn,
     EditFn,
+    InboundAttachment,
     InboundChatMessage,
+    SendFileFn,
     SendFn,
     SentMessages,
+    attachment_note,
+    classify_attachment,
+    fenced_file,
 )
 from graph_context.orchestrator.channels import ChannelRoute
+from graph_context.orchestrator.drivers import ImageAttachment
+from graph_context.orchestrator.pipeline import ReplyEvent, is_command
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
+from graph_context.orchestrator.turn_activity import ChatActivity
 from graph_context.orchestrator.turn_log import OFF_VALUES
 
 logger = logging.getLogger(__name__)
@@ -68,9 +90,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_CURSOR_PATH = "logs/chat_cursor.json"
 CATCHUP_WINDOW = 100  # the messages endpoint's recency window (C2)
 _RECONNECT_CAP_SECONDS = 60.0
-CHAT_RESCAN_SECONDS = 60  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
+CHAT_RESCAN_SECONDS = 3  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
+# 3s makes new-chat pickup near-instant: sidecar reads are unthrottled
+# (S7), so a tight re-list costs nothing. Raise this when pointing at a
+# throttled desktop endpoint.
 GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
 SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_SECONDS
+RULE_TICK_SECONDS = 5  # automation-rule scan (ADR 039); GC_RULE_TICK_SECONDS
+# 5s keeps reactions feeling immediate; the tick runs its own cheap
+# modified-since resync (unthrottled sidecar), so it does not wait for
+# the 60s graph poll. Raise this on a throttled desktop endpoint.
 
 
 def _cursor_path() -> str | None:
@@ -113,6 +142,11 @@ def _schedule_tick_seconds() -> float | None:
     return _interval_seconds("GC_SCHEDULE_TICK_SECONDS", SCHEDULE_TICK_SECONDS)
 
 
+def _rule_tick_seconds() -> float | None:
+    """Automation-rule scan interval; ``0``/``off`` disables the engine."""
+    return _interval_seconds("GC_RULE_TICK_SECONDS", RULE_TICK_SECONDS)
+
+
 def _sent_path(cursor_path: str | None) -> str | None:
     """The sent-message ledger rides next to the cursor (one knob)."""
     if cursor_path is None:
@@ -140,14 +174,84 @@ def _inbound(
         text=message.text,
         order_id=message.order_id,
         creator_name=message.creator_name,
+        attachments=tuple(
+            InboundAttachment(target=a.target, type=a.type)
+            for a in message.attachments
+        ),
     )
+
+
+async def _resolve_attachments(
+    chat_client: AnytypeChatClient, message: InboundChatMessage
+) -> tuple[list[str], list[ImageAttachment]]:
+    """A message's attachments -> (text parts, images) for the turn (WP23).
+
+    Classification is the transport's pure policy; this owns the I/O:
+    facts first (name/type/size -- no download), then bytes only for
+    what the model will actually get. Text files inline as fenced
+    blocks, images become native blocks, everything else a note -- and
+    a single unreadable attachment degrades to its own note, never the
+    turn."""
+    parts: list[str] = []
+    images: list[ImageAttachment] = []
+    for attachment in message.attachments:
+        try:
+            facts = await chat_client.attachment_facts(attachment.target)
+            name = str(facts["name"] or attachment.target)
+            extension = str(facts["extension"] or "")
+            display = f"{name}.{extension}" if extension else name
+            size = int(facts["size_in_bytes"] or 0)
+            kind = classify_attachment(
+                str(facts["type_key"]), size, extension
+            )
+            if kind == "object":
+                # An ordinary graph-object card: name it so the model can
+                # find_node it; nothing to download.
+                parts.append(f"[attached object: {name}]")
+                continue
+            if kind == "stub":
+                reason = (
+                    "too large to read here"
+                    if str(facts["type_key"]) in ("image", "file")
+                    and size > MAX_TEXT_BYTES
+                    else "a type the assistant cannot read"
+                )
+                parts.append(attachment_note(display, size, reason))
+                continue
+            content, media = await chat_client.fetch_file(attachment.target)
+            media = media.partition(";")[0].strip().lower()
+            if kind == "image":
+                if media not in IMAGE_MEDIA_TYPES:
+                    parts.append(attachment_note(
+                        display, len(content),
+                        f"an image format the assistant cannot read ({media})",
+                    ))
+                    continue
+                images.append(ImageAttachment(
+                    name=display, media_type=media,
+                    data_base64=base64.b64encode(content).decode("ascii"),
+                ))
+            else:  # text
+                parts.append(fenced_file(
+                    display, content.decode("utf-8", errors="replace")
+                ))
+        except GraphContextError as err:
+            logger.warning(
+                "attachment %s unreadable (chat=%s): %s",
+                attachment.target, message.chat_id, err,
+            )
+            parts.append(
+                f"[an attachment could not be read: {attachment.target}]"
+            )
+    return parts, images
 
 
 
 def _reply_primitives(
     chat_client: AnytypeChatClient, chat_id: str
-) -> tuple[SendFn, EditFn]:
-    """The send/edit pair a turn handler's reply needs, bound to one chat."""
+) -> tuple[SendFn, EditFn, SendFileFn, DeleteFn]:
+    """The send/edit/send-file/delete primitives a turn needs, bound to
+    one chat (delete serves the activity sink, not the reply)."""
 
     async def send(text: str, attachments: tuple[str, ...] = ()) -> str:
         return await chat_client.send(chat_id, text, attachments)
@@ -157,7 +261,19 @@ def _reply_primitives(
     ) -> None:
         await chat_client.edit(chat_id, message_id, text, attachments)
 
-    return send, edit
+    async def send_file(name: str, content: str) -> str:
+        # WP23: upload, then one message carrying the file as a card.
+        file_id = await chat_client.upload_file(
+            name, content.encode("utf-8")
+        )
+        return await chat_client.send_file_message(
+            chat_id, f"\N{PAPERCLIP} {name}", file_id
+        )
+
+    async def delete(message_id: str) -> None:
+        await chat_client.delete(chat_id, message_id)
+
+    return send, edit, send_file, delete
 
 
 async def _maybe_turn(
@@ -166,24 +282,85 @@ async def _maybe_turn(
     chat_id: str,
     message: ChatMessage,
     chat_client: AnytypeChatClient,
+    titler: ChatTitler | None = None,
 ) -> None:
     inbound = _inbound(space_id, chat_id, message)
     if not handler.accepts(inbound):
         return
 
-    send, edit = _reply_primitives(chat_client, chat_id)
+    send, edit, send_file, delete = _reply_primitives(chat_client, chat_id)
 
     # Errors deliver through the same reply, so they replace the turn's
-    # "Processing…" placeholder instead of stranding it in the chat.
-    reply = handler.reply(send, edit)
+    # "Processing…" placeholder instead of stranding it in the chat --
+    # and when the turn streamed activity (WP19), the error posts fresh
+    # (the sink claimed the placeholder) and the activity message is
+    # deleted like on the happy path.
+    reply = handler.reply(send, edit, send_file)
+    activity = ChatActivity(reply=reply, edit=edit, delete=delete)
     try:
-        await handler.run_turn(inbound, reply)
+        images: list[ImageAttachment] = []
+        if inbound.attachments:
+            parts, images = await _resolve_attachments(chat_client, inbound)
+            text = "\n\n".join(
+                piece for piece in (inbound.text.strip(), *parts) if piece
+            )
+            if not text and images:
+                text = "(the user sent the attached image(s))"
+            inbound = dataclasses.replace(inbound, text=text)
+        events = await handler.run_turn(inbound, reply, activity, images=images)
     except GraphContextError as err:
         # Config-shaped errors are actionable; show them in-chat.
         await reply.deliver(f"[error] {err}")
+        await activity.close(ok=False)
+        return
     except Exception:  # a turn must never take the serve loop down
         logger.exception("turn failed (chat=%s)", chat_id)
         await reply.deliver(TURN_FAILED_NOTICE)
+        await activity.close(ok=False)
+        return
+    if titler is not None:
+        await _maybe_title(titler, handler, inbound, events, chat_client)
+
+
+async def _maybe_title(
+    titler: ChatTitler,
+    handler: AnytypeChatTurnHandler,
+    inbound: InboundChatMessage,
+    events: list[ReplyEvent],
+    chat_client: AnytypeChatClient,
+) -> None:
+    """Claude-app-style auto-title after a chat's first real exchange
+    (WP21, ADR 031). One driver side-call + one rename PATCH, once per
+    chat lifetime, AFTER the reply is already delivered -- off the
+    user-visible path, and a failure never fails the turn.
+    """
+    if is_command(inbound.text) or not titler.needs_title(inbound.chat_id):
+        return
+    reply_text = next(
+        (event.text for event in events if event.kind == "reply"), ""
+    )
+    if not reply_text.strip():
+        return  # error/notice-only turn: wait for a real exchange
+    titler.mark_attempted(inbound.chat_id)  # win or lose, one attempt
+    route = handler.routes[inbound.chat_id]
+    try:
+        turn = await route.orchestrator.driver.decide(
+            titler.prompt_events(inbound.text, reply_text), {}, TITLE_GOAL
+        )
+        title = titler.sanitize(turn.reply)
+        if not title:
+            logger.warning(
+                "chat %s: title side-call produced nothing usable",
+                inbound.chat_id,
+            )
+            return
+        await chat_client.rename(inbound.chat_id, title)
+        titler.record(inbound.chat_id, title)
+        logger.info("titled chat %s: %r", inbound.chat_id, title)
+    except GraphContextError as err:
+        logger.warning("chat titling failed (chat=%s): %s", inbound.chat_id, err)
+    except Exception:  # titling must never take the serve loop down
+        logger.exception("chat titling failed (chat=%s)", inbound.chat_id)
 
 
 async def _catch_up(
@@ -191,8 +368,12 @@ async def _catch_up(
     chat_client: AnytypeChatClient,
     chat_id: str,
     cursor: ChatCursor,
+    titler: ChatTitler | None = None,
 ) -> None:
-    """First-run chats skip history; resumed chats answer the offline gap."""
+    """First-run chats skip history; resumed chats answer the offline gap.
+    (A live-discovered chat counts as resumed: discovery positions its
+    cursor at the beginning, making the pre-subscription messages the gap.)
+    """
     window = await chat_client.recent_messages(chat_id, limit=CATCHUP_WINDOW)
     if not cursor.has(chat_id):
         if window:
@@ -217,8 +398,43 @@ async def _catch_up(
         )
     for message in window:  # the gate drops everything <= the cursor
         await _maybe_turn(
-            handler, chat_client.space_id, chat_id, message, chat_client
+            handler, chat_client.space_id, chat_id, message, chat_client,
+            titler,
         )
+
+
+async def _maybe_reaction(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    chat_id: str,
+    message_id: str,
+    reactions: Mapping[str, tuple[str, ...]],
+) -> None:
+    """Route one reaction change into the WP33 confirm handler; a failure
+    must never take the serve loop down (the _maybe_turn discipline)."""
+    send, _, _, _ = _reply_primitives(chat_client, chat_id)
+    try:
+        await handler.handle_reaction(chat_id, message_id, reactions, send)
+    except Exception:
+        logger.exception("reaction handling failed (chat=%s)", chat_id)
+
+
+async def _sweep_confirms(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    chat_id: str,
+) -> None:
+    """Re-read tracked confirm messages after a stream (re)connect: C12
+    reaction frames are NOT replayed with the backlog, so a 👍 made
+    during a drop is only visible on the message list."""
+    tracked = set(handler.confirms_in(chat_id))
+    if not tracked:
+        return
+    for message in await chat_client.recent_messages(chat_id):
+        if message.id in tracked and message.reactions:
+            await _maybe_reaction(
+                handler, chat_client, chat_id, message.id, message.reactions
+            )
 
 
 async def _serve_chat(
@@ -226,18 +442,29 @@ async def _serve_chat(
     chat_client: AnytypeChatClient,
     chat_id: str,
     cursor: ChatCursor,
+    titler: ChatTitler | None = None,
 ) -> None:
     space_id = chat_client.space_id
-    await _catch_up(handler, chat_client, chat_id, cursor)
+    await _catch_up(handler, chat_client, chat_id, cursor, titler)
     delay = 1.0
     while True:
         try:
+            await _sweep_confirms(handler, chat_client, chat_id)
             async for event in chat_client.stream(chat_id):
                 delay = 1.0  # a live stream resets the backoff
+                if event.kind == "reactions_updated" and event.message_id:
+                    # WP33: a 👍 on a tracked confirm message applies the
+                    # schema proposal -- harness-executed, no model turn.
+                    await _maybe_reaction(
+                        handler, chat_client, chat_id,
+                        event.message_id, dict(event.reactions),
+                    )
+                    continue
                 if event.kind != "message_added" or event.message is None:
-                    continue  # edits/deletes/reactions/heartbeats: no turns
+                    continue  # edits/deletes/heartbeats: no turns
                 await _maybe_turn(
-                    handler, space_id, chat_id, event.message, chat_client
+                    handler, space_id, chat_id, event.message, chat_client,
+                    titler,
                 )
         except GraphContextError as err:
             logger.warning(
@@ -260,13 +487,18 @@ async def _watch_chats(
     runtimes: bootstrap.SpaceRuntimes,
     task_group: asyncio.TaskGroup,
     interval: float,
+    titler: ChatTitler | None = None,
 ) -> None:
     """Live discovery (WP8): re-list a space's chats and serve new ones.
 
     Reads are unthrottled, so a periodic re-list is cheap. A newly created
     chat is registered (visible to the handler at once, aliased maps) and
-    gets its own serve task with no restart. Never raises -- a failed
-    re-list logs and retries -- so it is safe inside the bot's TaskGroup.
+    gets its own serve task with no restart -- adopted from its beginning,
+    so the message that opened the thread is answered even though it
+    predates the subscription. Already-served chats get
+    their listed NAME refreshed (WP21: a human's rename must reach the
+    titler's untitled test). Never raises -- a failed re-list logs and
+    retries -- so it is safe inside the bot's TaskGroup.
     """
     space_id = binding.space_id
     while True:
@@ -279,11 +511,18 @@ async def _watch_chats(
         names = dict(listed)
         for chat_id in served_chat_ids(binding, [cid for cid, _ in listed]):
             if chat_id in runtimes.routes:
+                runtimes.chat_names[chat_id] = names.get(chat_id, "").strip()
                 continue
             bootstrap.register_chat(runtimes, space_id, chat_id, names.get(chat_id, ""))
             logger.info("discovered chat %s in space %s; serving it", chat_id, space_id)
+            # A discovered chat was born while the bot ran: adopt it from
+            # its beginning, so the message(s) typed before this
+            # subscription opened -- the thread's opener, typically --
+            # count as offline backlog for _catch_up, not skippable
+            # first-run history.
+            handler.cursor.begin(chat_id)
             task_group.create_task(
-                _serve_chat(handler, chat_client, chat_id, handler.cursor)
+                _serve_chat(handler, chat_client, chat_id, handler.cursor, titler)
             )
 
 
@@ -324,9 +563,9 @@ async def _fire_scheduled(
     """Deliver one due Scheduled Event's turn (same error posture as
     ``_maybe_turn``: the failure replaces the placeholder, never the loop)."""
 
-    send, edit = _reply_primitives(chat_client, chat_id)
+    send, edit, send_file, _ = _reply_primitives(chat_client, chat_id)
 
-    reply = handler.reply(send, edit)
+    reply = handler.reply(send, edit, send_file)
     try:
         await handler.run_scheduled(chat_id, due, reply)
     except GraphContextError as err:
@@ -397,6 +636,47 @@ async def _watch_schedule(
                 )
 
 
+async def _watch_rules(
+    route: ChannelRoute, space_id: str, interval: float
+) -> None:
+    """Fire due Automation Rules (ADR 039; fourth sibling watcher).
+
+    Unlike ``_watch_schedule`` -- a pure read riding ``_watch_graph``'s
+    resync -- each rule tick runs its OWN resync first, under the turn
+    lock: reacting to a checkbox a minute late reads as broken, and the
+    modified-since search is a few localhost calls against the
+    unthrottled sidecar. The engine's baseline diff makes the tick
+    idempotent and loop-free (its own writes never read as transitions).
+    Never raises -- a failed tick logs and retries -- so it is safe
+    inside the bot's TaskGroup.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with route.lock:
+                await route.orchestrator.resync_graph()
+                report = await route.orchestrator.rule_tick()
+        except GraphContextError as err:
+            logger.warning("rule tick for space %s failed: %s", space_id, err)
+            continue
+        except Exception:  # the engine must never take the serve loop down
+            logger.exception("rule tick for space %s crashed", space_id)
+            continue
+        for firing in report.fired:
+            logger.info(
+                "rule %r fired %r on %r (%s)",
+                firing.rule_name, firing.action, firing.node_name,
+                firing.node_id,
+            )
+        for problem in report.errors:
+            logger.warning(
+                "rule %r (%s) recorded an error: %s",
+                problem.rule_name, problem.rule_id, problem.message,
+            )
+        for node_id in report.healed:
+            logger.info("rule %s healed: config parses again", node_id)
+
+
 async def run() -> None:
     """Serve every bound space's chats until cancelled.
 
@@ -441,9 +721,14 @@ async def run() -> None:
             transport_clients[0]
         ) if transport_clients else "",
     )
+    # WP21: Claude-app-style auto-titling. The names map is the same
+    # object register_chat and the rescan watcher write, so a human's
+    # title is always respected.
+    titler = ChatTitler(names=runtimes.chat_names)
     rescan = _rescan_seconds()
     graph_resync = _graph_resync_seconds()
     schedule_tick = _schedule_tick_seconds()
+    rule_tick = _rule_tick_seconds()
     try:
         served = "; ".join(
             f"{chat_id}: {desc}"
@@ -451,13 +736,15 @@ async def run() -> None:
         )
         logger.info("anytype chat: serving %s. %s", served, runtimes.help_line)
         # TaskGroup (not gather): the discovery watchers spawn serve tasks
-        # into the same lifecycle. A brand-new chat's serve task fast-
-        # forwards past its (empty) history via _catch_up's first-run path.
+        # into the same lifecycle. A discovered chat is adopted from its
+        # beginning (cursor.begin), so _catch_up answers anything typed
+        # before the subscription opened instead of skipping it.
         async with asyncio.TaskGroup() as task_group:
             for chat_id, space_id in list(runtimes.spaces.items()):
                 task_group.create_task(
                     _serve_chat(
-                        handler, client_for(space_id), chat_id, handler.cursor
+                        handler, client_for(space_id), chat_id,
+                        handler.cursor, titler,
                     )
                 )
             if rescan is not None:
@@ -466,7 +753,7 @@ async def run() -> None:
                         continue  # pinned: no discovery
                     task_group.create_task(_watch_chats(
                         handler, client_for(space_id), binding,
-                        runtimes, task_group, rescan,
+                        runtimes, task_group, rescan, titler,
                     ))
             if graph_resync is not None:
                 for space_id, route in runtimes.space_routes.items():
@@ -479,6 +766,11 @@ async def run() -> None:
                         handler, client_for(space_id), route, space_id,
                         schedule_tick,
                     ))
+            if rule_tick is not None:
+                for space_id, route in runtimes.space_routes.items():
+                    task_group.create_task(
+                        _watch_rules(route, space_id, rule_tick)
+                    )
     finally:
         await composition.run_teardown(teardown)
 

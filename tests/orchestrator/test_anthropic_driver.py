@@ -23,19 +23,25 @@ pytest.importorskip("anthropic")
 from graph_context.errors import GraphContextError  # noqa: E402
 from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.anthropic_driver import (  # noqa: E402
+    _MAX_PAUSE_RESUMES,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     AnthropicDriver,
     anthropic_tools,
+    merged_turn,
     messages_from_transcript,
+    thinking_params,
     turn_from_response,
     usage_from_response,
+    web_search_tool,
 )
 from graph_context.orchestrator.driver_common import (  # noqa: E402
     assembled_system_prompt,
     derive_schema,
 )
 from graph_context.orchestrator.drivers import (  # noqa: E402
+    DecideOptions,
+    ImageAttachment,
     ToolCall,
     TranscriptEvent,
 )
@@ -263,6 +269,113 @@ class TestResponseHarvest:
         assert "truncated" in turn.reply
 
 
+def _cited_text_block(text: str, *urls: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="text", text=text,
+        citations=[
+            SimpleNamespace(
+                type="web_search_result_location", url=url,
+                title=f"page at {url}", cited_text="…",
+                encrypted_index="ENC",
+            )
+            for url in urls
+        ],
+    )
+
+
+class TestCitationFolding:
+    """Web-search citations (API driver only): the API splits the reply
+    into a text block per cited span; each block's sources fold in as
+    inline ``[domain](url)`` links, which the Anytype transport's marks
+    conversion (ADR 036) renders clickable."""
+
+    def test_a_cited_span_gets_its_source_appended_as_a_link(self):
+        turn = turn_from_response(_response([
+            _cited_text_block(
+                "Solar output grew 30% in 2025.",
+                "https://www.example.com/energy-report",
+            ),
+        ]))
+        assert turn.reply == (
+            "Solar output grew 30% in 2025."
+            " ([example.com](https://www.example.com/energy-report))"
+        )
+
+    def test_citation_split_blocks_reassemble_without_paragraph_breaks(self):
+        # The API splits MID-SENTENCE at cited-span boundaries; adjacent
+        # text blocks must concatenate verbatim, not join as paragraphs.
+        turn = turn_from_response(_response([
+            _text_block("Analysts report that "),
+            _cited_text_block("solar grew 30%", "https://a.example/x"),
+            _text_block(" over the past year."),
+        ]))
+        assert turn.reply == (
+            "Analysts report that solar grew 30%"
+            " ([a.example](https://a.example/x)) over the past year."
+        )
+
+    def test_text_separated_by_other_blocks_keeps_the_paragraph_break(self):
+        turn = turn_from_response(_response([
+            _text_block("Let me search."),
+            _server_tool_use_block("s1", "solar growth"),
+            _search_result_block("s1", []),
+            _text_block("Found it."),
+        ]))
+        assert turn.reply == "Let me search.\n\nFound it."
+
+    def test_sources_dedupe_by_url_and_join_distinct_ones(self):
+        turn = turn_from_response(_response([
+            _cited_text_block(
+                "Both agencies agree.",
+                "https://a.example/one", "https://a.example/one",
+                "https://b.example/two",
+            ),
+        ]))
+        assert turn.reply == (
+            "Both agencies agree. ([a.example](https://a.example/one),"
+            " [b.example](https://b.example/two))"
+        )
+
+    def test_the_marker_hugs_the_span_ahead_of_trailing_whitespace(self):
+        turn = turn_from_response(_response([
+            _cited_text_block("The claim.\n", "https://a.example/x"),
+            _text_block("Next paragraph."),
+        ]))
+        assert turn.reply == (
+            "The claim. ([a.example](https://a.example/x))\nNext paragraph."
+        )
+
+    def test_parens_in_urls_are_escaped_for_the_markdown_target(self):
+        turn = turn_from_response(_response([
+            _cited_text_block(
+                "Wiki says so.", "https://en.wikipedia.org/wiki/Foo_(bar)"
+            ),
+        ]))
+        assert turn.reply == (
+            "Wiki says so. ([en.wikipedia.org]"
+            "(https://en.wikipedia.org/wiki/Foo_%28bar%29))"
+        )
+
+    def test_citations_without_urls_are_skipped(self):
+        # Non-web citation shapes (e.g. document char_location) carry no
+        # url; the text passes through untouched.
+        block = SimpleNamespace(
+            type="text", text="From the attached doc.",
+            citations=[SimpleNamespace(
+                type="char_location", cited_text="…",
+                start_char_index=0, end_char_index=4,
+            )],
+        )
+        turn = turn_from_response(_response([block]))
+        assert turn.reply == "From the attached doc."
+
+    def test_uncited_replies_are_unchanged(self):
+        turn = turn_from_response(_response([
+            SimpleNamespace(type="text", text="No search ran.", citations=None),
+        ]))
+        assert turn.reply == "No search ran."
+
+
 class TestUsageTranslation:
     def test_the_usage_block_maps_field_for_field(self):
         response = _response([], usage=SimpleNamespace(
@@ -309,7 +422,9 @@ class TestRequestShape:
         assert request["model"] == DEFAULT_MODEL
         assert request["max_tokens"] == DEFAULT_MAX_TOKENS
         assert request["system"] == assembled_system_prompt("Be terse.")
-        assert request["thinking"] == {"type": "adaptive"}
+        assert request["thinking"] == {
+            "type": "adaptive", "display": "summarized",
+        }
         assert request["messages"] == [{"role": "user", "content": "Hello"}]
         assert [t["name"] for t in request["tools"]] == ["get_node"]
 
@@ -325,6 +440,22 @@ class TestRequestShape:
         stub.requests.clear()
         request = await self._decide(stub)
         assert "output_config" not in request
+
+    async def test_a_per_decide_model_override_wins(self, stub):
+        """ADR 033: the active mode's pinned model overrides the
+        constructor default for that decision -- including the web search
+        tool variant, which is picked per effective model."""
+        driver = AnthropicDriver(schemas={}, client=stub)
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {}, "",
+            options=DecideOptions(web_search=True, model="claude-opus-4-8"),
+        )
+        request = stub.requests[0]
+        assert request["model"] == "claude-opus-4-8"
+        assert request["tools"][-1]["type"] == "web_search_20260209"
+        stub.requests.clear()
+        await driver.decide([TranscriptEvent("user", "Hello")], {}, "")
+        assert stub.requests[0]["model"] == DEFAULT_MODEL
 
     async def test_the_usage_observer_fires_once_per_decide(self, stub):
         seen = []
@@ -370,3 +501,382 @@ class TestSeamParity:
         ]
         rendered = driver.render_prompt(transcript)
         assert json.loads(rendered) == messages_from_transcript(transcript)
+
+
+def _server_tool_use_block(id: str, query: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="server_tool_use", id=id, name="web_search",
+        input={"query": query},
+    )
+
+
+class _SequenceClient:
+    """Like _StubClient, but answers a fixed response SEQUENCE (the
+    pause_turn resume path makes several wire calls per decide)."""
+
+    def __init__(self, responses: list[SimpleNamespace]) -> None:
+        self._responses = list(responses)
+        self.requests: list[dict] = []
+        self.messages = SimpleNamespace(create=self._create)
+
+    async def _create(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self._responses) > 1:
+            return self._responses.pop(0)
+        return self._responses[0]
+
+
+class TestThinkingParams:
+    """ADR 037: one mode select drives the request's thinking + effort.
+    Adaptive is always explicit (omitting it runs WITHOUT thinking on
+    some models) and always summarized (the default `omitted` streams
+    thinking blocks with EMPTY text -- the diary and the intent-node
+    trace want the real summaries)."""
+
+    _ADAPTIVE = {"type": "adaptive", "display": "summarized"}
+
+    def test_a_level_means_adaptive_at_that_effort(self):
+        params = thinking_params("xhigh", "claude-opus-4-8", None)
+        assert params == {
+            "thinking": self._ADAPTIVE, "output_config": {"effort": "xhigh"},
+        }
+
+    def test_the_mode_level_beats_the_deployment_effort(self):
+        params = thinking_params("low", "claude-opus-4-8", "max")
+        assert params["output_config"] == {"effort": "low"}
+
+    def test_default_keeps_the_deployment_effort(self):
+        params = thinking_params("", "claude-opus-4-8", "high")
+        assert params == {
+            "thinking": self._ADAPTIVE, "output_config": {"effort": "high"},
+        }
+
+    def test_default_without_deployment_effort_sends_no_output_config(self):
+        assert thinking_params("", "claude-opus-4-8", None) == {
+            "thinking": self._ADAPTIVE,
+        }
+
+    def test_off_disables_thinking_and_sends_no_effort(self):
+        assert thinking_params("off", "claude-opus-4-8", "high") == {
+            "thinking": {"type": "disabled"},
+        }
+
+    def test_off_on_a_locked_model_fails_loudly(self):
+        # Defense in depth: spec validation catches a PINNED Fable model;
+        # this guard covers a Fable deployment default the spec never saw.
+        with pytest.raises(GraphContextError, match="cannot turn thinking off"):
+            thinking_params("off", "claude-fable-5", None)
+
+    async def test_the_mode_options_reach_the_request(self):
+        stub = _StubClient(_response([_text_block("Hi.")]))
+        driver = AnthropicDriver(schemas={}, client=stub, effort="high")
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {}, "",
+            options=DecideOptions(thinking="max", max_tokens=32000),
+        )
+        request = stub.requests[0]
+        assert request["thinking"] == self._ADAPTIVE
+        assert request["output_config"] == {"effort": "max"}
+        assert request["max_tokens"] == 32000
+        stub.requests.clear()
+        await driver.decide([TranscriptEvent("user", "Hello")], {}, "")
+        assert stub.requests[0]["max_tokens"] == DEFAULT_MAX_TOKENS
+        assert stub.requests[0]["output_config"] == {"effort": "high"}
+
+
+class TestWebSearch:
+    """WP20 (ADR 030): the provider's SERVER-SIDE web search tool --
+    admitted per decide by the mode flag, executed on Anthropic's
+    infrastructure, surfaced as server_tool_calls (never pipeline work)."""
+
+    def test_dynamic_filter_models_take_the_20260209_variant(self):
+        assert web_search_tool("claude-sonnet-5", DecideOptions())["type"] == "web_search_20260209"
+        assert web_search_tool("claude-opus-4-8", DecideOptions())["type"] == "web_search_20260209"
+
+    def test_older_models_take_the_basic_variant(self):
+        assert web_search_tool("claude-haiku-4-5", DecideOptions())["type"] == "web_search_20250305"
+
+    def test_search_limits_ride_the_definition_only_when_set(self):
+        """ADR 037: max_uses and the domain scope land on the tool dict;
+        an unconfigured mode sends the bare {type, name} it always did."""
+        bare = web_search_tool("claude-sonnet-5", DecideOptions())
+        assert set(bare) == {"type", "name"}
+        limited = web_search_tool("claude-sonnet-5", DecideOptions(
+            web_search_max_uses=3,
+            web_search_allowed_domains=("example.com", "b.example"),
+        ))
+        assert limited["max_uses"] == 3
+        assert limited["allowed_domains"] == ["example.com", "b.example"]
+        assert "blocked_domains" not in limited
+        blocked = web_search_tool("claude-sonnet-5", DecideOptions(
+            web_search_blocked_domains=("spam.example",),
+        ))
+        assert blocked["blocked_domains"] == ["spam.example"]
+        assert "allowed_domains" not in blocked
+
+    async def test_the_flag_appends_the_server_tool_after_graph_tools(self):
+        stub = _StubClient(_response([_text_block("Hi.")]))
+        driver = AnthropicDriver(schemas={}, client=stub)
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {"get_node": "Fetch."}, "",
+            options=DecideOptions(web_search=True),
+        )
+        tools = stub.requests[0]["tools"]
+        assert tools[-1] == {"type": "web_search_20260209", "name": "web_search"}
+        assert [t["name"] for t in tools[:-1]] == ["get_node"]
+
+    async def test_the_flag_off_sends_no_server_tool(self):
+        stub = _StubClient(_response([_text_block("Hi.")]))
+        driver = AnthropicDriver(schemas={}, client=stub)
+        await driver.decide(
+            [TranscriptEvent("user", "Hello")], {"get_node": "Fetch."}, ""
+        )
+        assert all(
+            t.get("type") is None or "web_search" not in str(t.get("type"))
+            for t in stub.requests[0]["tools"]
+        )
+
+    def test_server_tool_use_blocks_land_in_server_tool_calls(self):
+        response = _response([
+            _server_tool_use_block("srvtoolu_1", "anytype local api"),
+            SimpleNamespace(
+                type="web_search_tool_result", tool_use_id="srvtoolu_1",
+                content=[SimpleNamespace(type="web_search_result", url="u")],
+            ),
+            _text_block("Answer."),
+        ])
+        turn = turn_from_response(response)
+        assert turn.reply == "Answer."
+        assert turn.tool_calls == ()  # never pipeline work
+        (call,) = turn.server_tool_calls
+        assert call.name == "web_search"
+        assert call.arguments == {"query": "anytype local api"}
+        assert call.id == "srvtoolu_1"
+
+    def test_an_error_result_object_is_tolerated(self):
+        # A failed search returns HTTP 200 with an error OBJECT (not a
+        # result list) as the block content -- must not crash the parse.
+        response = _response([
+            _server_tool_use_block("srvtoolu_1", "q"),
+            SimpleNamespace(
+                type="web_search_tool_result", tool_use_id="srvtoolu_1",
+                content=SimpleNamespace(
+                    type="web_search_tool_result_error",
+                    error_code="max_uses_exceeded",
+                ),
+            ),
+            _text_block("Could not search."),
+        ])
+        turn = turn_from_response(response)
+        assert turn.reply == "Could not search."
+        assert len(turn.server_tool_calls) == 1
+
+
+class TestPauseTurnResume:
+    """A server-tool turn can pause mid-decision (stop_reason
+    ``pause_turn``); the driver resumes it on the same decide by
+    re-sending with the partial assistant content appended."""
+
+    async def test_a_paused_turn_is_resumed_and_merged(self):
+        paused = _response(
+            [
+                _text_block("Searching..."),
+                _server_tool_use_block("srvtoolu_1", "first query"),
+            ],
+            stop_reason="pause_turn",
+        )
+        final = _response([_text_block("The answer.")])
+        client = _SequenceClient([paused, final])
+        seen = []
+        driver = AnthropicDriver(
+            schemas={}, client=client, on_result=seen.append
+        )
+        turn = await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "",
+            options=DecideOptions(web_search=True)
+        )
+        assert len(client.requests) == 2
+        resumed = client.requests[1]["messages"]
+        assert resumed[-1] == {"role": "assistant", "content": paused.content}
+        assert turn.reply == "Searching...\n\nThe answer."
+        assert [c.id for c in turn.server_tool_calls] == ["srvtoolu_1"]
+        # The metrics tap fires ONCE, with usage summed across both calls.
+        assert len(seen) == 1
+        assert seen[0].input_tokens == 20
+
+    async def test_resumes_are_capped(self):
+        always_paused = _response(
+            [_text_block("still going")], stop_reason="pause_turn"
+        )
+        client = _SequenceClient([always_paused])
+        driver = AnthropicDriver(schemas={}, client=client)
+        await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "",
+            options=DecideOptions(web_search=True)
+        )
+        assert len(client.requests) == _MAX_PAUSE_RESUMES + 1
+
+    async def test_a_refusal_after_a_pause_discards_the_partial(self):
+        paused = _response(
+            [_text_block("Partial...")], stop_reason="pause_turn"
+        )
+        refused = _response([], stop_reason="refusal")
+        client = _SequenceClient([paused, refused])
+        driver = AnthropicDriver(schemas={}, client=client)
+        turn = await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "",
+            options=DecideOptions(web_search=True)
+        )
+        assert "Partial" not in turn.reply
+        assert "declined" in turn.reply
+
+
+def _search_result_block(
+    tool_use_id: str, content, block_type: str = "web_search_tool_result"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        type=block_type, tool_use_id=tool_use_id, content=content
+    )
+
+
+class TestServerResultCapture:
+    """WP22: a searching decision's raw result blocks are captured as
+    opaque payloads, position-paired with the calls."""
+
+    def test_results_pair_with_their_calls_by_id(self) -> None:
+        result_a = _search_result_block("s1", [SimpleNamespace(
+            type="web_search_result", title="A", url="https://a",
+            encrypted_content="ENC-A",
+        )])
+        result_b = _search_result_block(
+            "s2",
+            SimpleNamespace(type="web_search_tool_result_error",
+                            error_code="unavailable"),
+        )
+        turn = turn_from_response(_response([
+            _server_tool_use_block("s1", "first"),
+            result_a,
+            _server_tool_use_block("s2", "second"),
+            result_b,
+            _text_block("Answer."),
+        ]))
+        assert [c.id for c in turn.server_tool_calls] == ["s1", "s2"]
+        first, second = (json.loads(raw) for raw in turn.server_tool_results)
+        assert first["content"][0]["encrypted_content"] == "ENC-A"
+        assert second["content"]["error_code"] == "unavailable"
+
+    def test_a_missing_result_pairs_as_empty(self) -> None:
+        turn = turn_from_response(_response([
+            _server_tool_use_block("s1", "q"),
+            _text_block("Answer."),
+        ]))
+        assert turn.server_tool_results == ("",)
+
+    def test_pause_chains_merge_results_in_order(self) -> None:
+        paused = turn_from_response(_response(
+            [_server_tool_use_block("s1", "q1"),
+             _search_result_block("s1", [])],
+            stop_reason="pause_turn",
+        ))
+        final = turn_from_response(_response(
+            [_server_tool_use_block("s2", "q2"),
+             _search_result_block("s2", [])],
+        ))
+        merged = merged_turn([paused, final])
+        assert [c.id for c in merged.server_tool_calls] == ["s1", "s2"]
+        assert len(merged.server_tool_results) == 2
+
+
+class TestServerResultReplay:
+    """WP22: the rebuilt conversation replays server_tool_use + raw
+    result pairs verbatim -- encrypted_content untouched, unpaired
+    halves never sent."""
+
+    @staticmethod
+    def _event(results: tuple[str, ...]):
+        return TranscriptEvent(
+            "assistant", "Searching first.",
+            tool_calls=(ToolCall("find_node", {"name": "API"}, id="t1"),),
+            server_tool_calls=(
+                ToolCall("web_search", {"query": "anytype api"}, id="s1"),
+            ),
+            server_tool_results=results,
+        )
+
+    def test_a_captured_search_replays_verbatim(self) -> None:
+        raw = json.dumps({
+            "type": "web_search_tool_result", "tool_use_id": "s1",
+            "content": [{"type": "web_search_result", "title": "A",
+                         "url": "https://a", "encrypted_content": "ENC"}],
+        })
+        messages = messages_from_transcript([
+            TranscriptEvent("user", "What changed?"),
+            self._event((raw,)),
+            TranscriptEvent("tool", "API node.", tool_name="find_node",
+                            tool_use_id="t1"),
+        ])
+        content = messages[1]["content"]
+        assert [b["type"] for b in content] == [
+            "text", "server_tool_use", "web_search_tool_result", "tool_use",
+        ]
+        assert content[1] == {
+            "type": "server_tool_use", "id": "s1", "name": "web_search",
+            "input": {"query": "anytype api"},
+        }
+        assert content[2] == json.loads(raw)  # byte-faithful round trip
+        # Local tool pairing is untouched by the server blocks.
+        assert messages[2]["content"][0]["tool_use_id"] == "t1"
+
+    def test_an_uncaptured_search_is_omitted_whole(self) -> None:
+        messages = messages_from_transcript([
+            TranscriptEvent("user", "What changed?"),
+            self._event(("",)),
+        ])
+        content = messages[1]["content"]
+        assert [b["type"] for b in content] == ["text", "tool_use"]
+
+    def test_a_fully_unpaired_decision_with_nothing_else_is_skipped(
+        self,
+    ) -> None:
+        event = TranscriptEvent(
+            "assistant", "",
+            server_tool_calls=(ToolCall("web_search", {"query": "q"},
+                                        id="s1"),),
+            server_tool_results=("",),
+        )
+        messages = messages_from_transcript([
+            TranscriptEvent("user", "Hi"), event,
+        ])
+        assert [m["role"] for m in messages] == ["user"]
+
+
+class TestImageAttachments:
+    """WP23: inbound images ride the user turn as native blocks."""
+
+    def test_a_user_event_with_images_becomes_blocks(self) -> None:
+        event = TranscriptEvent(
+            "user", "what is in this picture?",
+            images=(ImageAttachment(
+                name="photo.png", media_type="image/png", data_base64="QUJD",
+            ),),
+        )
+        (message,) = messages_from_transcript([event])
+        image_block, text_block = message["content"]
+        assert image_block == {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png",
+                       "data": "QUJD"},
+        }
+        assert text_block == {"type": "text",
+                              "text": "what is in this picture?"}
+
+    def test_render_prompt_redacts_image_data(self) -> None:
+        driver = AnthropicDriver(schemas={}, client=_StubClient(_response([])))
+        rendered = driver.render_prompt([TranscriptEvent(
+            "user", "look",
+            images=(ImageAttachment(
+                name="p.png", media_type="image/png", data_base64="A" * 5000,
+            ),),
+        )])
+        assert "AAAA" not in rendered
+        assert "5000 base64 chars" in rendered

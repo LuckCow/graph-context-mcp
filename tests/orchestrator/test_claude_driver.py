@@ -17,12 +17,15 @@ from claude_agent_sdk import ResultMessage  # noqa: E402
 
 from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.claude_driver import (  # noqa: E402
+    WEB_SEARCH_TOOL,
     derive_schema,
     local_tool_name,
+    permission_gate,
     sdk_tools,
     session_options,
     usage_from_result,
 )
+from graph_context.orchestrator.drivers import DecideOptions  # noqa: E402
 
 # Transcript rendering is SDK-free and pinned in test_driver_common (CI
 # runs it there; this module self-skips without claude-agent-sdk).
@@ -92,14 +95,14 @@ class TestSessionCapabilityBoundary:
     built-ins (Read, Write, Bash, ...), no filesystem settings that could
     smuggle extra MCP servers or permissions into the session."""
 
-    def _options(self):
+    def _options(self, **kwargs):
         async def deny(name, tool_input, context):  # pragma: no cover
             raise AssertionError("never invoked here")
 
         server = {"type": "sdk", "name": "gc", "instance": object()}
         return session_options(
             server, "goal", model=None, effort=None, can_use_tool=deny,
-            cli_path=None,
+            cli_path=None, **kwargs,
         )
 
     def test_builtin_tools_are_disabled_by_the_empty_list(self):
@@ -116,6 +119,69 @@ class TestSessionCapabilityBoundary:
         # None = load user+project+local settings (CLI default), which can
         # inject MCP servers, permission grants, and hooks. [] = isolation.
         assert self._options().setting_sources == []
+
+    def test_web_search_admits_exactly_the_websearch_builtin(self):
+        # ADR 030: the one mode-gated exception to the empty list --
+        # server-side execution, so the host boundary is intact.
+        options = self._options(web_search=True)
+        assert options.tools == [WEB_SEARCH_TOOL]
+        assert options.setting_sources == []  # isolation unchanged
+
+
+class TestModeOptionsBestEffort:
+    """ADR 037 on the subscription driver: a thinking LEVEL rides the
+    SDK's effort knob; everything the SDK cannot express is skipped and
+    reported, never an error (the API driver is the full surface)."""
+
+    def test_a_thinking_level_overrides_the_deployment_effort(self):
+        from graph_context.orchestrator.claude_driver import mode_effort
+
+        assert mode_effort(DecideOptions(thinking="xhigh"), "low") == "xhigh"
+        assert mode_effort(DecideOptions(), "low") == "low"
+        assert mode_effort(DecideOptions(thinking="off"), "low") == "low"
+
+    def test_inexpressible_options_are_named_for_the_warning(self):
+        from graph_context.orchestrator.claude_driver import (
+            inexpressible_options,
+        )
+
+        assert inexpressible_options(DecideOptions()) == []
+        assert inexpressible_options(DecideOptions(thinking="high")) == []
+        named = inexpressible_options(DecideOptions(
+            thinking="off", max_tokens=1000,
+            web_search_allowed_domains=("a.example",),
+        ))
+        assert named == ["thinking=off", "max_tokens", "web_search limits"]
+
+
+class TestPermissionGate:
+    """Deny-all with the one ADR 030 exception: WebSearch, when the mode
+    admits it, runs server-side INSIDE the session."""
+
+    @staticmethod
+    async def _ask(gate, name):
+        return await gate(name, {}, None)
+
+    async def test_graph_tools_are_always_denied_with_interrupt(self):
+        from claude_agent_sdk import PermissionResultDeny
+
+        for enabled in (False, True):
+            result = await self._ask(
+                permission_gate(enabled), "mcp__gc__get_node"
+            )
+            assert isinstance(result, PermissionResultDeny)
+            assert result.interrupt is True
+
+    async def test_websearch_is_allowed_only_when_the_mode_admits_it(self):
+        from claude_agent_sdk import (
+            PermissionResultAllow,
+            PermissionResultDeny,
+        )
+
+        allowed = await self._ask(permission_gate(True), WEB_SEARCH_TOOL)
+        assert isinstance(allowed, PermissionResultAllow)
+        denied = await self._ask(permission_gate(False), WEB_SEARCH_TOOL)
+        assert isinstance(denied, PermissionResultDeny)
 
 
 class TestUsageTranslation:
@@ -152,3 +218,123 @@ class TestUsageTranslation:
         assert usage.output_tokens == 0
         assert usage.cache_read_tokens == 0
         assert usage.total_cost_usd is None
+
+
+class TestBlockHarvest:
+    """WP22: streamed blocks -> the decision, server searches captured
+    with their raw results (both wire shapes the CLI has shown)."""
+
+    def test_native_server_blocks_pair_call_and_result(self) -> None:
+        import json
+
+        from claude_agent_sdk import (
+            ServerToolResultBlock,
+            ServerToolUseBlock,
+            TextBlock,
+        )
+
+        from graph_context.orchestrator.claude_driver import (
+            BlockHarvest,
+            harvest_assistant_blocks,
+        )
+
+        harvest = BlockHarvest()
+        harvest_assistant_blocks([
+            ServerToolUseBlock(id="s1", name="WebSearch",
+                               input={"query": "anytype api"}),
+            ServerToolResultBlock(tool_use_id="s1", content={
+                "type": "web_search_tool_result",
+                "content": [{"title": "A", "url": "https://a"}],
+            }),
+            TextBlock(text="Answer."),
+        ], harvest)
+        turn = harvest.turn()
+        assert turn.reply == "Answer."
+        assert turn.tool_calls == ()
+        (call,) = turn.server_tool_calls
+        assert call.name == "WebSearch" and call.id == "s1"
+        (raw,) = turn.server_tool_results
+        assert json.loads(raw)["content"]["content"][0]["title"] == "A"
+
+    def test_tooluseblock_websearch_result_arrives_in_a_user_message(
+        self,
+    ) -> None:
+        import json
+
+        from claude_agent_sdk import ToolResultBlock, ToolUseBlock
+
+        from graph_context.orchestrator.claude_driver import (
+            BlockHarvest,
+            harvest_assistant_blocks,
+            harvest_result_blocks,
+        )
+
+        harvest = BlockHarvest()
+        harvest_assistant_blocks([
+            ToolUseBlock(id="s1", name="WebSearch",
+                         input={"query": "anytype api"}),
+        ], harvest)
+        harvest_result_blocks([
+            ToolResultBlock(tool_use_id="s1",
+                            content="Web search results: ..."),
+            ToolResultBlock(tool_use_id="other",  # not a search of ours
+                            content="ignored"),
+        ], harvest)
+        turn = harvest.turn()
+        assert turn.tool_calls == ()  # never pipeline work
+        (raw,) = turn.server_tool_results
+        assert json.loads(raw)["content"].startswith("Web search results")
+
+    def test_local_tool_calls_are_untouched_by_the_harvest_split(
+        self,
+    ) -> None:
+        from claude_agent_sdk import ToolUseBlock
+
+        from graph_context.orchestrator.claude_driver import (
+            BlockHarvest,
+            harvest_assistant_blocks,
+        )
+
+        harvest = BlockHarvest()
+        harvest_assistant_blocks([
+            ToolUseBlock(id="t1", name="mcp__gc__find_node",
+                         input={"name": "Mira"}),
+        ], harvest)
+        turn = harvest.turn()
+        assert turn.server_tool_calls == ()
+        (call,) = turn.tool_calls
+        assert call.name == "find_node"  # prefix stripped
+
+
+class TestQueryPayload:
+    """WP23: text turns query as a plain string; image-carrying turns
+    take the message-dict form with native image blocks."""
+
+    async def test_text_only_stays_a_string(self) -> None:
+        from graph_context.orchestrator.claude_driver import query_payload
+        from graph_context.orchestrator.drivers import TranscriptEvent
+
+        payload = query_payload([TranscriptEvent("user", "hello")])
+        assert isinstance(payload, str) and "hello" in payload
+
+    async def test_images_take_the_message_dict_form(self) -> None:
+        from graph_context.orchestrator.claude_driver import query_payload
+        from graph_context.orchestrator.drivers import (
+            ImageAttachment,
+            TranscriptEvent,
+        )
+
+        payload = query_payload([TranscriptEvent(
+            "user", "what is this?",
+            images=(ImageAttachment(
+                name="p.png", media_type="image/png", data_base64="QUJD",
+            ),),
+        )])
+        assert not isinstance(payload, str)
+        (message,) = [m async for m in payload]
+        content = message["message"]["content"]
+        assert content[0]["type"] == "image"
+        assert content[0]["source"]["data"] == "QUJD"
+        assert content[-1]["type"] == "text"
+        assert "what is this?" in content[-1]["text"]
+        assert "[image attached: p.png" in content[-1]["text"]

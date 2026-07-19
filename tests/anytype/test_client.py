@@ -10,12 +10,14 @@ from graph_context.infrastructure.anytype.config import AnytypeApiError, Anytype
 
 class TestPagination:
     async def test_paginate_stitches_pages(self, mock, client, repo):
-        # page_limit=10; 25 seeded humans + the bootstrap's two example
-        # objects (the Activity Mode and Scheduled Event explainers)
+        # page_limit=10; 25 seeded humans + the bootstrap's three seeded
+        # objects (the Scheduled Event explainer, the Space Context
+        # singleton, and the Automation Rule explainer (ADR 039) -- the
+        # Activity Mode explainer moved to the starter seeder, ADR 035)
         for i in range(25):
             mock.seed_object("gc_character", f"extra-{i}")
         items = [o async for o in client.list_objects()]
-        assert len(items) == 27
+        assert len(items) == 28
         # multiple GET pages were issued
         list_calls = [p for m, p in mock.request_log if m == "GET" and p.endswith("/objects")]
         assert len(list_calls) >= 3
