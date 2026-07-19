@@ -47,7 +47,7 @@ from typing import Any
 
 from graph_context.application.scheduler import Scheduler
 from graph_context.application.schema_proposals import SchemaProposal
-from graph_context.domain import schema
+from graph_context.domain import rules, schema
 from graph_context.domain.models import (
     Edge,
     Node,
@@ -386,6 +386,25 @@ async def schedule_tool(
     )
 
 
+async def _script_auto_test(services: Services, node: Node) -> str:
+    """A just-saved 'run script' rule is dry-run immediately, so the
+    authoring turn sees a script failure NOW instead of on the first
+    live fire (built-in actions are fully validated at bind time, so
+    only scripts need this). The rule is saved either way: a failing
+    auto-test reports, it never rolls back."""
+    if rules.parse_rule_fields(node.fields).action != rules.ACTION_RUN_SCRIPT:
+        return ""
+    try:
+        report = await services.rules.dry_run(identifier=node.id)
+    except GraphContextError as err:
+        return (
+            f"\nauto-test FAILED: {err}\nThe rule IS saved; if that is a "
+            "script error, fix it with action='update' (script=...) "
+            "before it fires live, then re-test with action='test'."
+        )
+    return f"\nauto-test of the saved script:\n{report}"
+
+
 @guarded
 async def automation_tool(
     services: Services,
@@ -414,6 +433,7 @@ async def automation_tool(
             "runs on its own a few seconds after a matching change, "
             "while the assistant is serving this space. Check on it "
             "with action='list'; simulate it with action='test'."
+            + await _script_auto_test(services, node)
         )
     if action == "update":
         node = await engine.update(
@@ -427,6 +447,7 @@ async def automation_tool(
         return (
             f"updated automation rule {node.name!r} (id={node.id}). "
             "Simulate it with action='test' to confirm the new behavior."
+            + await _script_auto_test(services, node)
         )
     if action == "list":
         views = engine.views()

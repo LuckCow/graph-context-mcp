@@ -294,10 +294,13 @@ Tool actions:
   pause / resume -- switch a rule off/on without deleting it (rule=...).
   test   -- DRY RUN: simulate one fire against a real object and report
             what WOULD be written; nothing is applied. rule=<id/name>
-            tests a stored rule; passing the create params (+ script)
-            tests a DRAFT before creating it. Optional trigger=<object
-            id or name> picks the simulated object. ALWAYS test a
-            script before creating it.
+            tests a stored rule (add script=... to try a REPLACEMENT
+            script against its stored config without saving it);
+            passing the create params (+ script) tests a DRAFT before
+            creating it. Optional trigger=<object id or name> picks the
+            simulated object. Script rules are auto-tested on create
+            and update -- read that result and fix any failure before
+            moving on.
 
 condition -- the rule watches TRANSITIONS, not states:
   "changed to true" / "changed to false" (checkbox flips), "changed"
@@ -322,8 +325,12 @@ rule_action -- what happens when the condition fires:
       objects(type=None), find(name, type=None), field(obj, prop),
       neighbors(obj, edge_type=None) -- read any object in the space
       set(obj_or_id, prop, value) -- queue one write (str/bool/int/
-                        float; max 20 per fire; the property must
-                        already exist on the target's type)
+                        float; max 20 per fire). Writes reach SCALAR
+                        properties that already exist on the target's
+                        type -- an object's summary, description, and
+                        body are NOT script-writable; if no suitable
+                        property exists, propose one with the schema
+                        tool first.
       log(msg)       -- a line for the system log (print() is discarded)
       No imports beyond the stdlib, no network, ~5s time limit, and the
       space snapshot caps at 2000 objects.

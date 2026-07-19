@@ -310,12 +310,15 @@ class RuleEngine:
     ) -> str:
         """The tool's test action: simulate one fire, apply NOTHING.
 
-        Pass ``identifier`` to test a stored rule, or the config params
-        (+ ``script``) to test a DRAFT before creating it. The trigger
-        object is ``trigger`` (id or name) or the first object of the
-        target type. The transition is synthesized to satisfy the
-        condition; a script's queued writes are validated with the same
-        code path a real fire uses and reported as would-write lines.
+        Pass ``identifier`` to test a stored rule -- with ``script`` as
+        an inline REPLACEMENT run against the stored config, so a fix
+        can be iterated without saving every attempt -- or the config
+        params (+ ``script``) to test a DRAFT before creating it. The
+        trigger object is ``trigger`` (id or name) or the first object
+        of the target type. The transition is synthesized to satisfy
+        the condition; a script's queued writes are validated with the
+        same code path a real fire uses and reported as would-write
+        lines.
         """
         if identifier.strip():
             node = self._find(identifier)
@@ -325,7 +328,17 @@ class RuleEngine:
                 node, config, self._repository.field_catalog()
             )
             if config.action == rules.ACTION_RUN_SCRIPT:
-                bound = replace(bound, script=await self._script_for(node))
+                bound = replace(
+                    bound,
+                    script=script.strip() or await self._script_for(node),
+                )
+            elif script.strip():
+                raise GraphContextError(
+                    f"rule {node.name!r} runs {config.action!r}, not a "
+                    "script -- 'script' only applies to 'run script' "
+                    "rules; drop it, or pass the draft config params "
+                    "instead of 'rule'"
+                )
         else:
             fields = self._rule_fields(
                 target_type=target_type, watch_property=watch_property,

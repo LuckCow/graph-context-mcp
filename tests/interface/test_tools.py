@@ -16,6 +16,7 @@ from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.domain import rules as rules_domain
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.session import SessionState
+from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface import tools
 from graph_context.interface.services import build_services
@@ -859,6 +860,91 @@ class TestAutomationTool:
             rule_action="run script",
         )
         assert out.startswith("ERROR:") and "'script'" in out
+
+    async def test_create_script_rule_auto_tests_the_saved_script(
+        self,
+    ) -> None:
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('hi')",
+        )
+        assert out.startswith("created automation rule 'rollup'")
+        assert "auto-test of the saved script:" in out
+        assert "would set 'ship it'.Note = 'scripted'" in out
+        assert "nothing was applied (dry run)" in out
+
+    async def test_a_failing_auto_test_reports_but_the_rule_is_saved(
+        self,
+    ) -> None:
+        class FailingScriptRunner:
+            async def run(self, script, payload):  # type: ignore[no-untyped-def]
+                raise GraphContextError(
+                    "the script failed: NameError: name 'update_node' "
+                    "is not defined"
+                )
+
+        services = build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            script_runner=FailingScriptRunner(),
+        )
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="update_node()",
+        )
+        assert out.startswith("created automation rule 'rollup'")
+        assert "auto-test FAILED" in out and "update_node" in out
+        assert "action='update'" in out  # teaches the fix path
+        assert [
+            n for n in services.repository.graph.nodes()
+            if n.name == "rollup"
+        ]  # saved despite the failing test
+
+    async def test_update_with_a_script_auto_tests_it(self) -> None:
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('v1')",
+        )
+        out = await tools.automation_tool(
+            services, action="update", rule="rollup", script="log('v2')",
+        )
+        assert out.startswith("updated automation rule 'rollup'")
+        assert "auto-test of the saved script:" in out
+        assert "would set 'ship it'.Note = 'scripted'" in out
+
+    async def test_test_with_rule_and_script_runs_the_inline_script(
+        self,
+    ) -> None:
+        # The silent-ignore trap: rule= + script= must exercise the
+        # inline script (the engine-level tests pin WHICH script runs;
+        # here we pin that the tool surface accepts the combination).
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('v1')",
+        )
+        out = await tools.automation_tool(
+            services, action="test", rule="rollup", script="log('inline')",
+        )
+        assert "dry run against 'ship it'" in out
+        assert "nothing was applied (dry run)" in out
 
     async def test_list_shows_status_and_config(self) -> None:
         services = self._services()

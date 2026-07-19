@@ -546,6 +546,44 @@ class TestScriptAction:
         assert repository.body_fetches.count(rule.id) == 2
 
 
+class TestDryRunScriptOverride:
+    """test with rule= AND script=: the inline script replaces the
+    stored one against the stored config (iterate on a fix without
+    saving every attempt); on a built-in-action rule it is rejected
+    loudly instead of silently ignored."""
+
+    async def test_an_inline_script_replaces_the_stored_one(
+        self, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        runner = FakeScriptRunner()
+        engine = RuleEngine(repository, now=clock, script_runner=runner)
+        await repository.create_node(script_rule_draft("log('stored')"))
+        await repository.create_node(task_draft("ship it"))
+        await engine.dry_run(identifier="scripted", script="log('inline')")
+        assert [call[0] for call in runner.calls] == ["log('inline')"]
+        assert repository.body_fetches == []  # the stored body never loads
+
+    async def test_without_an_inline_script_the_stored_one_runs(
+        self, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        runner = FakeScriptRunner()
+        engine = RuleEngine(repository, now=clock, script_runner=runner)
+        await repository.create_node(script_rule_draft("log('stored')"))
+        await repository.create_node(task_draft("ship it"))
+        await engine.dry_run(identifier="scripted")
+        assert [call[0] for call in runner.calls] == ["log('stored')"]
+
+    async def test_an_inline_script_on_a_builtin_rule_is_rejected(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(rule_draft())
+        await repository.create_node(task_draft("ship it"))
+        with pytest.raises(GraphContextError, match="'run script' rules"):
+            await engine.dry_run(
+                identifier="stamp completion", script="log('x')"
+            )
+
+
 class TestLifecycle:
     async def test_a_paused_rule_is_inert(
         self, engine: RuleEngine, repository: RecordingRepository,
