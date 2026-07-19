@@ -29,7 +29,9 @@ agnostic: the desktop app today, the headless sidecar after cutover),
 GC_SPACES_FILE (required), GC_CHAT_CURSOR, GC_CHAT_RESCAN_SECONDS (live
 chat discovery), GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
 both default 60, ``off`` disables), GC_SCHEDULE_TICK_SECONDS (scheduled-
-event firing, ADR 027; default 30, ``off`` disables), plus the usual
+event firing, ADR 027; default 30, ``off`` disables),
+GC_RULE_TICK_SECONDS (automation-rule firing, ADR 039; default 5,
+``off`` disables), plus the usual
 GC_DRIVER / GC_PROFILE / GC_MODES_FILE / provenance knobs.
 
 Run:  python -m graph_context.orchestrator.anytype_chat_bot
@@ -93,6 +95,10 @@ CHAT_RESCAN_SECONDS = 3  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
 # throttled desktop endpoint.
 GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
 SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_SECONDS
+RULE_TICK_SECONDS = 5  # automation-rule scan (ADR 039); GC_RULE_TICK_SECONDS
+# 5s keeps reactions feeling immediate; the tick runs its own cheap
+# modified-since resync (unthrottled sidecar), so it does not wait for
+# the 60s graph poll. Raise this on a throttled desktop endpoint.
 
 
 def _cursor_path() -> str | None:
@@ -133,6 +139,11 @@ def _graph_resync_seconds() -> float | None:
 def _schedule_tick_seconds() -> float | None:
     """Scheduled-event scan interval; ``0``/``off`` disables firing."""
     return _interval_seconds("GC_SCHEDULE_TICK_SECONDS", SCHEDULE_TICK_SECONDS)
+
+
+def _rule_tick_seconds() -> float | None:
+    """Automation-rule scan interval; ``0``/``off`` disables the engine."""
+    return _interval_seconds("GC_RULE_TICK_SECONDS", RULE_TICK_SECONDS)
 
 
 def _sent_path(cursor_path: str | None) -> str | None:
@@ -581,6 +592,47 @@ async def _watch_schedule(
                 )
 
 
+async def _watch_rules(
+    route: ChannelRoute, space_id: str, interval: float
+) -> None:
+    """Fire due Automation Rules (ADR 039; fourth sibling watcher).
+
+    Unlike ``_watch_schedule`` -- a pure read riding ``_watch_graph``'s
+    resync -- each rule tick runs its OWN resync first, under the turn
+    lock: reacting to a checkbox a minute late reads as broken, and the
+    modified-since search is a few localhost calls against the
+    unthrottled sidecar. The engine's baseline diff makes the tick
+    idempotent and loop-free (its own writes never read as transitions).
+    Never raises -- a failed tick logs and retries -- so it is safe
+    inside the bot's TaskGroup.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with route.lock:
+                await route.orchestrator.resync_graph()
+                report = await route.orchestrator.rule_tick()
+        except GraphContextError as err:
+            logger.warning("rule tick for space %s failed: %s", space_id, err)
+            continue
+        except Exception:  # the engine must never take the serve loop down
+            logger.exception("rule tick for space %s crashed", space_id)
+            continue
+        for firing in report.fired:
+            logger.info(
+                "rule %r fired %r on %r (%s)",
+                firing.rule_name, firing.action, firing.node_name,
+                firing.node_id,
+            )
+        for problem in report.errors:
+            logger.warning(
+                "rule %r (%s) recorded an error: %s",
+                problem.rule_name, problem.rule_id, problem.message,
+            )
+        for node_id in report.healed:
+            logger.info("rule %s healed: config parses again", node_id)
+
+
 async def run() -> None:
     """Serve every bound space's chats until cancelled.
 
@@ -632,6 +684,7 @@ async def run() -> None:
     rescan = _rescan_seconds()
     graph_resync = _graph_resync_seconds()
     schedule_tick = _schedule_tick_seconds()
+    rule_tick = _rule_tick_seconds()
     try:
         served = "; ".join(
             f"{chat_id}: {desc}"
@@ -669,6 +722,11 @@ async def run() -> None:
                         handler, client_for(space_id), route, space_id,
                         schedule_tick,
                     ))
+            if rule_tick is not None:
+                for space_id, route in runtimes.space_routes.items():
+                    task_group.create_task(
+                        _watch_rules(route, space_id, rule_tick)
+                    )
     finally:
         await composition.run_teardown(teardown)
 

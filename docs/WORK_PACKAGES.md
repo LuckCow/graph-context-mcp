@@ -2132,6 +2132,46 @@ turn's intent node, whose body holds the full process trace.
 
 ---
 
+## WP31 — Reactive rule engine (ADR 039) — **shipped 2026-07-19**
+
+**Status:** complete. Scheduled Events initiate on *time*; Automation
+Rules initiate on *state transitions* — "Done flips true → stamp the
+completion date", "one Default checkbox at a time" — authored entirely
+in the Anytype UI as `gc_rule` objects, no deployment config.
+
+* **Structural twin of WP18**: `domain/rules.py` (pure vocabulary +
+  `parse_rule_fields`/`condition_met`, no clocks), `application/
+  rule_engine.py` (`RuleEngine`, injected `local_clock(GC_TIMEZONE)`,
+  rules read off `repository.graph` by `Role.RULE` — no new port),
+  `_watch_rules` fourth sibling watcher (`GC_RULE_TICK_SECONDS`,
+  default 5, `off` disables; runs its OWN resync under the route lock
+  so reactions never wait on the 60s graph poll).
+* **Transitions, not states**: an in-memory per-space baseline of
+  watched values, diffed per tick and rebuilt from the POST-action
+  index — nothing fires on restart/replay, the engine's own writes can
+  never trigger a rule (no cascades or loops, by construction), and a
+  consumed transition never retries. Change detection is REST polling
+  by decision: the gRPC event backbone stays shelved
+  (`docs/spikes/grpc-event-backbone.md`).
+* **Nine `gc_rule_*` properties** (all in `GC_REFLECTED_FIELD_KEYS` —
+  the ADR 027-amendment lesson), select vocabularies pre-seeded,
+  display names "Rule …"-prefixed, an "Example Automation Rule"
+  explainer minted with the type. Status select is lenient (empty =
+  Active; `Error` is engine-owned and self-heals once the config
+  parses; the engine never writes `Paused`). Broken configs surface as
+  `Error` + "Rule last error" ON the rule object, change-only writes.
+* **Three built-in actions, no user scripts** (v1 scope): set property
+  to now, set property value (format-checked at validation), uncheck
+  others of type (same-tick double-flip resolves last-writer-wins in
+  node-id order). Watchable surface = scalar `Node.fields` only.
+* R2 resolved by live probe (2026-07-19): native date properties
+  reject naive timestamps (accept RFC 3339 with timezone, or a bare
+  date), so `set-property-to-now` is format-aware — date targets get
+  the bare local date, text targets the full stamp;
+  `tests/e2e/test_live_rules.py` certifies both live.
+
+---
+
 ## Sequencing
 
 ```

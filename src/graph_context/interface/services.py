@@ -17,6 +17,7 @@ from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
 from graph_context.application.querier import Querier
 from graph_context.application.ranker import Ranker
+from graph_context.application.rule_engine import RuleEngine
 from graph_context.application.scheduler import Scheduler, local_clock
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
@@ -45,6 +46,10 @@ class Services:
     querier: Querier
     capture: CaptureRecorder
     scheduler: Scheduler
+    # WP31 (ADR 039): the space's automation-rule engine. Space-scoped
+    # like the scheduler (rules belong to the space, not a session);
+    # only the Anytype bot's watcher ever ticks it.
+    rules: RuleEngine
     persister: SessionPersister | None = None  # wired in server lifespan
     # WP18 (ADR 027): the transport-scoped session key this view serves
     # ("mcp", "anytype:<chat_id>", ...). The schedule tool stamps it onto
@@ -89,6 +94,7 @@ def build_services(
         # GC_TIMEZONE (ADR 027): schedules mean the USER's wall clock,
         # not the container's (usually UTC); resolved loudly at startup.
         scheduler=Scheduler(repository, journal=journal, now=local_clock(timezone)),
+        rules=RuleEngine(repository, now=local_clock(timezone)),
         persister=persister,
         journal=journal,
         projector=projector,
@@ -120,6 +126,7 @@ def derive_services(
         querier=base.querier,
         capture=base.capture,
         scheduler=base.scheduler,
+        rules=base.rules,
         persister=persister,
         journal=base.journal,
         projector=base.projector,

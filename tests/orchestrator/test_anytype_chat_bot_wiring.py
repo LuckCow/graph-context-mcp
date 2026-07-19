@@ -26,9 +26,11 @@ from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
     _maybe_turn,
+    _rule_tick_seconds,
     _serve_chat,
     _watch_chats,
     _watch_graph,
+    _watch_rules,
 )
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
@@ -304,6 +306,88 @@ class TestPeriodicGraphResync:
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
+
+
+class TestRuleWatcher:
+    """ADR 039: the fourth watcher resyncs, diffs, and fires rules."""
+
+    def _route(self) -> tuple[ChannelRoute, InMemoryGraphRepository]:
+        repository = InMemoryGraphRepository()
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(repository, SessionState(project="Todo")),
+            driver=ScriptedDriver([]),
+            profile=FICTION, registry=fiction_registry(),
+        ))
+        return route, repository
+
+    async def test_a_ui_checkbox_flip_fires_the_rule_through_the_watcher(
+        self,
+    ) -> None:
+        from graph_context.domain import rules
+
+        route, repository = self._route()
+        await repository.create_node(NodeDraft(
+            type="gc_rule", name="stamp completion", summary="s",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_WATCH_PROPERTY: "Done",
+                rules.FIELD_CONDITION: "Changed to true",
+                rules.FIELD_ACTION: "Set property to now",
+                rules.FIELD_ACTION_PROPERTY: "Completion date",
+            },
+        ))
+        task = await repository.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        watcher = asyncio.ensure_future(
+            _watch_rules(route, "space-1", interval=0.01)
+        )
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            await repository.update_node(task.id, fields={"Done": "true"})
+            async with asyncio.timeout(5):
+                while "Completion date" not in repository.graph.node(task.id).fields:
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_crashing_tick_never_takes_the_watcher_down(self) -> None:
+        route, repository = self._route()
+        calls = {"count": 0}
+        engine = route.orchestrator.services.rules
+        original = engine.run_tick
+
+        async def flaky():  # type: ignore[no-untyped-def]
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise GraphContextError("transient")
+            return await original()
+
+        engine.run_tick = flaky  # type: ignore[method-assign]
+        watcher = asyncio.ensure_future(
+            _watch_rules(route, "space-1", interval=0.01)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while calls["count"] < 3:  # kept ticking past the failure
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    def test_rule_tick_interval_parses_and_disables(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("GC_RULE_TICK_SECONDS", raising=False)
+        assert _rule_tick_seconds() == 5
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "off")
+        assert _rule_tick_seconds() is None
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "2.5")
+        assert _rule_tick_seconds() == 2.5
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "soon")
+        with pytest.raises(GraphContextError):
+            _rule_tick_seconds()
 
 
 class TestServeLoop:

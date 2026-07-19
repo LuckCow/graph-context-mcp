@@ -51,6 +51,10 @@ class Role(StrEnum):
     # humans edit in Anytype -- today, which Activity Mode new chats start
     # in. The LLM's traversal never sees it.
     SPACE_CONTEXT = "SpaceContext"
+    # Automation Rule nodes (WP31, ADR 039): a watched property
+    # transition plus a built-in action the rule engine runs. Humans
+    # author them in Anytype; the engine writes status back.
+    RULE = "AutomationRule"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
@@ -58,7 +62,7 @@ class Role(StrEnum):
 INFRA_ROLES: frozenset[Role] = frozenset(
     {
         Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE,
-        Role.SCHEDULED, Role.SPACE_CONTEXT,
+        Role.SCHEDULED, Role.SPACE_CONTEXT, Role.RULE,
     }
 )
 
@@ -84,6 +88,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_activity_mode": Role.MODE,
     "gc_scheduled_event": Role.SCHEDULED,
     "gc_space_context": Role.SPACE_CONTEXT,
+    "gc_rule": Role.RULE,
     # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
     # the gc_ keys above; backends without a key registry (the in-memory
     # repository, eval worlds) see the display name as the type, and these
@@ -92,6 +97,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "activity mode": Role.MODE,
     "scheduled event": Role.SCHEDULED,
     "space context": Role.SPACE_CONTEXT,
+    "automation rule": Role.RULE,
 }
 
 

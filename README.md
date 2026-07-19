@@ -188,6 +188,7 @@ interface  ──▶  application  ──▶  domain
 | `domain/traversal.py` | Bounded BFS (`explore`) | Pure function; filters prune subtrees; `as_of` hides future events |
 | `domain/pathfinding.py` | Bounded shortest path (`find_path`) | Undirected walk, direction-preserving result |
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
+| `domain/rules.py` | Automation Rule vocabulary + matching ([ADR 039](docs/adr/039-reactive-rule-engine.md)) | Pure `parse_rule_fields`/`condition_met`; lenient status select; errors echo the allowed words |
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body` for on-demand descriptions/prose |
 | `ports/session_store.py` | Keyed session-snapshot contract | Plain-dict snapshots per required key ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)); lenient load (corrupt → `None`) |
 | `ports/mode_store.py` | Activity-Mode config contract | Plain payload dicts; validation lives in the loader, not the store |
@@ -201,6 +202,7 @@ interface  ──▶  application  ──▶  domain
 | `application/intent_recorder.py` | One `gc_intent` node per mutating turn | Provenance is a harness responsibility ([ADR 008](docs/adr/008-provenance-as-harness-responsibility.md)) |
 | `application/semantic_projector.py` | The embedding cache tracks the graph | Full pass + prune after hydrate; incremental from resync; store touches never re-embed |
 | `application/ranker.py` | Graph-aware retrieval ([ADR 016](docs/adr/016-graph-aware-ranking.md)) | Recall seeds → graph recruits → activation scores; every hit carries evidence |
+| `application/rule_engine.py` | `RuleEngine` tick over Automation Rules ([ADR 039](docs/adr/039-reactive-rule-engine.md)) | In-memory baseline diff: transitions not states; the engine's own writes never trigger rules |
 | `application/session_persister.py` | Debounced session persistence | Flush every N / on shutdown; lenient `load_or_fresh`; keyed |
 | `application/session_registry.py` | The one source of live sessions ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)) | Lazy keyed `(SessionState, persister)` cache; `flush_all` at teardown |
 | `composition.py` | Shared service builder | One wiring; all composition roots delegate to it |

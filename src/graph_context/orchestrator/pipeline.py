@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.application.rule_engine import RuleTickReport
 from graph_context.application.scheduler import SchedulerTick
 from graph_context.domain.model_choice import model_id
 from graph_context.domain.models import Node
@@ -308,6 +309,13 @@ class Orchestrator:
     async def mark_scheduled_fired(self, node_id: str) -> None:
         """Stamp an event as fired (call BEFORE its turn runs)."""
         await self.services.scheduler.mark_fired(node_id)
+
+    async def rule_tick(self) -> RuleTickReport:
+        """One Automation Rule diff-fire pass (WP31, ADR 039). The
+        transports' rule loop calls this after a resync, under the
+        route's turn lock; the shared bundle is correct here too --
+        rules belong to the space, not to any one session."""
+        return await self.services.rules.run_tick()
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
