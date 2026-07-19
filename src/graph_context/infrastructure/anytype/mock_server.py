@@ -76,6 +76,7 @@ import json
 import mimetypes
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from itertools import count
 from typing import Any
 
@@ -587,6 +588,9 @@ class MockAnytype:
             error = self._resolve_select_values(body.get("properties", []))
             if error is not None:
                 return error
+            error = self._resolve_date_values(body.get("properties", []))
+            if error is not None:
+                return error
             # template_id (spiked): the template supplies default property
             # values + a scaffold body server-side; the request's properties
             # override defaults per key, and the request body is appended below
@@ -683,6 +687,9 @@ class MockAnytype:
                         "object": "error", "status": 400,
                     })
             error = self._resolve_select_values(body.get("properties", []))
+            if error is not None:
+                return error
+            error = self._resolve_date_values(body.get("properties", []))
             if error is not None:
                 return error
             if "name" in body:
@@ -1210,6 +1217,45 @@ class MockAnytype:
                         })
                     resolved.append(tag)
                 entry["multi_select"] = resolved
+        return None
+
+    def _resolve_date_values(
+        self, entries: list[dict[str, Any]]
+    ) -> httpx.Response | None:
+        """Validate + normalize date-format entries in a write.
+
+        Live behavior (WP31 R2 probe, 2026-07-19): a date property
+        accepts a bare date or an RFC 3339 timestamp WITH a timezone; a
+        naive timestamp 400s the whole request. Stored values read back
+        as the UTC instant -- a bare date becomes ``T00:00:00Z``
+        (midnight **UTC**, the quirk that makes bare dates display a day
+        early in any zone west of Greenwich)."""
+        for entry in entries:
+            if entry.get("format") != "date":
+                continue
+            raw = entry.get("date")
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return self._error(
+                    400, "bad_request",
+                    f'bad input: invalid date value for '
+                    f'"{entry.get("key")}": {raw}',
+                )
+            bare_date = raw == moment.date().isoformat()
+            if moment.tzinfo is None and not bare_date:
+                return self._error(
+                    400, "bad_request",
+                    f'bad input: date value for "{entry.get("key")}" must '
+                    f'be a bare date or carry a timezone: {raw}',
+                )
+            instant = (
+                moment.replace(tzinfo=UTC) if bare_date
+                else moment.astimezone(UTC)
+            )
+            entry["date"] = instant.strftime("%Y-%m-%dT%H:%M:%SZ")
         return None
 
     # -- helpers ---------------------------------------------------------------

@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, time, tzinfo
 from typing import Any
 
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
@@ -59,6 +59,21 @@ def _local_now() -> datetime:
 
 def _stamp(moment: datetime) -> str:
     return moment.isoformat(sep=" ", timespec="seconds")
+
+
+def _local_midnight(moment: datetime, zone: tzinfo | None) -> str:
+    """Local midnight of ``moment``'s date, WITH its UTC offset.
+
+    Anytype stores a bare date as midnight UTC and clients render it in
+    the viewer's zone -- so a bare date displays one day early anywhere
+    west of Greenwich. The aware RFC 3339 form (the only timestamp shape
+    the live server accepts, R2) pins the calendar date in every zone.
+    ``zone`` is GC_TIMEZONE's; ``None`` resolves the system offset at
+    stamp time (a long-lived process must track DST).
+    """
+    midnight = datetime.combine(moment.date(), time.min)
+    aware = midnight.replace(tzinfo=zone) if zone else midnight.astimezone()
+    return aware.isoformat()
 
 
 def _truncate(message: str) -> str:
@@ -132,11 +147,15 @@ class RuleEngine:
         self,
         repository: GraphRepository,
         now: Callable[[], datetime] = _local_now,
+        zone: tzinfo | None = None,
         script_runner: ScriptRunner | None = None,
         journal: MutationJournal | None = None,
     ) -> None:
         self._repository = repository
         self._now = now
+        # The zone behind `now` (GC_TIMEZONE); date stamps need the
+        # explicit UTC offset the naive clock strips. None = system.
+        self._zone = zone
         self._script_runner = script_runner
         # The journal covers the TOOL's writes (intent provenance, like
         # the scheduler); the tick's automation writes stay unjournalled.
@@ -478,11 +497,7 @@ class RuleEngine:
     ) -> list[str]:
         config = rule.config
         if config.action == rules.ACTION_SET_NOW:
-            now = self._now()
-            value = (
-                now.date().isoformat() if rule.action_format == "date"
-                else _stamp(now)
-            )
+            value = self._now_value(rule.action_format)
             return [f"would set {obj.name!r}.{config.action_property} = {value!r}"]
         if config.action == rules.ACTION_SET_VALUE:
             return [
@@ -871,23 +886,27 @@ class RuleEngine:
 
     # -- actions -----------------------------------------------------------
 
+    def _now_value(self, action_format: str) -> str:
+        """What ``set property to now`` writes, by target format (R2).
+
+        The live server rejects naive timestamps on date properties;
+        text targets carry the full local stamp, date targets get local
+        midnight with its explicit UTC offset (see ``_local_midnight``).
+        """
+        now = self._now()
+        if action_format == "date":
+            return _local_midnight(now, self._zone)
+        return _stamp(now)
+
     async def _execute(
         self, rule: _BoundRule, obj: Node, before: str, after: str
     ) -> None:
         if rule.config.action == rules.ACTION_RUN_SCRIPT:
             await self._execute_script(rule, obj, before, after)
         elif rule.config.action == rules.ACTION_SET_NOW:
-            # A date-format target gets the bare LOCAL date: the live
-            # server rejects naive timestamps and accepts RFC 3339 only
-            # WITH a timezone -- which our naive-local clock convention
-            # cannot honestly supply (WP31 e2e probe, R2). Text targets
-            # carry the full stamp.
-            now = self._now()
-            value = (
-                now.date().isoformat() if rule.action_format == "date"
-                else _stamp(now)
+            await self._write_field(
+                obj, rule.action_key, self._now_value(rule.action_format)
             )
-            await self._write_field(obj, rule.action_key, value)
         elif rule.config.action == rules.ACTION_SET_VALUE:
             await self._write_field(obj, rule.action_key, rule.config.action_value)
         else:  # ACTION_UNCHECK_OTHERS

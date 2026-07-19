@@ -24,6 +24,7 @@ from graph_context.domain.models import (
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
 from graph_context.errors import (
+    GraphContextError,
     NodeNotFound,
     SchemaChangeConflict,
     UnknownFieldKey,
@@ -432,7 +433,35 @@ class FieldCatalogContract:
                       fields={"Due date": "2026-08-01"})
         )
         # Read-back is under the property's raw key, both backends alike.
-        assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == (
+            "2026-08-01T00:00:00Z"  # live reads a bare date back as midnight UTC
+        )
+
+    async def test_an_offset_date_value_reads_back_as_the_utc_instant(
+        self, catalog_repo
+    ):
+        """A15/R2: an RFC 3339 stamp WITH a timezone is accepted and
+        reads back normalized to UTC -- local midnight keeps its
+        calendar date (the rule engine's set-property-to-now shape)."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Due date": "2026-08-01T00:00:00-04:00"})
+        )
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == (
+            "2026-08-01T04:00:00Z"
+        )
+
+    async def test_a_naive_timestamp_date_value_errors_with_the_fix(
+        self, catalog_repo
+    ):
+        """A15/R2: the live store 400s naive timestamps on date
+        properties; both backends must reject them BEFORE the wire with
+        the self-correcting spelling hint instead."""
+        with pytest.raises(GraphContextError, match="timezone"):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Due date": "2026-08-01 10:00:00"})
+            )
 
     async def test_declared_key_matching_an_existing_property_reuses_it(
         self, catalog_repo
@@ -447,7 +476,9 @@ class FieldCatalogContract:
                 "Due date": PropertyDeclaration("Due date", "date")
             },
         )
-        assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == (
+            "2026-08-01T00:00:00Z"  # live reads a bare date back as midnight UTC
+        )
 
     async def test_declared_format_mismatch_conflicts_loudly(
         self, catalog_repo

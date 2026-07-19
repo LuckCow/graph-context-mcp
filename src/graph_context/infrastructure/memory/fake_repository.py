@@ -541,6 +541,10 @@ class InMemoryGraphRepository:
             names = domain_fields.split_multi_select(value)
             self._register_options(spec, names)
             return ", ".join(names) if spec.format == "multi_select" else value.strip()
+        if spec.format == "date":
+            # Live reads every date back as the UTC instant (bare date ->
+            # midnight UTC); naive timestamps error (R2).
+            return domain_fields.normalize_date(field, value)
         return value
 
     def _register_options(self, spec: FieldSpec, names: list[str]) -> None:

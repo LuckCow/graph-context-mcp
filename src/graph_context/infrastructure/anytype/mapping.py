@@ -86,6 +86,15 @@ Representation (v2, space-reflecting):
   server also normalises requested keys -- letter/digit boundaries gain
   underscores (``wp34`` -> ``wp_34``) -- so the RESPONSE key, not the
   requested one, is authoritative for registration.
+* **A15 (R2 probe + dogfooding, 2026-07-19):** ``date``-format
+  properties accept a bare date or an RFC 3339 stamp WITH a timezone,
+  400 naive timestamps, and read every value back as the UTC instant
+  (``...T00:00:00Z``). A bare date is stored as midnight **UTC**, which
+  clients render in the viewer's zone -- a day early anywhere west of
+  Greenwich. So all date writes are canonicalized client-side
+  (``domain.fields.normalize_date``, used by the field and timeline
+  paths), and zone-aware writers (the rule engine's set-property-to-now)
+  send local midnight with its explicit offset to pin the calendar day.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -109,6 +118,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from graph_context.domain import attribution, rules, scheduling
+from graph_context.domain import fields as domain_fields
 from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
 from graph_context.domain.model_choice import MODEL_CHOICES
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
@@ -412,6 +422,16 @@ def property_entry(key: str, fmt: str, value: Any) -> dict[str, Any]:
     return {"key": key, "format": fmt, _VALUE_FIELD[fmt]: value}
 
 
+def _timeline_entry(timeline: tuple[str, str], value: Any) -> dict[str, Any]:
+    key, fmt = timeline
+    if fmt == "date":
+        # A date-axis story_time is a date write like any other: the
+        # shared rule errors with the fix instead of the server's opaque
+        # 400 on naive/garbage values (R2), and sends the aware UTC form.
+        value = domain_fields.normalize_date(key, str(value))
+    return property_entry(key, fmt, value)
+
+
 def to_create_payload(
     draft: NodeDraft,
     *,
@@ -447,7 +467,7 @@ def to_create_payload(
         *native_properties,
     ]
     if draft.story_time is not None:
-        properties.append(property_entry(timeline[0], timeline[1], draft.story_time))
+        properties.append(_timeline_entry(timeline, draft.story_time))
     payload: dict[str, Any] = {
         "name": draft.name,
         "type_key": type_key,
@@ -487,7 +507,7 @@ def to_update_payload(
     if summary_stale is not None:
         properties.append(property_entry(PROP_SUMMARY_STALE, "checkbox", summary_stale))
     if story_time is not None:
-        properties.append(property_entry(timeline[0], timeline[1], story_time))
+        properties.append(_timeline_entry(timeline, story_time))
     payload: dict[str, Any] = {}
     if name is not None:
         payload["name"] = name

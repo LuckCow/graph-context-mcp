@@ -47,6 +47,19 @@ def _local_now() -> datetime:
     return datetime.now()
 
 
+def _parse_zone(timezone: str) -> ZoneInfo | None:
+    name = timezone.strip()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise GraphContextError(
+            f"unknown GC_TIMEZONE {name!r}; use an IANA zone name like "
+            "America/Chicago or Europe/Berlin (empty = the system clock)"
+        ) from None
+
+
 def local_clock(timezone: str = "") -> Callable[[], datetime]:
     """The scheduler's wall clock, pinned to an IANA timezone.
 
@@ -57,22 +70,26 @@ def local_clock(timezone: str = "") -> Callable[[], datetime]:
     TZ is configured). An unknown name fails loudly HERE, at startup,
     never inside a tick.
     """
-    name = timezone.strip()
-    if not name:
+    zone = _parse_zone(timezone)
+    if zone is None:
         return _local_now
-    try:
-        zone = ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        raise GraphContextError(
-            f"unknown GC_TIMEZONE {name!r}; use an IANA zone name like "
-            "America/Chicago or Europe/Berlin (empty = the system clock)"
-        ) from None
 
     def now() -> datetime:
         # Naive in that zone: the schedule convention (see scheduling.py).
         return datetime.now(zone).replace(tzinfo=None)
 
     return now
+
+
+def local_zone(timezone: str = "") -> ZoneInfo | None:
+    """The zone behind :func:`local_clock`, for the rare write that must
+    carry an explicit UTC offset (the rule engine's date stamps).
+
+    ``None`` (empty = system clock) means "resolve the system offset at
+    stamp time" -- a long-lived process must not freeze today's DST
+    offset. Same loud unknown-name failure as ``local_clock``.
+    """
+    return _parse_zone(timezone)
 
 
 def _stamp(moment: datetime) -> str:

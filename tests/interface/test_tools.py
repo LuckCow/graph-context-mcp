@@ -735,7 +735,8 @@ class TestRelationFieldCoercion:
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)
         assert len(edges) == 1
-        assert node.fields["due_date"] == "2026-08-01"
+        # R2: a bare date reads back as the midnight-UTC instant.
+        assert node.fields["due_date"] == "2026-08-01T00:00:00Z"
 
 
 # -- the schedule tool (WP18, ADR 027) ---------------------------------------

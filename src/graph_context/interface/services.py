@@ -18,7 +18,7 @@ from graph_context.application.node_writer import NodeWriter
 from graph_context.application.querier import Querier
 from graph_context.application.ranker import Ranker
 from graph_context.application.rule_engine import RuleEngine
-from graph_context.application.scheduler import Scheduler, local_clock
+from graph_context.application.scheduler import Scheduler, local_clock, local_zone
 from graph_context.application.schema_proposals import SchemaProposals
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
@@ -108,7 +108,7 @@ def build_services(
         # not the container's (usually UTC); resolved loudly at startup.
         scheduler=Scheduler(repository, journal=journal, now=local_clock(timezone)),
         rules=RuleEngine(
-            repository, now=local_clock(timezone),
+            repository, now=local_clock(timezone), zone=local_zone(timezone),
             script_runner=script_runner, journal=journal,
         ),
         persister=persister,

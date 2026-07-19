@@ -2167,7 +2167,9 @@ in the Anytype UI as `gc_rule` objects, no deployment config.
 * R2 resolved by live probe (2026-07-19): native date properties
   reject naive timestamps (accept RFC 3339 with timezone, or a bare
   date), so `set-property-to-now` is format-aware — date targets get
-  the bare local date, text targets the full stamp;
+  local midnight with its explicit UTC offset (amended same day: a
+  bare date stores as midnight UTC and displayed a day early in US
+  zones; ADR 039 amendment), text targets the full stamp;
   `tests/e2e/test_live_rules.py` certifies both live.
 
 ---

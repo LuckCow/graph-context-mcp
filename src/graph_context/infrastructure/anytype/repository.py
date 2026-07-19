@@ -1083,7 +1083,14 @@ class AnytypeGraphRepository:
             return mapping.property_entry(
                 info.key, fmt, domain_fields.parse_checkbox(info.key, value)
             )
-        # text / date / url / email / phone: pass the string through.
+        if fmt == "date":
+            # Canonicalized client-side: a naive timestamp would 400
+            # opaquely at the server (R2); the shared rule errors with
+            # the fix instead and sends the aware UTC form.
+            return mapping.property_entry(
+                info.key, fmt, domain_fields.normalize_date(info.key, value)
+            )
+        # text / url / email / phone: pass the string through.
         return mapping.property_entry(info.key, fmt, value)
 
     async def _send_tolerating_fresh_tags(

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from graph_context.application.rule_engine import RuleEngine
 from graph_context.domain import rules
@@ -172,13 +173,17 @@ async def test_scripted_rule_round_trips_live(repo, raw_api):
     assert (await engine.run_tick()).fired == ()
 
 
-async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api):
+async def test_r2_resolved_a_date_target_gets_local_midnight_with_offset(
+    repo, raw_api,
+):
     """R2 (ADR 039), answered by a live probe 2026-07-19: a native date
     property REJECTS naive timestamps (space- or T-separated) and accepts
-    RFC 3339 only WITH a timezone, or a bare date. The engine's clock is
-    naive local (the scheduling convention), so ``set-property-to-now``
-    writes the bare LOCAL date to date-format targets -- this certifies
-    that write shape end-to-end through a fired rule."""
+    RFC 3339 only WITH a timezone, or a bare date -- but a bare date is
+    stored as midnight UTC, which clients then render a day early in any
+    zone west of Greenwich. ``set-property-to-now`` therefore writes
+    local midnight WITH its explicit UTC offset; this certifies that
+    write shape end-to-end through a fired rule (America/New_York
+    midnight stores as the 04:00Z/05:00Z instant of the same date)."""
     await _ensure_type(repo, "E2E Dated", [
         {"key": "e2e_flag", "name": "E2E Flag", "format": "checkbox"},
         {"key": "e2e_when", "name": "E2E When", "format": "date"},
@@ -198,7 +203,10 @@ async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api)
     node = await repo.create_node(NodeDraft(
         type="E2E Dated", name="probe", summary="s",
     ))
-    engine = RuleEngine(repo, now=Clock("2026-07-19 10:00:05"))
+    engine = RuleEngine(
+        repo, now=Clock("2026-07-19 10:00:05"),
+        zone=ZoneInfo("America/New_York"),
+    )
     await engine.run_tick()  # baseline
     await asyncio.sleep(1.5)  # S3: same-second edits are indistinguishable
     raw_api.set_property(
@@ -209,4 +217,5 @@ async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api)
     assert len(report.fired) == 1
     assert report.errors == ()
     value = _property_value(raw_api.get(node.id), when_key)
-    assert str(value).startswith("2026-07-19")  # reads back 2026-07-19T00:00:00Z
+    # EDT midnight reads back as the UTC instant of the SAME calendar day.
+    assert str(value).startswith("2026-07-19T04:00:00")

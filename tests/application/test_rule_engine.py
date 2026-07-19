@@ -196,11 +196,11 @@ class TestFiring:
         await repository.update_node(task.id, fields={"Done": "true"})
         assert len((await engine.run_tick()).fired) == 1
 
-    async def test_a_date_format_target_gets_the_bare_local_date(
-        self, engine: RuleEngine, repository: RecordingRepository, clock: Clock,
-    ) -> None:
-        """R2 (ADR 039, live-probed): date properties reject naive
-        timestamps, so set-property-to-now writes YYYY-MM-DD there."""
+    async def _stage_date_target(
+        self, repository: RecordingRepository,
+    ) -> NodeId:
+        """A Character type whose 'Completion date' is date-format, plus
+        the standard rule watching Done; returns the watched node."""
         from graph_context.domain.models import FieldSpec
 
         rule_fields = {
@@ -224,15 +224,54 @@ class TestFiring:
         await repository.create_node(rule_draft(
             **{rules.FIELD_TARGET_TYPE: "Character"}  # a catalog-known type
         ))
-        task = await repository.create_node(NodeDraft(
+        node = await repository.create_node(NodeDraft(
             type="Character", name="ship it", summary="s",
         ))
+        return node.id
+
+    async def test_a_date_format_target_gets_local_midnight_with_offset(
+        self, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        """R2 (ADR 039, live-probed): date properties reject naive
+        timestamps and store bare dates as midnight UTC -- which then
+        DISPLAYS a day early anywhere west of Greenwich. So
+        set-property-to-now writes local midnight WITH the zone's
+        explicit UTC offset, pinning the calendar date in every zone."""
+        from zoneinfo import ZoneInfo
+
+        engine = RuleEngine(
+            repository, now=clock, zone=ZoneInfo("America/New_York"),
+        )
+        task_id = await self._stage_date_target(repository)
         await engine.run_tick()
-        await repository.update_node(task.id, fields={"Done": "true"})
+        await repository.update_node(task_id, fields={"Done": "true"})
         clock.advance_to("2026-07-19 23:59:59")
         report = await engine.run_tick()
         assert len(report.fired) == 1
-        assert repository.graph.node(task.id).fields["completion_date"] == "2026-07-19"
+        # EDT midnight, read back (like live) as the UTC instant of the
+        # SAME calendar day -- never the day-early bare-date shift.
+        assert repository.graph.node(task_id).fields["completion_date"] == (
+            "2026-07-19T04:00:00Z"
+        )
+
+    async def test_without_a_pinned_zone_the_date_stamp_still_has_an_offset(
+        self, engine: RuleEngine, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        """No GC_TIMEZONE = the system clock is local (TZ-configured
+        container); the stamp resolves the system's UTC offset at write
+        time rather than sending a naive value the server rejects."""
+        task_id = await self._stage_date_target(repository)
+        await engine.run_tick()
+        await repository.update_node(task_id, fields={"Done": "true"})
+        report = await engine.run_tick()
+        assert len(report.fired) == 1
+        value = repository.graph.node(task_id).fields["completion_date"]
+        # Whatever the host zone, the stored instant IS local midnight
+        # of the stamped date -- the calendar day survives display.
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        local = moment.astimezone()
+        assert local.date().isoformat() == "2026-07-19"
+        assert (local.hour, local.minute) == (0, 0)
 
     async def test_set_property_value_writes_the_configured_value(
         self, engine: RuleEngine, repository: RecordingRepository,
