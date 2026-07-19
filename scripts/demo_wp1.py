@@ -53,16 +53,16 @@ async def main() -> None:
         NodeDraft("Character", "Mira", "Exiled siege engineer.")
     )
     undercroft = await repo.create_node(
-        NodeDraft("Location", "The Undercroft", "Vaults beneath Brakk."),
-        links=[LinkSpec("located_at", other=mira.id, outgoing=False)],
+        NodeDraft("Location", "The Undercroft", "Vaults beneath Brakk.")
     )
-    await repo.create_node(
+    # Edges live on their SOURCE object (ADR 042 retired incoming links):
+    # Mira's own properties carry her whereabouts and participation.
+    await repo.add_link(mira.id, LinkSpec("located_at", other=undercroft.id))
+    siege = await repo.create_node(
         NodeDraft("Event", "Siege of Brakk", "The city falls.", story_time=10),
-        links=[
-            LinkSpec("participated_in", other=mira.id, outgoing=False),
-            LinkSpec("located_at", other=undercroft.id),
-        ],
+        links=[LinkSpec("located_at", other=undercroft.id)],
     )
+    await repo.add_link(mira.id, LinkSpec("participated_in", other=siege.id))
     print(f"   {repo.graph.node_count()} nodes / {repo.graph.edge_count()} edges\n")
 
     print("== 3. restart + hydrate ==")

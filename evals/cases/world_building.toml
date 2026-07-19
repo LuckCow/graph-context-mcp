@@ -64,7 +64,7 @@ called_any = ["create_node"]
 must_mention = ["Torvald"]
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Torvald", summary = "A canal smuggler who knows Mira from the siege years.", links = [{ edge_type = "knows", other = "Mira" }], create_missing_relations = true } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Torvald", summary = "A canal smuggler who knows Mira from the siege years.", properties = { knows = "Mira" }, create_missing_properties = { knows = "objects" } } }]
 
 [[case.script]]
 reply = "Torvald the smuggler now exists, linked to Mira."

@@ -530,11 +530,12 @@ class TestScriptAction:
                 type_key=node.type_key, role=node.role, modified_at=value,
             ))
 
-        # The fake's "" stamp -> refetch every tick (fetch is free there).
+        # The fake stamps modified_at at creation (ADR 042), so the first
+        # fetch caches and the second tick hits the cache.
         await engine.run_tick()
         await engine.run_tick()
-        assert repository.body_fetches.count(rule.id) == 2
-        # A real stamp -> one fetch, then cache hits...
+        assert repository.body_fetches.count(rule.id) == 1
+        # A moved stamp -> one fresh fetch, then cache hits again...
         stamp("2026-07-19 10:00:00")
         repository.body_fetches.clear()
         await engine.run_tick()
@@ -662,3 +663,145 @@ class TestLifecycle:
         repository.fail_for.clear()
         assert (await engine.run_tick()).fired == ()
         assert "Completion date" not in repository.graph.node(task.id).fields
+
+
+class TestBuiltinModifiedWatch:
+    """ADR 042: 'modified_at' (and its aliases) is watchable on every
+    type -- the object's store-clock stamp, bumped by ANY write -- with
+    condition 'changed' only, and never writable."""
+
+    def _watch_modified(self, **overrides: str) -> NodeDraft:
+        return rule_draft(
+            "on any edit",
+            **{
+                rules.FIELD_WATCH_PROPERTY: "last modified date",
+                rules.FIELD_CONDITION: "Changed",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Status",
+                rules.FIELD_ACTION_VALUE: "Touched",
+                **overrides,
+            },
+        )
+
+    async def test_fires_when_the_object_is_edited(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(self._watch_modified())
+        task = await repository.create_node(task_draft("ship it"))
+        assert (await engine.run_tick()).fired == ()  # baseline only
+        await repository.update_node(task.id, name="ship it now")
+        report = await engine.run_tick()
+        assert [f.node_id for f in report.fired] == [task.id]
+        assert repository.graph.node(task.id).fields["Status"] == "Touched"
+
+    async def test_the_engines_own_write_never_cascades(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        """The action write itself bumps modified_at; the tick-end
+        baseline rebuild absorbs it -- no self-retrigger loop."""
+        await repository.create_node(self._watch_modified())
+        task = await repository.create_node(task_draft("ship it"))
+        await engine.run_tick()
+        await repository.update_node(task.id, name="edited")
+        assert len((await engine.run_tick()).fired) == 1
+        # No further human edit: the engine's own Status write must not
+        # read as a new modified_at transition.
+        assert (await engine.run_tick()).fired == ()
+
+    async def test_a_link_write_counts_as_an_edit(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        from graph_context.domain.models import LinkSpec
+
+        await repository.create_node(self._watch_modified())
+        task = await repository.create_node(task_draft("ship it"))
+        other = await repository.create_node(task_draft("other"))
+        await engine.run_tick()
+        await repository.add_link(task.id, LinkSpec("blocks", other=other.id))
+        assert [f.node_id for f in (await engine.run_tick()).fired] == [task.id]
+
+    async def test_condition_other_than_changed_is_rejected_at_create(
+        self, engine: RuleEngine,
+    ) -> None:
+        with pytest.raises(GraphContextError, match="changed"):
+            await engine.create(
+                name="bad", target_type="Task",
+                watch_property="modified_at",
+                condition="changed to true",
+                action="set property value",
+                action_property="Status", action_value="x",
+            )
+
+    async def test_builtin_as_action_property_is_rejected(
+        self, engine: RuleEngine,
+    ) -> None:
+        with pytest.raises(GraphContextError, match="read-only"):
+            await engine.create(
+                name="bad", target_type="Task",
+                watch_property="Done", condition="changed to true",
+                action="set property value",
+                action_property="modified_at", action_value="x",
+            )
+
+    async def test_dry_run_synthesizes_a_stamp_transition(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        rule = await repository.create_node(self._watch_modified())
+        await repository.create_node(task_draft("ship it"))
+        report = await engine.dry_run(identifier=rule.id)
+        assert "would set" in report and "dry run" in report
+        # Dry runs apply nothing.
+        for node in repository.graph.nodes():
+            assert node.fields.get("Status") != "Touched"
+
+    async def test_a_real_catalog_property_wins_over_the_builtin(
+        self, clock: Clock,
+    ) -> None:
+        """A space's own "Modified date" scalar resolves as itself; the
+        built-in only rescues a miss."""
+        from graph_context.domain.models import FieldSpec
+
+        repository = RecordingRepository()
+        repository.stage_space_vocabulary(field_catalog=[
+            FieldSpec(name="Modified date", format="text", key="modified_date"),
+            FieldSpec(name="Status", format="text", key="status"),
+            FieldSpec(name="Done", format="checkbox", key="done"),
+            # The rule node's own bookkeeping properties, as bootstrap
+            # guarantees them in a live space (ADR 039).
+            *(
+                FieldSpec(name=key, format="text", key=key)
+                for key in (
+                    rules.FIELD_TARGET_TYPE, rules.FIELD_WATCH_PROPERTY,
+                    rules.FIELD_CONDITION, rules.FIELD_ACTION,
+                    rules.FIELD_ACTION_PROPERTY, rules.FIELD_ACTION_VALUE,
+                    rules.FIELD_STATUS, rules.FIELD_LAST_FIRED,
+                    rules.FIELD_LAST_ERROR,
+                )
+            ),
+        ])
+        engine = RuleEngine(repository, now=clock)
+        await repository.create_type("Task")
+        await repository.create_node(NodeDraft(
+            type="gc_rule", name="catalog wins", summary="an automation",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_WATCH_PROPERTY: "Modified date",
+                rules.FIELD_CONDITION: "Changed",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Status",
+                rules.FIELD_ACTION_VALUE: "Touched",
+            },
+        ))
+        task = await repository.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+            fields={"Modified date": "yesterday"},
+        ))
+        await engine.run_tick()
+        # A name/summary edit bumps modified_at but NOT the catalog
+        # property -- the rule must not fire (it watches the real one).
+        await repository.update_node(task.id, name="renamed")
+        assert (await engine.run_tick()).fired == ()
+        await repository.update_node(
+            task.id, fields={"Modified date": "today"}
+        )
+        assert len((await engine.run_tick()).fired) == 1

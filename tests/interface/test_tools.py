@@ -135,15 +135,15 @@ async def test_empty_node_type_errors(services: tools.Services) -> None:
     assert "type" in out
 
 
-async def test_empty_edge_label_errors(
+async def test_empty_properties_key_errors(
     services: tools.Services, world: World
 ) -> None:
     out = await tools.create_node_tool(
         services, type="Item", name="Relic", summary="s",
-        links=[{"edge_type": "", "other": world.mira.id}],
+        properties={"": world.mira.id},
     )
     assert "ERROR:" in out
-    assert "edge_type" in out
+    assert "empty key" in out
 
 
 async def test_bad_detail_lists_allowed_levels(
@@ -154,15 +154,25 @@ async def test_bad_detail_lists_allowed_levels(
     assert "names" in out and "summaries" in out and "full" in out
 
 
-async def test_malformed_link_names_required_keys(
+async def test_retired_write_params_redirect_to_properties(
     services: tools.Services, world: World
 ) -> None:
+    """ADR 042: an old-shape call (replayed transcript, stale habit) gets
+    a self-correcting redirect, never an opaque internal error."""
     out = await tools.create_node_tool(
         services, type="Item", name="Relic", summary="s",
-        links=[{"edge_type": "possesses"}],  # missing 'other'
+        links=[{"edge_type": "possesses", "other": world.mira.id}],
     )
     assert "ERROR:" in out
-    assert "edge_type" in out and "other" in out
+    assert "replaced" in out and "properties" in out
+
+    out = await tools.update_node_tool(
+        services, node_id=world.mira.id,
+        fields={"x": "y"}, create_missing_fields={"x": "text"},
+    )
+    assert "ERROR:" in out
+    assert "'fields' was replaced" in out
+    assert "'create_missing_fields' was replaced" in out
 
 
 # -- invariant 2 / WP2 policy: Prose & SessionContext hidden by default ------
@@ -239,9 +249,9 @@ async def _semantic_services(world: World) -> tools.Services:
     from graph_context.domain.models import LinkSpec, NodeDraft
 
     writer = NodeWriter(repository, SessionState())
-    mira = await writer.create_node(NodeDraft(
+    mira = (await writer.create_node(NodeDraft(
         "Character", name="Mira", summary="Exiled siege engineer of Brakk.",
-    ))
+    ))).node
     await writer.create_node(
         NodeDraft("Item", name="Ashbrand", summary="A blade quenched in ash."),
         links=[LinkSpec("wielded_by", other=mira.id)],
@@ -363,7 +373,7 @@ class TestQueryTool:
         ):
             out = await tools.create_node_tool(
                 services, type="Todo", name=name, summary=f"{name}.",
-                description=description, fields=fields,
+                description=description, properties=fields,
             )
             assert out.startswith("created:")
 
@@ -495,7 +505,7 @@ class TestQueryViewParam:
         ):
             await tools.create_node_tool(
                 services, type="Todo", name=name, summary=f"{name}.",
-                fields=fields,
+                properties=fields,
             )
 
     async def test_a_saved_view_runs_with_its_own_filters_and_order(self) -> None:
@@ -555,34 +565,67 @@ class TestFieldCatalogSurface:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"due": "2026-08-01"},
+            properties={"due": "2026-08-01"},
         )
         assert out.startswith("ERROR:")
-        assert "Due date (date)" in out and "create_missing_fields" in out
+        assert "Due date (date)" in out and "create_missing_properties" in out
 
     async def test_matching_by_display_name_writes_the_property(self) -> None:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Due date": "2026-08-01"},
+            properties={"Due date": "2026-08-01"},
         )
         assert out.startswith("created:")
         assert "due_date: 2026-08-01" in out
 
-    async def test_create_missing_fields_creates_and_writes(self) -> None:
+    async def test_create_missing_properties_creates_and_writes(self) -> None:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"effort": "3"}, create_missing_fields={"effort": "Number"},
+            properties={"effort": "3"},
+            create_missing_properties={"effort": "Number"},
         )
         assert out.startswith("created:")
         assert "effort: 3" in out
+
+    async def test_scope_type_saves_the_value_and_drafts_a_proposal(self) -> None:
+        """ADR 042: scope="type" writes immediately AND drafts the
+        EXTEND_TYPE proposal into the session ledger for the 👍 flow."""
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            properties={"effort": "3"},
+            create_missing_properties={
+                "effort": {"format": "number", "scope": "type"}
+            },
+        )
+        assert out.startswith("created:")
+        assert "effort: 3" in out
+        assert "schema proposal" in out and "cannot apply" in out
+        drafted = services.proposals.drain_drafted()
+        assert len(drafted) == 1
+        assert drafted[0].type_name == "Item"
+        assert drafted[0].properties[0].name == "Effort"
+
+    async def test_boolean_checkbox_value_coerces(self) -> None:
+        """Turn de38192f56dc: a JSON boolean for a checkbox crashed to an
+        opaque internal error; it must simply work now (D8)."""
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            properties={"shift_active": True},
+            create_missing_properties={"shift_active": "checkbox"},
+        )
+        assert out.startswith("created:")
+        assert "shift_active: true" in out
 
     async def test_bad_declared_format_errors_with_the_menu(self) -> None:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"due": "soon"}, create_missing_fields={"due": "datetime"},
+            properties={"due": "soon"},
+            create_missing_properties={"due": "datetime"},
         )
         assert out.startswith("ERROR:") and "formats:" in out
 
@@ -603,9 +646,9 @@ class TestRelationFieldCoercion:
         return build_services(repository, SessionState(project="t"))
 
     async def _seed_member(self, services: tools.Services):
-        return await services.writer.create_node(
+        return (await services.writer.create_node(
             NodeDraft("Person", name="Luckcow", summary="moo")
-        )
+        )).node
 
     def _edges_to(self, services: tools.Services, name: str, target_id: str):
         from graph_context.domain.graph import Direction
@@ -622,22 +665,21 @@ class TestRelationFieldCoercion:
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow"},
+            properties={"Assignee": "Luckcow"},
         )
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)
         assert len(edges) == 1
         assert not node.fields  # an edge landed, never a scalar shadow
 
-    async def test_field_and_link_naming_the_same_edge_land_once(self) -> None:
-        """The exact failing call: fields={'Assignee': ...} AND the same
-        edge in links. One edge results; nothing errors."""
+    async def test_duplicate_relation_targets_land_once(self) -> None:
+        """The same target spelled twice (name and id, or a list with a
+        repeat) results in ONE edge; nothing errors."""
         services = self._services()
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow"},
-            links=[{"edge_type": "assignee", "other": member.id}],
+            properties={"Assignee": ["Luckcow", member.id]},
         )
         assert out.startswith("created:")
         _, edges = self._edges_to(services, "Ship it", member.id)
@@ -650,7 +692,7 @@ class TestRelationFieldCoercion:
             services, type="Item", name="Ship it", summary="s.",
         )
         out = await tools.update_node_tool(
-            services, node_id="Ship it", fields={"Assignee": "Luckcow"},
+            services, node_id="Ship it", properties={"Assignee": "Luckcow"},
         )
         assert out.startswith("updated:")
         _, edges = self._edges_to(services, "Ship it", member.id)
@@ -660,19 +702,19 @@ class TestRelationFieldCoercion:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Nobody"},
+            properties={"Assignee": "Nobody"},
         )
         assert out.startswith("ERROR:") and "Nobody" in out
 
     async def test_declaration_for_a_relation_key_is_dropped(self) -> None:
-        """A create_missing_fields declaration must not mint a scalar
+        """A create_missing_properties declaration must not mint a scalar
         shadow of the relation -- the entry still becomes the edge."""
         services = self._services()
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow"},
-            create_missing_fields={"Assignee": "text"},
+            properties={"Assignee": "Luckcow"},
+            create_missing_properties={"Assignee": "text"},
         )
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)
@@ -688,7 +730,7 @@ class TestRelationFieldCoercion:
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow", "Due date": "2026-08-01"},
+            properties={"Assignee": "Luckcow", "Due date": "2026-08-01"},
         )
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)

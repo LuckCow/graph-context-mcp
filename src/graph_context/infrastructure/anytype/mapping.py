@@ -53,14 +53,19 @@ Representation (v2, space-reflecting):
   e.g. a template's property widgets) this is why the connections footer
   is suppressed on types whose template carries a body scaffold (ADR 013
   amendment; ``AnytypeGraphRepository._writes_footer``).
-* **A11 (spike_type_update, 2026-07-15):** ``PATCH /types/{id}`` with a
-  ``properties`` list REPLACES the type's human-managed fields wholesale
-  (an omitted ``gc_`` entry is stripped; server-owned entries like
-  ``tag``/``backlinks`` survive omission, and resending them verbatim is
-  harmless). Entries naming not-yet-minted OR already-minted space
-  properties both attach cleanly; omitting ``properties`` altogether
-  leaves the fields untouched. This is how ``ensure_schema`` retrofits
-  newly-added infra fields onto types that predate them (WP19's
+* **A11 (spike_type_update, 2026-07-15; amended 2026-07-19):** ``PATCH
+  /types/{id}`` with a ``properties`` list REPLACES the type's
+  human-managed fields wholesale (an omitted ``gc_`` entry is stripped;
+  server-owned entries like ``tag``/``backlinks`` survive omission, and
+  resending them verbatim is harmless). Entries naming not-yet-minted
+  space properties attach cleanly, ``objects`` format included (WP34
+  spike). An already-minted space property attaches by key alone when
+  scalar, but an ``objects``-format one 400s "property key already
+  exists" unless the entry also carries the property's ``id`` -- and the
+  id-carrying form works for every format, so reuse entries always
+  include it. Omitting ``properties`` altogether leaves the fields
+  untouched. This is how ``ensure_schema`` retrofits newly-added infra
+  fields onto types that predate them (WP19's
   ``gc_mode_activity_detail``): fetch, resend everything, append the
   missing entries.
 * **A12 (live-confirmed 2026-07-15):** a property's FORMAT is immutable
@@ -75,6 +80,12 @@ Representation (v2, space-reflecting):
   create ``body`` or PATCH ``markdown`` reads back as a bare ```` ``` ````
   fence on the markdown export. Why ``rules.extract_script`` (WP32)
   accepts untagged fences; the mock strips tags at every markdown write.
+* **A14 (WP34 spike, 2026-07-19):** ``POST /properties`` with an
+  existing key 400s ``property key "…" already exists`` (same name on a
+  fresh key is fine; DELETE then re-create of the same key is fine). The
+  server also normalises requested keys -- letter/digit boundaries gain
+  underscores (``wp34`` -> ``wp_34``) -- so the RESPONSE key, not the
+  requested one, is authoritative for registration.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -338,9 +349,10 @@ GENERIC_LINK_KEY = "links"
 # -- native scalar reflection (ADR 012) -----------------------------------
 
 # Property formats that surface in Node.fields (and are writable through
-# the ``fields`` parameter). ``objects`` is edges; everything else scalar.
-# Since ADR 023 the vocabulary is domain-owned (the LLM declares one of
-# these in create_missing_fields); this alias keeps the adapter-local name.
+# the scalar half of ``properties``). ``objects`` is edges; everything
+# else scalar. Since ADR 023 the vocabulary is domain-owned (the LLM
+# declares one in create_missing_properties, ADR 042); this alias keeps
+# the adapter-local name.
 REFLECTED_FIELD_FORMATS: frozenset[str] = FIELD_FORMATS
 
 # System properties that would be pure context-window noise if reflected.

@@ -92,10 +92,14 @@ def build_services(
     script_runner: ScriptRunner | None = None,
 ) -> Services:
     journal = journal or NullJournal()
+    # One proposal ledger per session, shared between the schema tool and
+    # the writer's scope="type" auto-drafts (ADR 042) -- both must land in
+    # the same ledger or the confirm flow would miss the writer's drafts.
+    proposals = SchemaProposals()
     return Services(
         repository=repository,
         session=session,
-        writer=NodeWriter(repository, session, journal),
+        writer=NodeWriter(repository, session, journal, proposals=proposals),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
         querier=Querier(repository, views),
@@ -112,6 +116,7 @@ def build_services(
         projector=projector,
         ranker=ranker,
         session_key=session_key,
+        proposals=proposals,
     )
 
 
@@ -129,10 +134,15 @@ def derive_services(
     views over one space, not runtimes of their own. Cheap: three thin
     wrappers, no I/O.
     """
+    # Session-scoped like the session itself (ADR 041): each derived view
+    # gets its own ledger, shared between its writer and its schema tool.
+    proposals = SchemaProposals()
     return Services(
         repository=base.repository,
         session=session,
-        writer=NodeWriter(base.repository, session, base.journal),
+        writer=NodeWriter(
+            base.repository, session, base.journal, proposals=proposals
+        ),
         reader=NodeReader(base.repository, session),
         explorer=Explorer(base.repository, session),
         querier=base.querier,
@@ -144,4 +154,5 @@ def derive_services(
         projector=base.projector,
         ranker=base.ranker,
         session_key=session_key,
+        proposals=proposals,
     )

@@ -32,6 +32,7 @@ from graph_context.domain.models import (
     Node,
     NodeDraft,
     NodeId,
+    PropertyDeclaration,
     PropertyDraft,
     TimelineValue,
 )
@@ -66,6 +67,11 @@ class InMemoryGraphRepository:
     ) -> None:
         self._graph = GraphIndex()
         self._ids = count(1)
+        # Deterministic store clock: every write stamps Node.modified_at
+        # with a strictly increasing sortable ISO string, mirroring the
+        # Anytype backend's last_modified_date (the rule engine's built-in
+        # watchable, ADR 042, needs the fake to tick too).
+        self._clock = count(1)
         self._bodies: dict[NodeId, str] = {}
         self._out_of_band: list[NodeDraft] = []
         # Profile-supplied type-key -> Role additions (WP5); same contract
@@ -78,13 +84,13 @@ class InMemoryGraphRepository:
         # historical open behavior -- any field key or edge label, stored
         # verbatim -- so the memory backend and demos need no vocabulary.
         # A catalog turns on the strict contract: story-node field keys
-        # must match a spec (by key or name) or be declared via
-        # create_missing_fields, and link labels must match an ``objects``
-        # spec (canonicalizing to its name) or be minted via
-        # create_missing_relations. An ``objects``-format spec models a
-        # RELATION (an edge, ADR 006): never a fields target, and a fields
-        # key naming one redirects to ``links`` -- mirroring the adapter's
-        # registry.
+        # must match a spec (by key or name) or carry a scalar
+        # ``create_missing`` declaration, and link labels must match an
+        # ``objects`` spec (canonicalizing to its name) or be minted via
+        # an ``objects`` declaration (ADR 042). An ``objects``-format spec
+        # models a RELATION (an edge, ADR 006): never a fields target, and
+        # a fields key naming one redirects to the relation surface --
+        # mirroring the adapter's registry.
         self._field_specs: list[FieldSpec] | None = None
         if field_catalog is not None:
             self._adopt_catalog(field_catalog)
@@ -126,13 +132,16 @@ class InMemoryGraphRepository:
     def graph(self) -> GraphIndex:
         return self._graph
 
+    def _tick(self) -> str:
+        """The next store-clock stamp: sortable ISO, strictly increasing."""
+        return f"2026-01-01T00:00:00.{next(self._clock):06d}+00:00"
+
     async def create_node(
         self,
         draft: NodeDraft,
         links: Sequence[LinkSpec] = (),
         *,
-        create_missing_relations: bool = False,
-        create_missing_fields: Mapping[str, str] | None = None,
+        create_missing: Mapping[str, PropertyDeclaration] | None = None,
     ) -> Node:
         role = schema.resolve_role(draft.type, self._role_overrides)
         # Apply the type's template (default field values + scaffold body),
@@ -141,8 +150,7 @@ class InMemoryGraphRepository:
         # scaffold (template first).
         template = None if role in schema.INFRA_ROLES else self._templates.get(draft.type)
         fields = self._resolve_fields(
-            draft.fields, type_name=draft.type,
-            create_missing=create_missing_fields,
+            draft.fields, type_name=draft.type, create_missing=create_missing,
         )
         body = draft.body
         if template is not None:
@@ -163,6 +171,7 @@ class InMemoryGraphRepository:
             fields=fields,
             type_key=draft.type,
             role=role,
+            modified_at=self._tick(),
         )
         self._graph.upsert_node(node)
         if body:
@@ -170,7 +179,8 @@ class InMemoryGraphRepository:
         try:
             for link in links:
                 label = self._resolve_link_label(
-                    link.edge_type, create_missing_relations
+                    link.edge_type,
+                    self._link_declaration(link.edge_type, create_missing),
                 )
                 self._graph.add_edge(
                     replace(link, edge_type=label).to_edge(anchor=node.id)
@@ -182,6 +192,18 @@ class InMemoryGraphRepository:
             raise
         return node
 
+    @staticmethod
+    def _link_declaration(
+        label: str, declared: Mapping[str, PropertyDeclaration] | None
+    ) -> PropertyDeclaration | None:
+        """The declaration licensing this link label, if any -- only
+        ``objects``-format declarations apply (the adapter's rule)."""
+        target = label.strip().lower()
+        for key, declaration in (declared or {}).items():
+            if key.strip().lower() == target and declaration.format == "objects":
+                return declaration
+        return None
+
     async def update_node(
         self,
         node_id: NodeId,
@@ -192,13 +214,12 @@ class InMemoryGraphRepository:
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
-        create_missing_fields: Mapping[str, str] | None = None,
+        create_missing: Mapping[str, PropertyDeclaration] | None = None,
     ) -> Node:
         existing = self._graph.node(node_id)
         if fields is not None:
             fields = self._resolve_fields(
-                fields, type_name=existing.type,
-                create_missing=create_missing_fields,
+                fields, type_name=existing.type, create_missing=create_missing,
             )
         changes: dict[str, Any] = {
             key: value
@@ -211,7 +232,7 @@ class InMemoryGraphRepository:
             }.items()
             if value is not None
         }
-        updated = replace(existing, **changes)
+        updated = replace(existing, **changes, modified_at=self._tick())
         self._graph.upsert_node(updated)
         if body is not None:
             # A7 semantics: wholesale replace; empty string clears.
@@ -219,15 +240,25 @@ class InMemoryGraphRepository:
         return updated
 
     async def add_link(
-        self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
+        self,
+        anchor: NodeId,
+        link: LinkSpec,
+        *,
+        create_missing: PropertyDeclaration | None = None,
     ) -> Edge:
-        label = self._resolve_link_label(link.edge_type, create_missing_relations)
+        label = self._resolve_link_label(link.edge_type, create_missing)
         edge = replace(link, edge_type=label).to_edge(anchor=anchor)
+        source = self._graph.node(edge.source)
         self._graph.add_edge(edge)
+        # Link writes bump the source's store clock, like the adapter's
+        # PATCH does on the live server (ADR 042 built-in watchable).
+        self._graph.upsert_node(replace(source, modified_at=self._tick()))
         return edge
 
     async def remove_link(self, edge: Edge) -> None:
         self._graph.remove_edge(edge)
+        source = self._graph.node(edge.source)
+        self._graph.upsert_node(replace(source, modified_at=self._tick()))
 
     def role_for(self, type_identifier: str) -> Role | None:
         return schema.resolve_role(type_identifier, self._role_overrides)
@@ -298,13 +329,19 @@ class InMemoryGraphRepository:
     def _adopt_property_draft(self, draft: PropertyDraft) -> FieldSpec:
         """The fake's half of the adapter's ``_property_entry`` contract:
         reuse an existing same-format property, conflict on a format
-        mismatch (A12) or a relation name (ADR 006), else mint -- joining
-        the catalog in catalog mode so writes resolve it thereafter."""
-        if self._relation_spec_for(draft.name) is not None:
-            raise SchemaChangeConflict(
-                f"{draft.name!r} names an existing relation -- an edge, not "
-                "a scalar property; pick a different name"
-            )
+        mismatch (A12) -- a *scalar* draft naming a relation included (no
+        scalar shadow of an edge, ADR 006); an ``objects`` draft naming an
+        existing relation attaches it (ADR 042) -- else mint, joining the
+        catalog in catalog mode so writes resolve it thereafter."""
+        relation = self._relation_spec_for(draft.name)
+        if relation is not None:
+            if draft.format != "objects":
+                raise SchemaChangeConflict(
+                    f"{draft.name!r} names an existing relation -- an edge, "
+                    f"not a {draft.format!r} property; formats are immutable "
+                    "(A12), pick a different name"
+                )
+            return relation
         existing = (
             self._spec_for(draft.name) if self._field_specs is not None else None
         )
@@ -334,22 +371,27 @@ class InMemoryGraphRepository:
             spec.name for spec in self._field_specs if spec.format == "objects"
         )
 
-    def _resolve_link_label(self, label: str, create_missing: bool) -> str:
+    def _resolve_link_label(
+        self, label: str, create_missing: PropertyDeclaration | None
+    ) -> str:
         """The fake's half of the adapter's ``_resolve_relation`` contract.
 
         Open mode (no catalog): any label lands verbatim, as ever. Catalog
         mode: a link's ``edge_type`` must match an existing ``objects``
         relation (by key or display name, case-insensitive) and canonicalizes
         to that relation's label -- an unmatched label is surfaced for
-        approval unless ``create_missing`` mints a new relation, which then
-        joins the vocabulary for reuse.
+        approval unless a declaration (ADR 042) mints a new relation, which
+        then joins the vocabulary for reuse. Edge labels derive from the
+        requested label, like the adapter's (whose labels clean from the
+        minted KEY); the declaration's display name is store cosmetics the
+        fake has no surface for.
         """
         if self._field_specs is None:
             return label
         spec = self._relation_spec_for(label)
         if spec is not None:
             return spec.name
-        if not create_missing:
+        if create_missing is None:
             raise UnknownRelationLabel(label, tuple(self.known_edge_labels()))
         minted = FieldSpec(
             name=label, format="objects",
@@ -403,23 +445,28 @@ class InMemoryGraphRepository:
         fields: Mapping[str, str],
         *,
         type_name: str,
-        create_missing: Mapping[str, str] | None,
+        create_missing: Mapping[str, PropertyDeclaration] | None,
     ) -> dict[str, str]:
-        """The fake's half of the ADR 023/028 contract.
+        """The fake's half of the ADR 023/028/042 contract.
 
         Open mode (no catalog): fields pass through verbatim. Catalog
         mode (every role -- infra writes are native-only too, ADR 028):
         each key must match a spec by key or display name
         (case-insensitive) and is stored under the spec's canonical key --
         mirroring the adapter, where a display-name write reads back under
-        the raw property key -- or be declared in ``create_missing``, which
-        registers a new spec. Values normalize like the adapter round-trip
-        (checkbox -> "true"/"false", numbers untrailed, multi_select
-        comma-spacing).
+        the raw property key -- or carry a *scalar* declaration in
+        ``create_missing``, which registers a new spec. A declared key
+        that matches an existing spec reuses it when the formats agree and
+        conflicts loudly when they differ (A12) -- the adapter's D7 rule.
+        Values normalize like the adapter round-trip (checkbox ->
+        "true"/"false", numbers untrailed, multi_select comma-spacing).
         """
         if self._field_specs is None:
             return dict(fields)
-        declared = {k: v.strip().lower() for k, v in (create_missing or {}).items()}
+        declared = {
+            k: d for k, d in (create_missing or {}).items()
+            if d.format != "objects"  # link labels resolve as relations
+        }
         # All-keys-first check: an approval error never half-extends the
         # catalog (same discipline as the adapter).
         matched: dict[str, FieldSpec | None] = {}
@@ -440,14 +487,32 @@ class InMemoryGraphRepository:
                         for s in self._field_specs
                         if s.format != "objects"
                     ),
-                    formats=tuple(schema.FIELD_FORMATS),
+                    formats=tuple(schema.CREATABLE_FORMATS),
+                )
+            declaration = declared.get(key)
+            if (
+                spec is not None
+                and declaration is not None
+                and spec.format != declaration.format
+            ):
+                raise SchemaChangeConflict(
+                    f"a property named {spec.name!r} already exists in this "
+                    f"space with format {spec.format!r}, not "
+                    f"{declaration.format!r}; formats are immutable (A12) -- "
+                    "reuse it as-is (drop the declaration) or pick another "
+                    "key"
                 )
             matched[key] = spec
         resolved: dict[str, str] = {}
         for key, value in fields.items():
             spec = matched[key]
             if spec is None:
-                spec = FieldSpec(name=key, format=declared[key], key=key)
+                declaration = declared[key]
+                spec = FieldSpec(
+                    name=declaration.display_name,
+                    format=declaration.format,
+                    key=key,
+                )
                 self._field_specs.append(spec)
             store_key = spec.key or spec.name
             resolved[store_key] = self._normalize_value(spec, value)

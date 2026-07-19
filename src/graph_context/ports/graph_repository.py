@@ -28,6 +28,7 @@ from graph_context.domain.models import (
     Node,
     NodeDraft,
     NodeId,
+    PropertyDeclaration,
     PropertyDraft,
     TimelineValue,
 )
@@ -73,25 +74,30 @@ class GraphRepository(Protocol):
         draft: NodeDraft,
         links: Sequence[LinkSpec] = (),
         *,
-        create_missing_relations: bool = False,
-        create_missing_fields: Mapping[str, str] | None = None,
+        create_missing: Mapping[str, PropertyDeclaration] | None = None,
     ) -> Node:
         """Create a node and its links.
 
         Resolves ``draft.type`` to an existing space type (raising
         :class:`graph_context.errors.UnknownNodeType` if none matches) and each
-        link's label to an existing relation. An unknown relation label raises
-        :class:`graph_context.errors.UnknownRelationLabel` unless
-        ``create_missing_relations`` is set, in which case the relation is
-        created. Either approval error is raised *before* any persistence.
-
-        Story-node ``fields`` keys must resolve to existing scalar properties
-        (ADR 023); an unmatched key raises
-        :class:`graph_context.errors.UnknownFieldKey` before any persistence
-        unless declared in ``create_missing_fields`` (key -> format from
-        :data:`graph_context.domain.schema.FIELD_FORMATS`), in which case the
-        property is created. Infra-role drafts are exempt: their fields are
-        bookkeeping, not space vocabulary.
+        link's label to an existing relation. ``create_missing`` is ONE
+        key/label -> :class:`~graph_context.domain.models.PropertyDeclaration`
+        map (ADR 042) licensing new space-level vocabulary: a ``fields``
+        key it declares mints a scalar property, a link label it declares
+        (format ``objects``) mints a relation. Minting is space-level only
+        -- the property attaches to NO type regardless of the
+        declaration's ``scope`` (scope drives the *caller's* proposal
+        drafting); type attachment is exclusively
+        :meth:`add_type_properties`. An unmatched, undeclared ``fields``
+        key raises :class:`graph_context.errors.UnknownFieldKey`; an
+        unmatched, undeclared link label raises
+        :class:`graph_context.errors.UnknownRelationLabel` -- either
+        *before* any persistence. A declared key that already matches an
+        existing same-format property is reused silently; a format
+        mismatch raises :class:`graph_context.errors.SchemaChangeConflict`
+        (A12: formats are immutable). Infra-role drafts are exempt from
+        field resolution: their fields are bookkeeping, not space
+        vocabulary.
         """
         ...
 
@@ -105,12 +111,25 @@ class GraphRepository(Protocol):
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
-        create_missing_fields: Mapping[str, str] | None = None,
-    ) -> Node: ...
+        create_missing: Mapping[str, PropertyDeclaration] | None = None,
+    ) -> Node:
+        """Apply the non-``None`` keyword arguments and return the updated
+        node. ``create_missing`` has :meth:`create_node` semantics for
+        ``fields`` keys (link labels ride :meth:`add_link`'s declaration)."""
+        ...
 
     async def add_link(
-        self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
-    ) -> Edge: ...
+        self,
+        anchor: NodeId,
+        link: LinkSpec,
+        *,
+        create_missing: PropertyDeclaration | None = None,
+    ) -> Edge:
+        """Add one outgoing edge from ``anchor``. A ``create_missing``
+        declaration (format ``objects``) mints the relation space-level
+        when the label matches none; without one an unknown label raises
+        :class:`graph_context.errors.UnknownRelationLabel`."""
+        ...
 
     async def remove_link(self, edge: Edge) -> None: ...
 
@@ -166,7 +185,10 @@ class GraphRepository(Protocol):
         matches an existing space property is REUSED (attached) when the
         formats agree, and conflicts when they differ -- formats are
         immutable (A12), so a mismatch must stop the change, never mint a
-        shadow. User confirmation is the caller's contract (the schema
+        shadow. ``objects`` drafts are legal (ADR 042): a same-name
+        relation attaches, joining the type's edge vocabulary; a *scalar*
+        draft naming a relation conflicts (no scalar shadow of an edge,
+        ADR 006). User confirmation is the caller's contract (the schema
         tool's proposal flow); implementations do not gate.
         """
         ...
@@ -174,7 +196,8 @@ class GraphRepository(Protocol):
     async def add_type_properties(
         self, type_identifier: str, properties: Sequence[PropertyDraft]
     ) -> str:
-        """Attach new scalar properties to an existing type (WP33).
+        """Attach new properties to an existing type (WP33; objects
+        drafts legal per ADR 042, same semantics as :meth:`create_type`).
 
         ``type_identifier`` resolves like ``create_node``'s type (key,
         display name, or role); no match raises

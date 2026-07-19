@@ -52,27 +52,29 @@ class UnknownRelationLabel(ApprovalRequired):
             f" Existing relations: {', '.join(sorted(self.known))}." if self.known else ""
         )
         super().__init__(
-            f"no existing relation matches label {label!r}; pass "
-            f"create_missing_relations=true to create it.{hint}"
+            f"no existing relation matches label {label!r}; declare it in "
+            f"create_missing_properties={{{label!r}: {{'format': 'objects', "
+            "'scope': 'instance'|'type'}}} to create it."
+            f"{hint}"
         )
 
 
 class UnknownFieldKey(ApprovalRequired):
-    """A ``fields`` key matched no existing scalar property (ADR 023).
+    """A scalar ``properties`` key matched no existing property (ADR 023).
 
-    Fields must land in real store properties -- never a hidden extras
+    Values must land in real store properties -- never a hidden extras
     blob (ADR 028) -- so an unmatched key stops the write. The message lists the
     reusable properties (the requested type's own first) and the explicit
     opt-in for creating a genuinely new one, mirroring
     :class:`UnknownRelationLabel`'s approval gesture.
 
     ``relation_label``: the key DID match an ``objects``-format relation --
-    in this system an edge, not a field (ADR 006). The message then
-    redirects to ``links`` instead of listing properties or offering
-    ``create_missing_fields`` (which would try to mint a scalar shadowing
-    the relation). Live-caught: a space's "Assignee" relation was invisible
-    to a model that only knew fields, and the old message sent it further
-    astray.
+    in this system an edge (ADR 006), whose value is a node reference. The
+    message then teaches the relation value shape instead of listing scalar
+    properties or offering a declaration (which would try to mint a scalar
+    shadowing the relation). Live-caught: a space's "Assignee" relation was
+    invisible to a model that only knew scalar keys, and the old message
+    sent it further astray.
     """
 
     def __init__(
@@ -91,14 +93,13 @@ class UnknownFieldKey(ApprovalRequired):
         self.relation_label = relation_label
         if relation_label:
             super().__init__(
-                f"{key!r} is an objects-format RELATION in this space -- "
-                f"an edge, not a scalar field. Drop the {key!r} fields key "
-                f"and pass links=[{{'edge_type': {relation_label!r}, "
-                "'other': '<target node id or name>'}] instead (the target "
-                "must be an existing node)."
+                f"{key!r} is an objects-format RELATION in this space -- an "
+                "edge, not a scalar. Its value must be an existing node's id "
+                f"or name (or a list of them): properties="
+                f"{{{relation_label!r}: '<target node id or name>'}}."
             )
             return
-        parts = [f"no property in this space matches field {key!r}."]
+        parts = [f"no property in this space matches key {key!r}."]
         if self.type_properties:
             parts.append(
                 f"Properties on {type_name}: {', '.join(self.type_properties)}."
@@ -108,8 +109,11 @@ class UnknownFieldKey(ApprovalRequired):
                 f"Other properties in the space: {', '.join(self.other_properties)}."
             )
         parts.append(
-            "To reuse one, use its name as the fields key; to create a NEW "
-            f"property, resend with create_missing_fields={{{key!r}: '<format>'}}"
+            "To reuse one, use its name as the properties key; to create a "
+            "NEW property, resend with create_missing_properties="
+            f"{{{key!r}: '<format>'}} (or {{'format': ..., 'scope': "
+            "'instance'|'type'}} -- 'type' when every object of the type "
+            "should carry it)"
         )
         if formats:
             parts.append(f"(formats: {', '.join(sorted(formats))}).")

@@ -42,7 +42,7 @@ from graph_context.domain.model_choice import (
     model_id,
     thinking_locked,
 )
-from graph_context.domain.schema import FIELD_FORMATS, Role
+from graph_context.domain.schema import CREATABLE_FORMATS, FIELD_FORMATS, Role
 from graph_context.domain.session import (
     DEFAULT_FULL_SLOTS,
     DEFAULT_SUMMARY_SLOTS,
@@ -232,12 +232,29 @@ def get_profile(name: str | None) -> DomainProfile:
 # means the profiles have actually diverged.
 # ---------------------------------------------------------------------------
 
-# The one source for the mintable-format menu (domain-owned, ADR 023):
+# The one source for the mintable-format menu (domain-owned, ADR 023;
+# ADR 042 added "objects" -- the format that makes a property a relation):
 # adding a format updates every prompt that lists it.
 _FORMAT_MENU = ", ".join(sorted(FIELD_FORMATS))
+_CREATABLE_MENU = ", ".join(sorted(CREATABLE_FORMATS))
+
+# The ADR 042 creation recipe + scope heuristic: one text, every surface.
+_CREATE_MISSING_DOC = f"""\
+An unmatched key ERRORS, listing the properties you can reuse -- prefer
+  reusing one. Only when none fits, resend with
+  create_missing_properties={{"key": "<format>"}} to create a real new
+  property (formats: {_CREATABLE_MENU}; "objects" makes it a relation --
+  its value is then a node id/name like any relation entry). Think about
+  SCOPE: {{"key": {{"format": ..., "scope": "type"}}}} when the property is
+  a recurring attribute EVERY object of this type should carry (this
+  drafts a schema proposal the user confirms with a 👍 reaction -- the
+  value saves immediately either way -- and is REQUIRED if an automation
+  rule should watch the property); the default scope "instance" (the
+  string shorthand) fits a one-off fact about this object only. An
+  optional "name" sets the property's human display name."""
 
 _UPDATE_NODE_DOC = f"""\
-Modify a node's fields and/or links. Only provided arguments change.
+Modify a node's properties and/or links. Only provided arguments change.
 
 node_id accepts a node NAME as well as an id (resolved for you).
 
@@ -253,41 +270,38 @@ saw it. An empty string clears it. Never list the node's links in the
 description: a Connections section is maintained automatically at the
 bottom of the page (you never see or write it).
 
-fields: {{"key": "value"}} attributes. Every key MUST match one of the
-space's own properties, by key or display name -- get_node shows what a
-node already carries, and context action='overview' lists each type's
-properties. The value updates THAT property, visible and filterable in
-Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful"). A key
-that names a RELATION (e.g. "Assignee") also works: its value is a node
-id or name, and the entry becomes a link, same as add_links. An
-unmatched key ERRORS, listing the properties you can reuse -- prefer
-reusing one. Only when none fits, resend with
-create_missing_fields={{"key": "format"}} to create a real new property
-(formats: {_FORMAT_MENU}).
+properties: {{"key": "value"}} -- scalar attributes AND relations in one
+map. Every key MUST match one of the space's own properties, by key or
+display name -- get_node shows what a node already carries, and context
+action='overview' lists each type's properties. A scalar key updates
+THAT property, visible and filterable in Anytype; select options match
+by name and are created when new; multi-select values are comma-
+separated names ("Dark, Hopeful"). A key that names a RELATION (e.g.
+"Assignee") takes a node id or name -- or a list of them -- and each
+becomes a link; relation entries ADD to the existing links (to reassign
+a single-target relation, also remove_links the old target -- the
+updated view in the response shows the result). {_CREATE_MISSING_DOC}
 
-add_links: same shape as create_node's links (set create_missing_relations
-to create a brand-new relation label rather than reuse an existing one).
 remove_links: list of {{"source", "edge_type", "target"}} exactly as shown
 by get_node.
 """
 
-def _fields_doc(examples: str) -> str:
-    """The create_node ``fields`` parameter doc (ADR 023): shared semantics,
-    profile-specific example property names. Lives here exactly once."""
+def _properties_doc(examples: str) -> str:
+    """The create_node ``properties`` parameter doc (ADR 042): shared
+    semantics, profile-specific example property names. Lives here
+    exactly once."""
     return f"""\
-fields: {{"key": "value"}} attributes. Every key MUST match one of the
-  space's own properties, by key or display name (e.g. {examples});
-  context action='overview' lists each type's properties, and get_node
-  shows what a node already carries. The value writes THAT property,
-  visible and filterable in Anytype; select options match by name and
-  are created when new; multi-select values are comma-separated names.
-  A key that names a RELATION (e.g. "Assignee") also works: its value
-  is a node id or name, and the entry becomes a link, same as links.
-  An unmatched key ERRORS, listing the properties you can reuse --
-  prefer reusing one. Only when none fits, resend with
-  create_missing_fields={{"key": "format"}} to create a real new property
-  (formats: {_FORMAT_MENU})."""
+properties: {{"key": "value"}} -- scalar attributes AND relations in one
+  map. Every key MUST match one of the space's own properties, by key or
+  display name (e.g. {examples}); context action='overview' lists each
+  type's properties, and get_node shows what a node already carries. A
+  scalar key writes THAT property, visible and filterable in Anytype;
+  select options match by name and are created when new; multi-select
+  values are comma-separated names. A key that names a RELATION (e.g.
+  "Assignee") takes a node id or name -- or a list of them -- and each
+  becomes a link from this node. (An edge pointing the OTHER way is the
+  other node's property: create this node first, then update_node the
+  other one.) {_CREATE_MISSING_DOC}"""
 
 
 def _query_doc(examples: str) -> str:
@@ -406,6 +420,13 @@ condition -- the rule watches TRANSITIONS, not states:
   "changed to true" / "changed to false" (checkbox flips), "changed"
   (any value change).
 
+watch_property -- a property attached to the target TYPE (the error
+  lists them; a property created with create_missing_properties scope
+  "type" becomes watchable once the user confirms the attach). Every
+  type also has the BUILT-IN "modified_at" -- the object's last-modified
+  stamp, so the rule fires on ANY edit to the object; condition
+  "changed" only, and it is read-only (never an action property).
+
 rule_action -- what happens when the condition fires:
   "set property to now"    -- write the current date-time into
                               action_property (a date-format property
@@ -481,11 +502,15 @@ Actions:
 properties -- a list of objects, each:
   {"name": "Status", "format": "select", "options": ["Open", "Done"]}
   formats: text, number, select, multi_select, date, checkbox, url,
-  email, phone. options only for select/multi_select. A property that
-  already exists in the space with the SAME format is reused (attached
-  to the type); a different format is a conflict -- the error names it.
-  Links between objects are NOT properties: use create_node/update_node
-  links with create_missing_relations for a new edge label.
+  email, phone, objects ("objects" = a relation: once attached, it is an
+  edge label whose values are links to other objects). options only for
+  select/multi_select. A property that already exists in the space with
+  the SAME format is reused (attached to the type); a different format
+  is a conflict -- the error names it.
+  Writing a VALUE at the same time? You don't need this tool:
+  create_node/update_node with create_missing_properties={"key":
+  {"format": ..., "scope": "type"}} saves the value immediately AND
+  drafts this same proposal for you.
 
 Don't repeat the draft's contents in your reply -- the confirmation
 message carries them. Proposals are drafts for THIS conversation (they
@@ -543,7 +568,7 @@ Actions:
                   scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
                   counts, each type's properties (reuse these as create/
-                  update `fields` keys), plus the highest-degree "hub"
+                  update `properties` keys), plus the highest-degree "hub"
                   nodes with name, type, id and summary. START HERE in a
                   fresh session to obtain node ids for explore /
                   get_node / hold. {overview_note}(alias: map)
@@ -573,7 +598,7 @@ def _get_node_doc(
     """The ``get_node`` doc: one body, profile-specific example nouns and
     the optional read-several-at-once tip."""
     return f"""\
-Read ONE node in depth: all fields plus every edge grouped by type,
+Read ONE node in depth: all properties plus every edge grouped by type,
 with neighbor names and ids. Use when you need the full picture of a
 single {entity_noun}; use `explore` to see a neighborhood instead. The full
 description (the node's Anytype page body) is fetched fresh on every
@@ -662,18 +687,14 @@ description: long-form text (a portrait, a place's atmosphere, an
   user reads and edits it directly; returned by get_node and
   explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
-""" + _fields_doc("role, tech_type") + """
-links: list of {"edge_type", "other" (target node id OR name),
-  "outgoing" (default true)}. `other` accepts a node name -- it is
-  resolved for you (ambiguous names report the candidates).
-  edge_type is a relation LABEL. Reuse an existing relation (e.g. knows,
-  located_at, participated_in, triggered_by, or any relation already in
-  your space). A label with no existing relation is surfaced for approval;
-  set create_missing_relations=true to create it on the fly.
-  outgoing=false means the edge points FROM `other` TO the new node --
-  e.g. creating an Event that an existing Character took part in:
-    {"edge_type": "participated_in", "other": "<character id>",
-     "outgoing": false}
+""" + _properties_doc("role, tech_type") + """
+  Relation example -- linking the new node to existing ones (labels like
+  knows, located_at, participated_in, or any relation in your space):
+    properties={"located_at": "The Undercroft", "knows": ["Mira", "Brakk"]}
+  An edge pointing INTO the new node (e.g. an existing Character
+  participated_in this new Event) is the Character's own property: create
+  the Event, then update_node(<character>,
+  properties={"participated_in": "<event id>"}).
 icon: a single emoji for the page, shown in lists and the graph view --
   pick one that fits the node (a face for a person, a place mark for a
   location, an object for an item). Optional; humans may change it later.
@@ -784,17 +805,14 @@ story_time: REQUIRED for an Event-role node (meetings, decisions,
   milestones): its position on the timeline as a sortable number -- use
   epoch seconds or YYYYMMDD (e.g. 20260702). The parameter name is
   historical; read it as "time".
-""" + _fields_doc("status, priority") + """
-links: list of {"edge_type", "other" (target node id OR name),
-  "outgoing" (default true)}. `other` accepts a node name -- it is
-  resolved for you (ambiguous names report the candidates).
-  edge_type is a relation LABEL. Reuse an existing relation (e.g.
-  member_of, works_on, attended, decided_in, or any relation already in
-  your space). A label with no existing relation is surfaced for approval;
-  set create_missing_relations=true to create it on the fly.
-  outgoing=false means the edge points FROM `other` TO the new node --
-  e.g. creating a Meeting that an existing Person attended:
-    {"edge_type": "attended", "other": "<person id>", "outgoing": false}
+""" + _properties_doc("status, priority") + """
+  Relation example -- linking the new node to existing ones (labels like
+  member_of, works_on, attended, decided_in, or any relation in your
+  space):
+    properties={"works_on": "Atlas Project", "member_of": ["Platform Team"]}
+  An edge pointing INTO the new node (e.g. an existing Person attended
+  this new Meeting) is the Person's own property: create the Meeting,
+  then update_node(<person>, properties={"attended": "<meeting id>"}).
 icon: a single emoji for the page, shown in lists and the graph view --
   pick one that fits the node (a face for a person, a calendar for a
   meeting, a target for a milestone). Optional; humans may change it later.
@@ -908,13 +926,10 @@ description: long-form text (a task's context, a procedure's overview, a
 story_time: REQUIRED for an Event-role node (meetings, milestones): an
   ISO date like "2026-07-04". The parameter name is historical; read it
   as "when".
-""" + _fields_doc('status, priority, "Due date"') + """
-links: list of {"edge_type", "other" (target node id OR name),
-  "outgoing" (default true)}. `other` accepts a node name -- it is
-  resolved for you. Reuse an existing relation (e.g. part_of, assigned_to,
-  documents, or any relation already in the space); a label with no
-  existing relation is surfaced for approval; set
-  create_missing_relations=true to create it on the fly.
+""" + _properties_doc('status, priority, "Due date"') + """
+  Relation example -- linking the new node to existing ones (labels like
+  part_of, assigned_to, documents, or any relation in the space):
+    properties={"part_of": "Website Refresh", "assigned_to": "Dana"}
 icon: a single emoji for the page, shown in lists and the graph view --
   pick one that fits (a checkbox for a task, a clipboard for a
   procedure, a calendar for a meeting). Optional.

@@ -2268,6 +2268,58 @@ vocabulary" amended with one human-gated path the model cannot walk.
 
 ---
 
+## WP34 — One `properties` surface: scoped creation + built-in watchables (ADR 042) — **shipped 2026-07-19**
+
+**Status:** complete. The write tools' fragmented property surface —
+`fields`, `links`/`add_links`, `create_missing_relations`,
+`create_missing_fields` — collapsed into ONE `properties` dict plus one
+explicit `create_missing_properties` declaration map, and the
+type-vs-instance distinction became a first-class `scope` the model
+must choose. Driven by two dogfooding failures (turns `ba3ab5c05a28`
+and `de38192f56dc`; forensics in the ADR).
+
+### The shipped shape
+
+* **One dict, discriminated by the space.** A `properties` key naming
+  an existing `objects` relation takes a node id/name (or list) and
+  becomes link(s) — relation entries ADD; `remove_links` handles
+  removal; the reverse edge is the other node's own write (incoming
+  links retired, `LinkSpec.outgoing` gone, the composite-create
+  patch-other-objects rollback deleted). Every other key is a scalar,
+  with JSON-native values coerced at the boundary (a boolean checkbox
+  value used to crash to "internal error"). Retired params survive as
+  implementation-only redirects; the MCP wrappers never advertise them.
+* **Declarations carry format AND scope** (`PropertyDeclaration`,
+  construction-validated; formats = `CREATABLE_FORMATS` = scalars +
+  `objects`). `instance` = the ADR 023 space-level mint; `type` = the
+  same immediate mint + value PLUS an auto-drafted EXTEND_TYPE proposal
+  riding ADR 041's 👍 flow (`NodeWriter` shares the session's
+  `SchemaProposals` ledger; `WriteOutcome` returns node + drafted +
+  warnings; drafting failures degrade to warnings, never unwind a
+  landed write). The human gate on all type changes is intact.
+* **Duplicate-safe minting** (quirk A14, live-spiked): a declared key
+  matching an existing same-format property is a reuse; a format
+  mismatch is a loud A12 conflict; the store's duplicate-key 400 maps
+  to a typed error naming the way out. Mints derive display names from
+  keys (`shift_active` → "Shift Active"; declaration `name` overrides).
+* **`objects` drafts in schema proposals**: create/attach a relation to
+  a type; reuse entries carry the property id (A11 amendment — a
+  key-only objects reuse 400s on the live type PATCH).
+* **Built-in rule watchable `modified_at`** (+ human aliases): watches
+  the store clock on ANY type, condition `changed` only, read-only.
+  The fake stamps a deterministic monotonic clock; the adapter folds
+  link-write PATCH responses into the index so the stamp stays
+  truthful; the engine's baseline rebuild keeps no-cascade by
+  construction. The automation tool and rule-engine errors advertise
+  it.
+* Docstrings across all three profiles teach the unified surface and
+  the scope heuristic (recurring attribute of the kind → `type`,
+  required for rule-watching; one-off fact → `instance`); goldens
+  regenerated as the review artifact; eval scripted cases and demo
+  scripts moved over.
+
+---
+
 ## Sequencing
 
 ```

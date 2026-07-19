@@ -191,12 +191,12 @@ async def test_edge_label_conditioning_changes_ranking() -> None:
     ))
     home = await repository.create_node(
         NodeDraft("Location", name="Homeplace", summary="zzz"),
-        links=[LinkSpec("located_at", other=seed.id, outgoing=False)],
     )
+    await repository.add_link(seed.id, LinkSpec("located_at", other=home.id))
     friend = await repository.create_node(
         NodeDraft("Character", name="Friendface", summary="zzz"),
-        links=[LinkSpec("knows", other=seed.id, outgoing=False)],
     )
+    await repository.add_link(seed.id, LinkSpec("knows", other=friend.id))
     ranker = await _ranker(repository, RankingWeights(final_threshold=0.0))
     located_query = {h.node.id: h.score for h in await ranker.rank(
         "where is the siege engineer located", limit=10)}

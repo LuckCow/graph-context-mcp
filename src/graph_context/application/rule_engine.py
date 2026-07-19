@@ -120,6 +120,9 @@ class _BoundRule:
     action_key: str
     action_format: str
     script: str = ""
+    # ADR 042: the watch resolved to a store-clock built-in
+    # (rules.BUILTIN_WATCH_MODIFIED) -- read Node.modified_at, not fields.
+    builtin_watch: bool = False
 
 
 class RuleEngine:
@@ -460,6 +463,9 @@ class RuleEngine:
     def _synthesize_transition(
         self, rule: _BoundRule, obj: Node
     ) -> tuple[str, str]:
+        if rule.builtin_watch:
+            # Two distinct stamps: any edit bumps the store clock.
+            return "(an earlier stamp)", obj.modified_at or _stamp(self._now())
         current = self._field_of(obj.fields, rule.read_key)
         if rule.config.condition == rules.CONDITION_CHANGED_TO_TRUE:
             return "", "true"
@@ -637,14 +643,23 @@ class RuleEngine:
         properties.
         """
         specs = self._type_specs(catalog, config.target_type)
-        read_key, read_format = self._resolve_property(
-            specs, config.target_type, config.watch_property
+        read_key, read_format, builtin_watch = self._resolve_watch(
+            specs, config
         )
         if config.action == rules.ACTION_RUN_SCRIPT:
             # No fixed write target: the script's own set() calls are
             # validated per effect at execution time.
             action_key, action_format = "", ""
         else:
+            if (
+                rules.builtin_watch_for(config.action_property) is not None
+                and self._spec_match(specs, config.action_property) is None
+            ):
+                raise SchemaViolation(
+                    f"{config.action_property!r} is the store's own "
+                    "last-modified stamp -- read-only, the store writes "
+                    "it; it can be watched but never set"
+                )
             action_key, action_format = self._resolve_property(
                 specs, config.target_type, config.action_property
             )
@@ -676,7 +691,50 @@ class RuleEngine:
             read_key=read_key,
             action_key=action_key,
             action_format=action_format,
+            builtin_watch=builtin_watch,
         )
+
+    def _resolve_watch(
+        self,
+        specs: tuple[FieldSpec, ...] | None,
+        config: rules.RuleConfig,
+    ) -> tuple[str, str, bool]:
+        """Resolve the watch property: the space catalog first (a space's
+        own "Modified date" property wins), then the built-in store-clock
+        watchables (ADR 042) -- available on EVERY type, condition
+        'changed' only (a timestamp has no true/false).
+        -> (read key, format or "", is-builtin)."""
+        identifier = config.watch_property
+        builtin = rules.builtin_watch_for(identifier)
+        if specs is not None and self._spec_match(specs, identifier) is not None:
+            key, fmt = self._resolve_property(
+                specs, config.target_type, identifier
+            )
+            return key, fmt, False
+        if builtin is None:
+            key, fmt = self._resolve_property(
+                specs, config.target_type, identifier
+            )
+            return key, fmt, False
+        if config.condition != rules.CONDITION_CHANGED:
+            raise SchemaViolation(
+                f"the built-in {rules.BUILTIN_WATCH_MODIFIED!r} watch only "
+                f"supports condition {rules.CONDITION_CHANGED!r} -- a "
+                "modified stamp has no true/false"
+            )
+        return rules.BUILTIN_WATCH_MODIFIED, "builtin", True
+
+    @staticmethod
+    def _spec_match(
+        specs: tuple[FieldSpec, ...] | None, identifier: str
+    ) -> FieldSpec | None:
+        if specs is None:
+            return None
+        wanted = identifier.strip().lower()
+        for spec in specs:
+            if wanted in (spec.key.strip().lower(), spec.name.strip().lower()):
+                return spec
+        return None
 
     def _type_specs(
         self,
@@ -705,7 +763,10 @@ class RuleEngine:
         hints = ", ".join(spec.render_hint() for spec in specs)
         raise SchemaViolation(
             f"type {target_type!r} has no property {identifier!r}; "
-            f"its properties: {hints or '(none)'}"
+            f"its properties: {hints or '(none)'}. Every type also has "
+            f"the built-in {rules.BUILTIN_WATCH_MODIFIED!r} (the store's "
+            "last-modified stamp) -- watchable with condition 'changed', "
+            "never writable"
         )
 
     def _note_overlaps(self, bound: list[_BoundRule]) -> None:
@@ -757,7 +818,7 @@ class RuleEngine:
                 before = prior.get(obj.id, {}).get(rule.read_key)
                 if before is None:
                     continue  # unseen: baseline silently at tick end
-                after = self._field_of(obj.fields, rule.read_key)
+                after = self._watched_value(rule, obj)
                 if rules.condition_met(rule.config.condition, before, after):
                     matches.append((rule, obj, before, after))
             if rule.config.action == rules.ACTION_UNCHECK_OTHERS and matches:
@@ -783,9 +844,16 @@ class RuleEngine:
         for rule in bound:
             for obj in self._targets(rule):
                 snapshot.setdefault(obj.id, {})[rule.read_key] = (
-                    self._field_of(obj.fields, rule.read_key)
+                    self._watched_value(rule, obj)
                 )
         return snapshot
+
+    def _watched_value(self, rule: _BoundRule, obj: Node) -> str:
+        """The rule's watched value on one object: the store-clock stamp
+        for a built-in watch (ADR 042), else the fields value."""
+        if rule.builtin_watch:
+            return obj.modified_at
+        return self._field_of(obj.fields, rule.read_key)
 
     @staticmethod
     def _field_of(fields: Mapping[str, str], key: str) -> str:

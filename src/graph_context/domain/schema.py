@@ -126,10 +126,11 @@ def resolve_role(
     return None
 
 
-# Scalar property formats a ``fields`` value can live in (ADR 023). This is
-# tool-surface vocabulary -- the LLM declares one of these when it asks for a
-# new property via ``create_missing_fields`` -- so it lives in the domain, not
-# the adapter (the adapter's REFLECTED_FIELD_FORMATS aliases it).
+# Scalar property formats a ``properties`` value can live in (ADR 023,
+# amended by ADR 042). This is tool-surface vocabulary -- the LLM declares
+# one of these when it asks for a new property via
+# ``create_missing_properties`` -- so it lives in the domain, not the
+# adapter (the adapter's REFLECTED_FIELD_FORMATS aliases it).
 FIELD_FORMATS: frozenset[str] = frozenset(
     {
         "text",
@@ -144,30 +145,11 @@ FIELD_FORMATS: frozenset[str] = frozenset(
     }
 )
 
-
-def validate_field_declarations(
-    fields: Mapping[str, str],
-    create_missing_fields: Mapping[str, str],
-) -> None:
-    """Well-formedness of a write's new-property declarations (ADR 023).
-
-    Every declared key must also carry a value in ``fields`` (a declaration
-    without a value writes nothing), and every declared format must be one
-    of :data:`FIELD_FORMATS`. Whether a key *needs* declaring -- i.e. whether
-    it matches an existing property -- is the repository's call, not ours.
-    """
-    allowed = ", ".join(sorted(FIELD_FORMATS))
-    for key, fmt in create_missing_fields.items():
-        if key not in fields:
-            raise SchemaViolation(
-                f"create_missing_fields declares {key!r} but 'fields' carries "
-                "no value for it; every declared key needs a value in 'fields'"
-            )
-        if fmt.strip().lower() not in FIELD_FORMATS:
-            raise SchemaViolation(
-                f"unknown format {fmt!r} for new field {key!r}; "
-                f"formats: {allowed}"
-            )
+# Everything a new-property declaration may mint (ADR 042): the scalar
+# formats plus ``objects`` -- the format that makes a property a relation,
+# i.e. an edge (ADR 006). Reads stay split (scalars reflect into fields,
+# objects-format properties reflect as edges); creation is one vocabulary.
+CREATABLE_FORMATS: frozenset[str] = FIELD_FORMATS | {"objects"}
 
 
 def validate_type_name(name: str) -> None:

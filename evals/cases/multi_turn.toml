@@ -39,7 +39,7 @@ tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "
 reply = "Orla is in the world."
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Vex", summary = "A rival broker circling Orla's territory.", links = [{ edge_type = "rival_of", other = "Orla" }], create_missing_relations = true } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Vex", summary = "A rival broker circling Orla's territory.", properties = { rival_of = "Orla" }, create_missing_properties = { rival_of = "objects" } } }]
 
 [[case.script]]
 reply = "Vex now exists, linked to Orla as her rival."
@@ -85,7 +85,7 @@ than invented ones.
 """
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Sefa", summary = "A chandler, Orla's sister, who wants nothing to do with the vaults.", links = [{ edge_type = "sibling_of", other = "Orla" }], create_missing_relations = true } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Sefa", summary = "A chandler, Orla's sister, who wants nothing to do with the vaults.", properties = { sibling_of = "Orla" }, create_missing_properties = { sibling_of = "objects" } } }]
 
 [[case.script]]
 reply = "Sefa is in the world -- Orla's sister, the chandler keeping clear of the vault trade."

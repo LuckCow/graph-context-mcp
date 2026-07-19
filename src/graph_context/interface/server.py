@@ -110,19 +110,16 @@ async def create_node(
     summary: str,
     description: str = "",
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     icon: str = "",
-    create_missing_relations: bool = False,
-    create_missing_fields: dict[str, str] | None = None,
+    create_missing_properties: dict[str, Any] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.create_node_tool(
         _services(ctx), type=type, name=name, summary=summary,
-        description=description, story_time=story_time, fields=fields, links=links,
-        icon=icon,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=create_missing_fields,
+        description=description, story_time=story_time,
+        properties=properties, icon=icon,
+        create_missing_properties=create_missing_properties,
     )
 
 
@@ -134,19 +131,16 @@ async def update_node(
     summary: str | None = None,
     description: str | None = None,
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    add_links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
-    create_missing_relations: bool = False,
-    create_missing_fields: dict[str, str] | None = None,
+    create_missing_properties: dict[str, Any] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.update_node_tool(
         _services(ctx), node_id=node_id, name=name, summary=summary,
-        description=description, story_time=story_time, fields=fields,
-        add_links=add_links, remove_links=remove_links,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=create_missing_fields,
+        description=description, story_time=story_time,
+        properties=properties, remove_links=remove_links,
+        create_missing_properties=create_missing_properties,
     )
 
 

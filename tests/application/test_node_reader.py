@@ -38,9 +38,9 @@ class TestProvenance:
 
     async def _touched_world(self, repository, session):
         writer = NodeWriter(repository, session)
-        mira = await writer.create_node(
+        mira = (await writer.create_node(
             NodeDraft("Character", name="Mira", summary="Engineer.")
-        )
+        )).node
         recorder = IntentRecorder(repository, now=lambda: "2026-07-04T01:00:00Z")
         intent = await recorder.record_turn(
             prompt="Add Mira to the world.",

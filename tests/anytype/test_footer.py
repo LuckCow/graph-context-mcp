@@ -53,9 +53,10 @@ async def test_footer_lists_only_outgoing_edges(
     event = await repo.create_node(
         NodeDraft("Event", name="Siege", summary="s", story_time=10,
                   body="The walls held for a year."),
-        links=[LinkSpec("participated_in", other=mira.id, outgoing=False)],
     )
-    # The edge runs Mira -> Siege: footer on Mira (the source), not the Siege.
+    # The edge runs Mira -> Siege (added on its source, ADR 042): footer
+    # on Mira, never on the target Siege.
+    await repo.add_link(mira.id, LinkSpec("participated_in", other=event.id))
     assert "- participated_in → [Siege]" in mock.object(mira.id)["markdown"]
     assert CONNECTIONS_HEADING not in mock.object(event.id)["markdown"]
     # Both bodies stay clean for the LLM.
@@ -144,17 +145,17 @@ async def test_add_link_on_scaffolded_type_leaves_the_body_untouched(
     assert mock.object(mira.id)["markdown"] == before
 
 
-async def test_incoming_link_leaves_scaffolded_source_body_untouched(
+async def test_link_target_body_is_never_touched(
     repo: AnytypeGraphRepository, mock: MockAnytype
 ) -> None:
-    """The create-with-incoming-link path rewrites the SOURCE node's body;
-    a scaffolded source must be left alone too."""
+    """A link write rewrites only its SOURCE node's footer; the target's
+    body must be left alone (scaffolded or not)."""
     mock.seed_template("character", body=SCAFFOLD)
     mira = await repo.create_node(MIRA)
     before = mock.object(mira.id)["markdown"]
     await repo.create_node(
         NodeDraft("Event", name="Siege", summary="s", story_time=10),
-        links=[LinkSpec("participated_in", other=mira.id, outgoing=False)],
+        links=[LinkSpec("participated_in", other=mira.id)],
     )
     assert mock.object(mira.id)["markdown"] == before
 

@@ -13,7 +13,12 @@ from uuid import uuid4
 import pytest
 
 from graph_context.domain import schema
-from graph_context.domain.models import LinkSpec, NodeDraft, PropertyDraft
+from graph_context.domain.models import (
+    LinkSpec,
+    NodeDraft,
+    PropertyDeclaration,
+    PropertyDraft,
+)
 from graph_context.errors import SchemaChangeConflict, UnknownFieldKey
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -169,7 +174,7 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         """ADR 012/023 against the real server: a `fields` key matching a
         select property resolves-or-creates the tag, writes the property,
         and reflects back as the option's display name; an unmatched key
-        ERRORS with guidance and succeeds via create_missing_fields --
+        ERRORS with guidance and succeeds via a declaration (ADR 042) --
         while system timestamps stay filtered out of fields."""
         client = repo._client  # E2E-only reach-in; the port has no property API
         if repo.registry.field_property("E2E Mood") is None:
@@ -185,7 +190,7 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         # Unmatched-key probe: uuid-fresh so reruns never match the
         # properties earlier runs minted (the API cannot delete them).
         probe = f"probe_{uuid4().hex[:8]}"
-        with pytest.raises(UnknownFieldKey, match="create_missing_fields"):
+        with pytest.raises(UnknownFieldKey, match="create_missing_properties"):
             await repo.create_node(
                 NodeDraft("Character", name="Field Pin", summary="s",
                           fields={"E2E Mood": "Wistful", probe: "nope"}),
@@ -195,7 +200,7 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         node = await repo.create_node(
             NodeDraft("Character", name="Field Pin", summary="s",
                       fields={"E2E Mood": "Wistful", "extra": "now native"}),
-            create_missing_fields={"extra": "text"},
+            create_missing={"extra": PropertyDeclaration("extra", "text")},
         )
         assert node.fields[key] == "Wistful"          # tag auto-created
         extra_key = repo.registry.field_property("extra").key
@@ -261,9 +266,59 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         )
         node = await repo.create_node(
             NodeDraft("Character", name="Mary Abbott", summary="Marketer."),
-            links=[LinkSpec("inspired_by", other=target.id, outgoing=True)],
-            create_missing_relations=True,
+            links=[LinkSpec("inspired_by", other=target.id)],
+            create_missing={
+                "inspired_by": PropertyDeclaration("inspired_by", "objects")
+            },
         )
         edges = [(e.type, e.target) for e in repo.graph.edges(node.id)]
         assert ("inspired_by", target.id) in edges
         assert repo.registry.key_for_label("inspired_by") is not None
+
+    async def test_objects_draft_attaches_a_relation_to_a_type_live(self, repo):
+        """WP34/ADR 042 live probe: an objects-format draft attaches an
+        already-minted relation to a type via the wholesale type PATCH --
+        the reuse entry must carry the property id (A11 amendment,
+        spike 2026-07-19) or the live server 400s "already exists"."""
+        stamp = uuid4().hex[:8]
+        label = f"e2e_rel_{stamp}"
+        await repo._client.create_property(
+            {"key": label, "name": label, "format": "objects"}
+        )
+        await repo.resync()
+        name = await repo.create_type(
+            f"E2E RelType {stamp}",
+            properties=(PropertyDraft(name=label, format="objects"),),
+        )
+        assert repo.registry.key_for_label(label) is not None
+        await repo.add_type_properties(
+            name, (PropertyDraft(name=label, format="objects"),)
+        )  # retry-safe no-op
+
+    async def test_duplicate_property_key_reports_cleanly_live(self, repo):
+        """A14 live probe: minting a key that already exists must surface
+        as a self-correcting conflict, never an opaque store error."""
+        from graph_context.errors import SchemaChangeConflict
+
+        # Letters only: the live server normalises keys at letter/digit
+        # boundaries (A14), which would break the by-key lookup below.
+        stamp = "".join(
+            "abcdefghij"[int(c, 16) % 10] for c in uuid4().hex[:8]
+        )
+        probe = f"dupprobe_{stamp}"
+        await repo.create_node(
+            NodeDraft("Character", name=f"Dup Pin {stamp}", summary="s",
+                      fields={probe: "one"}),
+            create_missing={probe: PropertyDeclaration(probe, "text")},
+        )
+        # Forget the mint (a stale-registry session), then re-declare with
+        # a DIFFERENT format: the space property wins with a clean error.
+        minted = repo.registry.field_property(probe)
+        assert minted is not None
+        del repo.registry.properties_by_key[minted.key]
+        with pytest.raises((SchemaChangeConflict, UnknownFieldKey)):
+            await repo.create_node(
+                NodeDraft("Character", name=f"Dup Pin B {stamp}", summary="s",
+                          fields={probe: "true"}),
+                create_missing={probe: PropertyDeclaration(probe, "checkbox")},
+            )

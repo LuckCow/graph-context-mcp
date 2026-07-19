@@ -225,3 +225,22 @@ class TestConditionMet:
     ])
     def test_changed_compares_values(self, before: str, after: str, expected: bool) -> None:
         assert rules.condition_met(rules.CONDITION_CHANGED, before, after) is expected
+
+
+class TestBuiltinWatchables:
+    """ADR 042: modified_at and its human spellings resolve to the
+    built-in store-clock watch; anything else does not."""
+
+    def test_aliases_resolve_case_and_separator_insensitively(self) -> None:
+        for spelling in (
+            "modified_at", "Modified At", "last modified date",
+            "LAST_MODIFIED_DATE", "modified", "Modified date",
+            "last-modified",
+        ):
+            assert rules.builtin_watch_for(spelling) == (
+                rules.BUILTIN_WATCH_MODIFIED
+            ), spelling
+
+    def test_ordinary_property_names_do_not_resolve(self) -> None:
+        for spelling in ("Done", "Status", "created", "modified by", ""):
+            assert rules.builtin_watch_for(spelling) is None, spelling

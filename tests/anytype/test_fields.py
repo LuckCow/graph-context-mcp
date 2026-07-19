@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from graph_context.domain import attribution
-from graph_context.domain.models import NodeDraft
+from graph_context.domain.models import NodeDraft, PropertyDeclaration
 from graph_context.errors import GraphContextError, UnknownFieldKey
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
@@ -180,7 +180,7 @@ class TestFieldWriteRouting:
         message = str(err.value)
         assert "'quirk'" in message
         assert "Role (select)" in message
-        assert "create_missing_fields" in message
+        assert "create_missing_properties" in message
         assert "date" in message  # the format menu is echoed
 
     async def test_error_lists_type_properties_with_select_options(
@@ -214,7 +214,7 @@ class TestFieldWriteRouting:
         assert "Properties on Task: Due date (date), Status (select: To Do)" in message
         await client.aclose()
 
-    async def test_create_missing_fields_mints_a_reusable_native_property(
+    async def test_declared_property_mints_a_reusable_native_property(
         self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
     ) -> None:
         await repo.hydrate()
@@ -223,7 +223,7 @@ class TestFieldWriteRouting:
                 "Character", name="Autumn", summary="Worker.",
                 fields={"quirk": "hums"},
             ),
-            create_missing_fields={"quirk": "text"},
+            create_missing={"quirk": PropertyDeclaration("quirk", "text")},
         )
         stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
         assert stored["quirk"]["text"] == "hums"

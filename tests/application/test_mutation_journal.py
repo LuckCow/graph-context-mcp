@@ -30,30 +30,30 @@ class TestJournalMechanics:
 
 
 class TestWritersReport:
-    async def test_create_with_incoming_link_reports_both_touches(self) -> None:
+    async def test_composite_create_reports_only_the_new_node(self) -> None:
         repository = InMemoryGraphRepository()
         journal = MutationJournal()
         writer = NodeWriter(repository, SessionState(), journal)
-        mira = await writer.create_node(
+        mira = (await writer.create_node(
             NodeDraft("Character", name="Mira", summary="Engineer.")
-        )
+        )).node
         journal.drain()  # isolate the composite create below
-        event = await writer.create_node(
+        event = (await writer.create_node(
             NodeDraft("Event", name="Siege", summary="s", story_time=10),
-            links=[LinkSpec("participated_in", other=mira.id, outgoing=False)],
-        )
+            links=[LinkSpec("participated_in", other=mira.id)],
+        )).node
         drained = {(r.node_id, r.action) for r in journal.drain()}
-        # Incoming link mutates Mira's relation list; outgoing links land
-        # with the create and touch no other object.
-        assert drained == {(event.id, "created"), (mira.id, "modified")}
+        # Links land on the created node itself (ADR 042 retired incoming
+        # links), so a composite create touches no other object.
+        assert drained == {(event.id, "created")}
 
     async def test_update_reports_modified(self) -> None:
         repository = InMemoryGraphRepository()
         journal = MutationJournal()
         writer = NodeWriter(repository, SessionState(), journal)
-        node = await writer.create_node(
+        node = (await writer.create_node(
             NodeDraft("Character", name="Mira", summary="Engineer.")
-        )
+        )).node
         journal.drain()
         await writer.update_node(node.id, summary="Leads the survivors.")
         assert {(r.node_id, r.action) for r in journal.drain()} == {
@@ -64,9 +64,9 @@ class TestWritersReport:
         repository = InMemoryGraphRepository()
         journal = MutationJournal()
         writer = NodeWriter(repository, SessionState(), journal)
-        place = await writer.create_node(
+        place = (await writer.create_node(
             NodeDraft("Location", name="Keep", summary="s")
-        )
+        )).node
         journal.drain()
         recorder = CaptureRecorder(repository, now=lambda: "t", journal=journal)
         prose = await recorder.record(

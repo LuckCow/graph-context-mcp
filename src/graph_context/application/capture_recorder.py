@@ -33,7 +33,13 @@ from datetime import UTC, datetime
 
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.domain import attribution
-from graph_context.domain.models import LinkSpec, Node, NodeDraft, NodeId
+from graph_context.domain.models import (
+    LinkSpec,
+    Node,
+    NodeDraft,
+    NodeId,
+    PropertyDeclaration,
+)
 from graph_context.ports.graph_repository import GraphRepository
 
 PROSE_TYPE = "gc_prose"  # the fiction default artifact type (infra-hidden)
@@ -88,7 +94,12 @@ class CaptureRecorder:
         # (gc_prose is additionally infra-hidden; native artifact types are
         # first-class and appear in traversal like any node.)
         node = await self._repository.create_node(
-            draft, links, create_missing_relations=True
+            draft, links,
+            create_missing={
+                references_label: PropertyDeclaration(
+                    key=references_label, format="objects"
+                )
+            },
         )
         self._journal.created(node.id)  # the captured artifact (WP7)
         return node

@@ -18,6 +18,7 @@ from graph_context.domain.models import (
     FieldSpec,
     LinkSpec,
     NodeDraft,
+    PropertyDeclaration,
     PropertyDraft,
 )
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
@@ -54,21 +55,25 @@ class GraphRepositoryContract:
         assert node.id
         assert repo.graph.node(node.id).name == "Mira"
 
-    async def test_composite_create_writes_outgoing_and_incoming_links(self, repo):
+    async def test_composite_create_writes_links_on_the_new_node(self, repo):
+        # Links live on their SOURCE (ADR 042 retired incoming links): a
+        # composite create's edges all run from the created node outward.
         mira = await repo.create_node(CHAR)
-        place = await repo.create_node(
-            PLACE, links=[LinkSpec("located_at", other=mira.id, outgoing=False)]
-        )
-        # incoming: mira -located_at-> place
-        assert {n.id for _, n in repo.graph.neighbors(mira.id)} == {place.id}
+        place = await repo.create_node(PLACE)
         sword = await repo.create_node(
             NodeDraft("Item", name="Ashbrand", summary="A blade."),
         )
         faction = await repo.create_node(
             NodeDraft("Organization", name="Emberguard", summary="Defenders."),
-            links=[LinkSpec("possesses", other=sword.id, outgoing=True)],
+            links=[
+                LinkSpec("possesses", other=sword.id),
+                LinkSpec("located_at", other=place.id),
+                LinkSpec("member_of", other=mira.id),
+            ],
         )
-        assert {n.id for _, n in repo.graph.neighbors(faction.id)} == {sword.id}
+        assert {n.id for _, n in repo.graph.neighbors(faction.id)} == {
+            sword.id, place.id, mira.id,
+        }
 
     async def test_create_with_missing_link_target_rolls_back(self, repo):
         before = repo.graph.node_count()
@@ -129,6 +134,27 @@ class GraphRepositoryContract:
         await repo.remove_link(edge)
         assert list(repo.graph.edges(mira.id)) == []
 
+    async def test_update_bumps_modified_at(self, repo):
+        """The store clock ticks on every write (ADR 042): the rule
+        engine's built-in watch and ranking recency both read it.
+        ``>=`` not ``>``: the LIVE clock has second resolution, so
+        back-to-back writes may share a stamp -- the built-in watch
+        targets human-timescale edits, which never do."""
+        node = await repo.create_node(CHAR)
+        assert node.modified_at
+        updated = await repo.update_node(node.id, summary="Fresh.")
+        assert updated.modified_at >= node.modified_at
+
+    async def test_link_writes_refresh_the_source_modified_at(self, repo):
+        mira = await repo.create_node(CHAR)
+        place = await repo.create_node(PLACE)
+        before = repo.graph.node(mira.id).modified_at
+        edge = await repo.add_link(mira.id, LinkSpec("located_at", other=place.id))
+        after_add = repo.graph.node(mira.id).modified_at
+        assert after_add and after_add >= before
+        await repo.remove_link(edge)
+        assert repo.graph.node(mira.id).modified_at >= after_add
+
     async def test_fields_round_trip(self, repo):
         # "fuel" is not a property anywhere; the declaration mints it as a
         # real one (ADR 023). In the live run this exercises scalar
@@ -136,7 +162,7 @@ class GraphRepositoryContract:
         node = await repo.create_node(
             NodeDraft("Technology", name="Ashforge", summary="A forge.",
                       fields={"fuel": "bonemeal"}),
-            create_missing_fields={"fuel": "text"},
+            create_missing={"fuel": PropertyDeclaration("fuel", "text")},
         )
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
 
@@ -150,7 +176,7 @@ class GraphRepositoryContract:
         ticked = await repo.create_node(
             NodeDraft("Item", name="Ticked", summary="s.",
                       fields={"done": "true"}),
-            create_missing_fields={"done": "checkbox"},
+            create_missing={"done": PropertyDeclaration("done", "checkbox")},
         )
         unticked = await repo.create_node(
             NodeDraft("Item", name="Unticked", summary="s.")
@@ -294,18 +320,20 @@ class FieldCatalogContract:
                           fields={"Assignee": "Nick"})
             )
         message = str(err.value)
-        assert "RELATION" in message and "'edge_type'" in message
-        assert "create_missing_fields" not in message
+        assert "RELATION" in message and "properties=" in message
+        assert "create_missing" not in message
 
     async def test_a_relation_key_cannot_be_shadowed_by_declaration(
         self, catalog_repo
     ):
-        """create_missing_fields must not mint a scalar over a relation."""
+        """A declaration must not mint a scalar over a relation."""
         with pytest.raises(UnknownFieldKey):
             await catalog_repo.create_node(
                 NodeDraft("Item", name="Ship it", summary="s.",
                           fields={"Assignee": "Nick"}),
-                create_missing_fields={"Assignee": "text"},
+                create_missing={
+                    "Assignee": PropertyDeclaration("Assignee", "text")
+                },
             )
 
     async def test_unknown_link_label_errors_with_existing_relations(
@@ -324,7 +352,7 @@ class FieldCatalogContract:
                 links=[LinkSpec(edge_type="assigned_to", other=target.id)],
             )
         message = str(err.value)
-        assert "create_missing_relations" in message
+        assert "create_missing_properties" in message
         assert "assignee" in message.lower()
         with pytest.raises(NodeNotFound):
             catalog_repo.graph.resolve("Ship it")
@@ -344,7 +372,7 @@ class FieldCatalogContract:
             # Both spellings canonicalize to the SAME relation.
             assert edge.type.lower() == "assignee"
 
-    async def test_create_missing_relations_mints_a_reusable_relation(
+    async def test_objects_declaration_mints_a_reusable_relation(
         self, catalog_repo
     ):
         target = await catalog_repo.create_node(
@@ -353,7 +381,9 @@ class FieldCatalogContract:
         first = await catalog_repo.create_node(
             NodeDraft("Item", name="Ship it", summary="s."),
             links=[LinkSpec(edge_type="approved_by", other=target.id)],
-            create_missing_relations=True,
+            create_missing={
+                "approved_by": PropertyDeclaration("approved_by", "objects")
+            },
         )
         assert any(
             e.type.lower() == "approved_by"
@@ -387,7 +417,7 @@ class FieldCatalogContract:
             )
         message = str(err.value)
         assert "Due date" in message and "(date)" in message
-        assert "create_missing_fields" in message
+        assert "create_missing_properties" in message
 
     async def test_unmatched_key_on_update_errors_with_guidance(self, catalog_repo):
         node = await catalog_repo.create_node(
@@ -404,11 +434,40 @@ class FieldCatalogContract:
         # Read-back is under the property's raw key, both backends alike.
         assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
 
+    async def test_declared_key_matching_an_existing_property_reuses_it(
+        self, catalog_repo
+    ):
+        """The de38192f56dc fix (ADR 042/D7): declaring a key that already
+        matches a same-format space property is a harmless reuse -- the
+        write lands; never a duplicate mint, never an opaque store error."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Due date": "2026-08-01"}),
+            create_missing={
+                "Due date": PropertyDeclaration("Due date", "date")
+            },
+        )
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
+
+    async def test_declared_format_mismatch_conflicts_loudly(
+        self, catalog_repo
+    ):
+        """A12: the existing property's format wins; a mismatched
+        declaration must stop the write with a self-correcting error."""
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Due date": "soon"}),
+                create_missing={
+                    "Due date": PropertyDeclaration("Due date", "text")
+                },
+            )
+
     async def test_declared_key_mints_a_reusable_property(self, catalog_repo):
         first = await catalog_repo.create_node(
             NodeDraft("Item", name="Ship it", summary="s.",
                       fields={"effort": "3"}),
-            create_missing_fields={"effort": "number"},
+            create_missing={"effort": PropertyDeclaration("effort", "number")},
         )
         assert first.fields["effort"] == "3"
         # Now part of the space's vocabulary: reusable without the opt-in.
@@ -594,6 +653,27 @@ class SchemaChangeContract:
                 "Faction",
                 properties=(PropertyDraft(name="Assignee", format="text"),),
             )
+
+    async def test_objects_draft_attaches_the_existing_relation(
+        self, schema_repo
+    ):
+        """ADR 042: an objects draft naming the seeded "Assignee" relation
+        is a reuse-attach, not a conflict -- and the label keeps resolving
+        for links afterwards. (On the Anytype path this exercises the A11
+        amendment: the reuse entry must carry the property id or the
+        type PATCH 400s "already exists".)"""
+        await schema_repo.create_type(
+            "Faction",
+            properties=(PropertyDraft(name="Assignee", format="objects"),),
+        )
+        assert schema_repo.relation_label_for("Assignee") is not None
+
+    async def test_objects_draft_extends_an_existing_type(self, schema_repo):
+        await schema_repo.create_type("Faction")
+        await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Assignee", format="objects"),)
+        )
+        assert schema_repo.relation_label_for("Assignee") is not None
 
     async def test_readding_an_attached_property_is_a_noop(self, schema_repo):
         """Retry safety: a confirmed proposal applied twice changes nothing."""

@@ -24,10 +24,15 @@ class TestPropertyDraftInvariants:
         with pytest.raises(SchemaViolation, match="formats: .*select.*text"):
             PropertyDraft(name="Status", format="datetime")
 
-    def test_objects_format_redirects_to_relations(self) -> None:
-        # Relations are edges (ADR 006); a schema proposal never mints one.
-        with pytest.raises(SchemaViolation, match="relation"):
-            PropertyDraft(name="Assignee", format="objects")
+    def test_objects_format_is_a_legal_draft(self) -> None:
+        # ADR 042: a proposal may attach a relation to a type -- an
+        # objects draft is just a property whose values are links.
+        draft = PropertyDraft(name="Assignee", format="objects")
+        assert draft.format == "objects"
+
+    def test_options_on_objects_error(self) -> None:
+        with pytest.raises(SchemaViolation, match="options"):
+            PropertyDraft(name="Assignee", format="objects", options=("x",))
 
     def test_options_only_on_selects(self) -> None:
         with pytest.raises(SchemaViolation, match="options"):

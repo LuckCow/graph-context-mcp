@@ -47,37 +47,39 @@ class World:
 
 
 @pytest.fixture
-async def world(writer: NodeWriter) -> World:
-    mira = await writer.create_node(
+async def world(
+    writer: NodeWriter, repository: InMemoryGraphRepository
+) -> World:
+    mira = (await writer.create_node(
         NodeDraft("Character", name="Mira", summary="Exiled siege engineer.")
-    )
-    undercroft = await writer.create_node(
-        NodeDraft("Location", name="The Undercroft", summary="Vaults beneath Brakk."),
-        links=[LinkSpec("located_at", other=mira.id, outgoing=False)],
-    )
-    siege = await writer.create_node(
+    )).node
+    undercroft = (await writer.create_node(
+        NodeDraft("Location", name="The Undercroft", summary="Vaults beneath Brakk.")
+    )).node
+    siege = (await writer.create_node(
         NodeDraft(
             "Event",
             name="Siege of Brakk",
             summary="The city falls after a year-long siege.",
             story_time=10,
         ),
-        links=[
-            LinkSpec("participated_in", other=mira.id, outgoing=False),
-            LinkSpec("located_at", other=undercroft.id),
-        ],
-    )
-    fall = await writer.create_node(
+        links=[LinkSpec("located_at", other=undercroft.id)],
+    )).node
+    fall = (await writer.create_node(
         NodeDraft(
             "Event",
             name="Fall of Brakk",
             summary="Brakk is razed; survivors scatter.",
             story_time=99,
         ),
-        links=[LinkSpec("participated_in", other=mira.id, outgoing=False)],
-    )
-    ashbrand = await writer.create_node(
+    )).node
+    ashbrand = (await writer.create_node(
         NodeDraft("Item", name="Ashbrand", summary="A blade quenched in ash."),
-        links=[LinkSpec("possesses", other=mira.id, outgoing=False)],
-    )
+    )).node
+    # Edges live on their SOURCE (ADR 042 retired incoming links): Mira's
+    # relationships are her own properties, added after her neighbors exist.
+    await repository.add_link(mira.id, LinkSpec("located_at", other=undercroft.id))
+    await repository.add_link(mira.id, LinkSpec("participated_in", other=siege.id))
+    await repository.add_link(mira.id, LinkSpec("participated_in", other=fall.id))
+    await repository.add_link(mira.id, LinkSpec("possesses", other=ashbrand.id))
     return World(mira=mira, undercroft=undercroft, siege=siege, fall=fall, ashbrand=ashbrand)

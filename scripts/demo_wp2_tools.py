@@ -43,11 +43,14 @@ async def main() -> None:
     show("create mira", await tools.create_node_tool(
         svc, type="Character", name="Mira", summary="Exiled siege engineer."))
     mira = svc.session.recent.items[0]
-    show("create siege (linked in one call)", await tools.create_node_tool(
+    show("create siege", await tools.create_node_tool(
         svc, type="Event", name="Siege of Brakk", summary="The city falls.",
-        story_time=10,
-        links=[{"edge_type": "participated_in", "other": mira, "outgoing": False}]))
+        story_time=10))
     siege = svc.session.recent.items[0]
+    show("link mira -> siege (her own property)", await tools.update_node_tool(
+        svc, node_id=mira, summary="Exiled siege engineer.",
+        properties={"participated_in": siege},
+        create_missing_properties={"participated_in": "objects"}))
 
     show("scene assembly via explore", await tools.explore_tool(
         svc, start=siege, depth=2, include_types=["Character", "Location", "Item"],
@@ -62,8 +65,12 @@ async def main() -> None:
 
     show("create a second event", await tools.create_node_tool(
         svc, type="Event", name="Fall of Brakk", summary="Brakk is razed.",
-        story_time=99,
-        links=[{"edge_type": "participated_in", "other": mira, "outgoing": False}]))
+        story_time=99))
+    fall = svc.session.recent.items[0]
+    # No fresh summary: the link-only update keeps Mira's stale flag set,
+    # which the stale query below demonstrates.
+    show("link mira -> fall (stays stale)", await tools.update_node_tool(
+        svc, node_id=mira, properties={"participated_in": fall}))
 
     show("query: mira's timeline (WP13)", await tools.query_tool(
         svc, type="Event", linked_to=mira, order_by=["story_time"]))

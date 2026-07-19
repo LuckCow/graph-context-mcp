@@ -45,6 +45,7 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
+from graph_context.application.node_writer import WriteOutcome
 from graph_context.application.scheduler import Scheduler
 from graph_context.application.schema_proposals import SchemaProposal
 from graph_context.domain import rules, schema
@@ -71,12 +72,11 @@ from graph_context.interface.tool_args import (
     _node_type_set,
     _parse_detail,
     _parse_edge_type,
-    _parse_field_declarations,
-    _parse_fields_and_links,
     _parse_hold_detail,
     _parse_node_type,
     _parse_order_by,
     _parse_predicates,
+    _parse_properties,
     _resolve,
     _validate_query_type,
 )
@@ -636,6 +636,34 @@ async def send_file_tool(
     )
 
 
+_RETIRED_WRITE_PARAMS = {
+    "fields": "pass the values inside properties={...}",
+    "links": "pass relation values inside properties={'<relation>': "
+             "'<node id or name>'}",
+    "add_links": "pass relation values inside properties={'<relation>': "
+                 "'<node id or name>'} (they ADD to existing links)",
+    "create_missing_relations": "declare the label in "
+        "create_missing_properties={'<label>': {'format': 'objects', "
+        "'scope': 'instance'|'type'}}",
+    "create_missing_fields": "declare the key in "
+        "create_missing_properties={'<key>': '<format>'} (or "
+        "{'format': ..., 'scope': 'instance'|'type'})",
+}
+
+
+def _reject_retired_params(supplied: dict[str, Any]) -> None:
+    """ADR 042 replaced the fields/links surface; a replayed transcript
+    or an old habit gets a self-correcting redirect, never an opaque
+    internal error."""
+    used = {k: v for k, v in supplied.items() if v is not None}
+    if not used:
+        return
+    notes = "; ".join(
+        f"'{key}' was replaced -- {_RETIRED_WRITE_PARAMS[key]}" for key in used
+    )
+    raise GraphContextError(notes)
+
+
 @guarded
 async def create_node_tool(
     services: Services,
@@ -644,14 +672,23 @@ async def create_node_tool(
     summary: str,
     description: str = "",
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     icon: str = "",
-    create_missing_relations: bool = False,
+    create_missing_properties: dict[str, Any] | None = None,
+    # Retired params (ADR 042): explicit so an old-shape call gets a
+    # redirect instead of guarded's opaque internal error.
+    fields: dict[str, Any] | None = None,
+    links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool | None = None,
     create_missing_fields: dict[str, str] | None = None,
 ) -> str:
-    fields, parsed_links, declarations = await _parse_fields_and_links(
-        services, fields, links, _parse_field_declarations(create_missing_fields)
+    _reject_retired_params({
+        "fields": fields, "links": links,
+        "create_missing_relations": create_missing_relations,
+        "create_missing_fields": create_missing_fields,
+    })
+    scalars, parsed_links, declarations = await _parse_properties(
+        services, properties, create_missing_properties
     )
     draft = NodeDraft(
         type=_parse_node_type(type),
@@ -660,18 +697,18 @@ async def create_node_tool(
         # Tool-surface "description" = the node's body (ADR 010).
         body=description,
         story_time=story_time,
-        fields=fields or {},
+        fields=scalars,
         icon=icon.strip(),
     )
-    node = await services.writer.create_node(
-        draft,
-        parsed_links,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=declarations,
+    outcome = await services.writer.create_node(
+        draft, parsed_links, declarations=declarations,
     )
     await _note_mutation(services)
-    view = await services.reader.get_node(node.id)
-    return f"created:\n{presenters.render_node_view(view)}"
+    view = await services.reader.get_node(outcome.node.id)
+    return (
+        f"created:\n{presenters.render_node_view(view)}"
+        f"{_render_write_outcome_notes(outcome)}"
+    )
 
 
 @guarded
@@ -682,12 +719,21 @@ async def update_node_tool(
     summary: str | None = None,
     description: str | None = None,
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    add_links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
-    create_missing_relations: bool = False,
+    create_missing_properties: dict[str, Any] | None = None,
+    # Retired params (ADR 042): explicit so an old-shape call gets a
+    # redirect instead of guarded's opaque internal error.
+    fields: dict[str, Any] | None = None,
+    add_links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool | None = None,
     create_missing_fields: dict[str, str] | None = None,
 ) -> str:
+    _reject_retired_params({
+        "fields": fields, "add_links": add_links,
+        "create_missing_relations": create_missing_relations,
+        "create_missing_fields": create_missing_fields,
+    })
     node_id = await _resolve(services, node_id)
     removals = [
         Edge(
@@ -698,22 +744,22 @@ async def update_node_tool(
         )
         for i in remove_links or []
     ]
-    fields, parsed_add_links, declarations = await _parse_fields_and_links(
-        services, fields, add_links, _parse_field_declarations(create_missing_fields)
+    scalars, parsed_add_links, declarations = await _parse_properties(
+        services, properties, create_missing_properties
     )
-    node = await services.writer.update_node(
+    outcome = await services.writer.update_node(
         node_id,
         name=name,
         summary=summary,
         description=description,
         story_time=story_time,
-        fields=fields,
+        fields=scalars if properties is not None else None,
         add_links=parsed_add_links,
         remove_links=removals,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=declarations,
+        declarations=declarations,
     )
     await _note_mutation(services)
+    node = outcome.node
     stale_note = (
         "\nNOTE: summary flagged stale (no fresh summary in this update); "
         "supply `summary` to clear it."
@@ -721,7 +767,25 @@ async def update_node_tool(
         else ""
     )
     view = await services.reader.get_node(node.id)
-    return f"updated:\n{presenters.render_node_view(view)}{stale_note}"
+    return (
+        f"updated:\n{presenters.render_node_view(view)}{stale_note}"
+        f"{_render_write_outcome_notes(outcome)}"
+    )
+
+
+def _render_write_outcome_notes(outcome: WriteOutcome) -> str:
+    """The write's schema side-channel (ADR 042), after the node view:
+    the auto-drafted type-attach proposal and any degraded warnings."""
+    notes = []
+    for proposal in outcome.drafted:
+        notes.append(
+            f"schema proposal {proposal.id} drafted (attach to "
+            f"{proposal.type_name!r}): a confirmation message follows this "
+            "reply -- the user applies it with a 👍 reaction; you cannot "
+            "apply it. The value is already saved either way."
+        )
+    notes.extend(f"NOTE: {warning}" for warning in outcome.warnings)
+    return "".join(f"\n{note}" for note in notes)
 
 
 @guarded

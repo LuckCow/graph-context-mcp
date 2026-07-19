@@ -74,6 +74,31 @@ ACTIONS = (
 _CONDITION_WORDS = ", ".join(repr(c) for c in CONDITIONS)
 _ACTION_WORDS = ", ".join(repr(a) for a in ACTIONS)
 
+# Built-in watchables (ADR 042): store-clock stamps every object carries,
+# watchable on ANY type without being a catalog property. Read-only --
+# the store writes them -- so they are legal as watch_property (condition
+# 'changed' only; there is no truthiness to a timestamp) and never as an
+# action property.
+BUILTIN_WATCH_MODIFIED = "modified_at"
+# normalize_choice folds _/- to spaces, so these are the normalized forms
+# ("modified_at" and "last_modified_date" fold onto them).
+_BUILTIN_MODIFIED_ALIASES = frozenset({
+    "modified at",
+    "modified date",
+    "modified",
+    "last modified",
+    "last modified date",
+})
+
+
+def builtin_watch_for(identifier: str) -> str | None:
+    """Resolve a watch-property identifier to a built-in watchable, or
+    ``None``. Callers consult the space catalog FIRST -- a space's own
+    property named "Modified date" wins over the built-in."""
+    if normalize_choice(identifier) in _BUILTIN_MODIFIED_ALIASES:
+        return BUILTIN_WATCH_MODIFIED
+    return None
+
 
 def is_paused(raw_status: str) -> bool:
     """Whether a stored status means "leave this rule alone".

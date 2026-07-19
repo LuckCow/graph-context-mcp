@@ -61,8 +61,8 @@ async def main() -> None:
                 ToolCall("create_node", {
                     "type": "Task", "name": "Ship v2 to staging",
                     "summary": "Deploy and verify the v2 build.", "icon": "☑️",
-                    "links": [{"edge_type": "runs_on", "other": "Staging server"}],
-                    "create_missing_relations": True,
+                    "properties": {"runs_on": "Staging server"},
+                    "create_missing_properties": {"runs_on": "objects"},
                 }),
             )),
             LLMTurn(reply="Task and server are in the graph."),

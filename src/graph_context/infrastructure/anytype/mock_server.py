@@ -1001,6 +1001,9 @@ class MockAnytype:
         # creates them as space properties (live-confirmed 2026-07-06). The
         # type's own ``properties`` carry the property ids, exactly like the
         # live GET /types response (the templates spike reads them).
+        conflict = self._reuse_conflict(body.get("properties", []), on_type=())
+        if conflict is not None:
+            return conflict
         for entry in body.get("properties", []):
             self._properties.setdefault(
                 entry["key"], {"id": self._new_id(), **entry}
@@ -1013,6 +1016,31 @@ class MockAnytype:
             "id": self._new_id(), **body, "properties": type_properties,
         }
         return httpx.Response(201, json={"type": self._types[body["key"]]})
+
+    def _reuse_conflict(
+        self,
+        entries: list[dict[str, Any]],
+        on_type: tuple[str, ...],
+    ) -> httpx.Response | None:
+        """Quirk A11 (amended 2026-07-19): a type POST/PATCH entry naming
+        an ``objects``-format space property NOT already on the type 400s
+        "already exists" unless the entry carries the property's ``id``;
+        scalars attach by key alone (id also fine). Pinned so the adapter
+        never regresses to key-only reuse of relations."""
+        for entry in entries:
+            existing = self._properties.get(entry.get("key", ""))
+            if (
+                existing is not None
+                and existing.get("format") == "objects"
+                and entry.get("key") not in on_type
+                and entry.get("id") != existing.get("id")
+            ):
+                return self._error(
+                    400, "bad_request",
+                    f"bad input: property key \"{entry.get('key')}\" "
+                    "already exists",
+                )
+        return None
 
     def _handle_type(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         """Single type by object ID: GET, and PATCH with quirk A11 --
@@ -1035,6 +1063,12 @@ class MockAnytype:
             if field in body:
                 entry[field] = body[field]
         if "properties" in body:
+            on_type = tuple(
+                p.get("key", "") for p in entry.get("properties", [])
+            )
+            conflict = self._reuse_conflict(body["properties"], on_type=on_type)
+            if conflict is not None:
+                return conflict
             for prop in body["properties"]:
                 self._properties.setdefault(
                     prop["key"], {"id": self._new_id(), **prop}
@@ -1049,6 +1083,14 @@ class MockAnytype:
         if request.method == "GET":
             return self._paginated(list(self._properties.values()), request.url.params)
         body = json.loads(request.content)
+        if body.get("key") in self._properties:
+            # Quirk A14 (live-confirmed 2026-07-19): duplicate keys 400;
+            # a duplicate NAME on a fresh key is fine, and DELETE frees
+            # the key for re-creation.
+            return self._error(
+                400, "bad_request",
+                f"bad input: property key \"{body['key']}\" already exists",
+            )
         self._properties[body["key"]] = {"id": self._new_id(), **body}
         if self.property_settle_patches > 0 and body.get("format") == "objects":
             # Only ``objects``-format relations have the settle window. A
@@ -1239,8 +1281,10 @@ class MockAnytype:
         return f"2026-01-01T00:00:00.{next(self._clock):06d}Z"
 
     @staticmethod
-    def _error(status: int, code: str) -> httpx.Response:
+    def _error(
+        status: int, code: str, message: str | None = None
+    ) -> httpx.Response:
         return httpx.Response(status, json={
-            "code": code, "message": code.replace("_", " "), "object": "error",
-            "status": status,
+            "code": code, "message": message or code.replace("_", " "),
+            "object": "error", "status": status,
         })

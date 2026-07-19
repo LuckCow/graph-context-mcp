@@ -82,7 +82,7 @@ misrepresent what it created.
 """
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Task Creation Mode", summary = "Task-creation mode: assign new tasks to whoever created them unless the message names another assignee.", description = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead.", fields = { gc_mode_mutating = "true" } } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Task Creation Mode", summary = "Task-creation mode: assign new tasks to whoever created them unless the message names another assignee.", description = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead.", properties = { gc_mode_mutating = "true" } } }]
 
 [[case.script]]
 reply = "Created 'Task Creation Mode' as an Activity Mode with the default-assignee rule as its goal."
@@ -137,7 +137,7 @@ created Activity Mode carries a truthy gc_mode_mutating field; a read-only
 """
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Task Creation Mode", summary = "Task-creation mode: assign new tasks to whoever created them unless the message names another assignee.", description = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead.", fields = { gc_mode_mutating = "true" } } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Activity Mode", name = "Task Creation Mode", summary = "Task-creation mode: assign new tasks to whoever created them unless the message names another assignee.", description = "Turn requests into Task nodes. By default, assign a newly created task to whoever created it; if the message explicitly names a different assignee, use that person instead.", properties = { gc_mode_mutating = "true" } } }]
 
 [[case.script]]
 reply = "Created 'Task Creation Mode' as a mutating Activity Mode -- it can create and edit task nodes."
@@ -323,7 +323,7 @@ max_decisions = 4
 must_mention = ["Old Notes"]
 
 [[case.script]]
-tool_calls = [{ name = "update_node", arguments = { node_id = "Old Notes", summary = "Superseded -- see New Notes.", add_links = [{ edge_type = "superseded_by", other = "New Notes" }], create_missing_relations = true } }]
+tool_calls = [{ name = "update_node", arguments = { node_id = "Old Notes", summary = "Superseded -- see New Notes.", properties = { superseded_by = "New Notes" }, create_missing_properties = { superseded_by = "objects" } } }]
 
 [[case.script]]
 reply = "Done: 'Old Notes' now carries the superseded_by link to 'New Notes' and the updated summary."

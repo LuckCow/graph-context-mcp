@@ -12,7 +12,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from graph_context.domain.models import LinkSpec, NodeId
+from graph_context.domain import fields as domain_fields
+from graph_context.domain.models import LinkSpec, NodeId, PropertyDeclaration
 from graph_context.domain.query import Op, Predicate, SortKey, normalize_value
 from graph_context.domain.schema import Role
 from graph_context.domain.traversal import node_identifiers
@@ -76,64 +77,127 @@ def _parse_detail(value: str) -> Detail:
         ) from None
 
 
-async def _parse_links(
-    raw: Sequence[dict[str, Any]] | None, services: Services
-) -> list[LinkSpec]:
-    links: list[LinkSpec] = []
-    for item in raw or []:
-        if "edge_type" not in item or "other" not in item:
-            raise GraphContextError(
-                "each link needs 'edge_type' and 'other' (target node id or "
-                "name); optional 'outgoing' (default true; false means the "
-                "edge points FROM 'other' TO this node)"
-            )
-        links.append(
-            LinkSpec(
-                edge_type=_parse_edge_type(str(item["edge_type"])),
-                other=await _resolve(services, str(item["other"])),
-                outgoing=bool(item.get("outgoing", True)),
-            )
-        )
-    return links
+def _parse_property_declarations(
+    raw: dict[str, Any] | None,
+) -> dict[str, PropertyDeclaration]:
+    """Normalize ``create_missing_properties`` (ADR 042).
 
-
-async def _parse_fields_and_links(
-    services: Services,
-    fields: dict[str, str] | None,
-    raw_links: Sequence[dict[str, Any]] | None,
-    declarations: dict[str, str] | None,
-) -> tuple[dict[str, str] | None, list[LinkSpec], dict[str, str] | None]:
-    """Parse a write's ``fields``/``links`` pair as ONE surface.
-
-    Anytype shows an ``objects``-format relation ("Assignee") as a property
-    of the type, so models naturally spell it as a ``fields`` key -- and
-    underneath it IS an edge (ADR 006). The two spellings meet here, at the
-    same boundary that resolves id-or-name: a fields key naming a relation
-    becomes a :class:`LinkSpec` (its value resolves exactly like a link's
-    ``other``), deduplicated against the explicit ``links``. A
-    ``create_missing_fields`` declaration for such a key is dropped -- the
-    relation already exists; nothing may mint a scalar shadow of it.
+    Two spellings per entry: the string shorthand ``{"key": "format"}``
+    (scope ``instance``) and the full form ``{"key": {"format": ...,
+    "scope": "instance"|"type", "name": <optional display name>}}``.
+    Per-declaration invariants (format/scope vocabulary, gc_ prefix) are
+    :class:`PropertyDeclaration`'s own, raised at construction.
     """
-    links = await _parse_links(raw_links, services)
-    if not fields:
-        return fields, links, declarations
-    seen = {
-        (link.edge_type.strip().lower(), link.other, link.outgoing)
-        for link in links
-    }
+    declarations: dict[str, PropertyDeclaration] = {}
+    for raw_key, value in (raw or {}).items():
+        key = str(raw_key).strip()
+        if isinstance(value, str):
+            declarations[key] = PropertyDeclaration(key=key, format=value)
+        elif isinstance(value, dict):
+            declarations[key] = PropertyDeclaration(
+                key=key,
+                format=str(value.get("format", "")),
+                scope=str(value.get("scope", "instance") or "instance"),
+                name=str(value.get("name", "")),
+            )
+        else:
+            raise GraphContextError(
+                f"create_missing_properties entry {key!r} must be a format "
+                "string (scope 'instance') or {'format': ..., 'scope': "
+                "'instance'|'type'}"
+            )
+    return declarations
+
+
+def _coerce_property_value(key: str, value: Any) -> str:
+    """One scalar ``properties`` value as its canonical string (ADR 042).
+
+    The tool schema says strings, but models send what JSON offers --
+    ``true`` for a checkbox, ``42`` for a number, a list for a
+    multi_select -- and a type crash here used to surface as an opaque
+    internal error (turn de38192f56dc). Coerce the unambiguous cases;
+    reject the rest loudly, naming the property.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):  # before int: bool subclasses int
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return domain_fields.render_number(float(value))
+    if isinstance(value, list | tuple):
+        items = [item for item in value if str(item).strip()]
+        if all(isinstance(item, str) for item in items):
+            return ", ".join(item.strip() for item in items)
+        raise GraphContextError(
+            f"property {key!r} got a list with non-string entries; a "
+            "multi_select takes strings (a relation takes node ids/names)"
+        )
+    raise GraphContextError(
+        f"property {key!r} got an unusable {type(value).__name__} value; "
+        "pass a string (checkbox: 'true'/'false'; multi_select: a comma "
+        "list or list of strings; relation: a node id/name or list of them)"
+    )
+
+
+async def _relation_targets(
+    services: Services, key: str, value: Any
+) -> list[NodeId]:
+    """A relation-valued ``properties`` entry: one node id/name, or a
+    list of them, each resolved like any node reference."""
+    items = list(value) if isinstance(value, list | tuple) else [value]
+    targets: list[NodeId] = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            raise GraphContextError(
+                f"relation {key!r} takes a node id or name (or a list of "
+                f"them); got {item!r}"
+            )
+        targets.append(await _resolve(services, item))
+    return targets
+
+
+async def _parse_properties(
+    services: Services,
+    properties: dict[str, Any] | None,
+    create_missing: dict[str, Any] | None,
+) -> tuple[dict[str, str], list[LinkSpec], dict[str, PropertyDeclaration]]:
+    """Split a write's ``properties`` dict into scalars and links (ADR 042).
+
+    One surface, discriminated by what the space says the key IS: a key
+    naming an existing ``objects``-format relation becomes link(s) -- its
+    value resolves like a node reference, and any declaration for it is
+    dropped (nothing may mint a scalar shadow of an edge, ADR 006); a key
+    whose declaration says ``objects`` becomes link(s) to be minted; every
+    other key is a scalar value (coerced to its canonical string). Unknown
+    undeclared keys stay in the scalars -- the REPOSITORY owns the
+    reuse-catalog approval error, not this boundary.
+    """
+    declarations = _parse_property_declarations(create_missing)
     scalars: dict[str, str] = {}
-    for key, value in fields.items():
+    links: list[LinkSpec] = []
+    seen: set[tuple[str, NodeId]] = set()
+
+    async def _add_links(label: str, key: str, value: Any) -> None:
+        for target in await _relation_targets(services, key, value):
+            coerced = (label.strip().lower(), target)
+            if coerced not in seen:
+                seen.add(coerced)
+                links.append(LinkSpec(edge_type=label, other=target))
+
+    for raw_key, value in (properties or {}).items():
+        key = str(raw_key).strip()
+        if not key:
+            raise GraphContextError("properties has an entry with an empty key")
         label = services.repository.relation_label_for(key)
-        if label is None:
-            scalars[key] = value
+        if label is not None:
+            declarations.pop(key, None)  # the relation already exists
+            await _add_links(label, key, value)
             continue
-        other = await _resolve(services, str(value))
-        if declarations is not None:
-            declarations.pop(key.strip(), None)
-        coerced = (label.strip().lower(), other, True)
-        if coerced not in seen:
-            seen.add(coerced)
-            links.append(LinkSpec(edge_type=label, other=other))
+        declaration = declarations.get(key)
+        if declaration is not None and declaration.format == "objects":
+            await _add_links(key, key, value)
+            continue
+        scalars[key] = _coerce_property_value(key, value)
     return scalars, links, declarations
 
 
@@ -203,16 +267,6 @@ def _validate_query_type(services: Services, requested: str) -> Role | None:
         if any(i.casefold() == wanted for i in node_identifiers(node)):
             return node.role
     raise UnknownNodeType(requested, tuple(services.repository.known_node_types()))
-
-
-def _parse_field_declarations(
-    raw: dict[str, str] | None,
-) -> dict[str, str] | None:
-    """Normalize a ``create_missing_fields`` map (key -> format); format
-    well-formedness is the writer's rule (schema.validate_field_declarations)."""
-    if raw is None:
-        return None
-    return {str(k).strip(): str(v).strip().lower() for k, v in raw.items()}
 
 
 def _node_type_set(values: Sequence[str] | None) -> frozenset[str] | None:

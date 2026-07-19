@@ -104,12 +104,12 @@ class TestWorkspaceRoleOverrides:
             await writer.create_node(
                 NodeDraft("Meeting", name="Standup", summary="Daily sync.")
             )
-        node = await writer.create_node(
+        node = (await writer.create_node(
             NodeDraft(
                 "Meeting", name="Standup", summary="Daily sync.",
                 story_time=20260702,
             )
-        )
+        )).node
         assert node.role is Role.EVENT
 
 

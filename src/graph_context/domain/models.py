@@ -72,15 +72,14 @@ class FieldSpec:
 
 @dataclass(frozen=True, slots=True)
 class PropertyDraft:
-    """One NEW scalar property in a schema proposal (WP33, ADR 041).
+    """One NEW property in a schema proposal (WP33, ADR 041; ADR 042).
 
     The LLM-drafted half of a user-confirmed schema change: a display
-    ``name``, a :data:`graph_context.domain.schema.FIELD_FORMATS` format,
-    and (for selects) the option names to seed. Scalars only -- a
-    relation is an edge (ADR 006) and is minted through links +
-    ``create_missing_relations``, never through a schema proposal.
-    Invariants are enforced at construction so a malformed draft can
-    never reach a repository.
+    ``name``, a :data:`graph_context.domain.schema.CREATABLE_FORMATS`
+    format (``objects`` makes it a relation -- an edge label once
+    attached), and (for selects) the option names to seed. Invariants are
+    enforced at construction so a malformed draft can never reach a
+    repository.
     """
 
     name: str
@@ -95,12 +94,10 @@ class PropertyDraft:
                 f"property name {self.name!r} uses the reserved gc_ prefix "
                 "(infrastructure vocabulary); pick a human name"
             )
-        if self.format.strip().lower() not in schema.FIELD_FORMATS:
+        if self.format.strip().lower() not in schema.CREATABLE_FORMATS:
             raise SchemaViolation(
                 f"unknown format {self.format!r} for property {self.name!r}; "
-                f"formats: {', '.join(sorted(schema.FIELD_FORMATS))}. "
-                "A link to other objects is a relation, not a property -- "
-                "create it on a write via links + create_missing_relations"
+                f"formats: {', '.join(sorted(schema.CREATABLE_FORMATS))}"
             )
         if self.options and self.format not in {"select", "multi_select"}:
             raise SchemaViolation(
@@ -134,6 +131,100 @@ def validate_property_drafts(drafts: Sequence[PropertyDraft]) -> None:
         seen.add(lowered)
 
 
+DECLARATION_SCOPES: tuple[str, str] = ("instance", "type")
+"""Where a newly declared property applies (ADR 042).
+
+``instance``: the property is minted space-level and its value written on
+the one object -- attached to no type (today's ``create_missing_fields``
+behaviour). ``type``: same immediate mint + value, PLUS the write drafts a
+user-confirmed schema proposal attaching the property to the node's type
+(the ADR 041 flow) -- required for automation rules to watch it.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PropertyDeclaration:
+    """One entry of a write's ``create_missing_properties`` map (ADR 042).
+
+    ``key`` is the ``properties``-dict key it licenses; ``format`` is a
+    :data:`graph_context.domain.schema.CREATABLE_FORMATS` member
+    (``objects`` mints a relation -- an edge label); ``scope`` is a
+    :data:`DECLARATION_SCOPES` member; ``name`` optionally overrides the
+    minted property's display name (else one is derived from ``key``).
+    Construction-validated so a malformed declaration never reaches a
+    repository; normalisation (format/scope lowering) happens here too so
+    every consumer sees canonical values.
+    """
+
+    key: str
+    format: str
+    scope: str = "instance"
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "format", self.format.strip().lower())
+        object.__setattr__(self, "scope", self.scope.strip().lower())
+        if not self.key.strip():
+            raise SchemaViolation(
+                "create_missing_properties has an entry with an empty key"
+            )
+        if self.key.strip().lower().startswith("gc_"):
+            raise SchemaViolation(
+                f"property key {self.key!r} uses the reserved gc_ prefix "
+                "(infrastructure vocabulary); pick a human name"
+            )
+        if self.format not in schema.CREATABLE_FORMATS:
+            raise SchemaViolation(
+                f"unknown format {self.format!r} for new property "
+                f"{self.key!r}; formats: "
+                f"{', '.join(sorted(schema.CREATABLE_FORMATS))}"
+            )
+        if self.scope not in DECLARATION_SCOPES:
+            raise SchemaViolation(
+                f"unknown scope {self.scope!r} for new property {self.key!r}; "
+                "scope is 'instance' (a fact about this one object) or "
+                "'type' (an attribute every object of the type should carry; "
+                "drafts a user-confirmed schema change)"
+            )
+
+    @property
+    def display_name(self) -> str:
+        """The minted property's human display name: the explicit ``name``
+        override, else one derived from the key (``shift_active`` ->
+        ``Shift Active``) so a snake_case tool key never becomes the label
+        humans see in the editor."""
+        if self.name.strip():
+            return self.name.strip()
+        cleaned = self.key.strip().replace("_", " ").replace("-", " ")
+        words = cleaned.split()
+        titled = " ".join(
+            word if word[:1].isupper() else word.capitalize() for word in words
+        )
+        return titled or self.key.strip()
+
+
+def validate_property_declarations(
+    written_keys: Sequence[str] | frozenset[str] | set[str],
+    declarations: Mapping[str, PropertyDeclaration],
+) -> None:
+    """Well-formedness of a write's new-property declarations (ADR 042).
+
+    Every declared key must also carry a value in ``properties`` (a
+    declaration without a value writes nothing). Per-declaration invariants
+    live in :class:`PropertyDeclaration`; whether a key *needs* declaring
+    -- i.e. whether it matches an existing property -- is the repository's
+    call, not ours.
+    """
+    written = {str(key) for key in written_keys}
+    for key in declarations:
+        if key not in written:
+            raise SchemaViolation(
+                f"create_missing_properties declares {key!r} but "
+                "'properties' carries no value for it; every declared key "
+                "needs a value in 'properties'"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class Edge:
     """A directed, labelled link between two nodes.
@@ -158,25 +249,19 @@ class LinkSpec:
 
     ``edge_type`` is the requested relation *label*; the repository resolves
     it to an existing relation's property key (or surfaces it for approval).
-    ``outgoing=True`` means the edge runs *from* the node being written *to*
-    ``other``; ``False`` reverses it (e.g. creating an Event and linking an
-    existing Character via ``participated_in`` requires an incoming edge:
-    Character -> Event).
+    The edge always runs *from* the node being written *to* ``other`` -- an
+    edge is an entry in an ``objects``-format property on its source (ADR
+    003), so the reverse direction is the other node's own write (ADR 042
+    retired ``outgoing=False``).
     """
 
     edge_type: str
     other: NodeId
-    outgoing: bool = True
 
     def to_edge(self, anchor: NodeId, property_key: str = "") -> Edge:
         """Materialise this spec relative to the node being written."""
-        if self.outgoing:
-            return Edge(
-                source=anchor, type=self.edge_type, target=self.other,
-                property_key=property_key,
-            )
         return Edge(
-            source=self.other, type=self.edge_type, target=anchor,
+            source=anchor, type=self.edge_type, target=self.other,
             property_key=property_key,
         )
 
@@ -236,6 +321,9 @@ class Node:
     fields: Mapping[str, str] = field(default_factory=dict)
     type_key: str = ""
     role: Role | None = None
-    # Store-clock change stamp (ISO; "" when unknown, e.g. the in-memory
-    # backend). A ranking signal (ADR 016 recency weight), never content.
+    # Store-clock change stamp (sortable ISO; "" only when the store has
+    # not surfaced one). A ranking signal (ADR 016 recency weight) and the
+    # rule engine's built-in watchable (ADR 042), never content. Both
+    # backends stamp it: Anytype from last_modified_date/created_date, the
+    # in-memory fake from its own deterministic clock.
     modified_at: str = ""
