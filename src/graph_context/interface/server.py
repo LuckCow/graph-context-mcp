@@ -262,6 +262,23 @@ async def automation(
     )
 
 
+@mcp.tool(description=_PROFILE.tool_docs["schema"])
+async def schema(
+    ctx: Context[Any, Any, Any],
+    action: str = "list",
+    type: str = "",
+    plural: str = "",
+    properties: list[dict[str, Any]] | None = None,
+    reason: str = "",
+    proposal_id: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.schema_tool(
+        _services(ctx), action=action, type=type, plural=plural,
+        properties=properties, reason=reason, proposal_id=proposal_id,
+    )
+
+
 @mcp.tool(description=_PROFILE.tool_docs["send_file"])
 async def send_file(
     ctx: Context[Any, Any, Any],

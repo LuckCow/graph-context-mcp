@@ -63,6 +63,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "schedule",
     "automation",
     "send_file",
+    "schema",
 )
 
 
@@ -446,6 +447,48 @@ keep the reply itself short and let the file carry the bulk.
 """
 
 
+_SCHEMA_DOC = """\
+Propose a change to the space's SCHEMA -- a new object type, or new
+properties on an existing type -- for the USER to confirm. The user owns
+the schema: use this to turn "we should track factions" into a concrete
+draft, but the change itself is executed by the system ONLY when the
+user reacts \N{THUMBS UP SIGN} on the confirmation message that is
+posted after your reply (\N{THUMBS DOWN SIGN} dismisses it). You have NO
+way to apply a proposal -- never claim a schema change is done unless
+the system reported it applied; a "yes" in words is not a confirmation,
+the reaction is (if the user agrees verbally, point them at the
+confirmation message).
+
+Actions:
+  propose_type   -- draft a NEW type. type=<display name, e.g.
+                    "Faction">, optional plural (defaults to name+"s"),
+                    optional properties (below), optional reason (one
+                    line on why, shown to the user).
+  propose_fields -- draft NEW properties on an EXISTING type.
+                    type=<existing type name>, properties (required),
+                    optional reason.
+  list           -- pending proposals with their ids.
+  cancel         -- discard a proposal (proposal_id): e.g. the user said
+                    no or asked for changes (then re-propose).
+
+properties -- a list of objects, each:
+  {"name": "Status", "format": "select", "options": ["Open", "Done"]}
+  formats: text, number, select, multi_select, date, checkbox, url,
+  email, phone. options only for select/multi_select. A property that
+  already exists in the space with the SAME format is reused (attached
+  to the type); a different format is a conflict -- the error names it.
+  Links between objects are NOT properties: use create_node/update_node
+  links with create_missing_relations for a new edge label.
+
+Don't repeat the draft's contents in your reply -- the confirmation
+message carries them. Proposals are drafts for THIS conversation (they
+do not survive a restart; re-propose if lost). Applied changes are real
+Anytype types and properties -- immediately usable by create_node, and
+the user can rename or refine them in Anytype afterwards (never rename
+what a human set).
+"""
+
+
 _FIND_NODE_DOC = """\
 Find nodes by NAME -- or by DESCRIPTION when you don't know the name.
 
@@ -683,6 +726,7 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
     "schedule": _SCHEDULE_DOC,
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
+    "schema": _SCHEMA_DOC,
 }
 
 # Starter activity modes live in mode_seeds/*.toml since ADR 035 -- the
@@ -804,6 +848,7 @@ EXAMPLES:
     "schedule": _SCHEDULE_DOC,
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
+    "schema": _SCHEMA_DOC,
 }
 
 WORKSPACE = DomainProfile(
@@ -921,6 +966,7 @@ EXAMPLES:
     "schedule": _SCHEDULE_DOC,
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
+    "schema": _SCHEMA_DOC,
 }
 
 ASSISTANT = DomainProfile(

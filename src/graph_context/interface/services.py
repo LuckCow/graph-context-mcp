@@ -19,6 +19,7 @@ from graph_context.application.querier import Querier
 from graph_context.application.ranker import Ranker
 from graph_context.application.rule_engine import RuleEngine
 from graph_context.application.scheduler import Scheduler, local_clock
+from graph_context.application.schema_proposals import SchemaProposals
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
 from graph_context.domain.session import SessionState
@@ -69,6 +70,12 @@ class Services:
     # drains it into file reply events after the last decision; the
     # transport turns those into real chat uploads (or a fenced fallback).
     outbox: list[OutboundFile] = field(default_factory=list)
+    # WP33 (ADR 041): the session's drafted-but-unconfirmed schema
+    # changes. SESSION-scoped (drafts must survive across the turn where
+    # the user says yes); the pipeline advances its turn watermark beside
+    # the outbox clear so a proposal can never apply in the turn that
+    # drafted it.
+    proposals: SchemaProposals = field(default_factory=SchemaProposals)
 
 
 def build_services(

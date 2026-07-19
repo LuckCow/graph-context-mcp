@@ -116,6 +116,18 @@ class UnknownFieldKey(ApprovalRequired):
         super().__init__(" ".join(parts))
 
 
+class SchemaChangeConflict(GraphContextError):
+    """A schema change collides with what the space already has (WP33).
+
+    Raised by ``GraphRepository.create_type`` when the proposed type name
+    already resolves to an existing type, and by both schema-change
+    methods when a proposed property name matches an existing property
+    under a DIFFERENT format (formats are immutable, quirk A12) or an
+    existing relation (an edge must never gain a scalar shadow, ADR 006).
+    The message is a prompt: it names the collision and the way out.
+    """
+
+
 class NodeNotFound(GraphContextError):
     """A referenced node id (or name) does not exist in the graph.
 

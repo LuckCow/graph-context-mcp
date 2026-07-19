@@ -350,3 +350,54 @@ class TestFiles:
         (attachment,) = message.attachments
         assert attachment.target == file_id
         assert attachment.type == "file"
+
+
+class TestReactions:
+    """C12 (spike S15): the toggle route, the populated reactions shape,
+    and the envelope-free reactions_updated SSE frame."""
+
+    async def test_toggle_round_trips_and_second_toggle_removes(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        message_id = await chat.send(chat_id, "confirm me")
+        await chat.toggle_reaction(chat_id, message_id, "\N{THUMBS UP SIGN}")
+        (message,) = await chat.recent_messages(chat_id)
+        assert message.reactions == {
+            "\N{THUMBS UP SIGN}": (mock.api_identity,)
+        }
+        await chat.toggle_reaction(chat_id, message_id, "\N{THUMBS UP SIGN}")
+        (message,) = await chat.recent_messages(chat_id)
+        assert message.reactions == {}
+
+    async def test_reactions_updated_frame_carries_id_and_map_bare(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        message_id = mock.post_chat_message_directly(chat_id, "human", "hi")
+        stream = chat.stream(chat_id)
+        await _collect(stream, 1)  # fast-forward the backlog replay
+        mock.react_directly(
+            chat_id, message_id, "\N{THUMBS UP SIGN}", "human-identity"
+        )
+        (event,) = await _collect(stream, 1)
+        assert event.kind == "reactions_updated"
+        assert event.message is None  # C12: no message envelope
+        assert event.message_id == message_id
+        assert event.reactions == {
+            "\N{THUMBS UP SIGN}": ("human-identity",)
+        }
+
+    async def test_a_human_and_the_bot_can_share_an_emoji(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        chat_id = mock.seed_chat()
+        message_id = await chat.send(chat_id, "confirm me")
+        mock.react_directly(
+            chat_id, message_id, "\N{THUMBS UP SIGN}", "human-identity"
+        )
+        await chat.toggle_reaction(chat_id, message_id, "\N{THUMBS UP SIGN}")
+        (message,) = await chat.recent_messages(chat_id)
+        assert set(message.reactions["\N{THUMBS UP SIGN}"]) == {
+            "human-identity", mock.api_identity,
+        }

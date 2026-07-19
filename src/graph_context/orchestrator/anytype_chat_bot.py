@@ -45,6 +45,7 @@ import dataclasses
 import logging
 import os
 import random
+from collections.abc import Mapping
 from pathlib import Path
 
 from graph_context import composition
@@ -402,6 +403,40 @@ async def _catch_up(
         )
 
 
+async def _maybe_reaction(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    chat_id: str,
+    message_id: str,
+    reactions: Mapping[str, tuple[str, ...]],
+) -> None:
+    """Route one reaction change into the WP33 confirm handler; a failure
+    must never take the serve loop down (the _maybe_turn discipline)."""
+    send, _, _, _ = _reply_primitives(chat_client, chat_id)
+    try:
+        await handler.handle_reaction(chat_id, message_id, reactions, send)
+    except Exception:
+        logger.exception("reaction handling failed (chat=%s)", chat_id)
+
+
+async def _sweep_confirms(
+    handler: AnytypeChatTurnHandler,
+    chat_client: AnytypeChatClient,
+    chat_id: str,
+) -> None:
+    """Re-read tracked confirm messages after a stream (re)connect: C12
+    reaction frames are NOT replayed with the backlog, so a 👍 made
+    during a drop is only visible on the message list."""
+    tracked = set(handler.confirms_in(chat_id))
+    if not tracked:
+        return
+    for message in await chat_client.recent_messages(chat_id):
+        if message.id in tracked and message.reactions:
+            await _maybe_reaction(
+                handler, chat_client, chat_id, message.id, message.reactions
+            )
+
+
 async def _serve_chat(
     handler: AnytypeChatTurnHandler,
     chat_client: AnytypeChatClient,
@@ -414,10 +449,19 @@ async def _serve_chat(
     delay = 1.0
     while True:
         try:
+            await _sweep_confirms(handler, chat_client, chat_id)
             async for event in chat_client.stream(chat_id):
                 delay = 1.0  # a live stream resets the backoff
+                if event.kind == "reactions_updated" and event.message_id:
+                    # WP33: a 👍 on a tracked confirm message applies the
+                    # schema proposal -- harness-executed, no model turn.
+                    await _maybe_reaction(
+                        handler, chat_client, chat_id,
+                        event.message_id, dict(event.reactions),
+                    )
+                    continue
                 if event.kind != "message_added" or event.message is None:
-                    continue  # edits/deletes/reactions/heartbeats: no turns
+                    continue  # edits/deletes/heartbeats: no turns
                 await _maybe_turn(
                     handler, space_id, chat_id, event.message, chat_client,
                     titler,

@@ -4,8 +4,9 @@ Pins against a real server the exact behaviors the mock asserts in
 ``tests/anytype/test_chat_client.py``: chat creation via API (S10e), the
 flat ``message_id`` create response (C1), the ``messages`` recency window
 (C2), SSE ``message_added`` framing with heartbeat comments (C5), the
-wholesale-replacement edit (C8), the object-route rename (C9), and
-message deletion. Gated by ``ANYTYPE_E2E=1`` like the rest of the suite.
+wholesale-replacement edit (C8), the object-route rename (C9), message
+deletion, and the reaction toggle + ``reactions_updated`` frame (C12).
+Gated by ``ANYTYPE_E2E=1`` like the rest of the suite.
 
 NOTE: the session-scoped ``live_config`` resets the GC-E2E space before
 and after the run -- spike artifacts (S9/S10 chats, sets, todos) do not
@@ -118,5 +119,40 @@ class TestLiveChat:
                 "from": 11, "to": 19, "type": "link",
                 "param": "https://developers.anytype.io",
             }]
+
+            # C12 (spike S15): the reaction toggle route, the populated
+            # identity-list shape, and the envelope-free
+            # ``reactions_updated`` SSE frame -- the WP33 schema-confirm
+            # channel. (Single account here: the bot reacts to its own
+            # message; identity-vs-bot filtering is transport policy,
+            # tested against the mock.)
+            stream = chat_client.stream(chat_id, heartbeat_seconds=5)
+            pending = asyncio.ensure_future(anext(stream))
+            await asyncio.sleep(1.0)  # connected; backlog will replay
+            await chat_client.toggle_reaction(
+                chat_id, marked, "\N{THUMBS UP SIGN}"
+            )
+            event = await asyncio.wait_for(pending, 30)
+            while event.kind != "reactions_updated":  # backlog + heartbeats
+                event = await asyncio.wait_for(anext(stream), 30)
+            await stream.aclose()
+            assert event.message is None  # C12: no message envelope
+            assert event.message_id == marked
+            (identities,) = event.reactions.values()
+            assert len(identities) == 1  # the bot account's identity
+            reacted = next(
+                m for m in await chat_client.recent_messages(chat_id)
+                if m.id == marked
+            )
+            assert reacted.reactions == event.reactions
+            # Toggle semantics: a second POST removes it.
+            await chat_client.toggle_reaction(
+                chat_id, marked, "\N{THUMBS UP SIGN}"
+            )
+            cleared = next(
+                m for m in await chat_client.recent_messages(chat_id)
+                if m.id == marked
+            )
+            assert cleared.reactions == {}
         finally:
             await client.aclose()

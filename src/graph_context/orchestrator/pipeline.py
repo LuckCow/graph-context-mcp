@@ -93,12 +93,20 @@ class ReplyEvent:
     object cards INDEPENDENT of its text -- the turn's intent node, so
     the reply links its own background-process record. Transports
     without an attachment surface ignore it.
+
+    ``confirm`` events (WP33, ADR 041 v2) carry a schema proposal's
+    harness-rendered confirmation text with ``confirm_id`` naming the
+    proposal. The Anytype transport posts one as its OWN message and
+    arms the 👍-reaction watch on it; other transports render the text
+    like a notice (their text says confirmation lives in the Anytype
+    chat).
     """
 
     text: str
     kind: str = "reply"
     file_name: str = ""
     attach: tuple[str, ...] = ()
+    confirm_id: str = ""
 
 
 class TurnObserver(Protocol):
@@ -371,8 +379,10 @@ class Orchestrator:
 
         spec = self._spec(state)
         # WP23: the outbox is TURN-scoped -- files a crashed earlier turn
-        # left behind must not ride out with this one's reply.
+        # left behind must not ride out with this one's reply. WP33: same
+        # discipline for schema drafts awaiting their confirm messages.
         state.services.outbox.clear()
+        state.services.proposals.drafted.clear()
         logger.info(
             "turn session=%s user=%s mode=%s", session_id, user_id, spec.name
         )
@@ -510,6 +520,17 @@ class Orchestrator:
                 outbound.content, kind="file", file_name=outbound.name
             ))
         state.services.outbox.clear()
+        # WP33 (ADR 041 v2): schema drafts ride out after the reply as
+        # confirm events -- the text is the STORED draft's rendering (the
+        # human confirms the exact change, never the model's paraphrase);
+        # each transport appends its own confirmation instruction. The
+        # Anytype transport posts one per event and arms the reaction
+        # watch; the human, not the model, applies.
+        for proposal in state.services.proposals.drain_drafted():
+            events.append(ReplyEvent(
+                proposal.confirm_text(),
+                kind="confirm", confirm_id=proposal.id,
+            ))
         intent = await self._finish_turn(
             state.services, spec, user_id, stripped, reply_text, trace,
             origin, process.render() if process.worked else "",

@@ -2,7 +2,7 @@
 
 An MCP server exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it. The framing is selectable ([domain profiles](#domain-profiles-gc_profile)): a **story world** (characters, locations, events, rendered prose — the default), a **work knowledge base** (people, teams, projects, meetings, decisions), or a **personal assistant** (tasks, procedures, notes).
 
-The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing ten tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
+The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), a FastMCP stdio server exposing eleven tools, and an **orchestrator harness** above it — a real Claude driver on your subscription, configurable activity modes ([ADR 015](docs/adr/015-configurable-activity-modes.md)), automatic per-turn provenance, semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Discord and Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)).
 
 **Space-reflecting ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure (Prose, SessionContext, and a few scalars — summaries live in the built-in `description` property, [ADR 011](docs/adr/011-summary-in-builtin-description.md), long-form descriptions in the body, [ADR 010](docs/adr/010-descriptions-in-the-body.md)).
 
@@ -117,7 +117,7 @@ docker compose -f .devcontainer/docker-compose.yml up -d --build
 }
 ```
 
-**3. Restart Claude Desktop.** You should see the ten tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
+**3. Restart Claude Desktop.** You should see the eleven tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
 
 ### Graduating to the live Anytype backend
 
@@ -223,7 +223,7 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/anytype/chat.py` | Chat quirk quarantine + `AnytypeChatClient` | Chat payload/SSE assumptions (C1–C6); the chat analogue of `mapping.py` |
 | `infrastructure/anytype/mock_server.py` | `MockAnytype` | Spike-pinned behavior simulator (search caps, body-editing quirks, timestamps, chat routes + live SSE) |
 | `interface/presenters.py` | Detail levels + node/path views | Response-budget shaping lives at the edge, not in tested logic |
-| `interface/tools.py` | The ten tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
+| `interface/tools.py` | The eleven tools (SDK-free) | `guarded` wrapper: actionable errors + per-call logging |
 | `interface/context_block.py` | Turn-start context block ([ADR 020](docs/adr/020-curated-cross-turn-context.md)) | Scratchpad + working-set buckets + recent trail, once per turn, budget-degraded |
 | `interface/profiles.py` | Domain profiles (DEPRECATED, ADR 035/WP27) + `ModeSpec` | Docstrings are prompts; golden-pinned per profile |
 | `interface/mode_config.py` | Mode validation seam + seed-TOML parser (ADR 035) | One payload shape feeds the memory store, the Anytype seeder, and the eval runner |

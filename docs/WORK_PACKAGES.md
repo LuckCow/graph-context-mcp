@@ -2211,6 +2211,63 @@ one-tool-call request.
 
 ---
 
+## WP33 — Schema proposals: reaction-confirmed type changes (ADR 041) — **shipped 2026-07-19**
+
+**Status:** complete (v2 same day: confirmation moved from an
+LLM-interpreted "yes" to a mechanical 👍 reaction). The eleventh tool,
+`schema`, lets the LLM DRAFT a new type or new scalar properties on an
+existing type; only a HUMAN's reaction on the harness-posted
+confirmation message executes it — ADR 006's "the server never invents
+vocabulary" amended with one human-gated path the model cannot walk.
+
+### Spike S15 results (2026-07-19, live sidecar, API `2025-11-08`) — quirk C12
+
+* `POST .../chats/:cid/messages/:mid/reactions {"emoji": "👍"}` → 200
+  (empty body); TOGGLE semantics — a second identical POST removes it.
+* Message `reactions`: `{"<emoji>": ["<account identity>", ...]}` —
+  ACCOUNT identities (the C6 suffix), not member ids.
+* Toggling emits SSE `event: reactions_updated` with payload
+  `{"id": <message id>, "reactions": {...}}` — bare, NO `message`
+  envelope; reaction frames are NOT replayed with the connect backlog
+  (consumers re-list on reconnect; messages carry `reactions` inline).
+
+### The shipped shape
+
+* **The model drafts only.** `propose_type` / `propose_fields` land
+  `PropertyDraft`s (construction-validated; ADR 023 `FIELD_FORMATS`,
+  scalars only) in a session-scoped ledger (cap 5, in-memory — drafts,
+  not records); `list`/`cancel` manage it. There is NO apply action —
+  attempting one is an error that teaches the contract.
+* **The confirm message is harness-authored.** Drafts drain after the
+  reply as `confirm` reply events (WP23-outbox discipline), rendered
+  from the STORED proposal — the human confirms the exact change, never
+  the model's paraphrase. The Anytype transport posts each as its OWN
+  message (+ "React 👍 to APPLY / 👎 to dismiss") and arms a watch on
+  the id; Discord/CLI render a where-to-confirm note instead.
+* **The reaction handler applies with no model turn.** SSE
+  `reactions_updated` frames (plus a tracked-message re-list sweep on
+  every reconnect — C12 frames don't replay) route into
+  `handle_reaction`: 👍 from any non-bot identity applies under the
+  route lock, 👎 dismisses, the bot's own identity never counts; the
+  outcome posts as ✅/🗑/⚠ messages. A restart clears watches and
+  drafts together — a stale 👍 is inert.
+* **Two new port methods** on `GraphRepository` — `create_type` /
+  `add_type_properties` — contract-tested against both backends. Reuse
+  a same-name property when formats agree; `SchemaChangeConflict` on
+  format mismatch (A12), relation-name shadowing, or an existing type
+  name; retry-safe no-op when a draft is already on the type.
+* **A11-safe by construction**: the adapter re-fetches the type inside
+  the single-writer section and resends the FULL property list plus
+  additions (bootstrap's retrofit discipline) — a human's fields
+  survive the PATCH. Created types register into the live
+  `SpaceRegistry` (`register_type`), so `create_node` can target them
+  with no resync; select options seed find-or-create as tags.
+* Bound in every mode beside `schedule`/`automation` (drafting is
+  harmless everywhere; the human alone executes); MCP-registered as
+  the `schema` tool.
+
+---
+
 ## Sequencing
 
 ```

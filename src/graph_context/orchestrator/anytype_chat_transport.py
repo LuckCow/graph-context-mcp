@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Protocol
 
 from graph_context.application.scheduler import DueEvent
+from graph_context.errors import GraphContextError
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import ImageAttachment, TranscriptEvent
 from graph_context.orchestrator.pipeline import (
@@ -72,6 +73,17 @@ MAX_ATTACHMENTS = 8  # per message; the reader wants cards, not a wall
 # reply by TurnReply); turns serialize per space and can run for a while,
 # so the user must see the bot working, not silence.
 PROCESSING_NOTICE = "Processing…"
+
+# WP33 (ADR 041 v2): the reaction vocabulary on a schema-proposal
+# confirmation message, and the instruction line appended to it. THIS
+# transport executes reactions; the render() fallback other surfaces use
+# says confirmation lives here.
+CONFIRM_APPLY_EMOJI = "\N{THUMBS UP SIGN}"
+CONFIRM_DISMISS_EMOJI = "\N{THUMBS DOWN SIGN}"
+CONFIRM_INSTRUCTION = (
+    f"React {CONFIRM_APPLY_EMOJI} to APPLY this schema change, "
+    f"{CONFIRM_DISMISS_EMOJI} to dismiss it."
+)
 
 SendFn = Callable[[str, tuple[str, ...]], Awaitable[str]]
 EditFn = Callable[[str, str, tuple[str, ...]], Awaitable[None]]
@@ -458,6 +470,15 @@ class TurnReply:
             raise RuntimeError("deliver_file needs a send_file primitive")
         self.sent.add(await self.send_file(name, content))
 
+    async def post(self, text: str, attachments: tuple[str, ...] = ()) -> str:
+        """Post a fresh message OUTSIDE the placeholder lifecycle (WP33:
+        the schema-confirm message must be its OWN message so a reaction
+        on it is unambiguous). The id lands in the sent ledger and is
+        returned for tracking."""
+        message_id = await self.send(text, attachments)
+        self.sent.add(message_id)
+        return message_id
+
     async def finish(self) -> None:
         """A turn that delivered nothing must not strand the placeholder.
         (The pipeline always yields at least one event; this is insurance.)"""
@@ -492,6 +513,11 @@ class AnytypeChatTurnHandler:
     # need is identical: a persisted per-chat order_id watermark.
     clear_marks: ChatCursor = field(default_factory=ChatCursor)
     bot_identity: str = ""
+    # WP33 (ADR 041 v2): posted schema-confirm messages awaiting a
+    # human's reaction -- message id -> (chat id, proposal id). In-memory
+    # like the proposals themselves: a restart clears both sides
+    # together, so a stale 👍 is silently inert.
+    pending_confirms: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def accepts(self, message: InboundChatMessage) -> bool:
         """The gate, separate from the turn (mirrors DiscordTurnHandler)."""
@@ -612,22 +638,32 @@ class AnytypeChatTurnHandler:
                 observer=activity,
                 images=images,
             )
-        await self.deliver_events(events, reply)
+        await self.deliver_events(events, reply, chat_id=message.chat_id)
         if activity is not None:
             await activity.close(ok=True)
         return list(events)
 
     async def deliver_events(
-        self, events: Sequence[ReplyEvent], reply: TurnReply
+        self, events: Sequence[ReplyEvent], reply: TurnReply,
+        chat_id: str = "",
     ) -> None:
         """A turn's reply events -> plain-text chunked chat deliveries,
         every referenced object attached to the first chunk as a card.
         File events (WP23) post as real uploads when the reply carries a
         ``send_file`` primitive; without one they degrade to the fenced
-        rendering like any other surface."""
+        rendering like any other surface. Confirm events (WP33) post as
+        their OWN messages with the reaction instruction appended, and
+        arm the reaction watch (``chat_id`` names the chat the watch
+        fires in; ``""`` -- bare tests -- degrades to the render path)."""
         for event in events:
             if event.kind == "file" and reply.send_file is not None:
                 await reply.deliver_file(event.file_name, event.text)
+                continue
+            if event.kind == "confirm" and chat_id and event.confirm_id:
+                message_id = await reply.post(
+                    plainify(f"{event.text}\n{CONFIRM_INSTRUCTION}")
+                )
+                self.pending_confirms[message_id] = (chat_id, event.confirm_id)
                 continue
             rendered = render(event)
             # ADR 038: explicit attachments (the turn's intent node) ride
@@ -687,4 +723,112 @@ class AnytypeChatTurnHandler:
                 # Intent nodes point back at the event node that fired.
                 origin=f"schedule:{due.node_id}",
             )
-        await self.deliver_events(events, reply)
+        await self.deliver_events(events, reply, chat_id=chat_id)
+
+    def confirms_in(self, chat_id: str) -> tuple[str, ...]:
+        """Message ids with an armed reaction watch in one chat -- the
+        reconnect sweep asks before paying a message re-list (C12:
+        reaction frames are not replayed with the backlog)."""
+        return tuple(
+            message_id
+            for message_id, (chat, _) in self.pending_confirms.items()
+            if chat == chat_id
+        )
+
+    async def handle_reaction(
+        self,
+        chat_id: str,
+        message_id: str,
+        reactions: Mapping[str, Sequence[str]],
+        send: SendFn,
+    ) -> None:
+        """A reaction change on a tracked confirm message -> the WP33
+        apply/dismiss, executed by the HARNESS -- no model turn, which is
+        the guarantee ADR 041 v2 exists for. Any non-bot account identity
+        counts as the human (C12 lists ACCOUNT identities; with no
+        discovered bot identity -- the desktop endpoint, where bot and
+        human share an account -- every identity counts). 👍 wins over a
+        simultaneous 👎. Untracked messages are ignored, so the bot's own
+        posts and ordinary reactions cost nothing.
+        """
+        tracked = self.pending_confirms.get(message_id)
+        if tracked is None or tracked[0] != chat_id:
+            return
+        proposal_id = tracked[1]
+
+        def human_reacted(emoji: str) -> bool:
+            return any(
+                identity != self.bot_identity or not self.bot_identity
+                for identity in reactions.get(emoji, ())
+            )
+
+        apply, dismiss = (
+            human_reacted(CONFIRM_APPLY_EMOJI),
+            human_reacted(CONFIRM_DISMISS_EMOJI),
+        )
+        if not apply and not dismiss:
+            return  # a reaction was removed / something unrelated
+        route = self.routes.get(chat_id)
+        services = (
+            route.orchestrator.services_of(f"anytype:{chat_id}")
+            if route is not None else None
+        )
+        if route is None or services is None:
+            # The session vanished under the watch (restart mid-flight);
+            # the proposal ledger went with it.
+            del self.pending_confirms[message_id]
+            self.sent.add(await send(
+                f"[notice] proposal {proposal_id} is no longer pending; "
+                "ask for it again.", (),
+            ))
+            return
+        async with route.lock:
+            if not any(
+                p.id == proposal_id for p in services.proposals.pending()
+            ):
+                del self.pending_confirms[message_id]
+                self.sent.add(await send(
+                    f"[notice] proposal {proposal_id} is no longer "
+                    "pending; ask for it again.", (),
+                ))
+                return
+            if not apply:
+                proposal = services.proposals.cancel(proposal_id)
+                del self.pending_confirms[message_id]
+                self.sent.add(await send(
+                    f"\N{WASTEBASKET} dismissed proposal {proposal.id} "
+                    f"({proposal.type_name!r}); nothing was changed.", (),
+                ))
+                return
+            try:
+                proposal, type_name = await services.proposals.apply(
+                    services.repository, proposal_id
+                )
+            except GraphContextError as err:
+                # Kept tracked: the space may heal (or the user 👎s).
+                self.sent.add(await send(
+                    f"\N{WARNING SIGN} proposal {proposal_id} failed to "
+                    f"apply: {err}", (),
+                ))
+                return
+            if services.persister is not None:
+                await services.persister.note_mutation()
+        del self.pending_confirms[message_id]
+        if proposal.kind == "new_type":
+            outcome = (
+                f"\N{WHITE HEAVY CHECK MARK} applied {proposal.id}: created "
+                f"type {type_name!r} with "
+                f"{len(proposal.properties)} propert"
+                f"{'y' if len(proposal.properties) == 1 else 'ies'}."
+            )
+        else:
+            added = ", ".join(d.name for d in proposal.properties)
+            outcome = (
+                f"\N{WHITE HEAVY CHECK MARK} applied {proposal.id}: "
+                f"{type_name!r} now carries {added}."
+            )
+        self.sent.add(await send(outcome, ()))
+        logger.info(
+            "schema proposal %s applied via reaction (chat=%s)",
+            proposal_id, chat_id,
+        )

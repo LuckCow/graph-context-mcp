@@ -414,6 +414,17 @@ class AnytypeClient:
             "DELETE", f"{self._space}/chats/{chat_id}/messages/{message_id}"
         )
 
+    async def toggle_chat_reaction(
+        self, chat_id: str, message_id: str, emoji: str
+    ) -> None:
+        """Toggle the calling account's reaction on a message (C12: a
+        second identical POST removes it; the 200 body is empty)."""
+        await self.request(
+            "POST",
+            f"{self._space}/chats/{chat_id}/messages/{message_id}/reactions",
+            json={"emoji": emoji},
+        )
+
     async def stream_lines(
         self, path: str, *, heartbeat_seconds: int = 30
     ) -> AsyncIterator[str]:

@@ -170,6 +170,21 @@ def validate_field_declarations(
             )
 
 
+def validate_type_name(name: str) -> None:
+    """Well-formedness of a proposed NEW type's display name (WP33).
+
+    Whether the name collides with an existing type is the repository's
+    call (:class:`graph_context.errors.SchemaChangeConflict`), not ours.
+    """
+    if not name.strip():
+        raise SchemaViolation("type 'name' must be a non-empty string")
+    if name.strip().lower().startswith("gc_"):
+        raise SchemaViolation(
+            f"type name {name!r} uses the reserved gc_ prefix "
+            "(infrastructure vocabulary); pick a human name"
+        )
+
+
 def validate_new_node(
     role: Role | None,
     name: str,

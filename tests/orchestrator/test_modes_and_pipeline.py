@@ -630,6 +630,60 @@ def _keyed_orchestrator(
     return orchestrator, store
 
 
+class TestSchemaConfirmEvents:
+    """WP33 (ADR 041 v2): a turn that drafted schema proposals rides them
+    out AFTER the reply as confirm events -- harness-rendered text, the
+    proposal id on the event, exactly once."""
+
+    _PROPOSE = ToolCall("schema", {
+        "action": "propose_type", "type": "Faction",
+        "properties": [{"name": "Motto", "format": "text"}],
+    })
+
+    async def test_drafts_ride_out_as_confirm_events(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(self._PROPOSE,)),
+            LLMTurn(reply="drafted -- please confirm"),
+        ])
+        events = await orchestrator.handle_message("s1", "u1", "track factions")
+        assert [e.kind for e in events] == ["reply", "confirm"]
+        confirm = events[-1]
+        assert confirm.confirm_id == "p1"
+        assert "Schema proposal p1:" in confirm.text
+        assert "NEW TYPE 'Faction'" in confirm.text
+        assert "React" not in confirm.text  # instruction is the transport's
+        # Drafting is not applying.
+        assert "Faction" not in services.repository.known_node_types()
+
+    async def test_a_cancelled_draft_posts_no_confirm(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(self._PROPOSE,)),
+            LLMTurn(tool_calls=(
+                ToolCall("schema", {"action": "cancel", "proposal_id": "p1"}),
+            )),
+            LLMTurn(reply="never mind"),
+        ])
+        events = await orchestrator.handle_message("s1", "u1", "hm")
+        assert [e.kind for e in events] == ["reply"]
+
+    async def test_next_turn_does_not_repost_old_drafts(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(self._PROPOSE,)),
+            LLMTurn(reply="drafted"),
+            LLMTurn(reply="just chatting"),
+        ])
+        first = await orchestrator.handle_message("s1", "u1", "track factions")
+        assert [e.kind for e in first] == ["reply", "confirm"]
+        second = await orchestrator.handle_message("s1", "u1", "ok cool")
+        assert [e.kind for e in second] == ["reply"]
+
+
 class TestKeyedSessions:
     """WP8: each session id gets its own SessionState + persisted mode."""
 

@@ -54,6 +54,18 @@ version header) lives here, pinned by spike S10 and mirrored by
         type). Chat messages reference files through the same
         ``attachments`` envelopes as C7 (``{"target", "type"}``), and
         inbound messages EXPOSE their attachments.
+    C12. Reactions (spike S15, live sidecar 2026-07-19): ``POST
+        .../messages/<id>/reactions {"emoji": "👍"}`` TOGGLES the calling
+        account's reaction (a second POST removes it; 200 with an empty
+        body either way). A message's ``reactions`` is ``{"<emoji>":
+        ["<account identity>", ...]}`` -- ACCOUNT identities (the C6
+        suffix), not member ids. Toggling emits an SSE frame ``event:
+        reactions_updated`` whose payload is ``{"id": <message id>,
+        "reactions": {...}}`` -- the message id + map DIRECTLY, with NO
+        ``message`` envelope (unlike message_added/updated). Reaction
+        frames are NOT replayed with the connect-time backlog, so a
+        consumer that must not miss one re-reads the message list on
+        reconnect (messages carry ``reactions`` inline).
     C11. Rich text rides ``marks`` beside ``text`` (spike S14):
         ``{"from", "to", "type"}`` + ``"param"`` for links, offsets in
         UTF-16 CODE UNITS. Ranges are bounds-checked server-side and an
@@ -69,8 +81,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -95,7 +107,10 @@ class ChatAttachment:
 
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
-    """One chat message, reduced to what the transport needs (C3/C4)."""
+    """One chat message, reduced to what the transport needs (C3/C4).
+
+    ``reactions`` (C12): emoji -> the ACCOUNT identities that reacted --
+    read by the schema-confirm sweep (WP33), ``{}`` otherwise."""
 
     id: str
     creator: str
@@ -104,14 +119,32 @@ class ChatMessage:
     created_at: int = 0
     creator_name: str = ""
     attachments: tuple[ChatAttachment, ...] = ()
+    reactions: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ChatEvent:
-    """One SSE frame: a message event, or a keepalive heartbeat."""
+    """One SSE frame: a message event, or a keepalive heartbeat.
+
+    ``reactions_updated`` frames (C12) carry no message envelope --
+    ``message`` stays ``None`` and the payload surfaces as
+    ``message_id`` + ``reactions`` instead."""
 
     kind: str  # one of MESSAGE_EVENT_KINDS, or "heartbeat"
     message: ChatMessage | None = None
+    message_id: str = ""
+    reactions: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+def _to_reactions(raw: Any) -> dict[str, tuple[str, ...]]:
+    """The C12 reactions map, defensively: emoji -> identity tuple."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(emoji): tuple(str(identity) for identity in identities)
+        for emoji, identities in raw.items()
+        if isinstance(identities, list)
+    }
 
 
 def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
@@ -131,6 +164,7 @@ def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
             for entry in raw.get("attachments") or []
             if isinstance(entry, dict) and entry.get("target")
         ),
+        reactions=_to_reactions(raw.get("reactions")),
     )
 
 
@@ -156,19 +190,29 @@ async def parse_sse(lines: AsyncIterator[str]) -> AsyncIterator[ChatEvent]:
             continue
         if line == "" and (event_kind or data_parts):
             kind, message = event_kind, None
+            message_id = ""
+            reactions: dict[str, tuple[str, ...]] = {}
             try:
                 payload = json.loads("".join(data_parts)) if data_parts else {}
                 kind = payload.get("type", event_kind) or event_kind
-                raw = (payload.get("payload") or {}).get("message")
+                envelope = payload.get("payload") or {}
+                raw = envelope.get("message")
                 if raw is not None:
                     message = to_chat_message(raw)
+                elif kind == "reactions_updated":
+                    # C12: no message envelope -- id + reactions ride bare.
+                    message_id = str(envelope.get("id", ""))
+                    reactions = _to_reactions(envelope.get("reactions"))
             except (ValueError, TypeError):
                 logger.warning("dropping malformed SSE frame (event=%r)", event_kind)
                 event_kind, data_parts = "", []
                 continue
             event_kind, data_parts = "", []
             if kind in MESSAGE_EVENT_KINDS:
-                yield ChatEvent(kind=kind, message=message)
+                yield ChatEvent(
+                    kind=kind, message=message,
+                    message_id=message_id, reactions=reactions,
+                )
             # unknown kinds are dropped silently: forward-compatible
 
 
@@ -311,6 +355,12 @@ class AnytypeChatClient:
         """Remove a message (WP19: the live activity trace is deleted
         once the reply has posted)."""
         await self._client.delete_chat_message(chat_id, message_id)
+
+    async def toggle_reaction(
+        self, chat_id: str, message_id: str, emoji: str
+    ) -> None:
+        """Toggle this account's reaction on a message (quirk C12)."""
+        await self._client.toggle_chat_reaction(chat_id, message_id, emoji)
 
     async def stream(
         self, chat_id: str, *, heartbeat_seconds: int = 30

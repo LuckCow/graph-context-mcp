@@ -112,6 +112,10 @@ _CHAT_MESSAGES = re.compile(
 _CHAT_MESSAGE = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages/(?P<msg>[^/]+)$"
 )
+_CHAT_REACTIONS = re.compile(
+    r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)"
+    r"/messages/(?P<msg>[^/]+)/reactions$"
+)
 _CHAT_STREAM = re.compile(
     r"^/v1/spaces/(?P<space>[^/]+)/chats/(?P<chat>[^/]+)/messages/stream$"
 )
@@ -152,6 +156,13 @@ def _parse_multipart_file(
 def _sse_frame(kind: str, message: dict[str, Any]) -> bytes:
     """One chat SSE frame exactly as the live server sends it (C5)."""
     data = json.dumps({"type": kind, "payload": {"message": message}})
+    return f"event: {kind}\ndata: {data}\n\n".encode()
+
+
+def _sse_payload_frame(kind: str, payload: dict[str, Any]) -> bytes:
+    """A frame whose payload is NOT a message envelope (C12:
+    ``reactions_updated`` sends ``{"id", "reactions"}`` bare)."""
+    data = json.dumps({"type": kind, "payload": payload})
     return f"event: {kind}\ndata: {data}\n\n".encode()
 
 
@@ -223,6 +234,9 @@ class MockAnytype:
         # own member id -- the live server attributes API posts to the
         # authenticated account's participant id.
         self.api_member_id = "mock-self"
+        # C12: reactions carry ACCOUNT identities, not member ids -- this
+        # is what the API caller's toggles record.
+        self.api_identity = "mock-self-identity"
         # Space membership (WP14 identity discovery, quirk C6): tests set
         # this to model solo-member (bot's own) vs shared spaces.
         self.members: list[dict[str, Any]] = []
@@ -269,6 +283,7 @@ class MockAnytype:
             return self._handle_spaces(request)
         for pattern, handler in (
             (_CHAT_STREAM, self._handle_chat_stream),  # before _CHAT_MESSAGE
+            (_CHAT_REACTIONS, self._handle_chat_reactions),  # before _CHAT_MESSAGE
             (_CHAT_MESSAGE, self._handle_chat_message),
             (_CHAT_MESSAGES, self._handle_chat_messages),
             (_CHATS, self._handle_chats),
@@ -462,6 +477,34 @@ class MockAnytype:
         the read-side twin of ``post_chat_message_directly``). Copies, so
         a test cannot accidentally mutate the store."""
         return [dict(m) for m in self._chat_messages[chat_id]]
+
+    def react_directly(
+        self, chat_id: str, message_id: str, emoji: str, identity: str
+    ) -> None:
+        """A reaction from another member -- the 'human reacted' analogue
+        of ``post_chat_message_directly`` (C12). Toggle semantics, like
+        live; open streams see ``reactions_updated``."""
+        message = next(
+            m for m in self._chat_messages[chat_id] if m["id"] == message_id
+        )
+        self._toggle_reaction(chat_id, message, emoji, identity)
+
+    def _toggle_reaction(
+        self, chat_id: str, message: dict[str, Any], emoji: str, identity: str
+    ) -> None:
+        reactions: dict[str, list[str]] = message.setdefault("reactions", {})
+        holders = reactions.setdefault(emoji, [])
+        if identity in holders:
+            holders.remove(identity)
+            if not holders:
+                del reactions[emoji]
+        else:
+            holders.append(identity)
+        # C12: the frame carries id + reactions bare, no message envelope.
+        self._notify_chat(chat_id, {
+            "kind": "reactions_updated",
+            "payload": {"id": message["id"], "reactions": reactions},
+        })
 
     def emit_chat_heartbeat(self, chat_id: str) -> None:
         """Push a ``: heartbeat`` comment to every open stream (C5)."""
@@ -871,6 +914,30 @@ class MockAnytype:
             return httpx.Response(200, json={})
         return self._error(405, "method_not_allowed")
 
+    def _handle_chat_reactions(
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
+        """C12 (spike S15): POST toggles the calling ACCOUNT's reaction;
+        the 200 body is empty; open streams see ``reactions_updated``."""
+        if request.method != "POST":
+            return self._error(405, "method_not_allowed")
+        chat_id = match.group("chat")
+        if chat_id not in self._chats:
+            return self._error(404, "chat_not_found")
+        message = next(
+            (m for m in self._chat_messages[chat_id]
+             if m["id"] == match.group("msg")),
+            None,
+        )
+        if message is None:
+            return self._error(404, "message_not_found")
+        body = json.loads(request.content)
+        emoji = str(body.get("emoji", ""))
+        if not emoji:
+            return self._error(400, "bad_request")
+        self._toggle_reaction(chat_id, message, emoji, self.api_identity)
+        return httpx.Response(200)
+
     def _handle_chat_stream(
         self, request: httpx.Request, match: re.Match[str]
     ) -> httpx.Response:
@@ -893,6 +960,10 @@ class MockAnytype:
                         return
                     if item["kind"] == "heartbeat":
                         yield b": heartbeat\n\n"
+                    elif "payload" in item:
+                        # C12: reactions_updated frames carry a bare
+                        # id+reactions payload, no message envelope.
+                        yield _sse_payload_frame(item["kind"], item["payload"])
                     else:
                         yield _sse_frame(item["kind"], item["message"])
             finally:

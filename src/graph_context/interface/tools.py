@@ -46,8 +46,15 @@ from functools import wraps
 from typing import Any
 
 from graph_context.application.scheduler import Scheduler
+from graph_context.application.schema_proposals import SchemaProposal
 from graph_context.domain import schema
-from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
+from graph_context.domain.models import (
+    Edge,
+    Node,
+    NodeDraft,
+    NodeId,
+    PropertyDraft,
+)
 from graph_context.domain.overview import build_overview
 from graph_context.domain.query import (
     NodeQuery,
@@ -455,6 +462,112 @@ async def automation_tool(
     raise GraphContextError(
         f"unknown action {action!r}; allowed: create, update, list, "
         "pause, resume, test"
+    )
+
+
+# WP33 (ADR 041): the schema tool -- the LLM drafts a type change, the
+# user confirms, only then does apply touch the space.
+
+
+def _parse_property_drafts(
+    properties: list[dict[str, Any]] | None,
+) -> tuple[PropertyDraft, ...]:
+    """Property entries as the tool surface takes them:
+    ``{"name": ..., "format": ..., "options": [...]}`` (options may also
+    arrive as one comma-separated string). Domain validation runs inside
+    ``PropertyDraft``; here we only reshape and reject non-dict entries."""
+    drafts: list[PropertyDraft] = []
+    for entry in properties or []:
+        if not isinstance(entry, dict):
+            raise GraphContextError(
+                "each properties entry must be an object like "
+                "{'name': 'Status', 'format': 'select', "
+                "'options': ['Open', 'Done']}"
+            )
+        options = entry.get("options") or ()
+        if isinstance(options, str):
+            options = [o.strip() for o in options.split(",") if o.strip()]
+        drafts.append(PropertyDraft(
+            name=str(entry.get("name", "")),
+            format=str(entry.get("format", "")).strip().lower(),
+            options=tuple(str(o) for o in options),
+        ))
+    return tuple(drafts)
+
+
+def _render_proposal(proposal: SchemaProposal) -> str:
+    lines = [f"proposal {proposal.id} (drafted, NOT applied):"]
+    lines.extend(proposal.summary())
+    lines.append(
+        "A confirmation message will be posted right after your reply; "
+        "the change applies ONLY if the user reacts \N{THUMBS UP SIGN} "
+        "on it (\N{THUMBS DOWN SIGN} dismisses). You cannot apply it "
+        "yourself -- do not claim the change is made, and do not repeat "
+        "the proposal's contents in your reply (the confirmation message "
+        "carries them). If the user asks for changes, cancel and "
+        "re-propose."
+    )
+    return "\n".join(lines)
+
+
+@guarded
+async def schema_tool(
+    services: Services,
+    action: str = "list",
+    type: str = "",
+    plural: str = "",
+    properties: list[dict[str, Any]] | None = None,
+    reason: str = "",
+    proposal_id: str = "",
+) -> str:
+    proposals = services.proposals
+    if action == "propose_type":
+        proposal = proposals.propose_type(
+            services.repository, type, plural=plural,
+            properties=_parse_property_drafts(properties), reason=reason,
+        )
+        return _render_proposal(proposal)
+    if action == "propose_fields":
+        proposal = proposals.propose_fields(
+            services.repository, type,
+            _parse_property_drafts(properties), reason=reason,
+        )
+        return _render_proposal(proposal)
+    if action == "list":
+        pending = proposals.pending()
+        if not pending:
+            return (
+                "no pending schema proposals. Draft one with "
+                "action='propose_type' (type, plural, properties) or "
+                "action='propose_fields' (type, properties)."
+            )
+        lines = [f"pending schema proposals ({len(pending)}):"]
+        for proposal in pending:
+            lines.append(f"[{proposal.id}]")
+            lines.extend(proposal.summary())
+        lines.append(
+            "Each applies only when the user reacts \N{THUMBS UP SIGN} "
+            "on its confirmation message; you cannot apply them."
+        )
+        return "\n".join(lines)
+    if action == "apply":
+        # ADR 041 v2: apply is DELIBERATELY not a model action -- the
+        # guarantee is that only a human's reaction executes a change.
+        raise GraphContextError(
+            "apply is not a model action: the change executes only when "
+            "the USER reacts \N{THUMBS UP SIGN} on the proposal's "
+            "confirmation message in the chat. If they agreed in words, "
+            "point them at the confirmation message"
+        )
+    if action == "cancel":
+        proposal = proposals.cancel(proposal_id)
+        return (
+            f"cancelled proposal {proposal.id} ({proposal.type_name!r}); "
+            "nothing was changed. Re-propose any time."
+        )
+    raise GraphContextError(
+        f"unknown action {action!r}; allowed: propose_type, "
+        "propose_fields, list, cancel"
     )
 
 

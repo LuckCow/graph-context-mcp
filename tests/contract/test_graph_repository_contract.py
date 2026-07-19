@@ -14,12 +14,19 @@ import pytest
 
 from graph_context.domain import attribution
 from graph_context.domain.graph import Direction
-from graph_context.domain.models import FieldSpec, LinkSpec, NodeDraft
+from graph_context.domain.models import (
+    FieldSpec,
+    LinkSpec,
+    NodeDraft,
+    PropertyDraft,
+)
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
 from graph_context.errors import (
     NodeNotFound,
+    SchemaChangeConflict,
     UnknownFieldKey,
+    UnknownNodeType,
     UnknownRelationLabel,
 )
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -504,6 +511,133 @@ class TestAnytypeFieldCatalog(FieldCatalogContract):
         )
         await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
         await client.create_tag(status["id"], {"name": "In Progress", "color": "lime"})
+        await client.create_property(
+            {"key": "assignee", "name": "Assignee", "format": "objects"}
+        )
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()
+
+
+class SchemaChangeContract:
+    """WP33 (ADR 041): user-confirmed schema changes behave identically in
+    every implementation. Seeded with a "Status" select property and an
+    "Assignee" objects-format relation so the reuse/conflict semantics
+    have something to bite on."""
+
+    async def test_created_type_is_immediately_a_create_target(self, schema_repo):
+        name = await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        assert name == "Faction"
+        assert "Faction" in schema_repo.known_node_types()
+        node = await schema_repo.create_node(
+            NodeDraft("Faction", name="Iron Pact", summary="s.")
+        )
+        assert schema_repo.graph.node(node.id).name == "Iron Pact"
+
+    async def test_created_type_offers_its_properties_as_fields(self, schema_repo):
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        specs = schema_repo.field_catalog().get("Faction", ())
+        assert any(s.name == "Motto" and s.format == "text" for s in specs)
+
+    async def test_create_type_conflicts_with_an_existing_type(self, schema_repo):
+        with pytest.raises(SchemaChangeConflict, match="already exists"):
+            await schema_repo.create_type("Item")
+
+    async def test_added_properties_join_without_stripping_existing_ones(
+        self, schema_repo
+    ):
+        """The A11 assertion: the type update replaces the property list
+        wholesale on the wire, so additions must ride with the fetched
+        list -- a careless adapter strips 'Motto' here."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Influence", format="number"),)
+        )
+        names = {s.name for s in schema_repo.field_catalog().get("Faction", ())}
+        assert {"Motto", "Influence"} <= names
+
+    async def test_add_properties_to_unknown_type_raises(self, schema_repo):
+        with pytest.raises(UnknownNodeType):
+            await schema_repo.add_type_properties(
+                "NoSuchType", (PropertyDraft(name="X", format="text"),)
+            )
+
+    async def test_existing_same_format_property_is_reused(self, schema_repo):
+        """A draft naming the seeded "Status" select attaches the existing
+        property; a subsequent write resolves it under its canonical key."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Status", format="select"),)
+        )
+        node = await schema_repo.create_node(
+            NodeDraft("Faction", name="Iron Pact", summary="s.",
+                      fields={"Status": "To Do"})
+        )
+        assert node.fields.get("status") == "To Do"
+
+    async def test_existing_other_format_property_conflicts(self, schema_repo):
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await schema_repo.create_type(
+                "Faction",
+                properties=(PropertyDraft(name="Status", format="date"),),
+            )
+
+    async def test_relation_named_property_conflicts(self, schema_repo):
+        with pytest.raises(SchemaChangeConflict, match="relation"):
+            await schema_repo.create_type(
+                "Faction",
+                properties=(PropertyDraft(name="Assignee", format="text"),),
+            )
+
+    async def test_readding_an_attached_property_is_a_noop(self, schema_repo):
+        """Retry safety: a confirmed proposal applied twice changes nothing."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Motto", format="text"),)
+        )
+        specs = schema_repo.field_catalog().get("Faction", ())
+        assert sum(1 for s in specs if s.name == "Motto") == 1
+
+    async def test_readding_under_another_format_conflicts(self, schema_repo):
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await schema_repo.add_type_properties(
+                "Faction", (PropertyDraft(name="Motto", format="number"),)
+            )
+
+
+class TestInMemorySchemaChanges(SchemaChangeContract):
+    @pytest.fixture
+    def schema_repo(self):
+        return InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Status", format="select", key="status",
+                      options=("To Do", "In Progress")),
+            FieldSpec(name="Assignee", format="objects", key="assignee"),
+        ])
+
+
+class TestAnytypeSchemaChanges(SchemaChangeContract):
+    @pytest.fixture
+    async def schema_repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        status = await client.create_property(
+            {"key": "status", "name": "Status", "format": "select"}
+        )
+        await client.create_tag(status["id"], {"name": "To Do", "color": "ice"})
         await client.create_property(
             {"key": "assignee", "name": "Assignee", "format": "objects"}
         )

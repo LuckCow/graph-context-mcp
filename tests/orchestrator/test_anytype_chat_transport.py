@@ -905,3 +905,115 @@ class TestFileDelivery:
         reply = self._reply(files, [], with_primitive=True)
         await reply.deliver_file("x.md", "hi")
         assert "f1" in reply.sent
+
+
+class TestSchemaConfirmFlow:
+    """WP33 (ADR 041 v2): schema changes execute on a HUMAN's reaction --
+    the confirm message is harness-authored and the apply path never
+    touches the model."""
+
+    _PROPOSE = ToolCall("schema", {
+        "action": "propose_type", "type": "Faction",
+        "properties": [{"name": "Motto", "format": "text"}],
+    })
+
+    async def _proposed(
+        self, **overrides: object
+    ) -> tuple[AnytypeChatTurnHandler, _ChatRecorder]:
+        handler = _handler(
+            [LLMTurn(tool_calls=(self._PROPOSE,)), LLMTurn(reply="drafted!")],
+            **overrides,
+        )
+        recorder = await _run(handler, _message())
+        return handler, recorder
+
+    def _services(self, handler: AnytypeChatTurnHandler):
+        services = handler.routes[CHAT].orchestrator.services_of(
+            f"anytype:{CHAT}"
+        )
+        assert services is not None
+        return services
+
+    async def test_confirm_posts_as_its_own_tracked_message(self) -> None:
+        handler, recorder = await self._proposed()
+        confirm = recorder.messages[-1]
+        text = str(confirm["text"])
+        assert "Schema proposal p1:" in text
+        assert "NEW TYPE 'Faction'" in text
+        assert "APPLY" in text and "\N{THUMBS UP SIGN}" in text
+        assert recorder.texts()[0] == "drafted!"  # the reply stays its own
+        assert handler.pending_confirms == {str(confirm["id"]): (CHAT, "p1")}
+        assert str(confirm["id"]) in handler.sent  # echo-suppressed
+        # Drafting touched nothing.
+        repo = self._services(handler).repository
+        assert "Faction" not in repo.known_node_types()
+
+    async def test_a_humans_thumbs_up_applies_without_a_model_turn(
+        self,
+    ) -> None:
+        handler, recorder = await self._proposed()
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS UP SIGN}": ("human-identity",)}, recorder.send,
+        )
+        services = self._services(handler)
+        assert "Faction" in services.repository.known_node_types()
+        assert services.proposals.pending() == ()
+        assert handler.pending_confirms == {}
+        outcome = recorder.texts()[-1]
+        assert "applied p1" in outcome and "'Faction'" in outcome
+        assert str(recorder.messages[-1]["id"]) in handler.sent
+
+    async def test_the_bots_own_reaction_never_applies(self) -> None:
+        handler, recorder = await self._proposed(bot_identity="bot-identity")
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS UP SIGN}": ("bot-identity",)}, recorder.send,
+        )
+        assert message_id in handler.pending_confirms  # still armed
+        repo = self._services(handler).repository
+        assert "Faction" not in repo.known_node_types()
+
+    async def test_a_thumbs_down_dismisses_the_draft(self) -> None:
+        handler, recorder = await self._proposed()
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS DOWN SIGN}": ("human-identity",)}, recorder.send,
+        )
+        services = self._services(handler)
+        assert services.proposals.pending() == ()
+        assert handler.pending_confirms == {}
+        assert "dismissed proposal p1" in recorder.texts()[-1]
+        assert "Faction" not in services.repository.known_node_types()
+
+    async def test_reactions_on_untracked_messages_cost_nothing(self) -> None:
+        handler, recorder = await self._proposed()
+        before = len(recorder.messages)
+        await handler.handle_reaction(
+            CHAT, "unrelated-message",
+            {"\N{THUMBS UP SIGN}": ("human-identity",)}, recorder.send,
+        )
+        assert len(recorder.messages) == before
+        assert handler.pending_confirms  # untouched
+
+    async def test_a_failed_apply_reports_and_keeps_the_watch(self) -> None:
+        handler, recorder = await self._proposed()
+        # The space changed under the draft: the type now exists.
+        await self._services(handler).repository.create_type("Faction")
+        (message_id,) = handler.pending_confirms
+        await handler.handle_reaction(
+            CHAT, message_id,
+            {"\N{THUMBS UP SIGN}": ("human-identity",)}, recorder.send,
+        )
+        assert "failed to apply" in recorder.texts()[-1]
+        assert message_id in handler.pending_confirms  # 👎 still possible
+        assert self._services(handler).proposals.pending()  # draft kept
+
+    async def test_confirms_in_names_only_the_chats_own_watches(self) -> None:
+        handler, _ = await self._proposed()
+        (message_id,) = handler.pending_confirms
+        assert handler.confirms_in(CHAT) == (message_id,)
+        assert handler.confirms_in("other-chat") == ()

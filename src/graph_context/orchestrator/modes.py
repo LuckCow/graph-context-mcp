@@ -64,6 +64,11 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     # WP23 (ADR 032): delivery, not graph authorship -- queues a file for
     # the transport to attach to the reply; read-only modes can send too.
     "send_file": tools.send_file_tool,
+    # WP33 (ADR 041): schema proposals are drafted in conversation and
+    # gated on the USER's confirmation, so binding them everywhere does
+    # not let a read-only mode change anything unilaterally -- the human
+    # authorizes every apply. Same posture as schedule/automation.
+    "schema": tools.schema_tool,
 }
 
 MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})

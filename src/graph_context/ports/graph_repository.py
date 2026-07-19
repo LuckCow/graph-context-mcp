@@ -28,6 +28,7 @@ from graph_context.domain.models import (
     Node,
     NodeDraft,
     NodeId,
+    PropertyDraft,
     TimelineValue,
 )
 from graph_context.domain.schema import Role
@@ -144,6 +145,46 @@ class GraphRepository(Protocol):
         Guidance for the LLM (overview rendering, unmatched-key errors):
         which properties already exist as ``fields`` targets on each
         non-infra type. May be empty for backends without a space schema.
+        """
+        ...
+
+    async def create_type(
+        self,
+        name: str,
+        *,
+        plural: str = "",
+        properties: Sequence[PropertyDraft] = (),
+    ) -> str:
+        """Create a NEW object type in the space (WP33, ADR 041).
+
+        Returns the created type's display name; the type is immediately
+        usable as a ``create_node`` target (implementations register it in
+        their live vocabulary, no resync needed). An empty ``plural``
+        derives ``<name>s``. Raises
+        :class:`graph_context.errors.SchemaChangeConflict` when ``name``
+        already resolves to an existing type. A property draft whose name
+        matches an existing space property is REUSED (attached) when the
+        formats agree, and conflicts when they differ -- formats are
+        immutable (A12), so a mismatch must stop the change, never mint a
+        shadow. User confirmation is the caller's contract (the schema
+        tool's proposal flow); implementations do not gate.
+        """
+        ...
+
+    async def add_type_properties(
+        self, type_identifier: str, properties: Sequence[PropertyDraft]
+    ) -> str:
+        """Attach new scalar properties to an existing type (WP33).
+
+        ``type_identifier`` resolves like ``create_node``'s type (key,
+        display name, or role); no match raises
+        :class:`graph_context.errors.UnknownNodeType`. Existing properties
+        on the type must SURVIVE the change (the Anytype type PATCH
+        replaces the property list wholesale -- quirk A11 -- so the
+        adapter resends the fetched list plus the additions). Same reuse/
+        conflict semantics as :meth:`create_type`; a draft already on the
+        type with a matching format is a no-op, so a confirmed proposal
+        can be retried safely. Returns the type's display name.
         """
         ...
 

@@ -1036,3 +1036,82 @@ class TestSendFileTool:
             )
         out = await tools.send_file_tool(services, name="one-more.md", content="x")
         assert out.startswith("ERROR:") and "next turn" in out
+
+
+class TestSchemaTool:
+    """WP33 (ADR 041 v2): the model DRAFTS schema changes; the confirm
+    message + 👍 reaction belong to the harness. The tool surface has no
+    apply -- that absence is the guarantee."""
+
+    def _services(self) -> tools.Services:
+        return build_services(InMemoryGraphRepository(), SessionState(project="t"))
+
+    async def _propose_faction(self, services: tools.Services) -> str:
+        return await tools.schema_tool(
+            services, action="propose_type", type="Faction",
+            properties=[
+                {"name": "Motto", "format": "text"},
+                {"name": "Alignment", "format": "select",
+                 "options": ["Good", "Evil"]},
+            ],
+            reason="track allegiances",
+        )
+
+    async def test_propose_renders_the_draft_and_the_contract(self) -> None:
+        services = self._services()
+        out = await self._propose_faction(services)
+        assert "NEW TYPE 'Faction'" in out
+        assert "Motto (text)" in out
+        assert "Alignment (select: Good, Evil)" in out
+        assert "reacts \N{THUMBS UP SIGN}" in out  # the contract is taught
+        assert "cannot apply it yourself" in out
+        # Nothing touched the space, and the draft awaits the harness.
+        assert "Faction" not in services.repository.known_node_types()
+        assert [p.id for p in services.proposals.drafted] == ["p1"]
+
+    async def test_apply_is_not_a_model_action(self) -> None:
+        services = self._services()
+        await self._propose_faction(services)
+        out = await tools.schema_tool(services, action="apply", proposal_id="p1")
+        assert out.startswith("ERROR:")
+        assert "not a model action" in out
+        assert "Faction" not in services.repository.known_node_types()
+        assert services.proposals.pending()  # the draft survives
+
+    async def test_propose_fields_drafts_against_an_existing_type(self) -> None:
+        services = self._services()
+        out = await tools.schema_tool(
+            services, action="propose_fields", type="Character",
+            properties=[{"name": "Influence", "format": "number"}],
+        )
+        assert "NEW PROPERTIES on existing type 'Character'" in out
+        assert not out.startswith("ERROR:")
+
+    async def test_malformed_property_entry_is_an_actionable_error(self) -> None:
+        services = self._services()
+        out = await tools.schema_tool(
+            services, action="propose_type", type="Faction",
+            properties=[{"name": "HQ", "format": "banana"}],
+        )
+        assert out.startswith("ERROR:")
+        assert "formats:" in out  # the menu is echoed
+
+    async def test_list_and_cancel_manage_the_ledger(self) -> None:
+        services = self._services()
+        assert "no pending schema proposals" in await tools.schema_tool(
+            services, action="list"
+        )
+        await self._propose_faction(services)
+        listed = await tools.schema_tool(services, action="list")
+        assert "[p1]" in listed and "Faction" in listed
+        assert "you cannot apply them" in listed
+        out = await tools.schema_tool(services, action="cancel", proposal_id="p1")
+        assert out.startswith("cancelled proposal p1")
+        assert "no pending schema proposals" in await tools.schema_tool(
+            services, action="list"
+        )
+
+    async def test_unknown_action_lists_the_menu(self) -> None:
+        out = await tools.schema_tool(self._services(), action="destroy")
+        assert out.startswith("ERROR:")
+        assert "propose_type" in out and "cancel" in out

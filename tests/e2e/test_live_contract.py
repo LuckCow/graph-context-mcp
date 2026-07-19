@@ -13,8 +13,8 @@ from uuid import uuid4
 import pytest
 
 from graph_context.domain import schema
-from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.errors import UnknownFieldKey
+from graph_context.domain.models import LinkSpec, NodeDraft, PropertyDraft
+from graph_context.errors import SchemaChangeConflict, UnknownFieldKey
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from tests.contract.test_graph_repository_contract import (
@@ -120,6 +120,50 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         assert member.id in mapping.relation_targets(
             await client.get_object(task.id), label
         )
+
+    async def test_schema_change_port_round_trips_live(self, repo):
+        """WP33 (ADR 041) against the real server: create_type mints an
+        immediately usable create target, add_type_properties survives
+        quirk A11 (the wholesale-replace type PATCH keeps existing
+        fields), a retried add is a no-op, and a format mismatch
+        conflicts. Names are uuid-fresh throughout -- the local API can
+        delete neither types nor properties, so reruns must never
+        collide with what earlier runs minted."""
+        stamp = uuid4().hex[:8]
+        type_name = f"E2E Rig {stamp}"
+        motto, gauge = f"Rig Motto {stamp}", f"Rig Gauge {stamp}"
+        created = await repo.create_type(
+            type_name,
+            properties=(
+                PropertyDraft(name=motto, format="text"),
+                PropertyDraft(
+                    name=f"Rig State {stamp}", format="select",
+                    options=("Armed", "Spent"),
+                ),
+            ),
+        )
+        assert created == type_name
+        assert type_name in repo.known_node_types()
+        node = await repo.create_node(
+            NodeDraft(type_name, name="Rig One", summary="s",
+                      fields={motto: "hold fast"}),
+        )
+        motto_key = repo.registry.field_property(motto).key
+        assert node.fields[motto_key] == "hold fast"
+        # A11: the addition must not strip the create-time properties.
+        await repo.add_type_properties(
+            type_name, (PropertyDraft(name=gauge, format="number"),)
+        )
+        names = {s.name for s in repo.field_catalog().get(type_name, ())}
+        assert {motto, gauge} <= names
+        # Retry safety + the A12 conflict, live.
+        await repo.add_type_properties(
+            type_name, (PropertyDraft(name=gauge, format="number"),)
+        )
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await repo.add_type_properties(
+                type_name, (PropertyDraft(name=gauge, format="date"),)
+            )
 
     async def test_native_select_field_round_trips_live(self, repo):
         """ADR 012/023 against the real server: a `fields` key matching a
