@@ -35,6 +35,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
     fenced_file,
     object_references,
     plainify,
+    plan_streams,
 )
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import (
@@ -516,6 +517,75 @@ class TestCursor:
         cursor.fast_forward(CHAT, "o9")
         cursor.begin(CHAT)
         assert not cursor.is_new(_message(order_id="o9"))
+
+
+class TestStreamRoster:
+    """WP35 (ADR 043): live SSE streams are a capped, activity-ranked
+    resource -- the most recently messaged chats hold them, everyone
+    else hibernates and wakes when a message makes them the newest."""
+
+    def test_under_the_cap_every_served_chat_streams(self) -> None:
+        plan = plan_streams(
+            {"a": "2026-01-01", "b": ""}, active=set(), cap=5
+        )
+        assert set(plan.start) == {"a", "b"}
+        assert plan.stop == ()
+
+    def test_over_the_cap_the_most_recent_chats_win(self) -> None:
+        plan = plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-01", "c": "2026-01-02"},
+            active=set(), cap=2,
+        )
+        assert plan.start == ("a", "c")  # most recent first
+        assert plan.stop == ()
+
+    def test_a_message_into_a_hibernated_chat_wakes_it(self) -> None:
+        """The wake IS the ranking: the new message makes the sleeper the
+        newest, so it starts and the least recent stream stops."""
+        plan = plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-09", "c": "2026-01-02"},
+            active={"a", "c"}, cap=2,
+        )
+        assert plan.start == ("b",)
+        assert plan.stop == ("c",)
+
+    def test_quiet_ticks_produce_no_churn(self) -> None:
+        plan = plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-01"},
+            active={"a", "b"}, cap=2,
+        )
+        assert plan == plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-01"},
+            active={"a", "b"}, cap=2,
+        )
+        assert plan.start == () and plan.stop == ()
+
+    def test_a_busy_chat_is_never_stopped(self) -> None:
+        """Mid-turn or holding a pending schema confirm: hibernating it
+        would abort the turn or orphan the 👍 -- the tick after it goes
+        quiet retries."""
+        plan = plan_streams(
+            {"a": "2026-01-09", "b": "2026-01-01"},
+            active={"b"}, busy={"b"}, cap=1,
+        )
+        assert plan.start == ("a",)
+        assert plan.stop == ()  # over cap transiently, by design
+
+    def test_a_vanished_chat_stops_even_uncapped(self) -> None:
+        plan = plan_streams({"a": "2026-01-01"}, active={"a", "gone"})
+        assert plan.stop == ("gone",)
+        assert plan.start == ()
+
+    def test_no_cap_streams_everything(self) -> None:
+        activity = {f"c{i}": "" for i in range(50)}
+        plan = plan_streams(activity, active=set(), cap=None)
+        assert set(plan.start) == set(activity)
+
+    def test_ties_break_deterministically_by_chat_id(self) -> None:
+        plan = plan_streams(
+            {"a": "same", "b": "same", "c": "same"}, active=set(), cap=2
+        )
+        assert plan.start == ("c", "b")  # reverse id order, stable
 
 
 class TestIntentOrigin:

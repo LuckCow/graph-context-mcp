@@ -820,7 +820,26 @@ class MockAnytype:
 
     def _handle_chats(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
-            return self._paginated(list(self._chats.values()), request.url.params)
+            # C13: the listing carries the server-maintained
+            # last_message_date property (generic object shape), absent
+            # until the chat has a message. The stamp derives from the
+            # newest message's created_at tick, so recency order matches
+            # message order -- exactly the guarantee live provides.
+            listing = []
+            for chat_id, chat in self._chats.items():
+                entry = dict(chat)
+                messages = self._chat_messages.get(chat_id) or []
+                if messages:
+                    tick = int(messages[-1]["created_at"])
+                    entry["properties"] = [{
+                        "object": "property",
+                        "key": "last_message_date",
+                        "name": "Last message date",
+                        "format": "date",
+                        "date": f"2026-01-01T00:00:00.{tick:06d}Z",
+                    }]
+                listing.append(entry)
+            return self._paginated(listing, request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
             chat_id = self.seed_chat(str(body.get("name", "")))

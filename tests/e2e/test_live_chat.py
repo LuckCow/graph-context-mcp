@@ -33,7 +33,7 @@ class TestLiveChat:
             chat_id = str(created["id"])
 
             # The chat is enumerable by list_chats (WP8 serve-all).
-            assert chat_id in {cid for cid, _ in await chat_client.list_chats()}
+            assert chat_id in {c.id for c in await chat_client.list_chats()}
 
             stream = chat_client.stream(chat_id, heartbeat_seconds=5)
             first = asyncio.ensure_future(anext(stream))
@@ -78,7 +78,7 @@ class TestLiveChat:
             # (the /chats namespace has no update route) and the /chats
             # re-list reflects it.
             await chat_client.rename(chat_id, "E2E Chat renamed")
-            names = dict(await chat_client.list_chats())
+            names = {c.id: c.name for c in await chat_client.list_chats()}
             assert names[chat_id] == "E2E Chat renamed"
 
             # C10 (spike S13): upload -> attach -> inbound exposure ->

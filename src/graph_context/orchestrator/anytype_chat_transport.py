@@ -36,6 +36,7 @@ import os
 import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -284,6 +285,55 @@ class ChatCursor:
                 "cannot persist chat cursor to %s; positions are in-memory "
                 "for this process", self._path,
             )
+
+
+# -- stream roster (WP35, ADR 043) ------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPlan:
+    """One roster tick's verdict: chats to open live streams for (most
+    recently active first) and chats to close them for."""
+
+    start: tuple[str, ...] = ()
+    stop: tuple[str, ...] = ()
+
+
+def plan_streams(
+    activity: Mapping[str, str],
+    active: AbstractSet[str],
+    busy: AbstractSet[str] = frozenset(),
+    cap: int | None = None,
+) -> StreamPlan:
+    """Which chats deserve a live SSE stream right now (WP35, ADR 043).
+
+    Every open stream pins a pooled connection for its lifetime, so a
+    space with hundreds of chats cannot stream them all. The roster is
+    memoryless top-N by recency: ``activity`` maps every served chat to
+    its ``last_message_date`` stamp (C13; an opaque orderable string,
+    ``""`` for a chat with no messages, ties broken by chat id) and the
+    ``cap`` most recent hold streams. Wake falls out for free -- a
+    message into a hibernated chat makes it the newest, the next tick
+    starts it, and the cursor's catch-up answers the message. The
+    displaced stream is the least recently active, whose next message
+    wakes it back the same way: a message is only ever answered late by
+    one rescan interval, never lost.
+
+    ``busy`` chats (mid-turn, or holding a pending schema confirm whose
+    reaction only arrives over SSE) are never stopped -- the tick after
+    they go quiet retries. A chat absent from ``activity`` (deleted or
+    no longer served) stops even uncapped. ``cap=None`` streams every
+    served chat: the pre-WP35 behavior, and the fallback whenever the
+    rescan watcher (the only wake mechanism) is disabled.
+    """
+    ranked = sorted(
+        activity, key=lambda chat_id: (activity[chat_id], chat_id),
+        reverse=True,
+    )
+    desired = set(ranked if cap is None else ranked[:cap])
+    start = tuple(c for c in ranked if c in desired and c not in active)
+    stop = tuple(sorted(c for c in active if c not in desired and c not in busy))
+    return StreamPlan(start=start, stop=stop)
 
 
 # -- inbound file attachments (WP23, ADR 032) ------------------------------

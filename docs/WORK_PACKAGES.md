@@ -2322,6 +2322,43 @@ and `de38192f56dc`; forensics in the ADR).
 
 ---
 
+## WP35 — Activity-capped chat streams: hibernate + wake (ADR 043) — **shipped 2026-07-21**
+
+**Status:** complete. Every served chat used to hold a live SSE stream
+forever; each stream pins one connection from the space client's shared
+httpx pool (default 100), so a space accumulating chats walked toward
+silently starving its own request path at ~90+ streams. Now only the
+`GC_CHAT_STREAM_CAP` (default 20) most recently active chats per space
+stream; the rest hibernate — registered, sessioned, reachable by
+scheduled events and replies — and wake within one rescan tick of their
+next message.
+
+* **Quirk C13** (live-probed): the `/chats` list carries a
+  server-maintained `last_message_date` date property advancing on every
+  post (bot posts included), absent until the first message; string
+  comparison is recency order. Pinned in `chat.py` + `MockAnytype`;
+  `AnytypeChatClient.list_chats` now returns `ChatSummary` records (the
+  bootstrap lister contract stays plain tuples — the composition root
+  converts).
+* **`plan_streams`** (`anytype_chat_transport`, pure): memoryless top-N
+  by activity stamp, ties on chat id; a message into a hibernated chat
+  makes it the newest, so the wake IS the rescan poll — `_watch_chats`
+  feeds the same re-list it already makes into the plan and
+  starts/stops serve tasks. `busy` chats (mid-turn/catch-up, marked by
+  the serve task; plus chats holding a pending WP33 confirm, whose 👍
+  only arrives over SSE) are never stopped — plan and cancel run with
+  no await between, so eviction is race-free by single-threaded
+  construction.
+* **ADR 019 intact:** chats hibernated at startup get one stream-less
+  `_catch_up` from the watcher before its first tick (offline backlog
+  answered, first-run history fast-forwarded; failures retried per
+  tick, chats the roster wakes first dropped from the debt).
+* **Fallbacks:** cap `0`/`off` streams everything; rescan off ignores
+  the cap loudly (the poll is the only wake mechanism); pinned bindings
+  are never capped.
+
+---
+
 ## Sequencing
 
 ```

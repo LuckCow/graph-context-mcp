@@ -24,10 +24,22 @@ half-dead stream raises instead of hanging; this loop reconnects with
 capped exponential backoff + jitter, and the cursor makes reconnect
 replays turn-free.
 
+Stream roster (WP35, ADR 043): only the ``GC_CHAT_STREAM_CAP`` (default
+20) most recently active chats per space hold live SSE streams -- each
+stream pins a pooled connection for its lifetime, so a space with
+hundreds of chats must not stream them all. Hibernated chats stay
+registered (sessions, scheduled events, and replies work stream-less)
+and the rescan watcher wakes them the tick after their
+``last_message_date`` (quirk C13) makes them the newest; catch-up then
+answers the message. Capping requires the rescan watcher; with it off
+the cap is ignored loudly.
+
 Config: ANYTYPE_API_KEY(_FILE) / ANYTYPE_BASE_URL family (endpoint-
 agnostic: the desktop app today, the headless sidecar after cutover),
 GC_SPACES_FILE (required), GC_CHAT_CURSOR, GC_CHAT_RESCAN_SECONDS (live
-chat discovery), GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
+chat discovery), GC_CHAT_STREAM_CAP (live streams per space, WP35;
+default 20, ``off`` streams every chat),
+GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
 both default 60, ``off`` disables), GC_SCHEDULE_TICK_SECONDS (scheduled-
 event firing, ADR 027; default 30, ``off`` disables),
 GC_RULE_TICK_SECONDS (automation-rule firing, ADR 039; default 5,
@@ -41,11 +53,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import logging
 import os
 import random
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from graph_context import composition
@@ -54,6 +67,7 @@ from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import (
     AnytypeChatClient,
     ChatMessage,
+    ChatSummary,
     discover_bot_identity,
 )
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -76,6 +90,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
     attachment_note,
     classify_attachment,
     fenced_file,
+    plan_streams,
 )
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import ImageAttachment
@@ -94,6 +109,11 @@ CHAT_RESCAN_SECONDS = 3  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
 # 3s makes new-chat pickup near-instant: sidecar reads are unthrottled
 # (S7), so a tight re-list costs nothing. Raise this when pointing at a
 # throttled desktop endpoint.
+STREAM_CAP = 20  # live SSE streams per space (WP35); GC_CHAT_STREAM_CAP
+# Every open stream pins one connection from the space client's httpx
+# pool (default 100) for its lifetime, shared with the request path --
+# uncapped, a space with ~90+ chats silently starves its own writes. 20
+# leaves ample headroom; hibernated chats wake within one rescan tick.
 GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
 SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_SECONDS
 RULE_TICK_SECONDS = 5  # automation-rule scan (ADR 039); GC_RULE_TICK_SECONDS
@@ -130,6 +150,22 @@ def _interval_seconds(env: str, default: float) -> float | None:
 def _rescan_seconds() -> float | None:
     """Live-discovery interval; ``0``/``off`` disables discovery."""
     return _interval_seconds("GC_CHAT_RESCAN_SECONDS", CHAT_RESCAN_SECONDS)
+
+
+def _stream_cap() -> int | None:
+    """Live streams per space (WP35); ``0``/``off`` streams every chat."""
+    raw = os.environ.get("GC_CHAT_STREAM_CAP", str(STREAM_CAP)).strip()
+    if raw.lower() in OFF_VALUES - {""}:
+        return None
+    try:
+        cap = int(raw)
+    except ValueError:
+        raise GraphContextError(
+            f"GC_CHAT_STREAM_CAP must be an integer or off, got {raw!r}"
+        ) from None
+    if cap <= 0:
+        raise GraphContextError("GC_CHAT_STREAM_CAP must be positive or off")
+    return cap
 
 
 def _graph_resync_seconds() -> float | None:
@@ -437,35 +473,72 @@ async def _sweep_confirms(
             )
 
 
+@dataclasses.dataclass
+class _SpaceStreams:
+    """One space's live-stream bookkeeping (WP35, ADR 043).
+
+    ``tasks`` maps streamed chats to their serve tasks; ``busy`` holds
+    chats currently inside catch-up or a turn (marked by the serve task
+    itself -- single-threaded asyncio makes a sync check-then-cancel
+    race-free); ``catch_up`` holds chats hibernated at startup whose
+    offline backlog (ADR 019) the watcher still owes one stream-less
+    catch-up. ``cap=None`` streams everything (pre-WP35 behavior).
+    """
+
+    cap: int | None = None
+    tasks: dict[str, asyncio.Task[None]] = dataclasses.field(
+        default_factory=dict
+    )
+    busy: set[str] = dataclasses.field(default_factory=set)
+    catch_up: set[str] = dataclasses.field(default_factory=set)
+
+
+@contextlib.contextmanager
+def _busy(marks: set[str], chat_id: str) -> Iterator[None]:
+    """Mark the chat unevictable while a turn or catch-up runs; the
+    roster tick skips busy chats so a hibernation never aborts a turn."""
+    marks.add(chat_id)
+    try:
+        yield
+    finally:
+        marks.discard(chat_id)
+
+
 async def _serve_chat(
     handler: AnytypeChatTurnHandler,
     chat_client: AnytypeChatClient,
     chat_id: str,
     cursor: ChatCursor,
     titler: ChatTitler | None = None,
+    busy: set[str] | None = None,
 ) -> None:
     space_id = chat_client.space_id
-    await _catch_up(handler, chat_client, chat_id, cursor, titler)
+    marks = set() if busy is None else busy
+    with _busy(marks, chat_id):
+        await _catch_up(handler, chat_client, chat_id, cursor, titler)
     delay = 1.0
     while True:
         try:
-            await _sweep_confirms(handler, chat_client, chat_id)
+            with _busy(marks, chat_id):
+                await _sweep_confirms(handler, chat_client, chat_id)
             async for event in chat_client.stream(chat_id):
                 delay = 1.0  # a live stream resets the backoff
-                if event.kind == "reactions_updated" and event.message_id:
-                    # WP33: a 👍 on a tracked confirm message applies the
-                    # schema proposal -- harness-executed, no model turn.
-                    await _maybe_reaction(
-                        handler, chat_client, chat_id,
-                        event.message_id, dict(event.reactions),
+                with _busy(marks, chat_id):
+                    if event.kind == "reactions_updated" and event.message_id:
+                        # WP33: a 👍 on a tracked confirm message applies
+                        # the schema proposal -- harness-executed, no
+                        # model turn.
+                        await _maybe_reaction(
+                            handler, chat_client, chat_id,
+                            event.message_id, dict(event.reactions),
+                        )
+                        continue
+                    if event.kind != "message_added" or event.message is None:
+                        continue  # edits/deletes/heartbeats: no turns
+                    await _maybe_turn(
+                        handler, space_id, chat_id, event.message,
+                        chat_client, titler,
                     )
-                    continue
-                if event.kind != "message_added" or event.message is None:
-                    continue  # edits/deletes/heartbeats: no turns
-                await _maybe_turn(
-                    handler, space_id, chat_id, event.message, chat_client,
-                    titler,
-                )
         except GraphContextError as err:
             logger.warning(
                 "chat %s stream failed (%s); reconnecting in %.1fs",
@@ -488,42 +561,93 @@ async def _watch_chats(
     task_group: asyncio.TaskGroup,
     interval: float,
     titler: ChatTitler | None = None,
+    streams: _SpaceStreams | None = None,
 ) -> None:
-    """Live discovery (WP8): re-list a space's chats and serve new ones.
+    """Live discovery (WP8) + the stream roster (WP35): re-list a space's
+    chats, serve new ones, and keep live streams on the most recent.
 
     Reads are unthrottled, so a periodic re-list is cheap. A newly created
     chat is registered (visible to the handler at once, aliased maps) and
-    gets its own serve task with no restart -- adopted from its beginning,
-    so the message that opened the thread is answered even though it
-    predates the subscription. Already-served chats get
-    their listed NAME refreshed (WP21: a human's rename must reach the
-    titler's untitled test). Never raises -- a failed re-list logs and
-    retries -- so it is safe inside the bot's TaskGroup.
+    adopted from its beginning, so the message that opened the thread is
+    answered even though it predates the subscription. Already-served
+    chats get their listed NAME refreshed (WP21: a human's rename must
+    reach the titler's untitled test).
+
+    Which chats hold serve tasks is ``plan_streams``' verdict each tick,
+    ranked on the same re-list's ``last_message_date`` (C13): a message
+    into a hibernated chat makes it the newest, so the wake IS the
+    discovery poll -- no extra requests. Stops only hit idle chats
+    (``streams.busy``, plus chats holding a pending schema confirm whose
+    👍 only arrives over SSE); the plan is computed and applied with no
+    await in between, so a turn can never start on a chat between the
+    busy check and the cancel. Before the first tick the watcher pays the
+    ADR 019 debt for chats hibernated at startup: one stream-less
+    catch-up each, so offline backlog is answered even where no stream
+    opens (retried until it lands; a chat the roster wakes first is
+    dropped here -- its serve task catches up instead). Never raises --
+    a failed re-list logs and retries -- so it is safe inside the bot's
+    TaskGroup.
     """
     space_id = binding.space_id
+    streams = streams if streams is not None else _SpaceStreams()
     while True:
+        for chat_id in sorted(streams.catch_up):
+            try:
+                await _catch_up(
+                    handler, chat_client, chat_id, handler.cursor, titler
+                )
+            except GraphContextError as err:
+                logger.warning(
+                    "hibernated chat %s catch-up failed: %s; retrying next "
+                    "tick", chat_id, err,
+                )
+            else:
+                streams.catch_up.discard(chat_id)
         await asyncio.sleep(interval)
         try:
             listed = await chat_client.list_chats()
         except GraphContextError as err:
             logger.warning("chat rescan for space %s failed: %s", space_id, err)
             continue
-        names = dict(listed)
-        for chat_id in served_chat_ids(binding, [cid for cid, _ in listed]):
+        names = {c.id: c.name for c in listed}
+        served = served_chat_ids(binding, [c.id for c in listed])
+        for chat_id in served:
             if chat_id in runtimes.routes:
                 runtimes.chat_names[chat_id] = names.get(chat_id, "").strip()
                 continue
             bootstrap.register_chat(runtimes, space_id, chat_id, names.get(chat_id, ""))
-            logger.info("discovered chat %s in space %s; serving it", chat_id, space_id)
+            logger.info("discovered chat %s in space %s", chat_id, space_id)
             # A discovered chat was born while the bot ran: adopt it from
             # its beginning, so the message(s) typed before this
             # subscription opened -- the thread's opener, typically --
             # count as offline backlog for _catch_up, not skippable
-            # first-run history.
+            # first-run history. The roster below decides its stream.
             handler.cursor.begin(chat_id)
-            task_group.create_task(
-                _serve_chat(handler, chat_client, chat_id, handler.cursor, titler)
+        for chat_id in [c for c, t in streams.tasks.items() if t.done()]:
+            del streams.tasks[chat_id]
+        activity = {c.id: c.last_message_date for c in listed}
+        plan = plan_streams(
+            {chat_id: activity.get(chat_id, "") for chat_id in served},
+            active=set(streams.tasks),
+            busy=streams.busy | {
+                chat_id for chat_id in streams.tasks
+                if handler.confirms_in(chat_id)
+            },
+            cap=streams.cap,
+        )
+        for chat_id in plan.stop:
+            streams.tasks.pop(chat_id).cancel()
+            logger.info(
+                "chat %s hibernated (space %s: %d stream(s) live)",
+                chat_id, space_id, len(streams.tasks),
             )
+        for chat_id in plan.start:
+            streams.catch_up.discard(chat_id)  # the serve task catches up
+            streams.tasks[chat_id] = task_group.create_task(_serve_chat(
+                handler, chat_client, chat_id, handler.cursor, titler,
+                busy=streams.busy,
+            ))
+            logger.info("serving chat %s in space %s", chat_id, space_id)
 
 
 async def _watch_graph(
@@ -696,12 +820,19 @@ async def run() -> None:
             chat_clients[space_id] = AnytypeChatClient(client)
         return chat_clients[space_id]
 
+    # The startup listing, kept per space: the roster ranks its initial
+    # stream selection on the same last_message_date (C13) the bootstrap
+    # enumeration already fetched.
+    latest: dict[str, list[ChatSummary]] = {}
+
     async def list_chats(binding: SpaceBinding) -> list[tuple[str, str]]:
         # A pinned chat needs no enumeration -- served_chat_ids ignores the
         # list for a pin; skip the API call and serve it by name-less id.
         if binding.chat_id:
             return [(binding.chat_id, "")]
-        return await client_for(binding.space_id).list_chats()
+        summaries = await client_for(binding.space_id).list_chats()
+        latest[binding.space_id] = summaries
+        return [(c.id, c.name) for c in summaries]
 
     runtimes = await bootstrap.build_space_runtimes(list_chats)
     teardown = list(runtimes.teardown)
@@ -729,6 +860,15 @@ async def run() -> None:
     graph_resync = _graph_resync_seconds()
     schedule_tick = _schedule_tick_seconds()
     rule_tick = _rule_tick_seconds()
+    cap = _stream_cap()
+    if cap is not None and rescan is None:
+        # The rescan watcher is the only wake mechanism; capping without
+        # it would leave hibernated chats deaf forever.
+        logger.warning(
+            "GC_CHAT_STREAM_CAP ignored: GC_CHAT_RESCAN_SECONDS is off, so "
+            "hibernated chats could never wake; streaming every chat"
+        )
+        cap = None
     try:
         served = "; ".join(
             f"{chat_id}: {desc}"
@@ -740,13 +880,42 @@ async def run() -> None:
         # beginning (cursor.begin), so _catch_up answers anything typed
         # before the subscription opened instead of skipping it.
         async with asyncio.TaskGroup() as task_group:
-            for chat_id, space_id in list(runtimes.spaces.items()):
-                task_group.create_task(
-                    _serve_chat(
-                        handler, client_for(space_id), chat_id,
-                        handler.cursor, titler,
-                    )
+            space_streams: dict[str, _SpaceStreams] = {}
+            for space_id, binding in runtimes.space_bindings.items():
+                # WP35: stream the cap most recently active chats; the
+                # rest stay registered (sessions, scheduled events, and
+                # replies all work stream-less) and wake through the
+                # rescan watcher, which also owes them one catch-up for
+                # any offline backlog (ADR 019).
+                streams = _SpaceStreams(cap=None if binding.chat_id else cap)
+                space_streams[space_id] = streams
+                space_chats = [
+                    cid for cid, sid in runtimes.spaces.items()
+                    if sid == space_id
+                ]
+                activity = {
+                    c.id: c.last_message_date
+                    for c in latest.get(space_id, [])
+                }
+                plan = plan_streams(
+                    {cid: activity.get(cid, "") for cid in space_chats},
+                    active=set(), cap=streams.cap,
                 )
+                for chat_id in plan.start:
+                    streams.tasks[chat_id] = task_group.create_task(
+                        _serve_chat(
+                            handler, client_for(space_id), chat_id,
+                            handler.cursor, titler, busy=streams.busy,
+                        )
+                    )
+                streams.catch_up = set(space_chats) - set(plan.start)
+                if streams.catch_up:
+                    logger.info(
+                        "space %s: streaming %d of %d chats (cap %s); the "
+                        "rest hibernate and wake on activity",
+                        space_id, len(streams.tasks), len(space_chats),
+                        streams.cap,
+                    )
             if rescan is not None:
                 for space_id, binding in runtimes.space_bindings.items():
                     if binding.chat_id:
@@ -754,6 +923,7 @@ async def run() -> None:
                     task_group.create_task(_watch_chats(
                         handler, client_for(space_id), binding,
                         runtimes, task_group, rescan, titler,
+                        streams=space_streams[space_id],
                     ))
             if graph_resync is not None:
                 for space_id, route in runtimes.space_routes.items():

@@ -28,6 +28,8 @@ from graph_context.orchestrator.anytype_chat_bot import (
     _maybe_turn,
     _rule_tick_seconds,
     _serve_chat,
+    _SpaceStreams,
+    _stream_cap,
     _watch_chats,
     _watch_graph,
     _watch_rules,
@@ -277,6 +279,132 @@ class TestLiveDiscovery:
                 raise _Done
         except* _Done:
             pass
+
+
+class TestStreamRoster:
+    """WP35 (ADR 043) end-to-end over MockAnytype: capped streams, wake
+    on activity, and the stream-less startup catch-up for hibernated
+    chats' offline backlog (ADR 019 must survive the cap)."""
+
+    def _two_chat_space(
+        self, turns: list[LLMTurn]
+    ) -> tuple[MockAnytype, AnytypeChatClient, bootstrap.SpaceRuntimes,
+               AnytypeChatTurnHandler, SpaceBinding, str, str]:
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        chat_client = AnytypeChatClient(
+            AnytypeClient(config, transport=mock.transport)
+        )
+        binding = SpaceBinding(space_id=mock.space_id, profile=FICTION)
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(
+                InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+                SessionState(project="Ashfall"),
+            ),
+            driver=ScriptedDriver(turns),
+            profile=FICTION, registry=fiction_registry(),
+        ))
+        runtimes = bootstrap.SpaceRuntimes(
+            routes={}, spaces={}, descriptions={}, help_line="",
+            teardown=[], space_routes={mock.space_id: route},
+            space_bindings={mock.space_id: binding},
+            session_labels={mock.space_id: {}},
+        )
+        handler = AnytypeChatTurnHandler(
+            routes=runtimes.routes, spaces=runtimes.spaces
+        )
+        chat_a = mock.seed_chat("Plot")
+        chat_b = mock.seed_chat("Characters")
+        for chat_id in (chat_a, chat_b):
+            bootstrap.register_chat(runtimes, mock.space_id, chat_id, "")
+        return mock, chat_client, runtimes, handler, binding, chat_a, chat_b
+
+    def _bot_replies(self, mock: MockAnytype, chat_id: str) -> list[str]:
+        return [
+            m["content"]["text"]
+            for m in mock.chat_messages(chat_id)
+            if m["creator"] == mock.api_member_id
+        ]
+
+    async def test_a_message_wakes_a_hibernated_chat(self) -> None:
+        """The headline WP35 behavior: with the cap holding one stream on
+        the active chat, a message into the hibernated one starts its
+        stream within a tick (catch-up answers the message) and the
+        displaced idle chat hibernates."""
+        mock, chat_client, runtimes, handler, binding, chat_a, chat_b = (
+            self._two_chat_space([LLMTurn(reply="good morning")])
+        )
+        handler.cursor.begin(chat_b)  # served before: not first-run
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                streams = _SpaceStreams(cap=1)
+                streams.tasks[chat_a] = tg.create_task(_serve_chat(
+                    handler, chat_client, chat_a, handler.cursor,
+                    busy=streams.busy,
+                ))
+                tg.create_task(_watch_chats(
+                    handler, chat_client, binding, runtimes, tg,
+                    interval=0.02, streams=streams,
+                ))
+                await asyncio.sleep(0.05)  # A streaming, B hibernated
+                mock.post_chat_message_directly(chat_b, "human", "hello?")
+                async with asyncio.timeout(5):
+                    while self._bot_replies(mock, chat_b) != ["good morning"]:
+                        await asyncio.sleep(0.01)
+                    # The wake displaced the idle chat: one stream lives.
+                    while set(streams.tasks) != {chat_b}:
+                        await asyncio.sleep(0.01)
+                raise _Done
+        except* _Done:
+            pass
+
+    async def test_startup_backlog_is_answered_without_a_stream(self) -> None:
+        """A chat hibernated at startup still gets its offline messages
+        answered (ADR 019): the watcher owes it one stream-less catch-up
+        before its first tick."""
+        mock, chat_client, runtimes, handler, binding, _, chat_b = (
+            self._two_chat_space([LLMTurn(reply="caught up")])
+        )
+        handler.cursor.begin(chat_b)
+        mock.post_chat_message_directly(chat_b, "human", "sent while down")
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                streams = _SpaceStreams(cap=1, catch_up={chat_b})
+                tg.create_task(_watch_chats(
+                    handler, chat_client, binding, runtimes, tg,
+                    interval=0.02, streams=streams,
+                ))
+                async with asyncio.timeout(5):
+                    while self._bot_replies(mock, chat_b) != ["caught up"]:
+                        await asyncio.sleep(0.01)
+                assert not streams.catch_up  # the debt is paid once
+                raise _Done
+        except* _Done:
+            pass
+
+    def test_stream_cap_parses_and_disables(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("GC_CHAT_STREAM_CAP", raising=False)
+        assert _stream_cap() == 20
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "off")
+        assert _stream_cap() is None
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "3")
+        assert _stream_cap() == 3
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "many")
+        with pytest.raises(GraphContextError):
+            _stream_cap()
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "-1")
+        with pytest.raises(GraphContextError):
+            _stream_cap()
 
 
 class TestPeriodicGraphResync:
@@ -600,7 +728,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("how do siege engines work?"), chat_client, titler,
         )
-        names = dict(await chat_client.list_chats())
+        names = {c.id: c.name for c in await chat_client.list_chats()}
         assert names[chat_id] == "Siege Engines 101"  # sanitized
         assert titler.names[chat_id] == "Siege Engines 101"
 
@@ -621,7 +749,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("q2", "!!b"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == "First Title"
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == "First Title"
 
     async def test_a_humans_title_is_never_overwritten(self) -> None:
         mock = MockAnytype()
@@ -634,7 +762,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("hello"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == "Trip planning"
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == "Trip planning"
 
     async def test_commands_never_trigger_titling(self) -> None:
         mock = MockAnytype()
@@ -646,7 +774,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("/mode"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == ""
         assert titler.needs_title(chat_id)  # the attempt was not consumed
 
     async def test_a_failed_turn_defers_the_attempt(self) -> None:
@@ -667,7 +795,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("hello"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == ""
         assert titler.needs_title(chat_id)  # retry on the next exchange
 
     async def test_a_failing_rename_never_fails_the_turn(self) -> None:

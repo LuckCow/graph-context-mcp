@@ -66,6 +66,14 @@ version header) lives here, pinned by spike S10 and mirrored by
         frames are NOT replayed with the connect-time backlog, so a
         consumer that must not miss one re-reads the message list on
         reconnect (messages carry ``reactions`` inline).
+    C13. The ``/chats`` list rides the generic object shape: each chat
+        carries the space's standard properties, and the server maintains
+        ``last_message_date`` (format ``date``, ISO-8601 ``Z``, second
+        granularity) at the newest message's post time -- the bot's own
+        posts included (live-observed 2026-07-21). The property is absent
+        until the chat has a message. Within one server the stamps share
+        one format, so lexicographic comparison IS recency order -- the
+        WP35 stream roster ranks and wakes on exactly this value.
     C11. Rich text rides ``marks`` beside ``text`` (spike S14):
         ``{"from", "to", "type"}`` + ``"param"`` for links, offsets in
         UTF-16 CODE UNITS. Ranges are bounds-checked server-side and an
@@ -103,6 +111,18 @@ class ChatAttachment:
 
     target: str
     type: str = "link"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSummary:
+    """One listed chat (C13): id, display name, and the server-maintained
+    recency stamp (``""`` until the chat has a message). The stamp is an
+    opaque orderable string to consumers -- the stream roster compares,
+    never parses."""
+
+    id: str
+    name: str
+    last_message_date: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +165,15 @@ def _to_reactions(raw: Any) -> dict[str, tuple[str, ...]]:
         for emoji, identities in raw.items()
         if isinstance(identities, list)
     }
+
+
+def _date_property(obj: dict[str, Any], key: str) -> str:
+    """A date property's value off a generic-object payload (C13), ``""``
+    when the property is absent (e.g. a chat with no messages yet)."""
+    for entry in obj.get("properties") or []:
+        if isinstance(entry, dict) and entry.get("key") == key:
+            return str(entry.get("date") or "")
+    return ""
 
 
 def to_chat_message(raw: dict[str, Any]) -> ChatMessage:
@@ -272,14 +301,19 @@ class AnytypeChatClient:
     def space_id(self) -> str:
         return self._client.space_id
 
-    async def list_chats(self) -> list[tuple[str, str]]:
-        """Every chat in the space as ``(id, name)`` pairs (WP8).
+    async def list_chats(self) -> list[ChatSummary]:
+        """Every chat in the space as :class:`ChatSummary` records (WP8).
 
         The bot serves each as its own thread; discovery re-lists to catch
         chats created while it runs. Reads are unthrottled (S7), so a
-        periodic re-list is cheap."""
+        periodic re-list is cheap. ``last_message_date`` (C13) is the
+        recency signal the WP35 stream roster caps and wakes on."""
         return [
-            (str(c["id"]), str(c.get("name") or ""))
+            ChatSummary(
+                id=str(c["id"]),
+                name=str(c.get("name") or ""),
+                last_message_date=_date_property(c, "last_message_date"),
+            )
             async for c in self._client.list_chats()
         ]
 
