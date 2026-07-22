@@ -42,8 +42,10 @@ default 20, ``off`` streams every chat),
 GC_GRAPH_RESYNC_SECONDS (periodic out-of-band resync;
 both default 60, ``off`` disables), GC_SCHEDULE_TICK_SECONDS (scheduled-
 event firing, ADR 027; default 30, ``off`` disables),
-GC_RULE_TICK_SECONDS (automation-rule firing, ADR 039; default 5,
-``off`` disables), plus the usual
+GC_CHANGE_TICK_SECONDS (the unified change tick, ADR 044: automation
+rules ADR 039 + mode auto-refresh; default 5, ``off`` disables both;
+GC_RULE_TICK_SECONDS, the pre-ADR-044 name, honored as a compat
+alias), plus the usual
 GC_DRIVER / GC_PROFILE / GC_MODES_FILE / provenance knobs.
 
 Run:  python -m graph_context.orchestrator.anytype_chat_bot
@@ -58,7 +60,7 @@ import dataclasses
 import logging
 import os
 import random
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from graph_context import composition
@@ -116,8 +118,8 @@ STREAM_CAP = 20  # live SSE streams per space (WP35); GC_CHAT_STREAM_CAP
 # leaves ample headroom; hibernated chats wake within one rescan tick.
 GRAPH_RESYNC_SECONDS = 60  # out-of-band edit poll; GC_GRAPH_RESYNC_SECONDS
 SCHEDULE_TICK_SECONDS = 30  # scheduled-event scan (ADR 027); GC_SCHEDULE_TICK_SECONDS
-RULE_TICK_SECONDS = 5  # automation-rule scan (ADR 039); GC_RULE_TICK_SECONDS
-# 5s keeps reactions feeling immediate; the tick runs its own cheap
+CHANGE_TICK_SECONDS = 5  # change-listener scan (ADR 044); GC_CHANGE_TICK_SECONDS
+# 5s keeps rule reactions feeling immediate; the tick runs its own cheap
 # modified-since resync (unthrottled sidecar), so it does not wait for
 # the 60s graph poll. Raise this on a throttled desktop endpoint.
 
@@ -178,9 +180,18 @@ def _schedule_tick_seconds() -> float | None:
     return _interval_seconds("GC_SCHEDULE_TICK_SECONDS", SCHEDULE_TICK_SECONDS)
 
 
-def _rule_tick_seconds() -> float | None:
-    """Automation-rule scan interval; ``0``/``off`` disables the engine."""
-    return _interval_seconds("GC_RULE_TICK_SECONDS", RULE_TICK_SECONDS)
+def _change_tick_seconds() -> float | None:
+    """Change-tick interval; ``0``/``off`` disables every change listener
+    (automation rules AND mode auto-refresh). GC_RULE_TICK_SECONDS -- the
+    pre-ADR-044 name for what was then only the rule tick -- is honored
+    when the new name is unset, so existing deployments keep their
+    setting."""
+    if (
+        "GC_CHANGE_TICK_SECONDS" not in os.environ
+        and "GC_RULE_TICK_SECONDS" in os.environ
+    ):
+        return _interval_seconds("GC_RULE_TICK_SECONDS", CHANGE_TICK_SECONDS)
+    return _interval_seconds("GC_CHANGE_TICK_SECONDS", CHANGE_TICK_SECONDS)
 
 
 def _sent_path(cursor_path: str | None) -> str | None:
@@ -760,32 +771,68 @@ async def _watch_schedule(
                 )
 
 
-async def _watch_rules(
-    route: ChannelRoute, space_id: str, interval: float
-) -> None:
-    """Fire due Automation Rules (ADR 039; fourth sibling watcher).
+ChangeListener = Callable[[frozenset[str]], Awaitable[None]]
 
-    Unlike ``_watch_schedule`` -- a pure read riding ``_watch_graph``'s
-    resync -- each rule tick runs its OWN resync first, under the turn
-    lock: reacting to a checkbox a minute late reads as broken, and the
+
+async def _watch_changes(
+    route: ChannelRoute,
+    space_id: str,
+    interval: float,
+    listeners: Sequence[tuple[str, ChangeListener]],
+) -> None:
+    """React to out-of-band space edits (ADR 044; fourth sibling watcher).
+
+    One tick = one modified-since resync + the ordered listeners, all
+    under the turn lock. Unlike ``_watch_schedule`` -- a pure read riding
+    ``_watch_graph``'s resync -- the tick runs its OWN resync first:
+    reacting to a checkbox a minute late reads as broken, and the
     modified-since search is a few localhost calls against the
-    unthrottled sidecar. The engine's baseline diff makes the tick
-    idempotent and loop-free (its own writes never read as transitions).
-    Never raises -- a failed tick logs and retries -- so it is safe
-    inside the bot's TaskGroup.
+    unthrottled sidecar. Each listener keeps its own baseline diff, so
+    the tick is idempotent and loop-free (a listener's writes never read
+    as changes). A failing listener logs and never starves the next one,
+    and nothing here raises -- safe inside the bot's TaskGroup. A future
+    on-change feature is one listener in ``_change_listeners``, not a
+    new watcher.
     """
     while True:
         await asyncio.sleep(interval)
         try:
             async with route.lock:
-                await route.orchestrator.resync_graph()
-                report = await route.orchestrator.rule_tick()
+                changed = await route.orchestrator.resync_graph()
+                for name, listener in listeners:
+                    try:
+                        await listener(changed)
+                    except GraphContextError as err:
+                        logger.warning(
+                            "%s listener for space %s failed: %s",
+                            name, space_id, err,
+                        )
+                    except Exception:  # never take the serve loop down
+                        logger.exception(
+                            "%s listener for space %s crashed",
+                            name, space_id,
+                        )
         except GraphContextError as err:
-            logger.warning("rule tick for space %s failed: %s", space_id, err)
+            logger.warning(
+                "change tick for space %s failed: %s", space_id, err
+            )
             continue
-        except Exception:  # the engine must never take the serve loop down
-            logger.exception("rule tick for space %s crashed", space_id)
+        except Exception:  # never take the serve loop down
+            logger.exception("change tick for space %s crashed", space_id)
             continue
+
+
+def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
+    """The unified tick's reactions, in order (ADR 044).
+
+    Rules run first -- reaction latency is their 5s contract (ADR 039) --
+    then the mode-registry refresh, which is fingerprint-gated and free
+    on the no-change tick. Names are for the watcher's per-listener
+    failure logs.
+    """
+
+    async def rules(_changed: frozenset[str]) -> None:
+        report = await route.orchestrator.rule_tick()
         for firing in report.fired:
             logger.info(
                 "rule %r fired %r on %r (%s)",
@@ -799,6 +846,11 @@ async def _watch_rules(
             )
         for node_id in report.healed:
             logger.info("rule %s healed: config parses again", node_id)
+
+    async def refresh_modes(_changed: frozenset[str]) -> None:
+        await route.orchestrator.refresh_modes()
+
+    return [("rules", rules), ("modes", refresh_modes)]
 
 
 async def run() -> None:
@@ -859,7 +911,7 @@ async def run() -> None:
     rescan = _rescan_seconds()
     graph_resync = _graph_resync_seconds()
     schedule_tick = _schedule_tick_seconds()
-    rule_tick = _rule_tick_seconds()
+    change_tick = _change_tick_seconds()
     cap = _stream_cap()
     if cap is not None and rescan is None:
         # The rescan watcher is the only wake mechanism; capping without
@@ -936,11 +988,12 @@ async def run() -> None:
                         handler, client_for(space_id), route, space_id,
                         schedule_tick,
                     ))
-            if rule_tick is not None:
+            if change_tick is not None:
                 for space_id, route in runtimes.space_routes.items():
-                    task_group.create_task(
-                        _watch_rules(route, space_id, rule_tick)
-                    )
+                    task_group.create_task(_watch_changes(
+                        route, space_id, change_tick,
+                        _change_listeners(route),
+                    ))
     finally:
         await composition.run_teardown(teardown)
 

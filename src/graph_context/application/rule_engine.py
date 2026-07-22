@@ -3,10 +3,10 @@
 
 An Automation Rule is a ``gc_rule`` node (``domain/rules.py`` owns the
 vocabulary) watching one scalar property on one object type. The engine
-runs one :meth:`RuleEngine.run_tick` per poll (the Anytype bot's
-``_watch_rules`` loop, under the space's turn lock, right after a
-resync), diffing a private in-memory baseline of watched values against
-the current index:
+runs one :meth:`RuleEngine.run_tick` per poll (the ``rules`` listener of
+the Anytype bot's ``_watch_changes`` tick, under the space's turn lock,
+right after a resync), diffing a private in-memory baseline of watched
+values against the current index:
 
 * the FIRST tick only records the baseline — nothing fires on restart
   or sync replay, and transitions made while the engine was down are

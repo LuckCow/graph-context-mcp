@@ -32,7 +32,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from graph_context.domain.graph import GraphIndex
 from graph_context.domain.model_choice import model_id
+from graph_context.domain.schema import Role
 from graph_context.errors import GraphContextError
 from graph_context.interface import tools
 from graph_context.interface.mode_config import slugify, spec_from_mapping
@@ -125,6 +127,43 @@ class ModeRegistry:
 
     def names(self) -> list[str]:
         return sorted(self.specs)
+
+
+def mode_fingerprint(graph: GraphIndex) -> frozenset[tuple[str, str]]:
+    """``(id, modified_at)`` over the mode-config surface of the index.
+
+    Covers every Activity Mode object plus the Space Context singleton:
+    creating, editing, or archiving a mode shifts the set (archived
+    objects leave the index on resync), and relinking ``gc_default_mode``
+    bumps the Space Context node's ``modified_at``. The index carries
+    only identity and the stamp -- the ``gc_mode_*`` payloads and goal
+    bodies are store-only -- so this detects a change; reloading still
+    goes through the stores (ADR 044).
+    """
+    return frozenset(
+        (node.id, node.modified_at)
+        for node in graph.nodes()
+        if node.role is Role.MODE or node.role is Role.SPACE_CONTEXT
+    )
+
+
+@dataclass(slots=True)
+class ModeConfigWatch:
+    """Change detector over :func:`mode_fingerprint` (ADR 044).
+
+    The first call seeds the baseline and reports no change -- the
+    rule-engine discipline: nothing reacts to a restart or to state that
+    predates the watch. Every call advances the baseline, so a change is
+    signalled at most once; a caller whose reaction fails waits for the
+    NEXT edit rather than retrying every tick.
+    """
+
+    _prior: frozenset[tuple[str, str]] | None = None
+
+    def changed(self, graph: GraphIndex) -> bool:
+        current = mode_fingerprint(graph)
+        prior, self._prior = self._prior, current
+        return prior is not None and current != prior
 
 
 def load_registry(

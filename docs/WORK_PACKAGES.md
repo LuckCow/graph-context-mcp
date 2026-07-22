@@ -2359,6 +2359,37 @@ next message.
 
 ---
 
+## WP36 — Unified change tick: mode auto-refresh (ADR 044) — **shipped 2026-07-21**
+
+**Status:** complete. Editing an Activity Mode object or relinking
+`gc_default_mode` on the Space Context in the Anytype UI used to sit
+invisible until a restart or a `/mode` command; now it is live within
+one change tick (~5s). Structurally, `_watch_rules` — the only
+change-driven watcher — became the unified `_watch_changes` tick, so
+future on-change features are one listener each instead of a new
+watcher.
+
+* **`_watch_changes`** (`anytype_chat_bot.py`): per tick, under the
+  route lock — one modified-since resync, then the ordered named
+  listeners from `_change_listeners` (`rules` first, ADR 039's latency
+  contract; then `modes`), each with its own crash guard so a failing
+  listener never starves the next. `GC_CHANGE_TICK_SECONDS` (default 5,
+  `off` disables all listeners); `GC_RULE_TICK_SECONDS` honored as a
+  compat alias.
+* **`Orchestrator.refresh_modes()`** (public, beside `rule_tick`):
+  fingerprint-gated reload — `modes.mode_fingerprint(graph)` is
+  `(id, modified_at)` over `Role.MODE`/`Role.SPACE_CONTEXT` index nodes,
+  `ModeConfigWatch` seeds its baseline on the first check (nothing
+  reloads on restart). On change it runs `/mode`'s `_refresh_registry`
+  degrade path (last good registry kept, errors logged not posted), and
+  the baseline advances even on failure — at-most-once per change, the
+  human's next edit retries. `/mode` stays the unconditional reload.
+* **Unchanged by construction:** specs re-resolve from the registry
+  every turn (edits live next turn), vanished modes degrade to the
+  default, default-mode changes affect only new sessions (ADR 034).
+
+---
+
 ## Sequencing
 
 ```

@@ -280,6 +280,11 @@ class Orchestrator:
     # shared `services` bundle for every session -- pre-WP8 behavior.
     services_for: Callable[[str], Awaitable[Services]] | None = None
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
+    # ADR 044: change detector behind refresh_modes() -- baseline over
+    # the index's mode-config nodes, seeded on the first check.
+    _mode_watch: modes.ModeConfigWatch = field(
+        default_factory=modes.ModeConfigWatch
+    )
 
     def mode_of(self, session_id: str) -> str:
         """Non-creating peek: the mode a session IS in (default if unseen)."""
@@ -324,6 +329,35 @@ class Orchestrator:
         route's turn lock; the shared bundle is correct here too --
         rules belong to the space, not to any one session."""
         return await self.services.rules.run_tick()
+
+    async def refresh_modes(self) -> bool:
+        """Reload the registry iff the space's mode config changed (ADR 044).
+
+        The transports' change-tick listener calls this every tick under
+        the route lock; the index fingerprint makes the common no-change
+        tick free. At-most-once per change (the rule-engine discipline):
+        the baseline advances even when the reload fails, so a broken
+        edit degrades once -- keeping the last good registry -- and the
+        human's NEXT edit retries, instead of the stores being re-read
+        and the log spammed every tick. ``/mode`` remains the
+        unconditional-reload path (an explicit human ask). Returns True
+        when a change was detected and a reload attempted.
+        """
+        if self.reload_registry is None:
+            return False
+        if not self._mode_watch.changed(self.services.repository.graph):
+            return False
+        events = await self._refresh_registry()
+        for event in events:
+            # No chat to post to from a background tick; the /mode
+            # command still surfaces the same degrade text on demand.
+            logger.warning("mode auto-refresh: %s", event.text)
+        if not events:
+            logger.info(
+                "mode registry auto-refreshed: [%s], default %r",
+                ", ".join(self.registry.names()), self.registry.default,
+            )
+        return True
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)

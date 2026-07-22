@@ -14,6 +14,7 @@ import pytest
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.domain import attribution
+from graph_context.domain.models import NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
@@ -166,6 +167,145 @@ class TestInSpaceModes:
             fiction_registry(_mode_payload(
                 capture={"artifact_type": "note", "min_chars": -3},
             ))
+
+
+class TestModeFingerprint:
+    """ADR 044: the change detector's view of the mode-config surface."""
+
+    async def test_only_mode_and_space_context_nodes_participate(self) -> None:
+        repository = InMemoryGraphRepository()
+        empty = modes.mode_fingerprint(repository.graph)
+        await repository.create_node(NodeDraft(
+            type="Character", name="Ada", summary="s",
+        ))
+        assert modes.mode_fingerprint(repository.graph) == empty
+        await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        await repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="s",
+        ))
+        assert len(modes.mode_fingerprint(repository.graph)) == 2
+
+    async def test_an_edit_bumps_the_fingerprint(self) -> None:
+        repository = InMemoryGraphRepository()
+        mode = await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        before = modes.mode_fingerprint(repository.graph)
+        await repository.update_node(mode.id, summary="edited")
+        assert modes.mode_fingerprint(repository.graph) != before
+
+    async def test_an_unrelated_edit_leaves_the_fingerprint_alone(self) -> None:
+        repository = InMemoryGraphRepository()
+        await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        bystander = await repository.create_node(NodeDraft(
+            type="Character", name="Ada", summary="s",
+        ))
+        before = modes.mode_fingerprint(repository.graph)
+        await repository.update_node(bystander.id, summary="edited")
+        assert modes.mode_fingerprint(repository.graph) == before
+
+    async def test_the_watch_seeds_on_the_first_check(self) -> None:
+        repository = InMemoryGraphRepository()
+        await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        watch = modes.ModeConfigWatch()
+        assert watch.changed(repository.graph) is False  # baseline seeds
+        assert watch.changed(repository.graph) is False  # steady state
+
+
+class TestModeAutoRefresh:
+    """ADR 044: refresh_modes() reloads at most once per detected change."""
+
+    def _wired(
+        self, services: Services, reload,
+    ) -> Orchestrator:
+        return Orchestrator(
+            services=services, driver=ScriptedDriver([]), profile=FICTION,
+            registry=fiction_registry(), reload_registry=reload,
+        )
+
+    async def test_first_check_seeds_the_baseline_without_reloading(
+        self, services: Services
+    ) -> None:
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            return fiction_registry()
+
+        orchestrator = self._wired(services, reload)
+        await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False
+        assert reloads["count"] == 0
+
+    async def test_a_mode_edit_reloads_exactly_once_until_the_next_edit(
+        self, services: Services
+    ) -> None:
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            return fiction_registry(_mode_payload())
+
+        orchestrator = self._wired(services, reload)
+        mode = await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False  # baseline
+        await services.repository.update_node(mode.id, summary="edited")
+        assert await orchestrator.refresh_modes() is True
+        assert orchestrator.registry.get("faithful_scribe") is not None
+        assert await orchestrator.refresh_modes() is False  # no re-reload
+        assert reloads["count"] == 1
+        await services.repository.update_node(mode.id, summary="again")
+        assert await orchestrator.refresh_modes() is True
+        assert reloads["count"] == 2
+
+    async def test_a_failed_reload_keeps_the_registry_and_waits_for_the_next_edit(
+        self, services: Services
+    ) -> None:
+        """At-most-once, the rule-engine discipline: a broken edit
+        degrades once -- no retry storm every tick -- and the human's
+        NEXT edit retries."""
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            raise GraphContextError(
+                "Activity Mode 'Broken' (obj-9): the goal is empty"
+            )
+
+        orchestrator = self._wired(services, reload)
+        before = orchestrator.registry
+        mode = await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False  # baseline
+        await services.repository.update_node(mode.id, summary="broken")
+        assert await orchestrator.refresh_modes() is True  # attempted
+        assert orchestrator.registry is before  # last good kept
+        assert await orchestrator.refresh_modes() is False  # waits
+        assert reloads["count"] == 1
+        await services.repository.update_node(mode.id, summary="fixed")
+        assert await orchestrator.refresh_modes() is True  # retried
+        assert reloads["count"] == 2
+
+    async def test_refresh_without_a_reload_closure_is_a_no_op(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False
+        assert await orchestrator.refresh_modes() is False
 
 
 @pytest.fixture

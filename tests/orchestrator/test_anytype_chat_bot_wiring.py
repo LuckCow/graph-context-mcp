@@ -8,6 +8,7 @@ the live bot has: transport clients and repository clients are separate.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -25,14 +26,15 @@ from graph_context.interface.services import build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
+    _change_listeners,
+    _change_tick_seconds,
     _maybe_turn,
-    _rule_tick_seconds,
     _serve_chat,
     _SpaceStreams,
     _stream_cap,
+    _watch_changes,
     _watch_chats,
     _watch_graph,
-    _watch_rules,
 )
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
@@ -436,17 +438,27 @@ class TestPeriodicGraphResync:
             await asyncio.gather(watcher, return_exceptions=True)
 
 
-class TestRuleWatcher:
-    """ADR 039: the fourth watcher resyncs, diffs, and fires rules."""
+class TestChangeWatcher:
+    """ADR 044: one tick resyncs, then the ordered listeners react --
+    rules fire (ADR 039) and the mode registry auto-refreshes."""
 
-    def _route(self) -> tuple[ChannelRoute, InMemoryGraphRepository]:
+    def _route(
+        self, reload_registry=None,
+    ) -> tuple[ChannelRoute, InMemoryGraphRepository]:
         repository = InMemoryGraphRepository()
         route = ChannelRoute(orchestrator=Orchestrator(
             services=build_services(repository, SessionState(project="Todo")),
             driver=ScriptedDriver([]),
             profile=FICTION, registry=fiction_registry(),
+            reload_registry=reload_registry,
         ))
         return route, repository
+
+    def _watch(self, route: ChannelRoute) -> asyncio.Future:
+        return asyncio.ensure_future(_watch_changes(
+            route, "space-1", interval=0.01,
+            listeners=_change_listeners(route),
+        ))
 
     async def test_a_ui_checkbox_flip_fires_the_rule_through_the_watcher(
         self,
@@ -467,9 +479,7 @@ class TestRuleWatcher:
         task = await repository.create_node(NodeDraft(
             type="Task", name="ship it", summary="a task",
         ))
-        watcher = asyncio.ensure_future(
-            _watch_rules(route, "space-1", interval=0.01)
-        )
+        watcher = self._watch(route)
         try:
             await asyncio.sleep(0.05)  # let the baseline tick land
             await repository.update_node(task.id, fields={"Done": "true"})
@@ -493,9 +503,7 @@ class TestRuleWatcher:
             return await original()
 
         engine.run_tick = flaky  # type: ignore[method-assign]
-        watcher = asyncio.ensure_future(
-            _watch_rules(route, "space-1", interval=0.01)
-        )
+        watcher = self._watch(route)
         try:
             async with asyncio.timeout(5):
                 while calls["count"] < 3:  # kept ticking past the failure
@@ -504,18 +512,144 @@ class TestRuleWatcher:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
 
-    def test_rule_tick_interval_parses_and_disables(
+    async def test_a_mode_object_edit_in_the_ui_reloads_the_registry(
+        self,
+    ) -> None:
+        """ADR 044: edit an Activity Mode object in Anytype and the new
+        spec is live within a tick -- no /mode command, no restart. The
+        first tick only seeds the baseline (nothing reloads on startup)."""
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            return fiction_registry({
+                "id": "obj-1", "name": "Faithful Scribe",
+                "goal": "Record only what the user states.",
+                "mutating": True, "capture": None,
+                "origin": "'Faithful Scribe' (obj-1)",
+            })
+
+        route, repository = self._route(reload_registry=reload)
+        mode = await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            assert reloads["count"] == 0  # startup state never reloads
+            await repository.update_node(mode.id, summary="edited in the UI")
+            async with asyncio.timeout(5):
+                while route.orchestrator.registry.get("faithful_scribe") is None:
+                    await asyncio.sleep(0.01)
+            assert reloads["count"] == 1
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_relinking_the_default_mode_reloads_the_registry(
+        self,
+    ) -> None:
+        """ADR 034 + 044: relink gc_default_mode on the Space Context in
+        the UI and new chats pick the new default within a tick."""
+
+        async def reload():
+            return dataclasses.replace(fiction_registry(), default="authoring")
+
+        route, repository = self._route(reload_registry=reload)
+        context = await repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="s",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # baseline tick
+            assert route.orchestrator.registry.default == "world_modeling"
+            await repository.update_node(context.id, summary="relinked")
+            async with asyncio.timeout(5):
+                while route.orchestrator.registry.default != "authoring":
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_failed_mode_reload_keeps_the_last_good_registry(
+        self,
+    ) -> None:
+        """A broken edit degrades once (last good registry kept) and the
+        watcher waits for the NEXT edit instead of retrying every tick."""
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            raise GraphContextError(
+                "Activity Mode 'Broken' (obj-9): the goal is empty"
+            )
+
+        route, repository = self._route(reload_registry=reload)
+        before = route.orchestrator.registry
+        mode = await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # baseline tick
+            await repository.update_node(mode.id, summary="a broken edit")
+            async with asyncio.timeout(5):
+                while reloads["count"] < 1:
+                    await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)  # several more ticks pass...
+            assert reloads["count"] == 1  # ...without a retry storm
+            assert route.orchestrator.registry is before
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_crashing_listener_does_not_starve_the_next_listener(
+        self,
+    ) -> None:
+        route, _repository = self._route()
+        ran = asyncio.Event()
+
+        async def bad(_changed: frozenset[str]) -> None:
+            raise RuntimeError("boom")
+
+        async def good(_changed: frozenset[str]) -> None:
+            ran.set()
+
+        watcher = asyncio.ensure_future(_watch_changes(
+            route, "space-1", interval=0.01,
+            listeners=[("bad", bad), ("good", good)],
+        ))
+        try:
+            async with asyncio.timeout(5):
+                await ran.wait()  # same tick as bad's crash
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    def test_change_tick_interval_parses_and_disables(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.delenv("GC_CHANGE_TICK_SECONDS", raising=False)
         monkeypatch.delenv("GC_RULE_TICK_SECONDS", raising=False)
-        assert _rule_tick_seconds() == 5
-        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "off")
-        assert _rule_tick_seconds() is None
-        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "2.5")
-        assert _rule_tick_seconds() == 2.5
-        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "soon")
+        assert _change_tick_seconds() == 5
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "off")
+        assert _change_tick_seconds() is None
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "2.5")
+        assert _change_tick_seconds() == 2.5
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "soon")
         with pytest.raises(GraphContextError):
-            _rule_tick_seconds()
+            _change_tick_seconds()
+
+    def test_the_old_rule_tick_env_var_still_works_as_an_alias(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pre-ADR-044 deployments set GC_RULE_TICK_SECONDS; honor it
+        until the new name is set, which then wins."""
+        monkeypatch.delenv("GC_CHANGE_TICK_SECONDS", raising=False)
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "7")
+        assert _change_tick_seconds() == 7.0
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "3")
+        assert _change_tick_seconds() == 3.0
 
 
 class TestServeLoop:
