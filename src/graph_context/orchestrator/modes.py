@@ -112,6 +112,13 @@ async def invoke(
     fn = binding_for(spec).get(name)
     if fn is None:
         return None
+    # ADR 045: the spec's meta privilege rides the Services view for
+    # exactly this call's duration. Set unconditionally (not just when
+    # privileged) so a /mode switch away from a privileged mode drops the
+    # surface with it; turns serialize per space, so no interleaving.
+    services.visible_infra_roles = (
+        frozenset({Role.MODE}) if spec.meta_inspection else frozenset()
+    )
     return await fn(services, **arguments)
 
 
@@ -286,9 +293,10 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
         body = {
             key: payload[key]
             for key in (
-                "goal", "mutating", "capture", "activity_detail",
-                "web_search", "model",
-                "thinking", "max_tokens", "web_search_max_uses",
+                "goal", "mutating", "meta_inspection", "capture",
+                "activity_detail", "web_search", "model",
+                "thinking", "max_tokens", "turn_limit",
+                "web_search_max_uses",
                 "web_search_allowed_domains", "web_search_blocked_domains",
             )
             if key in payload

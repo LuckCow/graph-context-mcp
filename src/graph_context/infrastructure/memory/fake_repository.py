@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any
 
-from graph_context.domain import attribution, schema
+from graph_context.domain import activity, attribution, schema
 from graph_context.domain import fields as domain_fields
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import (
@@ -109,11 +109,15 @@ class InMemoryGraphRepository:
         # Bootstrap parity (ADR 028): the Anytype adapter's
         # ensure_schema guarantees the attribution properties exist,
         # so recorder writes resolve without an opt-in. The fake's
-        # catalog carries the same guarantee.
+        # catalog carries the same guarantee -- and since ADR 045 the
+        # same holds for the mode-config surface a meta-inspection
+        # mode writes.
         existing_keys = {spec.key for spec in specs}
         specs.extend(
             FieldSpec(name=key, format=fmt, key=key)
-            for key, fmt in attribution.ATTRIBUTION_FIELDS.items()
+            for key, fmt in (
+                attribution.ATTRIBUTION_FIELDS | activity.MODE_CONFIG_FIELDS
+            ).items()
             if key not in existing_keys
         )
         self._field_specs = specs
@@ -263,12 +267,16 @@ class InMemoryGraphRepository:
     def role_for(self, type_identifier: str) -> Role | None:
         return schema.resolve_role(type_identifier, self._role_overrides)
 
-    def known_node_types(self) -> frozenset[str]:
+    def known_node_types(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> frozenset[str]:
         # The in-memory backend has an open vocabulary; surface the mapped
         # (non-infra) roles as helpful create_node suggestions, plus any
-        # types minted through the WP33 schema-change surface.
+        # types minted through the WP33 schema-change surface. Infra roles
+        # join only via the caller's meta privilege (ADR 045).
         return frozenset(
-            r.value for r in Role if r not in schema.INFRA_ROLES
+            r.value for r in Role
+            if r not in schema.INFRA_ROLES or r in include_roles
         ) | frozenset(self._minted_types)
 
     # -- schema changes (WP33, ADR 041) ----------------------------------
@@ -417,7 +425,9 @@ class InMemoryGraphRepository:
                 return spec
         return None
 
-    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+    def field_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
         if not self._field_specs:
             # Open mode: only WP33-minted types carry a catalog (their
             # own properties); everything else stays vocabulary-free.
@@ -434,9 +444,16 @@ class InMemoryGraphRepository:
         # not offered.
         specs = tuple(
             s for s in self._field_specs
-            if s.format != "objects" and s.key not in attribution.ATTRIBUTION_FIELDS
+            if s.format != "objects"
+            and s.key not in attribution.ATTRIBUTION_FIELDS
+            # Mode-config keys (ADR 045) belong to the mode surface, not
+            # the generic story-write vocabulary the catalog teaches.
+            and s.key not in activity.MODE_CONFIG_FIELDS
         )
-        return {name: specs for name in sorted(self.known_node_types())}
+        return {
+            name: specs
+            for name in sorted(self.known_node_types(include_roles))
+        }
 
     # -- field routing (ADR 023) -------------------------------------------
 

@@ -63,6 +63,7 @@ class NodeReader:
         edge_type_filter: Iterable[str] | None = None,
         include_provenance: int = 0,
         excerpt_chars: int = DEFAULT_EXCERPT_CHARS,
+        visible_roles: frozenset[Role] = frozenset(),
     ) -> NodeView:
         graph = self._repository.graph
         node = graph.node(node_id)
@@ -73,7 +74,9 @@ class NodeReader:
             # WP7: infra-role neighbors (Capture, SessionContext, Intent) are
             # bookkeeping -- their edges never clutter the edge groups. The
             # prose/provenance counts below are the deliberate signal.
-            if neighbor.role in INFRA_ROLES:
+            # ``visible_roles`` (ADR 045) re-admits the caller's privileged
+            # roles.
+            if neighbor.role in INFRA_ROLES and neighbor.role not in visible_roles:
                 continue
             grouped.setdefault(edge.type, []).append((edge, neighbor))
         body = await self._repository.fetch_body(node_id)

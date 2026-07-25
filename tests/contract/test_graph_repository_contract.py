@@ -940,3 +940,70 @@ class TestAnytypeScheduledEvents(ScheduledEventContract):
         assert properties[scheduling.FIELD_SCHEDULE]["text"] == "2027-04-08T09:00"
         assert properties[scheduling.FIELD_STATUS]["format"] == "select"
         assert "gc_fields" not in properties  # nothing fell through
+
+
+class MetaInspectionContract:
+    """ADR 045: the catalog surfaces hide infra types unless the caller's
+    privilege includes the role, and a privileged mode-object write
+    round-trips its ``gc_mode_*`` config through ``Node.fields``."""
+
+    MODE_NAMES = {"activity mode", "activitymode"}
+
+    async def test_known_node_types_admits_modes_only_with_privilege(
+        self, repo
+    ):
+        assert not {
+            t.lower() for t in repo.known_node_types()
+        } & self.MODE_NAMES
+        privileged = {
+            t.lower()
+            for t in repo.known_node_types(frozenset({Role.MODE}))
+        }
+        assert privileged & self.MODE_NAMES
+
+    async def test_field_catalog_admits_the_mode_type_only_with_privilege(
+        self, repo
+    ):
+        assert not {
+            name.lower() for name in repo.field_catalog()
+        } & self.MODE_NAMES
+        privileged = {
+            name.lower()
+            for name in repo.field_catalog(frozenset({Role.MODE}))
+        }
+        assert privileged & self.MODE_NAMES
+
+    async def test_mode_object_config_reflects_into_fields(self, repo):
+        node = await repo.create_node(NodeDraft(
+            type="Activity Mode", name="Recipe Mode",
+            summary="Cooks recipes.",
+            fields={"gc_mode_mutating": "true"},
+        ))
+        stored = repo.graph.node(node.id)
+        assert stored.role is Role.MODE
+        assert stored.fields["gc_mode_mutating"] == "true"
+
+
+class TestInMemoryMetaInspection(MetaInspectionContract):
+    @pytest.fixture
+    def repo(self):
+        # Catalog mode: the fake's field_catalog is keyed by its known
+        # type names, which is where the privilege parameter bites (the
+        # open-vocabulary mode has no catalog to filter at all).
+        return InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Rank", format="text", key="rank"),
+        ])
+
+
+class TestAnytypeMetaInspection(MetaInspectionContract):
+    @pytest.fixture
+    async def repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()

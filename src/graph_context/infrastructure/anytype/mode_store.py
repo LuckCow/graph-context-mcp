@@ -72,6 +72,7 @@ class AnytypeModeStore:
             # goal prompt's edges are never meaningful.
             "goal": mapping.body_of(obj).strip(),
             "mutating": bool(props.get(mapping.PROP_MODE_MUTATING)),
+            "meta_inspection": bool(props.get(mapping.PROP_MODE_META)),
             "web_search": bool(props.get(mapping.PROP_MODE_WEB_SEARCH)),
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
@@ -103,6 +104,9 @@ class AnytypeModeStore:
         max_tokens = props.get(mapping.PROP_MODE_MAX_TOKENS)
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        turn_limit = props.get(mapping.PROP_MODE_TURN_LIMIT)
+        if turn_limit:
+            payload["turn_limit"] = turn_limit
         max_uses = props.get(mapping.PROP_MODE_SEARCH_MAX_USES)
         if max_uses:
             payload["web_search_max_uses"] = max_uses

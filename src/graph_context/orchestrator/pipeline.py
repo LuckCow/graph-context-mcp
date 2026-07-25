@@ -66,7 +66,7 @@ from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_TOOL_CALLS = 16  # per turn; a loop guard, not a feature
+DEFAULT_MAX_TOOL_CALLS = 16  # per turn; ModeSpec.turn_limit overrides
 
 # Injected before the budget's final decide so the driver lands the turn
 # instead of being cut off mid-plan; its consumer is an LLM.
@@ -458,7 +458,10 @@ class Orchestrator:
         # into the intent node the reply's card opens.
         process = ProcessTrace()
         reply_text = ""
-        for decisions_left in range(self.max_tool_calls, 0, -1):
+        # The mode may cap the decide loop tighter (or looser) than the
+        # deployment guard; 0 = not set, like every ModeSpec number.
+        max_tool_calls = spec.turn_limit or self.max_tool_calls
+        for decisions_left in range(max_tool_calls, 0, -1):
             final_decision = decisions_left == 1
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
@@ -542,7 +545,7 @@ class Orchestrator:
                 break
         else:
             events.append(ReplyEvent(
-                f"tool budget exhausted ({self.max_tool_calls} decisions): "
+                f"tool budget exhausted ({max_tool_calls} decisions): "
                 "the final tool calls ran, but the driver bundled no reply "
                 "text despite the warning; the turn was cut short.",
                 kind="notice",
@@ -704,8 +707,12 @@ class Orchestrator:
                 # ADR 037 knobs report only when set -- the default line
                 # stays short for the common unconfigured mode.
                 parts = []
+                if current.meta_inspection:
+                    parts.append("meta-inspection: on")
                 if current.max_tokens:
                     parts.append(f"max tokens: {current.max_tokens}")
+                if current.turn_limit:
+                    parts.append(f"turn limit: {current.turn_limit}")
                 if current.web_search_max_uses:
                     parts.append(f"search uses: {current.web_search_max_uses}")
                 if current.web_search_allowed_domains:

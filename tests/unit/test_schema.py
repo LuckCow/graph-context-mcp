@@ -4,7 +4,7 @@ import pytest
 
 from graph_context.domain import models, schema
 from graph_context.domain.schema import Role
-from graph_context.errors import SchemaViolation
+from graph_context.errors import InfraWriteDenied, SchemaViolation
 
 
 class TestResolveRole:
@@ -127,3 +127,35 @@ class TestValidateTypeName:
     def test_gc_prefix_is_reserved(self) -> None:
         with pytest.raises(SchemaViolation, match="reserved gc_"):
             schema.validate_type_name("gc_faction")
+
+
+class TestValidateInfraWrite:
+    """ADR 045: the infra-write guard, in exactly one place."""
+
+    def test_story_and_neutral_roles_pass(self) -> None:
+        schema.validate_infra_write(Role.CHARACTER, "Character")
+        schema.validate_infra_write(None, "Realization")
+
+    def test_infra_role_is_denied_without_privilege(self) -> None:
+        with pytest.raises(InfraWriteDenied, match="system configuration"):
+            schema.validate_infra_write(Role.MODE, "Activity Mode")
+
+    def test_admitted_role_passes(self) -> None:
+        schema.validate_infra_write(
+            Role.MODE, "Activity Mode", frozenset({Role.MODE})
+        )
+
+    def test_privilege_admits_only_its_own_roles(self) -> None:
+        with pytest.raises(InfraWriteDenied):
+            schema.validate_infra_write(
+                Role.RULE, "Automation Rule", frozenset({Role.MODE})
+            )
+
+    def test_error_names_the_escape_hatches_and_known_types(self) -> None:
+        with pytest.raises(InfraWriteDenied) as excinfo:
+            schema.validate_infra_write(
+                Role.SCHEDULED, "Scheduled Event", known=("Character", "Task")
+            )
+        message = str(excinfo.value)
+        assert "meta-inspection" in message and "schedule" in message
+        assert "Character" in message and "Task" in message

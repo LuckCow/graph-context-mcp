@@ -23,6 +23,34 @@ class SchemaViolation(GraphContextError):
     """A write violated a node-creation invariant or a structural rule."""
 
 
+class InfraWriteDenied(GraphContextError):
+    """A write targeted a system-configuration (infra-role) type (ADR 045).
+
+    Raised by :func:`graph_context.domain.schema.validate_infra_write`
+    when a ``create_node``/``update_node`` targets an infra-role object
+    the active mode's privilege does not admit. The message names the
+    legitimate surfaces so the model self-corrects instead of retrying.
+    """
+
+    def __init__(
+        self, type_name: str, role: str, known: tuple[str, ...] = ()
+    ) -> None:
+        self.type_name = type_name
+        self.role = role
+        hint = (
+            f" Types you can write: {', '.join(sorted(known))}."
+            if known else ""
+        )
+        super().__init__(
+            f"{type_name!r} is system configuration ({role}), not "
+            "story/world data; this mode cannot create or modify it. "
+            "Activity Mode objects are editable only by a mode with "
+            "meta-inspection (the Space Setup mode) or directly in "
+            "Anytype; Scheduled Events and Automation Rules have their "
+            f"own tools (schedule, automation).{hint}"
+        )
+
+
 class ApprovalRequired(GraphContextError):
     """A write needs a new space-level type or relation the user must approve.
 

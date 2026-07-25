@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 
-from graph_context.errors import SchemaViolation
+from graph_context.errors import InfraWriteDenied, SchemaViolation
 
 
 class Role(StrEnum):
@@ -165,6 +165,25 @@ def validate_type_name(name: str) -> None:
             f"type name {name!r} uses the reserved gc_ prefix "
             "(infrastructure vocabulary); pick a human name"
         )
+
+
+def validate_infra_write(
+    role: Role | None,
+    type_name: str,
+    admitted: frozenset[Role] = frozenset(),
+    known: tuple[str, ...] = (),
+) -> None:
+    """The infra-write guard (ADR 045), in exactly one place.
+
+    Generic node writes may not target infra-role objects -- mode
+    config, scheduled events, rules, session state are system surfaces
+    with their own owners -- unless the caller's privilege ``admitted``
+    the role (today: meta-inspection admits ``Role.MODE``). The
+    dedicated services (scheduler, rule engine, recorders) write through
+    the repository directly and never pass here.
+    """
+    if role in INFRA_ROLES and role not in admitted:
+        raise InfraWriteDenied(type_name, role.value, known)
 
 
 def validate_new_node(

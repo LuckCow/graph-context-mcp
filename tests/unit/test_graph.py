@@ -145,3 +145,36 @@ class TestNameResolution:
 
     def test_find_by_name_empty_query(self, graph: GraphIndex) -> None:
         assert graph.find_by_name("   ") == []
+
+
+class TestMetaInclusion:
+    """ADR 045: ``include_roles`` re-admits the caller's privileged infra
+    roles in name resolution -- and only those."""
+
+    @pytest.fixture
+    def graph(self) -> GraphIndex:
+        g = GraphIndex()
+        g.upsert_node(_named("id-setup", "Space Setup", "Activity Mode",
+                             role=Role.MODE))
+        g.upsert_node(
+            _named("id-prose", "Space Setup notes", "Capture", role=Role.CAPTURE)
+        )
+        return g
+
+    def test_default_still_hides_infra(self, graph: GraphIndex) -> None:
+        assert graph.find_by_name("Space Setup") == []
+
+    def test_included_role_resolves_by_name(self, graph: GraphIndex) -> None:
+        matches = graph.find_by_name(
+            "Space Setup", include_roles=frozenset({Role.MODE})
+        )
+        assert [n.id for n in matches] == ["id-setup"]
+        node = graph.resolve("Space Setup", include_roles=frozenset({Role.MODE}))
+        assert node.id == "id-setup"
+
+    def test_other_infra_roles_stay_hidden(self, graph: GraphIndex) -> None:
+        # The privilege is per-role: MODE does not unlock Capture nodes.
+        matches = graph.find_by_name(
+            "Space Setup notes", include_roles=frozenset({Role.MODE})
+        )
+        assert matches == []

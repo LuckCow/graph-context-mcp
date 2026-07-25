@@ -137,8 +137,14 @@ class GraphRepository(Protocol):
         """Resolve a requested type identifier to its semantic role (or None)."""
         ...
 
-    def known_node_types(self) -> frozenset[str]:
-        """Type names available as create_node targets (for error suggestions)."""
+    def known_node_types(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> frozenset[str]:
+        """Type names available as create_node targets (for error suggestions).
+
+        Infra-role types are excluded unless their role is in
+        ``include_roles`` -- the caller's meta privilege (ADR 045).
+        """
         ...
 
     def known_edge_labels(self) -> frozenset[str]:
@@ -158,12 +164,16 @@ class GraphRepository(Protocol):
         """
         ...
 
-    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+    def field_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
         """Reflectable scalar properties per type display name (ADR 023).
 
         Guidance for the LLM (overview rendering, unmatched-key errors):
         which properties already exist as ``fields`` targets on each
-        non-infra type. May be empty for backends without a space schema.
+        non-infra type -- infra types join the catalog only when their
+        role is in ``include_roles`` (ADR 045). May be empty for backends
+        without a space schema.
         """
         ...
 

@@ -3,7 +3,12 @@
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.errors import NodeNotFound, SchemaViolation
+from graph_context.domain.schema import Role
+from graph_context.errors import (
+    InfraWriteDenied,
+    NodeNotFound,
+    SchemaViolation,
+)
 from tests.conftest import World
 
 
@@ -170,4 +175,51 @@ class TestTypeScopedDeclarations:
                 declarations={
                     "quirk": PropertyDeclaration("quirk", "text")
                 },
+            )
+
+
+class TestInfraWriteGuard:
+    """ADR 045: generic writes may not target infra-role objects unless
+    the caller's privilege admits the role. The dedicated services
+    (scheduler, rule engine, recorders) bypass NodeWriter entirely."""
+
+    MODE_DRAFT = NodeDraft(
+        "Activity Mode", name="Recipe Mode", summary="Cooks recipes."
+    )
+
+    async def test_unprivileged_create_of_a_mode_object_is_denied(
+        self, writer, repository
+    ):
+        before = repository.graph.node_count()
+        with pytest.raises(InfraWriteDenied, match="system configuration"):
+            await writer.create_node(self.MODE_DRAFT)
+        assert repository.graph.node_count() == before
+
+    async def test_admitted_create_lands_with_the_mode_role(
+        self, writer, repository
+    ):
+        node = (await writer.create_node(
+            self.MODE_DRAFT, admitted_infra_roles=frozenset({Role.MODE}),
+        )).node
+        assert repository.graph.node(node.id).role is Role.MODE
+
+    async def test_update_of_a_mode_object_needs_the_same_privilege(
+        self, writer, repository
+    ):
+        node = (await writer.create_node(
+            self.MODE_DRAFT, admitted_infra_roles=frozenset({Role.MODE}),
+        )).node
+        with pytest.raises(InfraWriteDenied):
+            await writer.update_node(node.id, summary="tweaked")
+        updated = (await writer.update_node(
+            node.id, summary="tweaked",
+            admitted_infra_roles=frozenset({Role.MODE}),
+        )).node
+        assert updated.summary == "tweaked"
+
+    async def test_mode_privilege_does_not_unlock_other_infra(self, writer):
+        with pytest.raises(InfraWriteDenied):
+            await writer.create_node(
+                NodeDraft("Scheduled Event", name="Ping", summary="s."),
+                admitted_infra_roles=frozenset({Role.MODE}),
             )

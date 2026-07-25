@@ -229,7 +229,10 @@ async def context_tool(
         # keys. Empty graph -> guidance, not an error (a fresh session
         # should get something actionable).
         return presenters.render_overview(
-            build_overview(graph), services.repository.field_catalog()
+            build_overview(graph),
+            services.repository.field_catalog(
+                include_roles=services.visible_infra_roles
+            ),
         )
     if action == "resync":
         changed = await resync_out_of_band(services)
@@ -702,6 +705,7 @@ async def create_node_tool(
     )
     outcome = await services.writer.create_node(
         draft, parsed_links, declarations=declarations,
+        admitted_infra_roles=services.visible_infra_roles,
     )
     await _note_mutation(services)
     view = await services.reader.get_node(outcome.node.id)
@@ -757,6 +761,7 @@ async def update_node_tool(
         add_links=parsed_add_links,
         remove_links=removals,
         declarations=declarations,
+        admitted_infra_roles=services.visible_infra_roles,
     )
     await _note_mutation(services)
     node = outcome.node
@@ -800,6 +805,7 @@ async def get_node_tool(
         edge_type_filter=_edge_type_set(edge_types),
         include_provenance=include_provenance,
         excerpt_chars=presenters.EXCERPT_CHARS,
+        visible_roles=services.visible_infra_roles,
     )
     return presenters.render_node_view(view)
 
@@ -899,10 +905,24 @@ async def query_tool(
     # Corpus scans reach everything, so hide ALL bookkeeping roles (not
     # just explore's default set -- mode config objects included) unless
     # the type filter explicitly names an infra type (same escape hatch
-    # as explore's include_types).
-    exclude_roles: frozenset[Role] = schema.INFRA_ROLES
+    # as explore's include_types). The active mode's meta privilege
+    # (ADR 045) re-admits its roles; Role.MODE keeps NO unprivileged
+    # hatch -- mode objects are assistant config, reachable only with
+    # meta-inspection.
+    exclude_roles: frozenset[Role] = (
+        schema.INFRA_ROLES - services.visible_infra_roles
+    )
     if node_type is not None:
         role = _validate_query_type(services, node_type)
+        if (
+            role is Role.MODE
+            and Role.MODE not in services.visible_infra_roles
+        ):
+            raise GraphContextError(
+                "Activity Mode objects are assistant configuration and "
+                "are not visible in this mode; a mode with "
+                "meta-inspection (the Space Setup mode) can inspect them"
+            )
         if role in schema.INFRA_ROLES:
             exclude_roles = frozenset()
     anchor = await _resolve(services, linked_to) if linked_to else None
@@ -951,7 +971,8 @@ async def find_node_tool(
 ) -> str:
     def by_name() -> list[Node]:
         return services.repository.graph.find_by_name(
-            name, node_type=type or None, limit=limit
+            name, node_type=type or None, limit=limit,
+            include_roles=services.visible_infra_roles,
         )
 
     matches = by_name()

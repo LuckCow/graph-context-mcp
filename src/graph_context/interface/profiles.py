@@ -111,21 +111,33 @@ class ModeSpec:
     adaptive thinking at that effort; ``off`` disables thinking -- and
     is rejected here when the mode pins a Fable/Mythos model, where
     thinking cannot be turned off); ``max_tokens`` caps one decision's
-    output; ``web_search_max_uses`` / ``web_search_allowed_domains`` /
+    output; ``turn_limit`` caps how many decisions (driver calls) one
+    turn may spend before the pipeline cuts it short -- a mode knob over
+    the orchestrator's loop guard, not a driver option;
+    ``web_search_max_uses`` / ``web_search_allowed_domains`` /
     ``web_search_blocked_domains`` bound the server-side search tool
     (inert unless ``web_search`` is on; the API takes at most ONE of the
     domain lists per request, so setting both is a spec error).
+
+    ``meta_inspection`` (ADR 045) grants the mode the meta surface:
+    Activity Mode objects -- normally hidden infra -- become visible to
+    the read tools and writable through ``create_node``/``update_node``,
+    so a setup mode can author modes for the user. Off for ordinary
+    modes; the infra-write guard keeps them out regardless of what they
+    guess.
     """
 
     name: str
     goal: str
     mutating: bool = False
+    meta_inspection: bool = False
     capture: CapturePolicy | None = None
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
     web_search: bool = False
     model: str = ""
     thinking: str = ""
     max_tokens: int = 0
+    turn_limit: int = 0
     web_search_max_uses: int = 0
     web_search_allowed_domains: tuple[str, ...] = ()
     web_search_blocked_domains: tuple[str, ...] = ()
@@ -156,10 +168,14 @@ class ModeSpec:
                 f"mode {self.name!r} sets thinking = off but pins "
                 f"{self.model!r}, which cannot turn thinking off"
             )
-        if self.max_tokens < 0 or self.web_search_max_uses < 0:
+        if (
+            self.max_tokens < 0
+            or self.turn_limit < 0
+            or self.web_search_max_uses < 0
+        ):
             raise ValueError(
-                f"mode {self.name!r}: max_tokens and web_search_max_uses "
-                "must be non-negative (0 = not set)"
+                f"mode {self.name!r}: max_tokens, turn_limit, and "
+                "web_search_max_uses must be non-negative (0 = not set)"
             )
         if self.web_search_allowed_domains and self.web_search_blocked_domains:
             raise ValueError(

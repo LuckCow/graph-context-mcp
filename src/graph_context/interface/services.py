@@ -22,6 +22,7 @@ from graph_context.application.scheduler import Scheduler, local_clock, local_zo
 from graph_context.application.schema_proposals import SchemaProposals
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 from graph_context.ports.script_runner import ScriptRunner
@@ -76,6 +77,12 @@ class Services:
     # the outbox clear so a proposal can never apply in the turn that
     # drafted it.
     proposals: SchemaProposals = field(default_factory=SchemaProposals)
+    # ADR 045 (meta-inspection): infra roles the ACTIVE mode may see and
+    # write. Set per tool call by ``modes.invoke`` from the dispatching
+    # spec (the mode can change between turns, so this is never static
+    # session state); empty -- the default everywhere else, including the
+    # bare MCP server -- means no infra surface at all.
+    visible_infra_roles: frozenset[Role] = frozenset()
 
 
 def build_services(

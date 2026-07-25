@@ -69,6 +69,9 @@ the default when empty), Tools (each tool call), or Full (thinking and \
 results too).
 - Tick gc_mode_web_search to let the assistant search the web while this \
 mode is active; unticked keeps it grounded in the graph alone.
+- Tick gc_mode_meta_inspection to let the mode see and edit Activity \
+Mode objects themselves (the Space Setup mode uses this); leave it off \
+for ordinary modes.
 - Pick a gc_mode_model option to run this mode on a specific Claude \
 model (Sonnet 5, Opus 4.8, or Fable 5); empty uses the deployment's \
 default model.
@@ -78,6 +81,9 @@ level (Low ... Max) enables thinking at that depth, Off disables it \
 deployment default.
 - Set gc_mode_max_tokens to cap one reply's output length in tokens; \
 empty/0 uses the deployment default.
+- Set gc_mode_turn_limit to cap how many model decisions (tool-call \
+rounds) one message may spend before the turn is cut short; empty/0 \
+uses the deployment default.
 - With web search on: gc_mode_search_max_uses caps searches per turn, \
 and gc_mode_search_allowed_domains / gc_mode_search_blocked_domains \
 (comma or space separated) scope where it may search -- set at most one \
@@ -114,7 +120,7 @@ async def seed_activity_modes(
     minted: dict[str, str] = {}  # payload id -> minted object id
     for payload in payloads:
         created = await client.create_object(
-            await _create_payload(client, payload)
+            await create_payload(client, payload)
         )
         minted[str(payload["id"])] = str(created["id"])
     # The explainer mints LAST: a crash mid-seed then leaves real modes
@@ -133,7 +139,7 @@ async def seed_activity_modes(
     return True
 
 
-async def _create_payload(
+async def create_payload(
     client: AnytypeClient, payload: Mapping[str, Any]
 ) -> dict[str, Any]:
     """One seed payload -> the create_object body.
@@ -142,11 +148,17 @@ async def _create_payload(
     page body, the binding/capture ride the ``gc_mode_*`` /
     ``gc_capture_*`` properties. Selects are written only when they
     differ from the unset default, matching how human-authored mode
-    objects normally look.
+    objects normally look. Public: the one-time retrofit script
+    (``scripts/seed_space_setup_mode.py``) mints single mode objects
+    into already-seeded spaces through the same translation.
     """
     properties: list[dict[str, Any]] = [
         mapping.property_entry(
             mapping.PROP_MODE_MUTATING, "checkbox", bool(payload["mutating"])
+        ),
+        mapping.property_entry(
+            mapping.PROP_MODE_META, "checkbox",
+            bool(payload.get("meta_inspection")),
         ),
         mapping.property_entry(
             mapping.PROP_MODE_WEB_SEARCH, "checkbox",
@@ -174,6 +186,7 @@ async def _create_payload(
         ))
     for key, prop in (
         ("max_tokens", mapping.PROP_MODE_MAX_TOKENS),
+        ("turn_limit", mapping.PROP_MODE_TURN_LIMIT),
         ("web_search_max_uses", mapping.PROP_MODE_SEARCH_MAX_USES),
     ):
         if payload.get(key):

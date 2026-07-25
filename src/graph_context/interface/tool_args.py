@@ -37,7 +37,9 @@ async def _resolve(services: Services, identifier: str) -> NodeId:
     and mutation targets are never guessed (ADR 014 non-feature).
     """
     try:
-        return services.repository.graph.resolve(identifier).id
+        return services.repository.graph.resolve(
+            identifier, include_roles=services.visible_infra_roles
+        ).id
     except NodeNotFound:
         if services.ranker is None:
             raise
@@ -260,13 +262,23 @@ def _validate_query_type(services: Services, requested: str) -> Role | None:
     role = services.repository.role_for(requested)
     if role is None:
         role = next((r for r in Role if r.value.casefold() == wanted), None)
-    known = {t.casefold() for t in services.repository.known_node_types()}
+    known = {
+        t.casefold()
+        for t in services.repository.known_node_types(
+            services.visible_infra_roles
+        )
+    }
     if wanted in known or role is not None:
         return role
     for node in services.repository.graph.nodes():
         if any(i.casefold() == wanted for i in node_identifiers(node)):
             return node.role
-    raise UnknownNodeType(requested, tuple(services.repository.known_node_types()))
+    raise UnknownNodeType(
+        requested,
+        tuple(
+            services.repository.known_node_types(services.visible_infra_roles)
+        ),
+    )
 
 
 def _node_type_set(values: Sequence[str] | None) -> frozenset[str] | None:

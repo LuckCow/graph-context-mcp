@@ -89,9 +89,20 @@ class NodeWriter:
         links: Sequence[LinkSpec] = (),
         *,
         declarations: Mapping[str, PropertyDeclaration] | None = None,
+        admitted_infra_roles: frozenset[schema.Role] = frozenset(),
     ) -> WriteOutcome:
-        """Create a node and its initial links as one logical operation."""
+        """Create a node and its initial links as one logical operation.
+
+        ``admitted_infra_roles`` (ADR 045) carries the caller's meta
+        privilege: infra-role targets are denied unless admitted -- the
+        infra surfaces have dedicated owners (scheduler, rule engine,
+        recorders) that write through the repository, never through here.
+        """
         role = self._repository.role_for(draft.type)
+        schema.validate_infra_write(
+            role, draft.type, admitted_infra_roles,
+            tuple(self._repository.known_node_types()),
+        )
         schema.validate_new_node(
             role, draft.name, draft.summary, draft.story_time
         )
@@ -120,9 +131,14 @@ class NodeWriter:
         add_links: Sequence[LinkSpec] = (),
         remove_links: Sequence[Edge] = (),
         declarations: Mapping[str, PropertyDeclaration] | None = None,
+        admitted_infra_roles: frozenset[schema.Role] = frozenset(),
     ) -> WriteOutcome:
         """Apply field and link changes; flag staleness unless summary is fresh."""
-        self._repository.graph.node(node_id)  # fail fast on bad id
+        target = self._repository.graph.node(node_id)  # fail fast on bad id
+        schema.validate_infra_write(
+            target.role, target.type, admitted_infra_roles,
+            tuple(self._repository.known_node_types()),
+        )
         declared = dict(declarations or {})
         written = set(fields or {}) | {link.edge_type for link in add_links}
         validate_property_declarations(written, declared)

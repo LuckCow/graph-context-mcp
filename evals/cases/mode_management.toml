@@ -11,6 +11,10 @@
 # must be inferred from that live pattern; there is no instruction-card
 # "Example Mode" spelling out the answer, because the first baseline
 # showed such a card teaches the model the solution outright.
+#
+# ADR 045: creating/updating Activity Mode objects now requires the
+# meta-inspection privilege, so the mode-authoring cases run in the
+# seeded space_setup mode (the corpus mode that carries it).
 
 [suite]
 name = "mode_management"
@@ -22,7 +26,7 @@ embedder = "off"
 # and the type every existing mode in the space already has.
 [[case]]
 id = "create_mode_uses_activity_mode_type"
-mode = "organizing"
+mode = "space_setup"
 trials = 2
 
 [[case.seed.node]]
@@ -95,7 +99,7 @@ reply = "Created 'Task Creation Mode' as an Activity Mode with the default-assig
 # with gc_mode_mutating set.
 [[case]]
 id = "created_mode_capability_matches_description"
-mode = "organizing"
+mode = "space_setup"
 trials = 2
 
 [[case.seed.node]]
@@ -147,7 +151,7 @@ reply = "Created 'Task Creation Mode' as a mutating Activity Mode -- it can crea
 # Without this pair, "always set the field" would ace case 2.
 [[case]]
 id = "read_only_mode_stays_read_only"
-mode = "organizing"
+mode = "space_setup"
 trials = 2
 
 [[case.seed.node]]
@@ -332,8 +336,9 @@ reply = "Done: 'Old Notes' now carries the superseded_by link to 'New Notes' and
 # 5. (log 2026-07-11 20:36, turn aabecafd1279) Two nodes both named
 # "Task Creation Mode" -- the superseded Structural Reminder and the live
 # Activity Mode. find_node surfaces only the reminder (mode objects are
-# infra-hidden by name) while query(type="Activity Mode") shows the mode;
-# fed that mixed information, the model re-rolled the identical find_node
+# infra-hidden by name), and since ADR 045 query(type="Activity Mode") is
+# refused outright in an unprivileged mode; fed that mixed information,
+# the model re-rolled the identical find_node
 # three times (5 decisions / 5 calls) before answering. A deterministic
 # call repeated verbatim is pure waste: look once, cross-check by type,
 # answer.
@@ -383,8 +388,10 @@ must_mention = ["Activity Mode"]
 rubric = """
 Two nodes share the name "Task Creation Mode": a superseded Structural
 Reminder and the live Activity Mode (the mode config actually in use).
-find_node only surfaces the reminder; the mode object appears via
-query(type="Activity Mode"). Pass only if the reply tells the user the
+find_node only surfaces the reminder; mode objects themselves are not
+inspectable here (query type="Activity Mode" is refused -- assistant
+configuration, ADR 045), but the session itself runs in
+task_creation_mode, which is the answer. Pass only if the reply tells the user the
 Activity Mode version is the one in use (the reminder is a superseded
 leftover), and the trajectory contains no tool call repeated with
 identical arguments -- re-rolling the same deterministic lookup is

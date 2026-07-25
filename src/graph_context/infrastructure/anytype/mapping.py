@@ -117,7 +117,7 @@ import zlib
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from graph_context.domain import attribution, rules, scheduling
+from graph_context.domain import activity, attribution, rules, scheduling
 from graph_context.domain import fields as domain_fields
 from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
 from graph_context.domain.model_choice import MODEL_CHOICES
@@ -167,34 +167,26 @@ ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 # Activity Mode config objects (ADR 015 amendment): the human-editable
 # fields of a gc_activity_mode object. Kept OUT of SCALAR_PROPERTIES --
 # these live only on mode objects, never on ordinary nodes. The goal is
-# the object BODY (read via body_of), so it needs no property.
-PROP_MODE_MUTATING = "gc_mode_mutating"
-PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
-PROP_MODE_WEB_SEARCH = "gc_mode_web_search"  # WP20, ADR 030
-PROP_MODE_MODEL = "gc_mode_model"  # ADR 033
-PROP_MODE_THINKING = "gc_mode_thinking"  # ADR 037
-PROP_MODE_MAX_TOKENS = "gc_mode_max_tokens"  # ADR 037
-PROP_MODE_SEARCH_MAX_USES = "gc_mode_search_max_uses"  # ADR 037
-PROP_MODE_SEARCH_ALLOWED = "gc_mode_search_allowed_domains"  # ADR 037
-PROP_MODE_SEARCH_BLOCKED = "gc_mode_search_blocked_domains"  # ADR 037
-PROP_CAPTURE_TYPE = "gc_capture_type"
-PROP_CAPTURE_REFERENCES = "gc_capture_references"
-PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
+# the object BODY (read via body_of), so it needs no property. The keys
+# live in the domain since ADR 045 (activity.MODE_CONFIG_FIELDS -- they
+# reflect, so both backends need one spelling); these are the
+# adapter-local aliases.
+PROP_MODE_MUTATING = activity.FIELD_MUTATING
+PROP_MODE_META = activity.FIELD_META_INSPECTION  # ADR 045
+PROP_MODE_ACTIVITY_DETAIL = activity.FIELD_ACTIVITY_DETAIL  # WP19, ADR 029
+PROP_MODE_WEB_SEARCH = activity.FIELD_WEB_SEARCH  # WP20, ADR 030
+PROP_MODE_MODEL = activity.FIELD_MODEL  # ADR 033
+PROP_MODE_THINKING = activity.FIELD_THINKING  # ADR 037
+PROP_MODE_MAX_TOKENS = activity.FIELD_MAX_TOKENS  # ADR 037
+PROP_MODE_TURN_LIMIT = activity.FIELD_TURN_LIMIT
+PROP_MODE_SEARCH_MAX_USES = activity.FIELD_SEARCH_MAX_USES  # ADR 037
+PROP_MODE_SEARCH_ALLOWED = activity.FIELD_SEARCH_ALLOWED  # ADR 037
+PROP_MODE_SEARCH_BLOCKED = activity.FIELD_SEARCH_BLOCKED  # ADR 037
+PROP_CAPTURE_TYPE = activity.FIELD_CAPTURE_TYPE
+PROP_CAPTURE_REFERENCES = activity.FIELD_CAPTURE_REFERENCES
+PROP_CAPTURE_MIN_CHARS = activity.FIELD_CAPTURE_MIN_CHARS
 
-MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
-    PROP_MODE_MUTATING: "checkbox",
-    PROP_MODE_ACTIVITY_DETAIL: "select",
-    PROP_MODE_WEB_SEARCH: "checkbox",
-    PROP_MODE_MODEL: "select",
-    PROP_MODE_THINKING: "select",
-    PROP_MODE_MAX_TOKENS: "number",
-    PROP_MODE_SEARCH_MAX_USES: "number",
-    PROP_MODE_SEARCH_ALLOWED: "text",
-    PROP_MODE_SEARCH_BLOCKED: "text",
-    PROP_CAPTURE_TYPE: "text",
-    PROP_CAPTURE_REFERENCES: "text",
-    PROP_CAPTURE_MIN_CHARS: "number",
-}
+MODE_PROPERTIES: dict[str, str] = dict(activity.MODE_CONFIG_FIELDS)
 
 # Select-format infra properties whose options bootstrap PRE-SEEDS, so the
 # human picks from a dropdown instead of typing the enum (WP19 amendment).
@@ -350,6 +342,12 @@ GC_REFLECTED_FIELD_KEYS: frozenset[str] = (
     | frozenset(ATTRIBUTION_PROPERTIES)
     # The Automation Rule surface is human-facing too (WP31, ADR 039).
     | frozenset(RULE_PROPERTIES)
+    # ADR 045: the mode config surface reflects so a meta-inspection mode
+    # can read a mode object's settings via get_node and write them via
+    # the properties dict. These keys only ever live on Activity Mode
+    # objects, which stay invisible to unprivileged modes -- reflecting
+    # them globally leaks nothing.
+    | frozenset(MODE_PROPERTIES)
 )
 
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``

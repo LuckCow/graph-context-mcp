@@ -15,6 +15,7 @@ import pytest
 from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.domain import rules as rules_domain
 from graph_context.domain.models import NodeDraft
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
@@ -1244,3 +1245,89 @@ class TestSchemaTool:
         out = await tools.schema_tool(self._services(), action="destroy")
         assert out.startswith("ERROR:")
         assert "propose_type" in out and "cancel" in out
+
+
+class TestMetaInspection:
+    """ADR 045: mode objects are reachable only with the meta privilege --
+    the query hatch is closed for Role.MODE, and the write tools forward
+    the privilege into the infra-write guard."""
+
+    @pytest.fixture
+    async def mode_node(self, services: tools.Services):
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.create_node_tool(
+            services,
+            type="Activity Mode",
+            name="Recipe Mode",
+            summary="Cooks recipes.",
+            description="Track recipes as the user cooks.",
+            properties={"gc_mode_mutating": "true"},
+        )
+        assert out.startswith("created:")
+        services.visible_infra_roles = frozenset()
+        return services.repository.graph.find_by_name(
+            "Recipe Mode", include_roles=frozenset({Role.MODE})
+        )[0]
+
+    async def test_unprivileged_create_gets_the_guard_error(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.create_node_tool(
+            services, type="Activity Mode", name="Sneaky", summary="s.",
+        )
+        assert out.startswith("ERROR:")
+        assert "system configuration" in out and "meta-inspection" in out
+
+    async def test_unprivileged_query_by_mode_type_is_refused(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        out = await tools.query_tool(services, type="Activity Mode")
+        assert out.startswith("ERROR:")
+        assert "not visible in this mode" in out
+
+    async def test_other_infra_types_keep_their_query_hatch(
+        self, services: tools.Services
+    ) -> None:
+        # The documented escape hatch survives for non-mode infra.
+        out = await tools.query_tool(services, type="Scheduled Event")
+        assert not out.startswith("ERROR:")
+
+    async def test_privileged_query_lists_mode_objects(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.query_tool(services, type="Activity Mode")
+        assert "Recipe Mode" in out
+
+    async def test_privileged_find_node_resolves_a_mode_by_name(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        unprivileged = await tools.find_node_tool(services, name="Recipe Mode")
+        assert "Recipe Mode" not in unprivileged
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.find_node_tool(services, name="Recipe Mode")
+        assert "Recipe Mode" in out
+
+    async def test_privileged_get_node_shows_the_mode_config_fields(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.get_node_tool(services, node_id=mode_node.id)
+        assert "gc_mode_mutating" in out
+
+    async def test_privileged_update_rewrites_the_goal(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        out = await tools.update_node_tool(
+            services, node_id=mode_node.id,
+            summary="Cooks and plans recipes.",
+            description="Track recipes and plan meals.",
+        )
+        assert out.startswith("ERROR:")  # unprivileged: denied
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.update_node_tool(
+            services, node_id="Recipe Mode",  # name resolution, privileged
+            summary="Cooks and plans recipes.",
+            description="Track recipes and plan meals.",
+        )
+        assert out.startswith("updated:")

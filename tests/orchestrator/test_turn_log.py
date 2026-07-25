@@ -229,7 +229,7 @@ class TestPipelineTurnLogging:
             "user", "prompt", "llm_prompt", "llm_turn", "tool_result",
             "llm_turn", "turn_end",
         ]
-        assert all(e["mode"] == "world_modeling" for e in entries)
+        assert all(e["mode"] == "space_setup" for e in entries)
         assert entries[0]["text"] == "Add Mira."
         assert entries[1]["goal"]  # the mode's system-prompt fragment
         assert entries[1]["system_prompt"]  # what the driver actually sends
@@ -254,7 +254,7 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         user, end = _entries(path)
         assert user["event"] == "user" and user["text"] == "/mode authoring"
-        assert user["mode"] == "world_modeling"  # the mode the command found
+        assert user["mode"] == "space_setup"  # the mode the command found
         assert end["event"] == "turn_end"
         assert end["mode"] == "authoring"  # the mode the session is in now
         assert "authoring" in end["replies"][0]["text"]
@@ -293,7 +293,7 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         await orchestrator.handle_message("s1", "u1", "third")
         prompts = [e for e in _entries(path) if e["event"] == "prompt"]
-        assert [p["mode"] for p in prompts] == ["world_modeling", "authoring"]
+        assert [p["mode"] for p in prompts] == ["space_setup", "authoring"]
         # The authoring binding drops the mutation tools; the logged tool
         # surface is the one the boundary will actually enforce.
         assert "create_node" in prompts[0]["tools"]

@@ -99,12 +99,16 @@ class SpaceRegistry:
                     return key
         return None
 
-    def known_node_types(self) -> frozenset[str]:
-        """Type display names available as create targets (non-infra)."""
+    def known_node_types(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> frozenset[str]:
+        """Type display names available as create targets (non-infra,
+        plus any infra roles the caller's privilege includes -- ADR 045)."""
         return frozenset(
             info.name
             for key, info in self.types_by_key.items()
-            if self.role_for(key) not in schema.INFRA_ROLES
+            if (role := self.role_for(key)) not in schema.INFRA_ROLES
+            or role in include_roles
         )
 
     # -- relations ------------------------------------------------------

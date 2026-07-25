@@ -38,8 +38,9 @@ from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import CapturePolicy, ModeSpec
 
 _SPEC_KEYS = {
-    "goal", "mutating", "capture", "activity_detail", "web_search", "model",
-    "thinking", "max_tokens", "web_search_max_uses",
+    "goal", "mutating", "meta_inspection", "capture", "activity_detail",
+    "web_search", "model",
+    "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
     "web_search_allowed_domains", "web_search_blocked_domains",
 }
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
@@ -98,11 +99,13 @@ def spec_from_mapping(
             name=name,
             goal=str(body.get("goal", "")),
             mutating=bool(body.get("mutating", False)),
+            meta_inspection=bool(body.get("meta_inspection", False)),
             capture=capture,
             web_search=bool(body.get("web_search", False)),
             model=model,
             thinking=thinking,
             max_tokens=_count(body.get("max_tokens"), f"{origin}: max_tokens"),
+            turn_limit=_count(body.get("turn_limit"), f"{origin}: turn_limit"),
             web_search_max_uses=_count(
                 body.get("web_search_max_uses"),
                 f"{origin}: web_search_max_uses",
@@ -287,6 +290,7 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
             "name": seed.display_name,
             "goal": spec.goal,
             "mutating": spec.mutating,
+            "meta_inspection": spec.meta_inspection,
             "web_search": spec.web_search,
             "capture": None,
             "activity_detail": spec.activity_detail,
@@ -306,6 +310,8 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
             payload["thinking"] = spec.thinking
         if spec.max_tokens:
             payload["max_tokens"] = spec.max_tokens
+        if spec.turn_limit:
+            payload["turn_limit"] = spec.turn_limit
         if spec.web_search_max_uses:
             payload["web_search_max_uses"] = spec.web_search_max_uses
         if spec.web_search_allowed_domains:

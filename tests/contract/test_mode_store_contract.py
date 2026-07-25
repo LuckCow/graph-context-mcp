@@ -89,6 +89,7 @@ def _seed_mode(
     model: str = "",
     thinking: str = "",
     max_tokens: float | None = None,
+    turn_limit: float | None = None,
     search_max_uses: float | None = None,
     search_allowed: str = "",
     search_blocked: str = "",
@@ -111,6 +112,9 @@ def _seed_mode(
     if max_tokens is not None:
         properties.append({"key": mapping.PROP_MODE_MAX_TOKENS,
                            "format": "number", "number": max_tokens})
+    if turn_limit is not None:
+        properties.append({"key": mapping.PROP_MODE_TURN_LIMIT,
+                           "format": "number", "number": turn_limit})
     if search_max_uses is not None:
         properties.append({"key": mapping.PROP_MODE_SEARCH_MAX_USES,
                            "format": "number", "number": search_max_uses})
@@ -241,13 +245,15 @@ async def test_driver_options_ride_the_payload_when_set(
     object yields the same payload it did before the fields existed."""
     _seed_mode(
         mock, "Tuned", "A goal.", thinking="Xhigh", max_tokens=32000.0,
-        search_max_uses=5.0, search_allowed="example.com, docs.example.com",
+        turn_limit=6.0, search_max_uses=5.0,
+        search_allowed="example.com, docs.example.com",
     )
-    _seed_mode(mock, "Untouched", "A goal.", max_tokens=0.0)
+    _seed_mode(mock, "Untouched", "A goal.", max_tokens=0.0, turn_limit=0.0)
     payloads = await _load_by_name(anytype_client)
     tuned = payloads["Tuned"]
     assert tuned["thinking"] == "Xhigh"
     assert tuned["max_tokens"] == 32000.0
+    assert tuned["turn_limit"] == 6.0
     assert tuned["web_search_max_uses"] == 5.0
     assert tuned["web_search_allowed_domains"] == (
         "example.com, docs.example.com"
@@ -255,7 +261,7 @@ async def test_driver_options_ride_the_payload_when_set(
     assert "web_search_blocked_domains" not in tuned
     untouched = payloads["Untouched"]
     for key in (
-        "thinking", "max_tokens", "web_search_max_uses",
+        "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
         "web_search_allowed_domains", "web_search_blocked_domains",
     ):
         assert key not in untouched  # zero/empty = unset

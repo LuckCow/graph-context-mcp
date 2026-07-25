@@ -562,7 +562,7 @@ class TestChangeWatcher:
         watcher = self._watch(route)
         try:
             await asyncio.sleep(0.05)  # baseline tick
-            assert route.orchestrator.registry.default == "world_modeling"
+            assert route.orchestrator.registry.default == "space_setup"
             await repository.update_node(context.id, summary="relinked")
             async with asyncio.timeout(5):
                 while route.orchestrator.registry.default != "authoring":

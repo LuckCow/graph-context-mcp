@@ -167,8 +167,10 @@ class AnytypeGraphRepository:
             return self._registry.role_for(key)
         return schema.resolve_role(type_identifier, self._role_overrides)
 
-    def known_node_types(self) -> frozenset[str]:
-        return self._registry.known_node_types()
+    def known_node_types(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> frozenset[str]:
+        return self._registry.known_node_types(include_roles)
 
     def known_edge_labels(self) -> frozenset[str]:
         return self._registry.known_edge_labels()
@@ -177,7 +179,9 @@ class AnytypeGraphRepository:
         key = self._registry.key_for_label(field_key)
         return None if key is None else self._registry.label_for(key)
 
-    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+    def field_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
         """Reflectable scalar properties per non-infra type (ADR 023).
 
         Properties no type claims (space-level ones, including any the bot
@@ -192,7 +196,8 @@ class AnytypeGraphRepository:
         catalog: dict[str, tuple[FieldSpec, ...]] = {}
         claimed: set[str] = set()
         for type_key, info in self._registry.types_by_key.items():
-            if self._registry.role_for(type_key) in schema.INFRA_ROLES:
+            role = self._registry.role_for(type_key)
+            if role in schema.INFRA_ROLES and role not in include_roles:
                 continue
             type_props = self._registry.reflectable_type_properties(type_key)
             claimed.update(prop.key for prop in type_props)
@@ -1023,6 +1028,10 @@ class AnytypeGraphRepository:
         others = tuple(
             prop for prop in self._registry.reflectable_properties()
             if prop.key not in type_prop_keys
+            # Reflected gc_ surfaces (schedule/rule/mode/attribution)
+            # belong to dedicated tools and roles, not the generic
+            # story-write vocabulary this suggestion list teaches.
+            and not prop.key.startswith(mapping.GC_PREFIX)
         )
         raise UnknownFieldKey(
             key,

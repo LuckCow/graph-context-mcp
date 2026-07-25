@@ -211,7 +211,7 @@ class TestTurn:
         )
         recorder = await _run(handler, _message())
         assert recorder.texts() == ["hi there"]
-        assert route.orchestrator.mode_of(f"anytype:{CHAT}") == "world_modeling"
+        assert route.orchestrator.mode_of(f"anytype:{CHAT}") == "space_setup"
 
     async def test_every_posted_id_is_recorded_for_echo_suppression(self) -> None:
         handler = _handler([LLMTurn(reply="a\n" + "b" * 2500)])

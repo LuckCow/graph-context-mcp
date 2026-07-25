@@ -57,6 +57,8 @@ FICTION = get_profile("fiction")
 _FICTION_REGISTRY = fiction_registry()
 AUTHORING = _FICTION_REGISTRY.specs["authoring"]
 WORLD_MODELING = _FICTION_REGISTRY.specs["world_modeling"]
+# ADR 045: the seeded default -- privileged, mutating.
+SPACE_SETUP = _FICTION_REGISTRY.specs["space_setup"]
 
 
 class TestBindings:
@@ -79,6 +81,22 @@ class TestBindings:
         assert set(docs) == set(binding_for(AUTHORING))
         assert all(docs.values())  # docstrings are prompts; never empty
 
+    async def test_invoke_sets_the_meta_privilege_per_call(
+        self, services: Services
+    ) -> None:
+        """ADR 045: the dispatching spec's meta_inspection flag rides the
+        Services view for exactly one call -- and an unprivileged spec's
+        call drops it again (a /mode switch away revokes the surface)."""
+        assert SPACE_SETUP.meta_inspection
+        await modes.invoke(
+            SPACE_SETUP, "context", services, {"action": "get"}
+        )
+        assert services.visible_infra_roles == frozenset({Role.MODE})
+        await modes.invoke(
+            WORLD_MODELING, "context", services, {"action": "get"}
+        )
+        assert services.visible_infra_roles == frozenset()
+
 
 def _mode_payload(**overrides) -> dict:
     """One in-space Activity Mode payload, ModeStore-port shaped."""
@@ -99,8 +117,10 @@ class TestRegistryLoader:
 
     def test_the_seeded_corpus_loads_with_the_linked_default(self) -> None:
         registry = fiction_registry()
-        assert registry.names() == ["authoring", "world_modeling"]
-        assert registry.default == "world_modeling"
+        assert registry.names() == [
+            "authoring", "space_setup", "world_modeling",
+        ]
+        assert registry.default == "space_setup"
 
     def test_no_modes_fails_loudly_pointing_at_reseeding(self) -> None:
         with pytest.raises(GraphContextError, match="no Activity Mode"):
@@ -134,7 +154,7 @@ class TestInSpaceModes:
         scribe = registry.get("faithful_scribe")
         assert scribe is not None and scribe.mutating
         assert scribe.goal == "Record only what the user explicitly states."
-        assert registry.default == "world_modeling"  # untouched
+        assert registry.default == "space_setup"  # untouched
 
     def test_in_space_capture_fills_policy_defaults(self) -> None:
         registry = fiction_registry(_mode_payload(
@@ -395,7 +415,7 @@ class TestPipeline:
         ])
         await orchestrator.handle_message("locked-down", "u1", "/mode authoring")
         assert orchestrator.mode_of("locked-down") == "authoring"
-        assert orchestrator.mode_of("fresh") == "world_modeling"
+        assert orchestrator.mode_of("fresh") == "space_setup"
         events = await orchestrator.handle_message("fresh", "u1", "Add Mira.")
         assert events[-1].kind == "reply"
 
@@ -552,7 +572,7 @@ class TestPipeline:
         await orchestrator.handle_message("s1", "u1", "hello")
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         await orchestrator.handle_message("s1", "u1", "write")
-        assert goals[0] == WORLD_MODELING.goal
+        assert goals[0] == SPACE_SETUP.goal  # the seeded default (ADR 045)
         assert goals[1] == AUTHORING.goal
 
     async def test_mode_command_refreshes_the_registry(
@@ -614,7 +634,7 @@ class TestPipeline:
         assert any(
             e.kind == "notice" and "no longer loaded" in e.text for e in events
         )
-        assert orchestrator.mode_of("s1") == "world_modeling"
+        assert orchestrator.mode_of("s1") == "space_setup"
 
     async def test_vanished_mode_mid_turn_degrades_without_dying(
         self, services: Services
@@ -636,7 +656,7 @@ class TestPipeline:
         await orchestrator.handle_message("b", "u2", "/mode")  # b refreshes
         events = await orchestrator.handle_message("a", "u1", "hello")
         assert events[-1].kind == "reply"
-        assert orchestrator.mode_of("a") == "world_modeling"
+        assert orchestrator.mode_of("a") == "space_setup"
 
     async def test_tool_budget_cuts_a_runaway_turn(self, services: Services) -> None:
         probe = ToolCall("context", {"action": "get"})
@@ -649,6 +669,26 @@ class TestPipeline:
         events = await orchestrator.handle_message("s1", "u1", "loop forever")
         assert events[-1].kind == "notice"
         assert "budget exhausted" in events[-1].text
+
+    async def test_a_mode_turn_limit_overrides_the_deployment_guard(
+        self, services: Services
+    ) -> None:
+        """ModeSpec.turn_limit is the per-mode word on the decide loop;
+        the orchestrator's max_tool_calls is only the unset default."""
+        probe = ToolCall("context", {"action": "get"})
+        driver = ScriptedDriver([LLMTurn(tool_calls=(probe,))] * 99)
+        capped = ModeSpec(name="capped", goal="g", turn_limit=2)
+        registry = fiction_registry()
+        specs = dict(registry.specs) | {capped.name: capped}
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+            max_tool_calls=10,
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode capped")
+        events = await orchestrator.handle_message("s1", "u1", "loop forever")
+        assert events[-1].kind == "notice"
+        assert "budget exhausted (2 decisions)" in events[-1].text
 
     async def test_only_the_final_decision_is_warned(
         self, services: Services
@@ -851,11 +891,11 @@ class TestKeyedSessions:
         await orchestrator.handle_message("anytype:b", "u1", "hi")  # stays default
         # A fresh orchestrator over the same store == a restart.
         restarted, _ = _keyed_orchestrator([LLMTurn(reply="ok")], store=store)
-        assert restarted.mode_of("anytype:a") == "world_modeling"  # not yet seen
+        assert restarted.mode_of("anytype:a") == "space_setup"  # not yet seen
         await restarted.handle_message("anytype:a", "u1", "resume")
         assert restarted.mode_of("anytype:a") == "authoring"  # restored on first turn
         await restarted.handle_message("anytype:b", "u1", "resume")
-        assert restarted.mode_of("anytype:b") == "world_modeling"
+        assert restarted.mode_of("anytype:b") == "space_setup"
 
     async def test_persisted_but_vanished_mode_degrades_to_default(self) -> None:
         store = InMemorySessionStore()
@@ -864,7 +904,7 @@ class TestKeyedSessions:
         await store.save(seed.to_snapshot(), "anytype:a")
         orchestrator, _ = _keyed_orchestrator([LLMTurn(reply="ok")], store=store)
         await orchestrator.handle_message("anytype:a", "u1", "hi")
-        assert orchestrator.mode_of("anytype:a") == "world_modeling"
+        assert orchestrator.mode_of("anytype:a") == "space_setup"
 
     async def test_mode_switch_flush_failure_degrades_to_a_notice(self) -> None:
         class Flaky(InMemorySessionStore):
@@ -911,7 +951,7 @@ class TestTurnObserver:
             "s1", "u1", "create Mira", observer=observer
         )
         assert observer.events == [
-            ("turn_started", "world_modeling", DEFAULT_ACTIVITY_DETAIL),
+            ("turn_started", "space_setup", DEFAULT_ACTIVITY_DETAIL),
             ("decision", ("create_node",)),
             ("tool_result", "create_node", True),
             ("decision", ()),
@@ -966,9 +1006,11 @@ class TestActivityDetailFromTheMode:
     ) -> None:
         orchestrator = _orchestrator(services, [])
         events = await orchestrator.handle_message("s1", "u1", "/mode")
+        # The seeded default is the setup mode (ADR 045), so the status
+        # line also reports its meta privilege.
         assert (
             f"(activity detail: {DEFAULT_ACTIVITY_DETAIL}; web search: off; "
-            "model: default; thinking: default)"
+            "model: default; thinking: default; meta-inspection: on)"
             in events[-1].text
         )
 
@@ -989,7 +1031,7 @@ class TestActivityDetailFromTheMode:
         observer = _RecordingObserver()
         await orchestrator.handle_message("s1", "u1", "hi", observer=observer)
         assert observer.events[0] == (
-            "turn_started", "world_modeling", DEFAULT_ACTIVITY_DETAIL,
+            "turn_started", "space_setup", DEFAULT_ACTIVITY_DETAIL,
         )
         await orchestrator.handle_message("s1", "u1", "/mode narrator")
         observer.events.clear()
@@ -1179,11 +1221,13 @@ class TestDriverOptionsFromTheMode:
             web_search_max_uses=4.0,
             web_search_allowed_domains="Example.com  b.example",
             max_tokens=32000.0,
+            turn_limit=6.0,
         ))
         spec = registry.get("faithful_scribe")
         assert spec is not None
         assert spec.web_search_max_uses == 4
         assert spec.max_tokens == 32000
+        assert spec.turn_limit == 6
         assert spec.web_search_allowed_domains == (
             "example.com", "b.example",
         )
@@ -1235,7 +1279,7 @@ class TestDriverOptionsFromTheMode:
     ) -> None:
         tuned = ModeSpec(
             name="tuned", goal="g", thinking="xhigh", max_tokens=32000,
-            web_search=True, web_search_max_uses=3,
+            turn_limit=6, web_search=True, web_search_max_uses=3,
             web_search_allowed_domains=("example.com",),
         )
         registry = fiction_registry()
@@ -1251,6 +1295,7 @@ class TestDriverOptionsFromTheMode:
         text = events[-1].text
         assert "thinking: xhigh" in text
         assert "max tokens: 32000" in text
+        assert "turn limit: 6" in text
         assert "search uses: 3" in text
         assert "search domains: example.com" in text
 
@@ -1370,7 +1415,7 @@ class TestProvenanceTurns:
         (intent,) = _intent_nodes(services)
         assert intent.name.startswith("Intent: Add Mira.")
         assert intent.fields[attribution.FIELD_USER_ID] == "cli:nick"
-        assert intent.fields[attribution.FIELD_MODE] == "world_modeling"  # the active binding
+        assert intent.fields[attribution.FIELD_MODE] == "space_setup"  # the active binding
         mira = services.repository.graph.resolve("Mira")
         assert {e.target for e in services.repository.graph.edges(intent.id)} == {
             mira.id

@@ -2390,6 +2390,43 @@ watcher.
 
 ---
 
+## WP37 — Meta-inspection privilege + Space Setup mode (ADR 045) — **shipped 2026-07-22**
+
+**Status:** complete. A new starter mode helps the user set up their
+space in conversation: it interviews them, authors a tailored Activity
+Mode object (goal prompt + every `gc_mode_*` option), proposes object
+types through the WP33 👍 flow, and suggests rules/scheduled events.
+Mode objects are normally hidden infra, so this shipped as a privilege,
+not a hole:
+
+* **`ModeSpec.meta_inspection`** (`gc_mode_meta_inspection` checkbox,
+  bootstrap-retrofitted): flows through every `mutating`-style seam
+  (mode_config, in-space parse, store, seeder, eval overlay; `/mode`
+  reports `meta-inspection: on`). The mode-config key/format table moved
+  to the domain (`activity.MODE_CONFIG_FIELDS`) since it now reflects.
+* **Threading**: `Services.visible_infra_roles`, set per call by
+  `modes.invoke` from the dispatching spec — `{Role.MODE}` or empty.
+  Tool signatures unchanged (driver schemas would leak a parameter).
+* **Visibility (MODE only)**: query's exclude-set honors the privilege
+  and its infra hatch CLOSES for Role.MODE unprivileged (was a silent
+  leak of goal bodies); `find_by_name`/`resolve`, `get_node` neighbors,
+  and the port catalogs (`known_node_types`/`field_catalog`, both
+  backends) gain `include_roles`. `gc_mode_*` reflects into
+  `Node.fields` (invisible to unprivileged modes anyway).
+* **Infra-write guard (new)**: `schema.validate_infra_write` +
+  `InfraWriteDenied` — `NodeWriter` rejects infra-role targets unless
+  admitted; before this, any mutating mode could write a guessed
+  `type="Activity Mode"`. The dedicated services (scheduler, rules,
+  recorders) bypass NodeWriter and never meet it. Three eval cases
+  repinned to `space_setup`.
+* **Seeds + rollout**: `[modes.space_setup]` in all three corpora,
+  marked `default = true` (fresh spaces start in it; live spaces keep
+  their defaults). Seed-once stands: `scripts/seed_space_setup_mode.py`
+  is the one-time idempotent retrofit for already-seeded spaces — mints
+  the object per binding, never touches `gc_default_mode`.
+
+---
+
 ## Sequencing
 
 ```

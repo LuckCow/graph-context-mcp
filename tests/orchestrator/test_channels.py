@@ -158,12 +158,15 @@ class TestBuildChannelRuntimes:
             ),
         )
         runtimes = await bootstrap.build_channel_runtimes()
+        # Both corpora mark space_setup default (ADR 045); the profiles
+        # still differ in corpus membership.
         assert runtimes.routes[CHANNEL_A].orchestrator.registry.default == (
-            "world_modeling"
+            "space_setup"
         )
-        assert runtimes.routes[CHANNEL_B].orchestrator.registry.default == (
-            "organizing"
-        )
+        assert "world_modeling" in runtimes.routes[
+            CHANNEL_A].orchestrator.registry.names()
+        assert "organizing" in runtimes.routes[
+            CHANNEL_B].orchestrator.registry.names()
 
     async def test_a_per_channel_modes_file_overrides_only_that_channel(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

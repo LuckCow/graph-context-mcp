@@ -205,6 +205,7 @@ async def _run_trial(
             merged[slug] = {
                 "id": kept_id, "name": m.name, "goal": m.goal,
                 "mutating": m.mutating,
+                "meta_inspection": m.meta_inspection,
                 "origin": f"case {case.id} mode {i}",
             }
         registry = load_registry(
