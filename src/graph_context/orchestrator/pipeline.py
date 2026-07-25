@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
+from graph_context.application.mutation_journal import MutationRecord
 from graph_context.application.rule_engine import RuleTickReport
 from graph_context.application.scheduler import SchedulerTick
 from graph_context.domain.model_choice import model_id
@@ -94,6 +95,12 @@ class ReplyEvent:
     the reply links its own background-process record. Transports
     without an attachment surface ignore it.
 
+    ``suppress`` (ADR 046) names graph objects the event must NOT carry
+    as cards even where its text references them -- the turn's
+    created/edited nodes when the mode hides them. The text keeps its
+    mentions; only the cards go. Same posture as ``attach``: transports
+    without cards ignore it.
+
     ``confirm`` events (WP33, ADR 041 v2) carry a schema proposal's
     harness-rendered confirmation text with ``confirm_id`` naming the
     proposal. The Anytype transport posts one as its OWN message and
@@ -106,6 +113,7 @@ class ReplyEvent:
     kind: str = "reply"
     file_name: str = ""
     attach: tuple[str, ...] = ()
+    suppress: tuple[str, ...] = ()
     confirm_id: str = ""
 
 
@@ -568,21 +576,30 @@ class Orchestrator:
                 proposal.confirm_text(),
                 kind="confirm", confirm_id=proposal.id,
             ))
-        intent = await self._finish_turn(
+        intent, mutations = await self._finish_turn(
             state.services, spec, user_id, stripped, reply_text, trace,
             origin, process.render() if process.worked else "",
         )
-        if intent is not None and process.worked:
+        if intent is not None and process.worked and not spec.hide_intent_card:
             # ADR 038: the reply carries its background-process record as
             # an object card -- only on turns that DID background work
             # (a plain answer stays a plain answer, even when capture
-            # minted a node for it).
+            # minted a node for it). ADR 046: a mode may hide the card;
+            # the intent node is still recorded either way.
             for index in range(len(events) - 1, -1, -1):
                 if events[index].kind == "reply":
                     events[index] = dataclasses.replace(
                         events[index], attach=(intent.id,)
                     )
                     break
+        if spec.hide_node_cards and mutations:
+            # ADR 046: the mode hides the turn's created/edited nodes from
+            # the reply's object cards -- the text keeps naming them, the
+            # transport just must not card them. Every event is stamped:
+            # cards ride whatever event's text mentions the node.
+            hidden = tuple(record.node_id for record in mutations)
+            for index, event in enumerate(events):
+                events[index] = dataclasses.replace(event, suppress=hidden)
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
             # The attributed form: replayed history must keep who spoke.
@@ -608,13 +625,15 @@ class Orchestrator:
         trace: list[ToolTrace],
         origin: str = "",
         process_trace: str = "",
-    ) -> Node | None:
+    ) -> tuple[Node | None, tuple[MutationRecord, ...]]:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
-        drain -> intent node (returned so the caller can attach it to the
-        reply, ADR 038). ``services`` is the session's view; its
-        repository/capture/journal are the runtime's shared instances."""
+        drain -> intent node (returned, with the drained mutations, so
+        the caller can attach it to the reply, ADR 038 -- and suppress
+        the touched nodes' cards when the mode hides them, ADR 046).
+        ``services`` is the session's view; its repository/capture/journal
+        are the runtime's shared instances."""
         if self.provenance is None:
-            return None
+            return None, ()
         policy = spec.capture
         if policy is not None and reply_text:
             references = capture.entity_links(
@@ -648,7 +667,7 @@ class Orchestrator:
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
                         intent.id, len(mutations))
-        return intent
+        return intent, mutations
 
     async def _session(self, session_id: str) -> _SessionState:
         """The per-session state, created (with I/O) on first sight.
@@ -709,6 +728,10 @@ class Orchestrator:
                 parts = []
                 if current.meta_inspection:
                     parts.append("meta-inspection: on")
+                if current.hide_intent_card:
+                    parts.append("intent card: hidden")
+                if current.hide_node_cards:
+                    parts.append("node cards: hidden")
                 if current.max_tokens:
                     parts.append(f"max tokens: {current.max_tokens}")
                 if current.turn_limit:

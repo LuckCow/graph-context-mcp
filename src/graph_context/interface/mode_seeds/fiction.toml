@@ -40,6 +40,10 @@ message may spend; 0 = default.
    gc_mode_web_search (checkbox) admits web search, bounded by \
 gc_mode_search_max_uses (number) and gc_mode_search_allowed_domains OR \
 gc_mode_search_blocked_domains (text; at most one list).
+   gc_mode_hide_intent_card (checkbox): true keeps the turn's \
+process-trace (Intent) card off replies; the record is still written.
+   gc_mode_hide_node_cards (checkbox): true keeps created/edited \
+object cards off replies; the text still names them.
    gc_capture_type (text: an existing type name), with \
 gc_capture_references and gc_capture_min_chars: auto-captures the \
 mode's substantial replies as objects of that type.

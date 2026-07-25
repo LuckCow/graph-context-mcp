@@ -1465,6 +1465,51 @@ class TestProvenanceTurns:
         )
         assert events[-1].attach == (intent.id,)
 
+    async def test_hide_intent_card_keeps_the_trace_off_the_reply(self) -> None:
+        """ADR 046: a mode with hide_intent_card still RECORDS the intent
+        node -- only the reply's card goes."""
+        quiet = ModeSpec(
+            name="quiet_trace", goal="work quietly", mutating=True,
+            hide_intent_card=True,
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ], extra_specs=(quiet,))
+        await orchestrator.handle_message("s1", "u", "/mode quiet_trace")
+        events = await orchestrator.handle_message("s1", "u", "Add Mira.")
+        assert _intent_nodes(services) != []  # the record survives
+        assert events[-1].attach == ()
+
+    async def test_hide_node_cards_suppresses_touched_nodes(self) -> None:
+        """ADR 046: a mode with hide_node_cards stamps the turn's
+        created/edited ids as ``suppress`` on the events, so the
+        transport never cards them; the intent card is independent and
+        still rides ``attach``."""
+        quiet = ModeSpec(
+            name="quiet_nodes", goal="work quietly", mutating=True,
+            hide_node_cards=True,
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ], extra_specs=(quiet,))
+        await orchestrator.handle_message("s1", "u", "/mode quiet_nodes")
+        events = await orchestrator.handle_message("s1", "u", "Add Mira.")
+        mira = services.repository.graph.resolve("Mira")
+        assert events[-1].suppress == (mira.id,)
+        (intent,) = _intent_nodes(services)
+        assert events[-1].attach == (intent.id,)
+
+    async def test_default_mode_suppresses_no_cards(self) -> None:
+        """Pre-046 behavior is the default: nothing is suppressed."""
+        orchestrator, _ = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ])
+        events = await orchestrator.handle_message("s1", "u", "Add Mira.")
+        assert all(event.suppress == () for event in events)
+
     async def test_capture_policy_threshold_is_respected(self) -> None:
         """A custom spec with a lower threshold captures what the default
         would ignore -- the policy, not a constant, decides."""

@@ -718,9 +718,14 @@ class AnytypeChatTurnHandler:
             rendered = render(event)
             # ADR 038: explicit attachments (the turn's intent node) ride
             # ahead of ids scraped from the text, deduped, same cap.
-            merged = tuple(dict.fromkeys(
-                (*event.attach, *object_references(rendered))
-            ))[:MAX_ATTACHMENTS]
+            # ADR 046: mode-suppressed ids (the turn's created/edited
+            # nodes) never card from the text -- explicit attach still
+            # rides; the pipeline owns both stamps.
+            merged = tuple(dict.fromkeys((
+                *event.attach,
+                *(ref for ref in object_references(rendered)
+                  if ref not in event.suppress),
+            )))[:MAX_ATTACHMENTS]
             attachments = merged
             for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):
                 await reply.deliver(piece, attachments)

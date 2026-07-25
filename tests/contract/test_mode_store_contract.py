@@ -86,6 +86,8 @@ def _seed_mode(
     min_chars: float | None = None,
     activity_detail: str = "",
     web_search: bool = False,
+    hide_intent_card: bool = False,
+    hide_node_cards: bool = False,
     model: str = "",
     thinking: str = "",
     max_tokens: float | None = None,
@@ -99,6 +101,10 @@ def _seed_mode(
          "checkbox": mutating},
         {"key": mapping.PROP_MODE_WEB_SEARCH, "format": "checkbox",
          "checkbox": web_search},
+        {"key": mapping.PROP_MODE_HIDE_INTENT_CARD, "format": "checkbox",
+         "checkbox": hide_intent_card},
+        {"key": mapping.PROP_MODE_HIDE_NODE_CARDS, "format": "checkbox",
+         "checkbox": hide_node_cards},
         {"key": mapping.PROP_CAPTURE_TYPE, "format": "text",
          "text": capture_type},
         # A select: the read side sees the picked option as a tag envelope.
@@ -204,6 +210,24 @@ async def test_web_search_checkbox_rides_the_payload(
     payloads = await _load_by_name(anytype_client)
     assert payloads["Researcher"]["web_search"] is True
     assert payloads["Grounded"]["web_search"] is False
+
+
+async def test_reply_card_checkboxes_ride_the_payload(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """ADR 046: gc_mode_hide_intent_card / gc_mode_hide_node_cards are
+    checkboxes with the web_search rule -- always in the payload, ticked
+    reads True, unticked/absent reads False."""
+    _seed_mode(
+        mock, "Discreet", "A goal.",
+        hide_intent_card=True, hide_node_cards=True,
+    )
+    _seed_mode(mock, "Carded", "A goal.")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Discreet"]["hide_intent_card"] is True
+    assert payloads["Discreet"]["hide_node_cards"] is True
+    assert payloads["Carded"]["hide_intent_card"] is False
+    assert payloads["Carded"]["hide_node_cards"] is False
 
 
 async def test_model_choice_rides_the_payload_when_set(

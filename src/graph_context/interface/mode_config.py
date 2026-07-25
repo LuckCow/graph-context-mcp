@@ -39,6 +39,7 @@ from graph_context.interface.profiles import CapturePolicy, ModeSpec
 
 _SPEC_KEYS = {
     "goal", "mutating", "meta_inspection", "capture", "activity_detail",
+    "hide_intent_card", "hide_node_cards",
     "web_search", "model",
     "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
     "web_search_allowed_domains", "web_search_blocked_domains",
@@ -101,6 +102,8 @@ def spec_from_mapping(
             mutating=bool(body.get("mutating", False)),
             meta_inspection=bool(body.get("meta_inspection", False)),
             capture=capture,
+            hide_intent_card=bool(body.get("hide_intent_card", False)),
+            hide_node_cards=bool(body.get("hide_node_cards", False)),
             web_search=bool(body.get("web_search", False)),
             model=model,
             thinking=thinking,
@@ -294,6 +297,8 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
             "web_search": spec.web_search,
             "capture": None,
             "activity_detail": spec.activity_detail,
+            "hide_intent_card": spec.hide_intent_card,
+            "hide_node_cards": spec.hide_node_cards,
             "origin": f"seed [modes.{seed.name}]",
             "icon": seed.icon,
             "default": seed.default,

@@ -131,6 +131,22 @@ async def test_driver_options_round_trip_through_the_seeder(
     assert spec.web_search_allowed_domains == ("example.com", "b.example")
 
 
+async def test_reply_card_toggles_round_trip_through_the_seeder(
+    anytype_client: AnytypeClient,
+) -> None:
+    """ADR 046: a seed pre-filling the card-hiding checkboxes mints an
+    object the store reads back to the same spec the memory path builds."""
+    payloads = seed_payloads(parse_seed_modes(
+        '[modes.discreet]\ngoal = "Work quietly."\n'
+        'hide_intent_card = true\nhide_node_cards = true\n',
+        "test corpus",
+    ))
+    await seed_activity_modes(anytype_client, payloads)
+    spec = (await _loaded_registry(anytype_client)).specs["discreet"]
+    assert spec.hide_intent_card is True
+    assert spec.hide_node_cards is True
+
+
 async def test_a_second_run_is_a_no_op(anytype_client: AnytypeClient) -> None:
     await seed_activity_modes(anytype_client, FICTION_PAYLOADS)
     before = {p["id"] for p in await AnytypeModeStore(anytype_client).load()}

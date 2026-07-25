@@ -69,6 +69,11 @@ the default when empty), Tools (each tool call), or Full (thinking and \
 results too).
 - Tick gc_mode_web_search to let the assistant search the web while this \
 mode is active; unticked keeps it grounded in the graph alone.
+- Tick gc_mode_hide_intent_card to keep the turn's process-trace \
+(Intent) card off replies in this mode; the record is still written to \
+the graph. Tick gc_mode_hide_node_cards to keep the cards of nodes the \
+turn created or edited off replies too -- the reply text still names \
+them, only the attached cards go.
 - Tick gc_mode_meta_inspection to let the mode see and edit Activity \
 Mode objects themselves (the Space Setup mode uses this); leave it off \
 for ordinary modes.
@@ -163,6 +168,14 @@ async def create_payload(
         mapping.property_entry(
             mapping.PROP_MODE_WEB_SEARCH, "checkbox",
             bool(payload.get("web_search")),
+        ),
+        mapping.property_entry(
+            mapping.PROP_MODE_HIDE_INTENT_CARD, "checkbox",
+            bool(payload.get("hide_intent_card")),
+        ),
+        mapping.property_entry(
+            mapping.PROP_MODE_HIDE_NODE_CARDS, "checkbox",
+            bool(payload.get("hide_node_cards")),
         ),
     ]
     detail = str(payload.get("activity_detail") or "").strip()

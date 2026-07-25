@@ -122,6 +122,20 @@ class TestDriverOptionKeys:
                 "seed",
             )
 
+    def test_reply_card_toggles_parse_and_default_off(self) -> None:
+        """ADR 046: the two card-hiding booleans ride like mutating --
+        absent reads False (pre-046 behavior: everything shows)."""
+        (discreet,) = parse_seed_modes(
+            '[modes.discreet]\ngoal = "g"\nhide_intent_card = true\n'
+            'hide_node_cards = true\n',
+            "test",
+        )
+        assert discreet.spec.hide_intent_card is True
+        assert discreet.spec.hide_node_cards is True
+        (plain,) = parse_seed_modes('[modes.plain]\ngoal = "g"\n', "test")
+        assert plain.spec.hide_intent_card is False
+        assert plain.spec.hide_node_cards is False
+
     def test_domains_parse_from_a_string_or_a_list(self) -> None:
         (seed,) = parse_seed_modes(
             '[modes.scoped]\ngoal = "g"\nweb_search = true\n'
@@ -270,6 +284,8 @@ class TestSeedPayloads:
             "web_search": False,
             "capture": None,
             "activity_detail": "minimal",
+            "hide_intent_card": False,
+            "hide_node_cards": False,
             "origin": "seed [modes.organizing]",
             "icon": "X",
             "default": True,

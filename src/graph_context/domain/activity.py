@@ -25,6 +25,8 @@ DEFAULT_ACTIVITY_DETAIL = "minimal"
 FIELD_MUTATING = "gc_mode_mutating"
 FIELD_META_INSPECTION = "gc_mode_meta_inspection"
 FIELD_ACTIVITY_DETAIL = "gc_mode_activity_detail"
+FIELD_HIDE_INTENT_CARD = "gc_mode_hide_intent_card"
+FIELD_HIDE_NODE_CARDS = "gc_mode_hide_node_cards"
 FIELD_WEB_SEARCH = "gc_mode_web_search"
 FIELD_MODEL = "gc_mode_model"
 FIELD_THINKING = "gc_mode_thinking"
@@ -41,6 +43,8 @@ MODE_CONFIG_FIELDS: dict[str, str] = {  # key -> format; bootstrap mints these
     FIELD_MUTATING: "checkbox",
     FIELD_META_INSPECTION: "checkbox",
     FIELD_ACTIVITY_DETAIL: "select",
+    FIELD_HIDE_INTENT_CARD: "checkbox",
+    FIELD_HIDE_NODE_CARDS: "checkbox",
     FIELD_WEB_SEARCH: "checkbox",
     FIELD_MODEL: "select",
     FIELD_THINKING: "select",

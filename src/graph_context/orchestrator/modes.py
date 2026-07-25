@@ -294,7 +294,8 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             key: payload[key]
             for key in (
                 "goal", "mutating", "meta_inspection", "capture",
-                "activity_detail", "web_search", "model",
+                "activity_detail", "hide_intent_card", "hide_node_cards",
+                "web_search", "model",
                 "thinking", "max_tokens", "turn_limit",
                 "web_search_max_uses",
                 "web_search_allowed_domains", "web_search_blocked_domains",

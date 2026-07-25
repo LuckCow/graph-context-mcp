@@ -74,6 +74,14 @@ class AnytypeModeStore:
             "mutating": bool(props.get(mapping.PROP_MODE_MUTATING)),
             "meta_inspection": bool(props.get(mapping.PROP_MODE_META)),
             "web_search": bool(props.get(mapping.PROP_MODE_WEB_SEARCH)),
+            # ADR 046: reply-card visibility checkboxes, same rule as
+            # the binding checkboxes -- unticked/absent reads False.
+            "hide_intent_card": bool(
+                props.get(mapping.PROP_MODE_HIDE_INTENT_CARD)
+            ),
+            "hide_node_cards": bool(
+                props.get(mapping.PROP_MODE_HIDE_NODE_CARDS)
+            ),
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
         }

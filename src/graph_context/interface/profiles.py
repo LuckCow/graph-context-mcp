@@ -119,6 +119,13 @@ class ModeSpec:
     (inert unless ``web_search`` is on; the API takes at most ONE of the
     domain lists per request, so setting both is a spec error).
 
+    Reply-card visibility (ADR 046): ``hide_intent_card`` keeps the
+    turn's intent (process-trace) node off the reply's object cards;
+    ``hide_node_cards`` keeps the turn's created/edited nodes off them
+    (the text still names them -- only the cards go). Both default to
+    showing, the pre-046 behavior; the transport-neutral suppression
+    rides the reply events, so surfaces without cards ignore it.
+
     ``meta_inspection`` (ADR 045) grants the mode the meta surface:
     Activity Mode objects -- normally hidden infra -- become visible to
     the read tools and writable through ``create_node``/``update_node``,
@@ -133,6 +140,8 @@ class ModeSpec:
     meta_inspection: bool = False
     capture: CapturePolicy | None = None
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
+    hide_intent_card: bool = False
+    hide_node_cards: bool = False
     web_search: bool = False
     model: str = ""
     thinking: str = ""

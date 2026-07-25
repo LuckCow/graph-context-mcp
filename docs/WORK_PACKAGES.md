@@ -2427,6 +2427,24 @@ not a hole:
 
 ---
 
+## WP38 — Reply-card visibility mode toggles (ADR 046) — **shipped 2026-07-25**
+
+**Status:** complete. Two Activity Mode checkboxes control what a reply
+cards, both defaulting to the old always-show behavior:
+`gc_mode_hide_intent_card` keeps the ADR 038 process-trace card off
+replies (the intent node is still recorded), and
+`gc_mode_hide_node_cards` keeps the turn's created/edited nodes from
+carding even where the reply text names them — the pipeline stamps the
+drained mutation ids on a new `ReplyEvent.suppress` tuple and the
+Anytype transport filters them out of its text-scrape (explicit `attach`
+is never filtered; read-only mentions still card). Plumbing rides the
+`web_search`-checkbox precedent end to end: domain field table (mint +
+retrofit + ADR 045 reflection for free), spec validation, store/seeder
+round trip, seed-TOML pre-fill, ADR 044 auto-refresh; the Space Setup
+menu and Example Mode explainer document both fields.
+
+---
+
 ## Sequencing
 
 ```

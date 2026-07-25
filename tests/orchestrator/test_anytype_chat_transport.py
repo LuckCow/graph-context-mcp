@@ -256,6 +256,28 @@ class TestTurn:
         assert recorder.attachments()[0] == (intent_id, OBJECT_ID)  # deduped
         assert all(a == () for a in recorder.attachments()[1:])
 
+    async def test_suppressed_references_never_card(self) -> None:
+        """ADR 046: ids the pipeline stamped as ``suppress`` (the turn's
+        created/edited nodes under a hiding mode) are skipped when the
+        text is scraped -- but an EXPLICIT attach still rides: the
+        pipeline owns both stamps and never contradicts itself."""
+        from graph_context.orchestrator.pipeline import ReplyEvent
+
+        handler = _handler([])
+        recorder = _ChatRecorder()
+        reply = handler.reply(recorder.send, recorder.edit)
+        intent_id = OBJECT_ID.replace("bafyreid", "bafyreie")
+        await handler.deliver_events(
+            [ReplyEvent(
+                f"made [Mira]({OBJECT_ID})",
+                attach=(intent_id,),
+                suppress=(OBJECT_ID,),
+            )],
+            reply,
+        )
+        assert recorder.attachments()[0] == (intent_id,)
+        assert "[Mira](" not in recorder.texts()[0]  # text keeps the name
+
     async def test_a_processed_message_is_not_eligible_twice(self) -> None:
         handler = _handler([LLMTurn(reply="once")])
         message = _message()
