@@ -740,6 +740,24 @@ class FieldCatalogContract:
         stored = catalog_repo.graph.node(node.id).fields
         assert stored[attribution.FIELD_USER_ID] == "u-1"
 
+    async def test_attribution_stamps_resolve_bare_on_native_types(
+        self, catalog_repo
+    ):
+        """The turn-a0d7b7350c34 regression: a capture whose artifact
+        type is NATIVE (ADR 015) still stamps the recorder's attribution
+        keys -- bot-owned space vocabulary, exempt from type scoping like
+        the ``gc_edge_*`` starter relations, with no declaration and no
+        model in the loop to self-correct."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Tournament Morning", summary="A chapter.",
+                      fields={attribution.FIELD_GENERATED_AT:
+                              "2026-07-26T22:24:43+00:00"})
+        )
+        stored = catalog_repo.graph.node(node.id).fields
+        assert stored[attribution.FIELD_GENERATED_AT] == (
+            "2026-07-26T22:24:43+00:00"
+        )
+
     async def test_infra_unmatched_field_errors_like_any_other(self, catalog_repo):
         with pytest.raises(UnknownFieldKey):
             await catalog_repo.create_node(

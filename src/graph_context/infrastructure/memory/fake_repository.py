@@ -154,14 +154,18 @@ class InMemoryGraphRepository:
     ) -> bool:
         """The fake's half of the ADR 047 bare-resolution scope: the
         type's attached specs, plus the object's own vocabulary on
-        update. Exempt (space-wide): infra-role targets and the seeded
-        ``gc_edge_*`` starter relations -- mirroring the adapter."""
+        update. Exempt (space-wide): infra-role targets, the seeded
+        ``gc_edge_*`` starter relations, and the attribution stamps
+        (recorders write those onto ANY type -- a capture's artifact
+        type is native under ADR 015) -- mirroring the adapter."""
         if not self._scoped:
             return True
         role = schema.resolve_role(type_name, self._role_overrides)
         if role in schema.INFRA_ROLES:
             return True
         if spec.key.startswith("gc_edge_"):
+            return True
+        if spec.key in attribution.ATTRIBUTION_FIELDS:
             return True
         if any(self._same_spec(spec, held) for held in self._own_specs(type_name)):
             return True

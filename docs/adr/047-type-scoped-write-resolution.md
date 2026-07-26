@@ -61,6 +61,13 @@ the write's TYPE scope, not the space:
    seeded `gc_edge_*` starter relations (user decision): they are
    deliberately type-less, bootstrap-owned (never an accidental
    duplicate), and the story-world profile links freely with them.
+   Amended 2026-07-26 (turn a0d7b7350c34): the ADR 028 attribution
+   stamps are exempt BY KEY, not just via infra-role targets — the
+   capture recorder stamps `gc_generated_at` onto the mode's artifact
+   type, which ADR 015 allows to be NATIVE (e.g. a Chapter), where the
+   role-based exemption never applies and no model is in the loop to
+   answer the teaching error; the bot-owned stamps are the scalar
+   mirror of the `gc_edge_*` carve-out.
 
 The space-wide matchers (`field_property` / `key_for_label`) survive as
 the REUSE universe — declared reuse, schema-change apply, error

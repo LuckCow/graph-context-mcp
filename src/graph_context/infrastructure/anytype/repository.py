@@ -854,18 +854,21 @@ class AnytypeGraphRepository:
         properties, plus -- on an existing node -- properties the node
         already carries a value for. Infra-role targets stay space-wide
         (recorder/scheduler bookkeeping writes bootstrap-minted keys that
-        no type needs to claim)."""
+        no type needs to claim), and so do the attribution stamps (ADR
+        028): the recorders write them onto ANY type -- a capture's
+        artifact type is native under ADR 015 -- making them the scalar
+        mirror of the ``gc_edge_*`` carve-out."""
         if self._registry.role_for(type_key) in schema.INFRA_ROLES:
             return self._registry.field_property(identifier)
         info = self._registry.attached_property(type_key, identifier)
         if info is not None:
             return info
         space = self._registry.field_property(identifier)
-        if (
-            space is not None
-            and instance is not None
-            and space.key in instance.fields
-        ):
+        if space is None:
+            return None
+        if space.key in mapping.ATTRIBUTION_PROPERTIES:
+            return space
+        if instance is not None and space.key in instance.fields:
             return space
         return None
 
