@@ -740,6 +740,76 @@ class TestRelationFieldCoercion:
         assert node.fields["due_date"] == "2026-08-01T00:00:00Z"
 
 
+class TestTypeScopedPropertyRouting:
+    """ADR 047 at the tool boundary: the link-vs-scalar split asks the
+    TYPE (create) or the node itself (update), so an unattached
+    relation-named key falls through to the repository's sectioned
+    approval error instead of silently linking through space vocabulary
+    the type never claimed."""
+
+    def _services(self) -> tools.Services:
+        from graph_context.domain.models import FieldSpec
+
+        repository = InMemoryGraphRepository(
+            field_catalog=[
+                FieldSpec(name="Assignee", format="objects", key="assignee"),
+                FieldSpec(name="Linked Projects", format="objects",
+                          key="linked_projects"),
+                FieldSpec(name="Linked Project", format="objects",
+                          key="linked_project"),
+            ],
+            attachments={"Item": ("Assignee", "Linked Projects")},
+        )
+        return build_services(repository, SessionState(project="t"))
+
+    async def _seed_item(self, services: tools.Services, name: str):
+        return (await services.writer.create_node(
+            NodeDraft("Item", name=name, summary="s.")
+        )).node
+
+    async def test_create_routes_only_type_attached_relations_to_links(
+        self,
+    ) -> None:
+        services = self._services()
+        await self._seed_item(services, "Thesis Revisions")
+        out = await tools.create_node_tool(
+            services, type="Item", name="Fix margins", summary="s.",
+            properties={"Linked Project": "Thesis Revisions"},
+        )
+        assert out.startswith("ERROR:") and "NOT attached" in out
+        out = await tools.create_node_tool(
+            services, type="Item", name="Fix margins", summary="s.",
+            properties={"Linked Projects": "Thesis Revisions"},
+        )
+        assert out.startswith("created:")
+
+    async def test_update_routes_the_objects_own_relation_keys(self) -> None:
+        services = self._services()
+        await self._seed_item(services, "Thesis Revisions")
+        await self._seed_item(services, "Side Project")
+        out = await tools.create_node_tool(
+            services, type="Item", name="Holder", summary="s.",
+            properties={"Linked Project": "Thesis Revisions"},
+            create_missing_properties={
+                "Linked Project": {"format": "objects"}
+            },
+        )
+        assert out.startswith("created:")
+        # The holder carries the relation: a bare update keeps working.
+        out = await tools.update_node_tool(
+            services, node_id="Holder",
+            properties={"Linked Project": "Side Project"},
+        )
+        assert out.startswith("updated:")
+        # A fresh object never picked it up: the same bare write errors.
+        await self._seed_item(services, "Fresh")
+        out = await tools.update_node_tool(
+            services, node_id="Fresh",
+            properties={"Linked Project": "Thesis Revisions"},
+        )
+        assert out.startswith("ERROR:") and "NOT attached" in out
+
+
 # -- the schedule tool (WP18, ADR 027) ---------------------------------------
 
 

@@ -45,21 +45,26 @@ description: long-form text (a portrait, a place's atmosphere, an
   explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
 properties: {"key": "value"} -- scalar attributes AND relations in one
-  map. Every key MUST match one of the space's own properties, by key or
-  display name (e.g. role, tech_type); context action='overview' lists each
-  type's properties, and get_node shows what a node already carries. A
+  map. Every key MUST match a property of the TYPE you are creating, by
+  key or display name (e.g. role, tech_type); context action='overview' lists
+  each type's properties, and get_node shows what a node already
+  carries (other space properties need the create_missing_properties
+  attach gesture below). A
   scalar key writes THAT property, visible and filterable in Anytype;
   select options match by name and are created when new; multi-select
   values are comma-separated names. A key that names a RELATION (e.g.
   "Assignee") takes a node id or name -- or a list of them -- and each
   becomes a link from this node. (An edge pointing the OTHER way is the
   other node's property: create this node first, then update_node the
-  other one.) An unmatched key ERRORS, listing the properties you can reuse -- prefer
-  reusing one. Only when none fits, resend with
-  create_missing_properties={"key": "<format>"} to create a real new
-  property (formats: checkbox, date, email, multi_select, number, objects, phone, select, text, url; "objects" makes it a relation --
-  its value is then a node id/name like any relation entry). Think about
-  SCOPE: {"key": {"format": ..., "scope": "type"}} when the property is
+  other one.) An unmatched key ERRORS, listing the type's own properties you can use
+  bare, and the space's other properties -- to use one of THOSE (or
+  create a real new property when none fits), resend with
+  create_missing_properties={"key": "<format>"}: a declared key
+  matching an existing space property REUSES it (attaching it to this
+  object, never duplicating); otherwise it is created (formats:
+  checkbox, date, email, multi_select, number, objects, phone, select, text, url; "objects" makes it a relation -- its value is then
+  a node id/name like any relation entry). Think about SCOPE:
+  {"key": {"format": ..., "scope": "type"}} when the property is
   a recurring attribute EVERY object of this type should carry (this
   drafts a schema proposal the user confirms with a 👍 reaction -- the
   value saves immediately either way -- and is REQUIRED if an automation
@@ -99,21 +104,26 @@ description: a Connections section is maintained automatically at the
 bottom of the page (you never see or write it).
 
 properties: {"key": "value"} -- scalar attributes AND relations in one
-map. Every key MUST match one of the space's own properties, by key or
-display name -- get_node shows what a node already carries, and context
-action='overview' lists each type's properties. A scalar key updates
+map. Every key MUST match a property of this node's TYPE, or one this
+object already carries, by key or display name -- get_node shows what a
+node already carries, and context action='overview' lists each type's
+properties (other space properties need the create_missing_properties
+attach gesture below). A scalar key updates
 THAT property, visible and filterable in Anytype; select options match
 by name and are created when new; multi-select values are comma-
 separated names ("Dark, Hopeful"). A key that names a RELATION (e.g.
 "Assignee") takes a node id or name -- or a list of them -- and each
 becomes a link; relation entries ADD to the existing links (to reassign
 a single-target relation, also remove_links the old target -- the
-updated view in the response shows the result). An unmatched key ERRORS, listing the properties you can reuse -- prefer
-  reusing one. Only when none fits, resend with
-  create_missing_properties={"key": "<format>"} to create a real new
-  property (formats: checkbox, date, email, multi_select, number, objects, phone, select, text, url; "objects" makes it a relation --
-  its value is then a node id/name like any relation entry). Think about
-  SCOPE: {"key": {"format": ..., "scope": "type"}} when the property is
+updated view in the response shows the result). An unmatched key ERRORS, listing the type's own properties you can use
+  bare, and the space's other properties -- to use one of THOSE (or
+  create a real new property when none fits), resend with
+  create_missing_properties={"key": "<format>"}: a declared key
+  matching an existing space property REUSES it (attaching it to this
+  object, never duplicating); otherwise it is created (formats:
+  checkbox, date, email, multi_select, number, objects, phone, select, text, url; "objects" makes it a relation -- its value is then
+  a node id/name like any relation entry). Think about SCOPE:
+  {"key": {"format": ..., "scope": "type"}} when the property is
   a recurring attribute EVERY object of this type should carry (this
   drafts a schema proposal the user confirms with a 👍 reaction -- the
   value saves immediately either way -- and is REQUIRED if an automation

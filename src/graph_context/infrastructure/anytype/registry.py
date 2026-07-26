@@ -125,18 +125,55 @@ class SpaceRegistry:
         matches it for scalars ("Linked Projects" must resolve as well as
         ``linked_projects``). Returns ``None`` when no existing relation
         matches (the writer then surfaces it for approval).
+
+        SPACE-WIDE: since ADR 047 this is the REUSE universe (declared
+        reuse, error guidance); bare write resolution goes through
+        :meth:`attached_relation_key`.
         """
         target = label.strip().lower()
         for key, info in self.properties_by_key.items():
-            if info.format != "objects" or key in mapping.SYSTEM_RELATION_DENYLIST:
-                continue
-            if (
-                mapping.clean_label(key).lower() == target
-                or key.lower() == target
-                or info.name.strip().lower() == target
-            ):
+            if self._relation_matches(key, info, target):
                 return key
         return None
+
+    @staticmethod
+    def _relation_matches(key: str, info: PropertyInfo, target: str) -> bool:
+        """THE relation-label match rule (key, cleaned label, or display
+        name -- case-insensitive), shared by the space-wide and the
+        type-scoped resolvers so they can never drift."""
+        if info.format != "objects" or key in mapping.SYSTEM_RELATION_DENYLIST:
+            return False
+        return (
+            mapping.clean_label(key).lower() == target
+            or key.lower() == target
+            or info.name.strip().lower() == target
+        )
+
+    def attached_relation_key(self, type_key: str, label: str) -> str | None:
+        """Resolve a relation label among the TYPE's attached properties
+        only (ADR 047: the bare-resolution universe for writes). Matched
+        exactly like :meth:`key_for_label`; ``None`` when the type does
+        not carry a matching relation (unknown types match nothing)."""
+        info = self.types_by_key.get(type_key)
+        if info is None:
+            return None
+        target = label.strip().lower()
+        for prop in info.properties:
+            if self._relation_matches(prop.key, prop, target):
+                return prop.key
+        return None
+
+    def attached_relations(self, type_key: str) -> tuple[PropertyInfo, ...]:
+        """The type's attached ``objects`` relations (denylist honored) --
+        the bare-usable edge vocabulary an unmatched-key error teaches."""
+        info = self.types_by_key.get(type_key)
+        if info is None:
+            return ()
+        return tuple(
+            prop for prop in info.properties
+            if prop.format == "objects"
+            and prop.key not in mapping.SYSTEM_RELATION_DENYLIST
+        )
 
     def known_edge_labels(self) -> frozenset[str]:
         """Relation labels available to reuse (for error suggestions)."""
@@ -210,6 +247,10 @@ class SpaceRegistry:
         Case-insensitive match on key or display name -- the write-side
         mirror of :meth:`reflects_field` (an unmatched key is surfaced for
         approval by the repository).
+
+        SPACE-WIDE: since ADR 047 this is the REUSE universe (declared
+        reuse, error guidance); bare write resolution goes through
+        :meth:`attached_property`.
         """
         target = identifier.strip().lower()
         for key, info in self.properties_by_key.items():
@@ -217,6 +258,22 @@ class SpaceRegistry:
                 continue
             if key.lower() == target or info.name.strip().lower() == target:
                 return info
+        return None
+
+    def attached_property(self, type_key: str, identifier: str) -> PropertyInfo | None:
+        """Resolve a ``fields`` key among the TYPE's attached reflectable
+        scalars only (ADR 047: the bare-resolution universe for writes).
+        Matched exactly like :meth:`field_property`; ``None`` when the
+        type does not carry a match (unknown types match nothing)."""
+        info = self.types_by_key.get(type_key)
+        if info is None:
+            return None
+        target = identifier.strip().lower()
+        for prop in info.properties:
+            if not self.reflects_field(prop.key, prop.format):
+                continue
+            if prop.key.lower() == target or prop.name.strip().lower() == target:
+                return prop
         return None
 
 

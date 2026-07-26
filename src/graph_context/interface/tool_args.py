@@ -162,17 +162,22 @@ async def _parse_properties(
     services: Services,
     properties: dict[str, Any] | None,
     create_missing: dict[str, Any] | None,
+    *,
+    on_type: str | None = None,
+    on_node: NodeId | None = None,
 ) -> tuple[dict[str, str], list[LinkSpec], dict[str, PropertyDeclaration]]:
     """Split a write's ``properties`` dict into scalars and links (ADR 042).
 
-    One surface, discriminated by what the space says the key IS: a key
-    naming an existing ``objects``-format relation becomes link(s) -- its
-    value resolves like a node reference, and any declaration for it is
-    dropped (nothing may mint a scalar shadow of an edge, ADR 006); a key
-    whose declaration says ``objects`` becomes link(s) to be minted; every
-    other key is a scalar value (coerced to its canonical string). Unknown
-    undeclared keys stay in the scalars -- the REPOSITORY owns the
-    reuse-catalog approval error, not this boundary.
+    One surface, discriminated by what the target TYPE (plus, on update,
+    the object itself -- the ``on_type``/``on_node`` scope, ADR 047) says
+    the key IS: a key naming a relation the scope admits becomes link(s)
+    -- its value resolves like a node reference, and any declaration for
+    it is dropped (nothing may mint a scalar shadow of an edge, ADR 006);
+    a key whose declaration says ``objects`` becomes link(s) -- reusing a
+    matching space relation or minting one; every other key is a scalar
+    value (coerced to its canonical string). Unadmitted undeclared keys
+    stay in the scalars -- the REPOSITORY owns the approval error, not
+    this boundary.
     """
     declarations = _parse_property_declarations(create_missing)
     scalars: dict[str, str] = {}
@@ -190,7 +195,9 @@ async def _parse_properties(
         key = str(raw_key).strip()
         if not key:
             raise GraphContextError("properties has an entry with an empty key")
-        label = services.repository.relation_label_for(key)
+        label = services.repository.relation_label_for(
+            key, on_type=on_type, on_node=on_node
+        )
         if label is not None:
             declarations.pop(key, None)  # the relation already exists
             await _add_links(label, key, value)

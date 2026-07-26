@@ -2445,6 +2445,34 @@ menu and Example Mode explainer document both fields.
 
 ---
 
+## WP39 — Type-scoped write resolution (ADR 047) — **shipped 2026-07-25**
+
+**Status:** complete. Bare `properties` keys (scalars and relations)
+resolve against the write's TYPE scope — the target type's attached
+properties on create, plus the object's own vocabulary on update —
+instead of the space-wide catalog, closing the incident where an
+unattached near-duplicate relation ("Linked Project" beside the type's
+"Linked Projects") kept resolving silently and spread object by
+object. `create_missing_properties` widens resolution to the whole
+space: a declared key matching an existing same-format property is
+REUSED (attach, never a twin), so one explicit declaration is the
+deliberate path to unattached space vocabulary; infra-role writers and
+the seeded `gc_edge_*` starter relations stay space-wide. The port's
+`relation_label_for` takes a mandatory `on_type`/`on_node` scope; the
+registry gains `attached_property`/`attached_relation_key`; the fake
+gains per-type `attachments` (its catalog-without-attachments mode
+keeps the historical flat behavior for fixtures/evals; open mode
+untouched). Unmatched-key errors are sectioned — the type's own
+properties AND relations first, then unattached space vocabulary with
+the exact attach gesture, naming the exact space match when there is
+one. No fuzzy matching anywhere (considered, rejected — ADR 014's
+stance stands). One-off remediation:
+`scripts/cleanup_duplicate_linked_project.py` migrates the incident
+space's duplicate links onto `linked_projects` and deletes the
+duplicate.
+
+---
+
 ## Sequencing
 
 ```

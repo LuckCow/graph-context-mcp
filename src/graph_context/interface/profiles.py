@@ -263,14 +263,18 @@ def get_profile(name: str | None) -> DomainProfile:
 _FORMAT_MENU = ", ".join(sorted(FIELD_FORMATS))
 _CREATABLE_MENU = ", ".join(sorted(CREATABLE_FORMATS))
 
-# The ADR 042 creation recipe + scope heuristic: one text, every surface.
+# The ADR 042 creation recipe + scope heuristic (type-scoped resolution
+# per ADR 047): one text, every surface.
 _CREATE_MISSING_DOC = f"""\
-An unmatched key ERRORS, listing the properties you can reuse -- prefer
-  reusing one. Only when none fits, resend with
-  create_missing_properties={{"key": "<format>"}} to create a real new
-  property (formats: {_CREATABLE_MENU}; "objects" makes it a relation --
-  its value is then a node id/name like any relation entry). Think about
-  SCOPE: {{"key": {{"format": ..., "scope": "type"}}}} when the property is
+An unmatched key ERRORS, listing the type's own properties you can use
+  bare, and the space's other properties -- to use one of THOSE (or
+  create a real new property when none fits), resend with
+  create_missing_properties={{"key": "<format>"}}: a declared key
+  matching an existing space property REUSES it (attaching it to this
+  object, never duplicating); otherwise it is created (formats:
+  {_CREATABLE_MENU}; "objects" makes it a relation -- its value is then
+  a node id/name like any relation entry). Think about SCOPE:
+  {{"key": {{"format": ..., "scope": "type"}}}} when the property is
   a recurring attribute EVERY object of this type should carry (this
   drafts a schema proposal the user confirms with a 👍 reaction -- the
   value saves immediately either way -- and is REQUIRED if an automation
@@ -296,9 +300,11 @@ description: a Connections section is maintained automatically at the
 bottom of the page (you never see or write it).
 
 properties: {{"key": "value"}} -- scalar attributes AND relations in one
-map. Every key MUST match one of the space's own properties, by key or
-display name -- get_node shows what a node already carries, and context
-action='overview' lists each type's properties. A scalar key updates
+map. Every key MUST match a property of this node's TYPE, or one this
+object already carries, by key or display name -- get_node shows what a
+node already carries, and context action='overview' lists each type's
+properties (other space properties need the create_missing_properties
+attach gesture below). A scalar key updates
 THAT property, visible and filterable in Anytype; select options match
 by name and are created when new; multi-select values are comma-
 separated names ("Dark, Hopeful"). A key that names a RELATION (e.g.
@@ -317,9 +323,11 @@ def _properties_doc(examples: str) -> str:
     exactly once."""
     return f"""\
 properties: {{"key": "value"}} -- scalar attributes AND relations in one
-  map. Every key MUST match one of the space's own properties, by key or
-  display name (e.g. {examples}); context action='overview' lists each
-  type's properties, and get_node shows what a node already carries. A
+  map. Every key MUST match a property of the TYPE you are creating, by
+  key or display name (e.g. {examples}); context action='overview' lists
+  each type's properties, and get_node shows what a node already
+  carries (other space properties need the create_missing_properties
+  attach gesture below). A
   scalar key writes THAT property, visible and filterable in Anytype;
   select options match by name and are created when new; multi-select
   values are comma-separated names. A key that names a RELATION (e.g.

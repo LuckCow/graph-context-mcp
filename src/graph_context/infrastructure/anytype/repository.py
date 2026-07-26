@@ -4,14 +4,17 @@ Write ordering (port contract): persist to Anytype first, then mutate the
 index -- the index may lag the store but never lead it. A failed API call
 leaves the index untouched.
 
-Space-reflecting resolution (v2): a write names a *type* and relation
-*labels*, not a fixed vocabulary. The repository resolves them against the
-live :class:`SpaceRegistry`:
+Space-reflecting resolution (v2, type-scoped by ADR 047): a write names a
+*type* and relation *labels*, not a fixed vocabulary. The repository
+resolves them against the live :class:`SpaceRegistry`:
   * the node's ``type`` -> an existing native type key (else ``UnknownNodeType``);
-  * each link label -> an existing ``objects`` relation key (reuse), or,
-    when an ADR 042 ``create_missing`` declaration licenses it, a freshly
-    created relation. An unknown label otherwise raises
-    ``UnknownRelationLabel``.
+  * each link label / property key -> bare, one the write's TYPE carries
+    (plus, on update, the object's own -- the space-wide catalog stopped
+    being the bare universe when an unattached near-duplicate relation
+    kept resolving silently); or, under an ADR 042 ``create_missing``
+    declaration, any existing space property (REUSED -- the write
+    attaches it) or a freshly created one. An unknown label otherwise
+    raises ``UnknownRelationLabel``.
 Both resolutions happen *before* the node POST, so an approval error never
 leaves a half-applied write.
 
@@ -175,8 +178,30 @@ class AnytypeGraphRepository:
     def known_edge_labels(self) -> frozenset[str]:
         return self._registry.known_edge_labels()
 
-    def relation_label_for(self, field_key: str) -> str | None:
-        key = self._registry.key_for_label(field_key)
+    def relation_label_for(
+        self,
+        field_key: str,
+        *,
+        on_type: str | None = None,
+        on_node: NodeId | None = None,
+    ) -> str | None:
+        if (on_type is None) == (on_node is None):
+            raise ValueError(
+                "relation_label_for needs exactly one of on_type/on_node"
+            )
+        if on_node is not None:
+            node = self._graph.node(on_node)  # NodeNotFound propagates
+            key = self._scoped_relation_key(
+                field_key, type_key=node.type_key, instance=node
+            )
+        else:
+            assert on_type is not None
+            type_key = self._registry.type_key_for(on_type)
+            if type_key is None:  # create_node raises UnknownNodeType itself
+                return None
+            key = self._scoped_relation_key(
+                field_key, type_key=type_key, instance=None
+            )
         return None if key is None else self._registry.label_for(key)
 
     def field_catalog(
@@ -186,9 +211,10 @@ class AnytypeGraphRepository:
 
         Properties no type claims (space-level ones, including any the bot
         minted via a ``create_missing_properties`` declaration -- POST
-        /properties does not attach to a type) are still reusable
-        ``properties`` keys, so they are offered under an ``"(any type)"``
-        bucket rather than hidden.
+        /properties does not attach to a type) are offered under an
+        ``"(any type)"`` bucket rather than hidden: since ADR 047 they are
+        not bare-usable ``properties`` keys, but a declaration naming one
+        reuses it (attach), so the vocabulary stays discoverable.
         Options are deliberately absent -- listing them would cost one GET
         per select property on every overview; the unmatched-key error
         fetches them lazily instead.
@@ -332,7 +358,9 @@ class AnytypeGraphRepository:
             # relations); raises UnknownRelationLabel before any persistence.
             resolved = [
                 (link, await self._resolve_relation(
-                    link.edge_type, self._link_declaration(link.edge_type, declared)
+                    link.edge_type,
+                    self._link_declaration(link.edge_type, declared),
+                    type_key=type_key,
                 ))
                 for link in links
             ]
@@ -425,7 +453,7 @@ class AnytypeGraphRepository:
         if fields is not None:
             native_fields = await self._resolve_field_entries(
                 fields, type_key=existing.type_key,
-                create_missing=create_missing,
+                create_missing=create_missing, instance=existing,
             )
         if body is not None and await self._writes_footer(existing):
             # ADR 013: re-render the footer around the new text (index edges;
@@ -463,9 +491,12 @@ class AnytypeGraphRepository:
         create_missing: PropertyDeclaration | None = None,
     ) -> Edge:
         async with self._writer():
-            key = await self._resolve_relation(link.edge_type, create_missing)
+            source = self._graph.node(anchor)  # endpoints must exist
+            key = await self._resolve_relation(
+                link.edge_type, create_missing,
+                type_key=source.type_key, instance=source,
+            )
             edge = link.to_edge(anchor=anchor, property_key=key)
-            source = self._graph.node(edge.source)  # endpoints must exist
             self._graph.node(edge.target)
             obj, targets = await self._current_state(edge.source, key)
             if edge.target not in targets:
@@ -790,19 +821,88 @@ class AnytypeGraphRepository:
             return result
         raise AssertionError("unreachable")  # loop always returns or raises
 
+    def _scoped_relation_key(
+        self, label: str, *, type_key: str, instance: Node | None
+    ) -> str | None:
+        """Bare relation resolution (ADR 047): the type's attached
+        relations, plus -- on an existing node -- relations the node
+        already carries. Exempt (space-wide as before): infra-role
+        targets (bot-owned bookkeeping, bootstrap-guaranteed vocabulary)
+        and the seeded ``gc_edge_*`` starter relations, which are
+        deliberately type-less and stay bare-usable everywhere."""
+        if self._registry.role_for(type_key) in schema.INFRA_ROLES:
+            return self._registry.key_for_label(label)
+        key = self._registry.attached_relation_key(type_key, label)
+        if key is not None:
+            return key
+        space = self._registry.key_for_label(label)
+        if space is None:
+            return None
+        if space.startswith(mapping.GC_EDGE_PREFIX):
+            return space
+        if instance is not None and any(
+            edge.property_key == space
+            for edge in self._graph.edges(instance.id, Direction.OUT)
+        ):
+            return space
+        return None
+
+    def _scoped_field_property(
+        self, identifier: str, *, type_key: str, instance: Node | None
+    ) -> PropertyInfo | None:
+        """Bare scalar resolution (ADR 047): the type's attached
+        properties, plus -- on an existing node -- properties the node
+        already carries a value for. Infra-role targets stay space-wide
+        (recorder/scheduler bookkeeping writes bootstrap-minted keys that
+        no type needs to claim)."""
+        if self._registry.role_for(type_key) in schema.INFRA_ROLES:
+            return self._registry.field_property(identifier)
+        info = self._registry.attached_property(type_key, identifier)
+        if info is not None:
+            return info
+        space = self._registry.field_property(identifier)
+        if (
+            space is not None
+            and instance is not None
+            and space.key in instance.fields
+        ):
+            return space
+        return None
+
     async def _resolve_relation(
-        self, label: str, create_missing: PropertyDeclaration | None
+        self,
+        label: str,
+        create_missing: PropertyDeclaration | None,
+        *,
+        type_key: str,
+        instance: Node | None = None,
     ) -> str:
-        """Resolve a relation label to an existing property key, reusing when
-        possible. Surfaces unknown labels for approval unless a declaration
-        licenses the mint (ADR 042)."""
-        key = self._registry.key_for_label(label)
+        """Resolve a relation label to an existing property key the write's
+        type scope admits (ADR 047). A declaration widens resolution to the
+        whole space -- an existing relation is REUSED (attached by the
+        write itself), never duplicated -- and licenses the mint when
+        nothing matches at all (ADR 042). An undeclared unmatched label is
+        surfaced for approval."""
+        key = self._scoped_relation_key(label, type_key=type_key, instance=instance)
         if key is not None:
             return key
         if create_missing is None:
-            raise UnknownRelationLabel(
-                label, tuple(self._registry.known_edge_labels())
+            attached = tuple(
+                self._registry.label_for(prop.key)
+                for prop in self._registry.attached_relations(type_key)
             )
+            raise UnknownRelationLabel(
+                label,
+                tuple(self._registry.known_edge_labels()),
+                type_name=self._registry.type_name(type_key),
+                attached=attached,
+                unattached=tuple(
+                    self._registry.known_edge_labels() - frozenset(attached)
+                ),
+            )
+        space = self._registry.key_for_label(label)
+        if space is not None:
+            return space  # declared reuse: attach, never mint a twin
         display = create_missing.display_name
         created = await self._create_property_checked(
             {"key": _slugify(label), "name": display, "format": "objects"}
@@ -908,27 +1008,31 @@ class AnytypeGraphRepository:
         *,
         type_key: str,
         create_missing: Mapping[str, PropertyDeclaration] | None = None,
+        instance: Node | None = None,
     ) -> list[dict[str, Any]]:
         """Resolve ``fields`` into native property entries.
 
-        A key matching a reflectable native property (by key or display
-        name) writes that property -- where humans filter and sort; select
-        values are resolved against the property's tags *before* the object
-        write (POST validates inline select entries, so resolution cannot
-        wait).
+        Bare keys resolve against the write's type scope (ADR 047:
+        the type's attached properties, plus the object's own on update)
+        -- where humans filter and sort; select values are resolved
+        against the property's tags *before* the object write (POST
+        validates inline select entries, so resolution cannot wait).
 
         Writes are native-only for every role (ADR 023/028 -- infra
         bookkeeping lands in bootstrap-minted attribution properties, not
-        a blob): an unmatched key raises :class:`UnknownFieldKey` --
-        listing the type's reusable properties -- unless a *scalar*
-        declaration in ``create_missing`` licenses it (ADR 042), in which
-        case the property is created (immediately usable; live-confirmed
-        2026-07-10, unlike ``objects`` relations there is no settle
-        window). A declared key that already matches an existing property
-        is reused when the formats agree and conflicts loudly when they
-        differ (A12: formats are immutable) -- never an opaque store
-        error. All keys are checked before anything is created, so an
-        approval error never leaves a half-minted vocabulary.
+        a blob): an unadmitted key raises :class:`UnknownFieldKey` --
+        teaching the type's own vocabulary and the attach gesture --
+        unless a *scalar* declaration in ``create_missing`` licenses it
+        (ADR 042). A declaration widens resolution to the whole space: an
+        existing same-format property is REUSED (this write attaches it
+        to the object), a format mismatch conflicts loudly (A12: formats
+        are immutable), and only a key matching nothing at all mints
+        (immediately usable; live-confirmed 2026-07-10, unlike
+        ``objects`` relations there is no settle window). A key naming a
+        relation never resolves as a scalar, declared or not (no scalar
+        shadow of an edge, ADR 006). All keys are checked before anything
+        is created, so an approval error never leaves a half-minted
+        vocabulary.
         """
         declared = {
             k: d for k, d in (create_missing or {}).items()
@@ -936,12 +1040,17 @@ class AnytypeGraphRepository:
         }
         resolved: list[tuple[PropertyInfo | None, str, str]] = []
         for key, value in fields.items():
-            info = self._registry.field_property(key)
-            if info is None and (
-                self._registry.key_for_label(key) is not None  # a relation
-                or key not in declared
-            ):
-                await self._raise_unknown_field(key, type_key)
+            info = self._scoped_field_property(
+                key, type_key=type_key, instance=instance
+            )
+            if info is None and key in declared:
+                if self._registry.key_for_label(key) is not None:  # a relation
+                    await self._raise_unknown_field(
+                        key, type_key, instance=instance
+                    )
+                info = self._registry.field_property(key)  # declared reuse
+            elif info is None:
+                await self._raise_unknown_field(key, type_key, instance=instance)
             declaration = declared.get(key)
             if (
                 info is not None
@@ -1009,14 +1118,17 @@ class AnytypeGraphRepository:
                 ) from err
             raise
 
-    async def _raise_unknown_field(self, key: str, type_key: str) -> NoReturn:
-        """Build and raise the unmatched-key approval error (errors are
-        prompts: the type's own properties first, with select options,
-        then the rest of the space's without them). A key that names an
-        ``objects``-format relation redirects to ``links`` instead --
-        relations are edges here (ADR 006), and minting a scalar shadow
-        of one must stay impossible."""
-        relation = self._registry.key_for_label(key)
+    async def _raise_unknown_field(
+        self, key: str, type_key: str, *, instance: Node | None = None
+    ) -> NoReturn:
+        """Build and raise the unadmitted-key approval error (errors are
+        prompts, ADR 047: the type's own vocabulary first -- properties
+        with select options, then relations -- then space vocabulary NOT
+        attached to the type with the explicit attach gesture). A key that
+        names a relation the scope admits redirects to the link value
+        shape instead -- relations are edges here (ADR 006), and minting
+        a scalar shadow of one must stay impossible."""
+        relation = self._scoped_relation_key(key, type_key=type_key, instance=instance)
         if relation is not None:
             raise UnknownFieldKey(
                 key,
@@ -1025,7 +1137,9 @@ class AnytypeGraphRepository:
             )
         type_props = self._registry.reflectable_type_properties(type_key)
         type_prop_keys = {prop.key for prop in type_props}
-        others = tuple(
+        attached_rels = self._registry.attached_relations(type_key)
+        attached_rel_keys = {prop.key for prop in attached_rels}
+        unattached_props = tuple(
             prop for prop in self._registry.reflectable_properties()
             if prop.key not in type_prop_keys
             # Reflected gc_ surfaces (schedule/rule/mode/attribution)
@@ -1033,12 +1147,35 @@ class AnytypeGraphRepository:
             # story-write vocabulary this suggestion list teaches.
             and not prop.key.startswith(mapping.GC_PREFIX)
         )
+        unattached_rels = tuple(
+            self._registry.label_for(k)
+            for k, info in self._registry.properties_by_key.items()
+            if info.format == "objects"
+            and k not in mapping.SYSTEM_RELATION_DENYLIST
+            and k not in attached_rel_keys
+            and not k.startswith(mapping.GC_PREFIX)
+        )
+        # The incident shape (ADR 047): the key names real space
+        # vocabulary that just isn't on this type -- state that fact and
+        # the reuse-attach gesture before the listings.
+        space_match = self._registry.field_property(key)
+        space_rel = None if space_match else self._registry.key_for_label(key)
+        if space_rel is not None:
+            space_match = self._registry.properties_by_key.get(space_rel)
         raise UnknownFieldKey(
             key,
             self._registry.type_name(type_key),
             type_properties=await self._render_property_lines(type_props, options=True),
-            other_properties=await self._render_property_lines(others, options=False),
+            type_relations=tuple(
+                self._registry.label_for(prop.key) for prop in attached_rels
+            ),
+            unattached_properties=await self._render_property_lines(
+                unattached_props, options=False
+            ),
+            unattached_relations=unattached_rels,
             formats=tuple(schema.CREATABLE_FORMATS),
+            space_match_name=space_match.name if space_match else "",
+            space_match_format=space_match.format if space_match else "",
         )
 
     async def _render_property_lines(

@@ -115,6 +115,11 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
                  "format": "objects"}
             )
             await repo.resync()  # refresh the registry snapshot
+        # ADR 047: bare link labels resolve against the type's attached
+        # relations -- attach (reuse-attach; retried runs no-op).
+        await repo.add_type_properties(
+            "Character", (PropertyDraft(name="E2E Assignee", format="objects"),)
+        )
         label = repo.registry.key_for_label("E2E Assignee")
         task = await repo.create_node(
             NodeDraft("Character", name="Member Link Pin", summary="s"),
@@ -186,6 +191,11 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
                 {"key": "e2e_mood", "name": "E2E Mood", "format": "select"}
             )
             await repo.resync()  # refresh the registry snapshot
+        # ADR 047: bare fields keys resolve against the type's attached
+        # properties -- attach (reuse-attach; retried runs no-op).
+        await repo.add_type_properties(
+            "Character", (PropertyDraft(name="E2E Mood", format="select"),)
+        )
         key = repo.registry.field_property("E2E Mood").key
         # Unmatched-key probe: uuid-fresh so reruns never match the
         # properties earlier runs minted (the API cannot delete them).
@@ -208,6 +218,33 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         assert "created_date" not in node.fields      # noise filter, live
         updated = await repo.update_node(node.id, fields={"E2E Mood": "wistful"})
         assert updated.fields[key] == "Wistful"       # option REUSED by name
+
+    async def test_unattached_space_property_needs_a_declaration_live(self, repo):
+        """ADR 047 against the real server: a space property no type
+        claims does not resolve bare (the incident shape -- an unattached
+        'Linked Project' kept resolving silently); the SAME declaration
+        reuses it -- attach, never a twin -- and the error teaches that
+        gesture."""
+        client = repo._client  # E2E-only reach-in; the port has no property API
+        if repo.registry.field_property("E2E Loose") is None:
+            await client.create_property(
+                {"key": "e2e_loose", "name": "E2E Loose", "format": "text"}
+            )
+            await repo.resync()
+        with pytest.raises(UnknownFieldKey, match="NOT attached"):
+            await repo.create_node(
+                NodeDraft("Character", name="Loose Pin", summary="s",
+                          fields={"E2E Loose": "held"}),
+            )
+        node = await repo.create_node(
+            NodeDraft("Character", name="Loose Pin", summary="s",
+                      fields={"E2E Loose": "held"}),
+            create_missing={
+                "E2E Loose": PropertyDeclaration("E2E Loose", "text")
+            },
+        )
+        key = repo.registry.field_property("E2E Loose").key
+        assert node.fields[key] == "held"
 
     async def test_template_applied_on_create_live(self, repo):
         """Templates can't be minted via the API, so this exercises whatever

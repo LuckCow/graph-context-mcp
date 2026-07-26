@@ -79,25 +79,29 @@ class GraphRepository(Protocol):
         """Create a node and its links.
 
         Resolves ``draft.type`` to an existing space type (raising
-        :class:`graph_context.errors.UnknownNodeType` if none matches) and each
-        link's label to an existing relation. ``create_missing`` is ONE
-        key/label -> :class:`~graph_context.domain.models.PropertyDeclaration`
-        map (ADR 042) licensing new space-level vocabulary: a ``fields``
-        key it declares mints a scalar property, a link label it declares
-        (format ``objects``) mints a relation. Minting is space-level only
-        -- the property attaches to NO type regardless of the
-        declaration's ``scope`` (scope drives the *caller's* proposal
-        drafting); type attachment is exclusively
-        :meth:`add_type_properties`. An unmatched, undeclared ``fields``
-        key raises :class:`graph_context.errors.UnknownFieldKey`; an
-        unmatched, undeclared link label raises
+        :class:`graph_context.errors.UnknownNodeType` if none matches) and
+        each ``fields`` key / link label against the TYPE's attached
+        properties (ADR 047: bare resolution is type-scoped -- a space
+        property no type claims does not resolve; exempt are infra-role
+        targets and the seeded ``gc_edge_*`` starter relations, which
+        stay space-wide). ``create_missing`` is ONE key/label ->
+        :class:`~graph_context.domain.models.PropertyDeclaration` map
+        (ADR 042) that widens resolution to the whole space: a declared
+        key matching an existing same-format space property -- attached
+        or not -- is REUSED (the write attaches it to this object, never
+        minting a twin); a format mismatch raises
+        :class:`graph_context.errors.SchemaChangeConflict` (A12: formats
+        are immutable); a key matching nothing mints new space-level
+        vocabulary (a scalar property, or a relation for format
+        ``objects``). Minting is space-level only -- the property
+        attaches to NO type regardless of the declaration's ``scope``
+        (scope drives the *caller's* proposal drafting); type attachment
+        is exclusively :meth:`add_type_properties`. An unadmitted,
+        undeclared ``fields`` key raises
+        :class:`graph_context.errors.UnknownFieldKey`; an unadmitted,
+        undeclared link label raises
         :class:`graph_context.errors.UnknownRelationLabel` -- either
-        *before* any persistence. A declared key that already matches an
-        existing same-format property is reused silently; a format
-        mismatch raises :class:`graph_context.errors.SchemaChangeConflict`
-        (A12: formats are immutable). Infra-role drafts are exempt from
-        field resolution: their fields are bookkeeping, not space
-        vocabulary.
+        *before* any persistence.
         """
         ...
 
@@ -114,8 +118,11 @@ class GraphRepository(Protocol):
         create_missing: Mapping[str, PropertyDeclaration] | None = None,
     ) -> Node:
         """Apply the non-``None`` keyword arguments and return the updated
-        node. ``create_missing`` has :meth:`create_node` semantics for
-        ``fields`` keys (link labels ride :meth:`add_link`'s declaration)."""
+        node. Bare ``fields`` keys resolve against the node's type PLUS
+        the properties the node itself already carries (ADR 047: an
+        object's local properties stay editable; another object's never
+        leak in). ``create_missing`` has :meth:`create_node` semantics
+        (link labels ride :meth:`add_link`'s declaration)."""
         ...
 
     async def add_link(
@@ -125,9 +132,12 @@ class GraphRepository(Protocol):
         *,
         create_missing: PropertyDeclaration | None = None,
     ) -> Edge:
-        """Add one outgoing edge from ``anchor``. A ``create_missing``
-        declaration (format ``objects``) mints the relation space-level
-        when the label matches none; without one an unknown label raises
+        """Add one outgoing edge from ``anchor``. The label resolves
+        bare against the anchor's type and the relations the anchor
+        already carries (ADR 047). A ``create_missing`` declaration
+        (format ``objects``) widens resolution to the whole space --
+        reusing an existing relation, or minting space-level when none
+        matches; without one an unadmitted label raises
         :class:`graph_context.errors.UnknownRelationLabel`."""
         ...
 
@@ -151,9 +161,16 @@ class GraphRepository(Protocol):
         """Relation labels available to reuse (for error suggestions)."""
         ...
 
-    def relation_label_for(self, field_key: str) -> str | None:
+    def relation_label_for(
+        self,
+        field_key: str,
+        *,
+        on_type: str | None = None,
+        on_node: NodeId | None = None,
+    ) -> str | None:
         """The canonical edge label when ``field_key`` names an
-        ``objects``-format relation, else ``None``.
+        ``objects``-format relation the write's scope admits, else
+        ``None``.
 
         Matched exactly like a ``fields`` key resolves (by property key or
         display name, case-insensitive), because that is what this exists
@@ -161,6 +178,16 @@ class GraphRepository(Protocol):
         write ``fields={"Assignee": ...}``. The tool boundary asks this
         question to route such a key as the link it really is (ADR 006:
         relations are edges) instead of surfacing a rejection.
+
+        Exactly ONE of ``on_type``/``on_node`` is required (ADR 047 --
+        implementations raise ``ValueError`` otherwise, so an unscoped
+        call cannot reintroduce space-wide bare resolution). ``on_type``
+        is create semantics: the named type's attached relations (an
+        unknown type matches nothing -- ``create_node`` raises its own
+        ``UnknownNodeType``). ``on_node`` is update semantics: the node's
+        type plus relations the node itself already carries. Infra-role
+        scopes and the seeded ``gc_edge_*`` vocabulary resolve
+        space-wide.
         """
         ...
 

@@ -3,7 +3,10 @@
 Date: 2026-07-19
 Status: accepted (amends ADR 023's fields opt-in and ADR 006's
 `create_missing_relations` into one declaration surface; supersedes the
-incoming-link half of the WP1 composite-create choreography)
+incoming-link half of the WP1 composite-create choreography; amended by
+ADR 047 — bare key resolution is now TYPE-scoped, "what the space says
+the key IS" reads "what the TYPE says", and a declaration is the
+explicit path to unattached space vocabulary)
 
 ## Context
 

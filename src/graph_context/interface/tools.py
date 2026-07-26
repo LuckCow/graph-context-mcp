@@ -691,7 +691,8 @@ async def create_node_tool(
         "create_missing_fields": create_missing_fields,
     })
     scalars, parsed_links, declarations = await _parse_properties(
-        services, properties, create_missing_properties
+        services, properties, create_missing_properties,
+        on_type=_parse_node_type(type),
     )
     draft = NodeDraft(
         type=_parse_node_type(type),
@@ -749,7 +750,7 @@ async def update_node_tool(
         for i in remove_links or []
     ]
     scalars, parsed_add_links, declarations = await _parse_properties(
-        services, properties, create_missing_properties
+        services, properties, create_missing_properties, on_node=node_id,
     )
     outcome = await services.writer.update_node(
         node_id,
