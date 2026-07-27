@@ -85,6 +85,14 @@ class AnytypeModeStore:
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
         }
+        # ADR 048: the document-mode surface -- presence enables, like
+        # capture; the loader validates (requires mutating, excludes
+        # capture) naming this object.
+        document_type = str(
+            props.get(mapping.PROP_MODE_DOCUMENT_TYPE) or ""
+        ).strip()
+        if document_type:
+            payload["document_type"] = document_type
         # A select: the value is a tag envelope, normalized to the option's
         # display name. Empty means "not set" -- the loader applies the
         # default; a set value is validated there (lowercased, so the

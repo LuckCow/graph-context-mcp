@@ -2473,6 +2473,90 @@ duplicate.
 
 ---
 
+## WP40 — Document modes (ADR 048) — **shipped 2026-07-27**
+
+**Status:** complete. A mode that maintains long-form documents sets
+`gc_mode_document_type` (e.g. `Chapter`; requires `gc_mode_mutating`,
+mutually exclusive with `gc_capture_type`) and the MODEL maintains the
+document node through the normal write tools — create once, revise the
+same node's description, curate its `references` itself — fixing both
+capture-era dogfooding failures: the chat no longer floods with pasted
+prose (replies are a short change summary; the touched document nodes
+always card via `ReplyEvent.attach`, never filtered by
+`hide_node_cards`) and iteration no longer mints duplicate Chapter
+nodes. `modes.goal_for(spec)` appends the standing `DOCUMENT_GUIDANCE`
+block in one place (fingerprint, diary, and `decide` all route through
+it); `_finish_turn` drains the journal unconditionally. Reply
+discipline is deliberately prompt-only (no harness reply rewriting).
+Plumbing rides the mode-checkbox precedent end to end; the Space Setup
+menus document the new option. ProseWeaver migration appendix in the
+ADR.
+
+---
+
+## WP41 — Node revision history (ADR 049) — **shipped 2026-07-27**
+
+**Status:** complete. General-purpose, space-following revision history
+for the node types listed in the Space Context's new **Tracked types**
+(`gc_tracked_types`) property — data config, not mode config: writes
+from ANY mode and human Anytype-UI edits both record. Identity is
+paragraph-level normalized content hashes (`domain/revisions.py`, the
+single home of segmentation/normalization/blame/compaction; absorbs
+A9/A13/whitespace drift, honoring ADR 010's no-byte-exact rule);
+history is a keyframe+delta JSONL log inside one fence in a hidden
+`gc_node_history` sidecar per tracked node (lenient parse; ~400 K soft
+cap with truncation-marker compaction that re-carries live block
+texts). `application/node_historian.py` records compare-to-baseline —
+baselines always from `fetch_body` output, so store normalization can
+never mint phantom revisions — at two structural points: the turn
+boundary (one attributed `model · mode · user` revision per touched
+tracked node; failures never fail the turn) and a third `history`
+listener on the ADR 044 change tick (author `human`; the bot's own
+writes compare equal, so nothing double-records). `rebuild()` restores
+baselines on startup and catches up offline edits. Blame is derived at
+read time (introduced-by + difflib lineage), never stored. Fenced-JSONL
+body round-trip pinned by contract test on both backends and
+live-confirmed (`docs/spikes/node-history-body.md`). Open spike: API
+last-modified-by identity (human revisions attribute generically until
+then).
+
+---
+
+## WP42 — Section status, revision intent, locked enforcement — roadmap
+
+**Status:** not started (design direction fixed in ADR 049). Per-block
+`status` (`raw_ai | approved | human`) and `intent`
+(`locked | flexible | needs_change`) records join the same sidecar log,
+keyed by block hash; a domain fold derives the current maps; statuses
+follow successor blocks across HUMAN edits via the similarity match,
+and any AI edit voids `approved`. Locked enforcement is one rule in one
+place: `NodeWriter` gains an injected body-guard consulted on
+tracked-type body updates; a violation raises a typed
+`LockedSectionsChanged` errors-are-prompts message ("reproduce these
+sections verbatim or ask the user to unlock") — an order-insensitive
+locked-hash-presence check, no diffing. Ships with the block-anchored
+`edit_document` tool (replace/insert-after/delete one section, anchored
+on the same hash vocabulary): cheap iterations without re-emitting the
+whole chapter, untouched blocks unchanged by construction; plain
+`update_node` stays valid. Intent feeds the model via the context
+block's full-detail entries.
+
+---
+
+## WP43 — Prose review page on the inspect server — roadmap
+
+**Status:** not started. `prose.html` beside `inspect_server.py` (ADR
+025 house style: stdlib server, one self-contained page); the
+composition root injects read/write callables into `create_server`
+(import-linter forbids the inspect server importing infrastructure).
+Per-block blame coloring from the WP41 log, on-demand word-level
+intra-block diffs, and status/intent setting — the server's FIRST
+non-GET surface, which needs an explicit origin-check decision since
+read-only was a load-bearing safety property. Highlight-a-selection-as-
+context deliberately deferred with this phase.
+
+---
+
 ## Sequencing
 
 ```

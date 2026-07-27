@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any, NoReturn
 
-from graph_context.domain import activity, attribution, schema
+from graph_context.domain import activity, attribution, revisions, schema
 from graph_context.domain import fields as domain_fields
 from graph_context.domain.graph import Direction, GraphIndex
 from graph_context.domain.models import (
@@ -192,6 +192,9 @@ class InMemoryGraphRepository:
             FieldSpec(name=key, format=fmt, key=key)
             for key, fmt in (
                 attribution.ATTRIBUTION_FIELDS | activity.MODE_CONFIG_FIELDS
+                # ADR 049: the historian's surfaces, bootstrap-guaranteed
+                # like the recorders' stamps.
+                | revisions.HISTORY_FIELDS | revisions.TRACKED_TYPES_FIELDS
             ).items()
             if key not in existing_keys
         )
@@ -564,6 +567,8 @@ class InMemoryGraphRepository:
             if s.format != "objects"
             and s.key not in attribution.ATTRIBUTION_FIELDS
             and s.key not in activity.MODE_CONFIG_FIELDS
+            and s.key not in revisions.HISTORY_FIELDS
+            and s.key not in revisions.TRACKED_TYPES_FIELDS
         )
         if not self._scoped:
             # Flat mode: the whole catalog offered under every known

@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from graph_context import composition
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
+from graph_context.application.node_historian import NodeHistorian
 from graph_context.composition import TeardownHook
 from graph_context.errors import GraphContextError
 from graph_context.interface import profiles
@@ -348,6 +349,13 @@ async def _assemble_runtime(
         IntentRecorder(services.repository, store_prompt=store_prompt)
         if provenance_on else None
     )
+    # WP41 (ADR 049): the revision historian. No knob -- the Space
+    # Context's Tracked types list is the switch (empty = inert).
+    # Rebuild runs after hydrate: baselines reload from the sidecars,
+    # then one catch-up compare per tracked node records edits made
+    # while the bot was down.
+    historian = NodeHistorian(services.repository)
+    await historian.rebuild()
 
     async def reload_registry() -> modes.ModeRegistry:
         return modes.load_registry(
@@ -358,7 +366,8 @@ async def _assemble_runtime(
     registry = await reload_registry()  # startup: bad specs fail loudly here
     orchestrator = Orchestrator(
         services=services, driver=driver, profile=profile,
-        registry=registry, provenance=recorder, model_name=model_name,
+        registry=registry, provenance=recorder, historian=historian,
+        model_name=model_name,
         reload_registry=reload_registry, turn_log=turn_log,
         services_for=built.services_for,  # WP8: per-session-key Services
     )

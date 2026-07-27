@@ -38,7 +38,8 @@ from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import CapturePolicy, ModeSpec
 
 _SPEC_KEYS = {
-    "goal", "mutating", "meta_inspection", "capture", "activity_detail",
+    "goal", "mutating", "meta_inspection", "capture", "document_type",
+    "activity_detail",
     "hide_intent_card", "hide_node_cards",
     "web_search", "model",
     "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
@@ -102,6 +103,7 @@ def spec_from_mapping(
             mutating=bool(body.get("mutating", False)),
             meta_inspection=bool(body.get("meta_inspection", False)),
             capture=capture,
+            document_type=str(body.get("document_type") or "").strip(),
             hide_intent_card=bool(body.get("hide_intent_card", False)),
             hide_node_cards=bool(body.get("hide_node_cards", False)),
             web_search=bool(body.get("web_search", False)),
@@ -309,6 +311,8 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
                 "references_label": spec.capture.references_label,
                 "min_chars": spec.capture.min_chars,
             }
+        if spec.document_type:
+            payload["document_type"] = spec.document_type
         if spec.model:
             payload["model"] = spec.model
         if spec.thinking:

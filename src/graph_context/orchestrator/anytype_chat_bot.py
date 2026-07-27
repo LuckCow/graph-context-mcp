@@ -826,9 +826,10 @@ def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
     """The unified tick's reactions, in order (ADR 044).
 
     Rules run first -- reaction latency is their 5s contract (ADR 039) --
-    then the mode-registry refresh, which is fingerprint-gated and free
-    on the no-change tick. Names are for the watcher's per-listener
-    failure logs.
+    then the mode-registry refresh (fingerprint-gated, free on the
+    no-change tick), then the revision historian (WP41: compares changed
+    tracked nodes to its baselines; free when nothing tracked changed).
+    Names are for the watcher's per-listener failure logs.
     """
 
     async def rules(_changed: frozenset[str]) -> None:
@@ -850,7 +851,11 @@ def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
     async def refresh_modes(_changed: frozenset[str]) -> None:
         await route.orchestrator.refresh_modes()
 
-    return [("rules", rules), ("modes", refresh_modes)]
+    async def history(changed: frozenset[str]) -> None:
+        # WP41 (ADR 049): human edits to tracked nodes become revisions.
+        await route.orchestrator.history_tick(changed)
+
+    return [("rules", rules), ("modes", refresh_modes), ("history", history)]
 
 
 async def run() -> None:

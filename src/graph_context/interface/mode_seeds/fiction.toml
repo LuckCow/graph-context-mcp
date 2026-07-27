@@ -47,6 +47,10 @@ object cards off replies; the text still names them.
    gc_capture_type (text: an existing type name), with \
 gc_capture_references and gc_capture_min_chars: auto-captures the \
 mode's substantial replies as objects of that type.
+   gc_mode_document_type (text: an existing type name): the mode \
+maintains long-form documents as nodes of that type (drafting and \
+revising via the node tools, chat replies stay short summaries + a \
+link). Needs gc_mode_mutating; never combine with gc_capture_type.
 Leave gc_mode_meta_inspection unset -- only this setup mode edits mode \
 objects. To revise a mode later, get_node it and rewrite its \
 description wholesale.

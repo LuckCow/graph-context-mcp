@@ -84,6 +84,7 @@ def _seed_mode(
     capture_type: str = "",
     references: str = "",
     min_chars: float | None = None,
+    document_type: str = "",
     activity_detail: str = "",
     web_search: bool = False,
     hide_intent_card: bool = False,
@@ -130,6 +131,9 @@ def _seed_mode(
     if search_blocked:
         properties.append({"key": mapping.PROP_MODE_SEARCH_BLOCKED,
                            "format": "text", "text": search_blocked})
+    if document_type:
+        properties.append({"key": mapping.PROP_MODE_DOCUMENT_TYPE,
+                           "format": "text", "text": document_type})
     if references:
         properties.append({"key": mapping.PROP_CAPTURE_REFERENCES,
                            "format": "text", "text": references})
@@ -364,6 +368,19 @@ async def test_bootstrap_heals_a_text_minted_detail_property(
     }
     assert attached[mapping.PROP_MODE_ACTIVITY_DETAIL] == "select"
     assert set(mapping.MODE_PROPERTIES) <= set(attached)  # nothing lost
+
+
+async def test_document_type_rides_the_payload_when_set(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """ADR 048: presence enables, like capture -- an empty text property
+    keeps the key off the payload entirely."""
+    _seed_mode(mock, "Prose Weaver", "Write chapters.",
+               mutating=True, document_type="Chapter")
+    _seed_mode(mock, "Plain Mode", "A goal.", document_type="  ")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Prose Weaver"]["document_type"] == "Chapter"
+    assert "document_type" not in payloads["Plain Mode"]
 
 
 async def test_capture_absent_when_capture_type_empty(

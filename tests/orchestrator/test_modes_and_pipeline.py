@@ -13,7 +13,8 @@ import pytest
 
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
-from graph_context.domain import attribution
+from graph_context.application.node_historian import NodeHistorian
+from graph_context.domain import attribution, revisions
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
@@ -187,6 +188,35 @@ class TestInSpaceModes:
             fiction_registry(_mode_payload(
                 capture={"artifact_type": "note", "min_chars": -3},
             ))
+
+    def test_in_space_document_type_parses(self) -> None:
+        registry = fiction_registry(_mode_payload(document_type="Chapter"))
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.document_type == "Chapter"
+
+    def test_document_type_without_mutating_names_the_object(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            fiction_registry(_mode_payload(
+                mutating=False, document_type="Chapter",
+            ))
+        assert "obj-1" in str(err.value) and "mutating" in str(err.value)
+
+
+class TestDocumentGuidance:
+    """ADR 048: goal_for appends the standing document discipline."""
+
+    def test_plain_specs_keep_their_goal_verbatim(self) -> None:
+        assert modes.goal_for(WORLD_MODELING) is WORLD_MODELING.goal
+
+    def test_document_specs_get_the_guidance_with_their_type(self) -> None:
+        spec = ModeSpec(
+            name="prose", goal="Write the saga.",
+            mutating=True, document_type="Chapter",
+        )
+        goal = modes.goal_for(spec)
+        assert goal.startswith("Write the saga.")
+        assert "Chapter node" in goal
+        assert "NEVER paste the document text" in goal
 
 
 class TestModeFingerprint:
@@ -808,6 +838,167 @@ def _keyed_orchestrator(
         registry=fiction_registry(), services_for=services_for,
     )
     return orchestrator, store
+
+
+DOCUMENT_SPEC = ModeSpec(
+    name="chapters", goal="Write chapters as nodes.",
+    mutating=True, document_type="Chapter",
+)
+
+CREATE_CHAPTER = ToolCall("create_node", {
+    "type": "Chapter", "name": "Chapter One", "summary": "Opening chapter.",
+    "description": "The city fell quiet before the siege began.",
+})
+
+
+class TestDocumentModeCards:
+    """ADR 048: a document mode's touched document nodes always card on
+    the reply -- the text only summarizes, so the card is the link."""
+
+    async def test_document_turn_cards_the_node_beside_the_intent(
+        self,
+    ) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One."),
+        ], extra_specs=(DOCUMENT_SPEC,))
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        events = await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (intent,) = _intent_nodes(services)
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert reply.attach == (intent.id, chapter.id)
+
+    async def test_hide_node_cards_never_strips_the_document_card(
+        self,
+    ) -> None:
+        spec = ModeSpec(
+            name="chapters", goal="Write chapters as nodes.",
+            mutating=True, document_type="Chapter", hide_node_cards=True,
+            hide_intent_card=True,
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One."),
+        ], extra_specs=(spec,))
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        events = await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        # Explicit attach survives ADR 046 suppression: the transport
+        # filters only its text-scrape by suppress, never event.attach.
+        assert reply.attach == (chapter.id,)
+        assert chapter.id in reply.suppress
+
+    async def test_non_document_mutations_do_not_attach(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Noted."),
+        ], extra_specs=(DOCUMENT_SPEC,))
+        # world_modeling mutates but has no document_type: only the
+        # intent node cards (ADR 038 behavior, unchanged).
+        await orchestrator.handle_message("s1", "u1", "/mode world_modeling")
+        events = await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (intent,) = _intent_nodes(services)
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert reply.attach == (intent.id,)
+
+
+class TestRevisionRecording:
+    """WP41 (ADR 049): the turn boundary records one attributed revision
+    per touched tracked node; the change tick records human edits and
+    never echoes the bot's own writes."""
+
+    async def _world(
+        self, turns: list[LLMTurn]
+    ) -> tuple[Orchestrator, Services, NodeHistorian]:
+        journal = MutationJournal()
+        services = build_services(
+            InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+            SessionState(project="Ashfall"),
+            journal=journal,
+        )
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        historian = NodeHistorian(services.repository, now=lambda: "T")
+        registry = fiction_registry()
+        registry = modes.ModeRegistry(
+            specs={**registry.specs, DOCUMENT_SPEC.name: DOCUMENT_SPEC},
+            default=registry.default,
+        )
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver(turns),
+            profile=FICTION,
+            registry=registry,
+            provenance=IntentRecorder(services.repository, now=lambda: "T0"),
+            historian=historian,
+            model_name="scripted",
+        )
+        return orchestrator, services, historian
+
+    async def test_a_document_turn_records_one_attributed_revision(
+        self,
+    ) -> None:
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (record,) = historian.history(chapter.id)
+        assert record.author_kind == revisions.AUTHOR_MODEL
+        assert record.author_detail == "scripted · chapters · u1"
+
+    async def test_the_tick_after_a_bot_turn_records_no_phantom(
+        self,
+    ) -> None:
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        await orchestrator.history_tick(frozenset({chapter.id}))
+        assert len(historian.history(chapter.id)) == 1
+
+    async def test_a_human_edit_reaches_history_through_the_tick(
+        self,
+    ) -> None:
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        await services.repository.update_node(
+            chapter.id, body="A human rewrote the whole opening at night.",
+        )
+        await orchestrator.history_tick(frozenset({chapter.id}))
+        records = historian.history(chapter.id)
+        assert [r.author_kind for r in records] == [
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+        ]
+
+    async def test_tracked_writes_record_from_any_mode(self) -> None:
+        """Tracking is a data concern: a mode WITHOUT document_type
+        touching a tracked type still records (cross-mode edits must
+        never later misattribute as human)."""
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Noted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode world_modeling")
+        await orchestrator.handle_message("s1", "u1", "Add the chapter.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (record,) = historian.history(chapter.id)
+        assert record.author_kind == revisions.AUTHOR_MODEL
+        assert "world_modeling" in record.author_detail
 
 
 class TestSchemaConfirmEvents:

@@ -44,6 +44,7 @@ from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.application.mutation_journal import MutationRecord
+from graph_context.application.node_historian import NodeHistorian
 from graph_context.application.rule_engine import RuleTickReport
 from graph_context.application.scheduler import SchedulerTick
 from graph_context.domain.model_choice import model_id
@@ -276,6 +277,11 @@ class Orchestrator:
     profile: DomainProfile
     registry: ModeRegistry
     provenance: IntentRecorder | None = None
+    # WP41 (ADR 049): the revision historian -- when wired, every turn
+    # that touched a TRACKED node (the Space Context's gc_tracked_types
+    # list) records one attributed body revision at the turn boundary,
+    # and history_tick records human edits the change tick surfaces.
+    historian: NodeHistorian | None = None
     turn_log: TurnLog | None = None
     # ADR 015 amendment: re-reads every config source (profile defaults,
     # GC_MODES_FILE, in-space Activity Mode objects). None (tests, no
@@ -337,6 +343,17 @@ class Orchestrator:
         route's turn lock; the shared bundle is correct here too --
         rules belong to the space, not to any one session."""
         return await self.services.rules.run_tick()
+
+    async def history_tick(self, changed: frozenset[str]) -> None:
+        """Record human revisions for changed tracked nodes (WP41, ADR
+        049). The change-tick listener calls this after its resync under
+        the route lock; a body edit bumps ``modified_at``, landing the
+        node in ``changed``. Bot writes already advanced the historian's
+        baseline, so their tick compares equal -- nothing double-records.
+        No historian wired = the subsystem is off, like ``provenance``.
+        """
+        if self.historian is not None:
+            await self.historian.sweep(changed)
 
     async def refresh_modes(self) -> bool:
         """Reload the registry iff the space's mode config changed (ADR 044).
@@ -431,12 +448,17 @@ class Orchestrator:
         if observer:
             await observer.turn_started(spec.name, spec.activity_detail)
         tools = modes.tool_docs(spec, self.profile)
+        # ADR 048: the effective goal -- the human-authored prompt plus
+        # the standing document discipline for document modes. Assembled
+        # once; the fingerprint, the diary, and decide all see the same
+        # text.
+        goal = modes.goal_for(spec)
         if self.turn_log:
-            fingerprint = (spec.name, spec.goal, tuple(sorted(tools)))
+            fingerprint = (spec.name, goal, tuple(sorted(tools)))
             if state.logged_prompt != fingerprint:
                 self.turn_log.prompt(
-                    turn_id, session_id, spec.name, spec.goal,
-                    self.driver.system_prompt(spec.goal), tools,
+                    turn_id, session_id, spec.name, goal,
+                    self.driver.system_prompt(goal), tools,
                 )
                 state.logged_prompt = fingerprint
         # [prior conversation..., context block, the live message]: history
@@ -474,7 +496,7 @@ class Orchestrator:
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(
-                transcript, tools, spec.goal,
+                transcript, tools, goal,
                 options=modes.decide_options(spec),
             )
             if self.turn_log:
@@ -580,16 +602,32 @@ class Orchestrator:
             state.services, spec, user_id, stripped, reply_text, trace,
             origin, process.render() if process.worked else "",
         )
+        attach_ids: list[str] = []
         if intent is not None and process.worked and not spec.hide_intent_card:
             # ADR 038: the reply carries its background-process record as
             # an object card -- only on turns that DID background work
             # (a plain answer stays a plain answer, even when capture
             # minted a node for it). ADR 046: a mode may hide the card;
             # the intent node is still recorded either way.
+            attach_ids.append(intent.id)
+        if spec.document_type:
+            # ADR 048: a document mode's reply only SUMMARIZES the write,
+            # so the touched document nodes always card -- explicit attach
+            # rides ahead of the text scrape and is never filtered by
+            # hide_node_cards.
+            wanted = spec.document_type.strip().lower()
+            graph = state.services.repository.graph
+            attach_ids.extend(
+                record.node_id for record in mutations
+                if graph.has_node(record.node_id)
+                and graph.node(record.node_id).type.strip().lower() == wanted
+            )
+        if attach_ids:
             for index in range(len(events) - 1, -1, -1):
                 if events[index].kind == "reply":
                     events[index] = dataclasses.replace(
-                        events[index], attach=(intent.id,)
+                        events[index],
+                        attach=tuple(dict.fromkeys(attach_ids)),
                     )
                     break
         if spec.hide_node_cards and mutations:
@@ -632,10 +670,8 @@ class Orchestrator:
         the touched nodes' cards when the mode hides them, ADR 046).
         ``services`` is the session's view; its repository/capture/journal
         are the runtime's shared instances."""
-        if self.provenance is None:
-            return None, ()
         policy = spec.capture
-        if policy is not None and reply_text:
+        if self.provenance is not None and policy is not None and reply_text:
             references = capture.entity_links(
                 reply_text, services.repository.graph
             )
@@ -651,7 +687,30 @@ class Orchestrator:
                     artifact_type=policy.artifact_type,
                     references_label=policy.references_label,
                 )
+        # Drained unconditionally (ADR 048): the caller cards a document
+        # mode's touched nodes (and suppresses cards, ADR 046) whether or
+        # not an intent recorder is wired.
         mutations = services.journal.drain()
+        if self.historian is not None and mutations:
+            # WP41 (ADR 049): one attributed revision per touched tracked
+            # node -- the turn is the revision granularity. A history
+            # failure never fails the turn that did the real work.
+            author = (
+                f"{model_id(spec.model) or self.model_name}"
+                f" · {spec.name} · {user_id}"
+            )
+            for record in mutations:
+                try:
+                    if self.historian.is_tracked(record.node_id):
+                        await self.historian.record_bot_revision(
+                            record.node_id, author_detail=author,
+                        )
+                except Exception:  # noqa: BLE001 -- bookkeeping, not work
+                    logger.exception(
+                        "historian: failed to record %s", record.node_id
+                    )
+        if self.provenance is None:
+            return None, mutations
         intent = await self.provenance.record_turn(
             prompt=prompt,
             mutations=mutations,

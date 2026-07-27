@@ -38,6 +38,10 @@ FIELD_SEARCH_BLOCKED = "gc_mode_search_blocked_domains"
 FIELD_CAPTURE_TYPE = "gc_capture_type"
 FIELD_CAPTURE_REFERENCES = "gc_capture_references"
 FIELD_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
+# ADR 048: the mode maintains long-form documents of this type as NODES
+# (create_node/update_node), never as chat prose; mutually exclusive with
+# the capture surface above.
+FIELD_DOCUMENT_TYPE = "gc_mode_document_type"
 
 MODE_CONFIG_FIELDS: dict[str, str] = {  # key -> format; bootstrap mints these
     FIELD_MUTATING: "checkbox",
@@ -56,4 +60,5 @@ MODE_CONFIG_FIELDS: dict[str, str] = {  # key -> format; bootstrap mints these
     FIELD_CAPTURE_TYPE: "text",
     FIELD_CAPTURE_REFERENCES: "text",
     FIELD_CAPTURE_MIN_CHARS: "number",
+    FIELD_DOCUMENT_TYPE: "text",
 }

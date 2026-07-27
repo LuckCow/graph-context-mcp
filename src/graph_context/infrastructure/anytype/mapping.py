@@ -117,7 +117,13 @@ import zlib
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from graph_context.domain import activity, attribution, rules, scheduling
+from graph_context.domain import (
+    activity,
+    attribution,
+    revisions,
+    rules,
+    scheduling,
+)
 from graph_context.domain import fields as domain_fields
 from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
 from graph_context.domain.model_choice import MODEL_CHOICES
@@ -187,6 +193,7 @@ PROP_MODE_SEARCH_BLOCKED = activity.FIELD_SEARCH_BLOCKED  # ADR 037
 PROP_CAPTURE_TYPE = activity.FIELD_CAPTURE_TYPE
 PROP_CAPTURE_REFERENCES = activity.FIELD_CAPTURE_REFERENCES
 PROP_CAPTURE_MIN_CHARS = activity.FIELD_CAPTURE_MIN_CHARS
+PROP_MODE_DOCUMENT_TYPE = activity.FIELD_DOCUMENT_TYPE  # ADR 048
 
 MODE_PROPERTIES: dict[str, str] = dict(activity.MODE_CONFIG_FIELDS)
 
@@ -225,8 +232,13 @@ SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
 # and never surfaces as reusable edge vocabulary: it is server config,
 # not story structure.
 PROP_DEFAULT_MODE = "gc_default_mode"
+# ADR 049: the tracked-types list joins the Space Context surface -- a
+# text property (comma/newline-separated type names) humans edit; the
+# historian reads it off the index by role each change tick.
+PROP_TRACKED_TYPES = revisions.FIELD_TRACKED_TYPES
 SPACE_CONTEXT_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints
     PROP_DEFAULT_MODE: "objects",
+    **revisions.TRACKED_TYPES_FIELDS,
 }
 
 # Session discriminator (WP8, ADR 021): every gc_session_context node
@@ -238,6 +250,14 @@ PROP_SESSION_KEY = "gc_session_key"
 SESSION_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_SESSION_KEY: "text",
 }
+
+# Revision-history sidecars (WP41, ADR 049): each gc_node_history object
+# names the tracked node it shadows via this text discriminator (the
+# gc_session_key pattern -- never an ``objects`` relation, so the link
+# neither reflects as an edge nor grows a connections footer). Keys live
+# in the domain (revisions.py); this is the adapter-local alias.
+PROP_HISTORY_OF = revisions.FIELD_HISTORY_OF
+HISTORY_PROPERTIES: dict[str, str] = dict(revisions.HISTORY_FIELDS)
 
 # The session snapshot slot (ADR 028, superseding the gc_fields blob for
 # ADR 021's per-chat state): server-managed JSON on the SessionContext
@@ -304,6 +324,8 @@ RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # "Status". Properties absent here mint under their raw key, as before.
 PROPERTY_DISPLAY_NAMES: dict[str, str] = {
     PROP_DEFAULT_MODE: "Default mode",
+    PROP_TRACKED_TYPES: "Tracked types",
+    PROP_HISTORY_OF: "History of",
     PROP_SCHEDULE: "Schedule",
     PROP_SCHEDULE_PROMPT: "Schedule prompt",
     PROP_SCHEDULE_STATUS: "Schedule status",
@@ -350,6 +372,11 @@ GC_REFLECTED_FIELD_KEYS: frozenset[str] = (
     # objects, which stay invisible to unprivileged modes -- reflecting
     # them globally leaks nothing.
     | frozenset(MODE_PROPERTIES)
+    # ADR 049: the historian reads the tracked-types list and each
+    # sidecar's discriminator off the INDEX (Node.fields), the
+    # rule-engine pattern -- both live only on infra-role objects.
+    | frozenset(HISTORY_PROPERTIES)
+    | frozenset(revisions.TRACKED_TYPES_FIELDS)
 )
 
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``

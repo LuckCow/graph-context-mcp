@@ -43,6 +43,7 @@ MODE_TYPE_KEY = "gc_activity_mode"  # ADR 015 amendment: in-space mode config
 SCHEDULED_TYPE_KEY = "gc_scheduled_event"  # WP18/ADR 027: timed prompts
 SPACE_CONTEXT_TYPE_KEY = "gc_space_context"  # ADR 034: space-wide settings
 RULE_TYPE_KEY = "gc_rule"  # WP31/ADR 039: reactive automations
+HISTORY_TYPE_KEY = "gc_node_history"  # WP41/ADR 049: revision sidecars
 INFRA_TYPES: dict[str, str] = {
     PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
@@ -51,6 +52,7 @@ INFRA_TYPES: dict[str, str] = {
     SCHEDULED_TYPE_KEY: "Scheduled Event",
     SPACE_CONTEXT_TYPE_KEY: "Space Context",
     RULE_TYPE_KEY: "Automation Rule",
+    HISTORY_TYPE_KEY: "Node History",
 }
 
 # Types whose fields humans edit in the Anytype UI get their properties
@@ -79,6 +81,7 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
     },
     SPACE_CONTEXT_TYPE_KEY: mapping.SPACE_CONTEXT_PROPERTIES,
     RULE_TYPE_KEY: mapping.RULE_PROPERTIES,
+    HISTORY_TYPE_KEY: mapping.HISTORY_PROPERTIES,
 }
 
 # The Activity Mode explainer/template moved to mode_seeder.py (ADR 035):
@@ -317,6 +320,7 @@ async def ensure_schema(
     for key, fmt in {
         **mapping.SCHEDULED_PROPERTIES, **mapping.ATTRIBUTION_PROPERTIES,
         **mapping.SPACE_CONTEXT_PROPERTIES, **mapping.RULE_PROPERTIES,
+        **mapping.HISTORY_PROPERTIES,
     }.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)

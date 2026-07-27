@@ -85,6 +85,40 @@ def binding_for(spec: ModeSpec) -> Mapping[str, ToolFn]:
     return _FULL_SURFACE if spec.mutating else _READ_SURFACE
 
 
+# ADR 048: the standing manuscript discipline for document modes -- the
+# mode's goal says WHAT to write, this says WHERE it lives. Appended by
+# goal_for so a terse human-authored goal still gets the mechanics.
+DOCUMENT_GUIDANCE = """\
+Document discipline: this mode maintains long-form documents as {type} \
+nodes -- the document lives in the node, never in chat.
+- First draft: create ONE {type} node and write the full text into its \
+`description`.
+- Revisions: update THAT SAME node's `description` with the complete \
+revised text (an update replaces the whole body, so always send the \
+full document).
+- Keep the document's `references` property (when the type has one) \
+linked to the entities -- characters, places, events -- that appear in \
+the text.
+- In chat, reply with a short summary of what you wrote or changed and \
+why, a few sentences at most, plus a markdown link [name](node id) to \
+the document node. NEVER paste the document text into the chat."""
+
+
+def goal_for(spec: ModeSpec) -> str:
+    """The spec's effective system-prompt goal.
+
+    The human-authored goal, plus the standing document discipline when
+    the mode maintains documents (ADR 048). The ONE place the prompt is
+    assembled -- every consumer (the prompt fingerprint, the turn-log
+    diary, ``decide``) must route through it or the diary would lie
+    about what the model saw.
+    """
+    if not spec.document_type:
+        return spec.goal
+    guidance = DOCUMENT_GUIDANCE.format(type=spec.document_type)
+    return f"{spec.goal}\n\n{guidance}"
+
+
 def full_surface() -> Mapping[str, ToolFn]:
     """Every tool any spec can bind -- drivers derive schemas from the
     wrappers' signatures (one source of truth, never a maintained table)."""
@@ -294,6 +328,7 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
             key: payload[key]
             for key in (
                 "goal", "mutating", "meta_inspection", "capture",
+                "document_type",
                 "activity_detail", "hide_intent_card", "hide_node_cards",
                 "web_search", "model",
                 "thinking", "max_tokens", "turn_limit",

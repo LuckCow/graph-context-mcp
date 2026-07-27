@@ -126,6 +126,13 @@ class ModeSpec:
     showing, the pre-046 behavior; the transport-neutral suppression
     rides the reply events, so surfaces without cards ignore it.
 
+    ``document_type`` (ADR 048) names the node type this mode maintains
+    long-form documents in (e.g. ``Chapter``): the model writes and
+    revises the document node via ``create_node``/``update_node`` and
+    keeps chat replies to a short change summary -- so it requires
+    ``mutating`` and is mutually exclusive with ``capture`` (which copies
+    chat prose into nodes; a document mode's prose never IS chat prose).
+
     ``meta_inspection`` (ADR 045) grants the mode the meta surface:
     Activity Mode objects -- normally hidden infra -- become visible to
     the read tools and writable through ``create_node``/``update_node``,
@@ -139,6 +146,7 @@ class ModeSpec:
     mutating: bool = False
     meta_inspection: bool = False
     capture: CapturePolicy | None = None
+    document_type: str = ""
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
     hide_intent_card: bool = False
     hide_node_cards: bool = False
@@ -161,6 +169,18 @@ class ModeSpec:
                 f"mode {self.name!r} has unknown activity_detail "
                 f"{self.activity_detail!r}; allowed: "
                 f"{', '.join(ACTIVITY_DETAIL_LEVELS)}"
+            )
+        if self.document_type and not self.mutating:
+            raise ValueError(
+                f"mode {self.name!r} sets document_type "
+                f"{self.document_type!r} but is not mutating -- maintaining "
+                "a document node needs the mutation tools"
+            )
+        if self.document_type and self.capture is not None:
+            raise ValueError(
+                f"mode {self.name!r} sets both document_type and capture; "
+                "pick one -- a document mode writes its document via the "
+                "node tools, capture copies chat replies into nodes"
             )
         if self.model and self.model not in MODEL_CHOICES:
             raise ValueError(

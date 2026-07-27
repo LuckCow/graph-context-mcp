@@ -9,6 +9,7 @@ When live-server access exists, add a third subclass gated behind
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -106,6 +107,37 @@ class GraphRepositoryContract:
         assert (await repo.fetch_body(node.id)).strip() == "Born in the Undercroft."
         await repo.update_node(node.id, body="Leads the survivors now.")
         assert (await repo.fetch_body(node.id)).strip() == "Leads the survivors now."
+
+    async def test_fenced_jsonl_body_round_trips_intact(self, repo):
+        """ADR 049's load-bearing storage assumption: the revision
+        historian keeps its log as JSON lines inside one fence in a
+        sidecar body. The store may normalize prose, but fence CONTENTS
+        must survive create -> fetch_body byte-usable (parsed back as
+        JSON) -- the ``ANYTYPE_E2E=1`` run of this test is the live
+        spike (docs/spikes/node-history-body.md)."""
+        lines = [
+            json.dumps(
+                {"seq": i, "at": f"T{i}", "kind": "delta",
+                 "ops": [["equal", 0, 3]],
+                 "new_blocks": {"abc123": 'text with "quotes" & *marks*'}},
+                sort_keys=True, separators=(",", ":"),
+            )
+            for i in range(3)
+        ]
+        body = "A header sentence.\n\n```\n" + "\n".join(lines) + "\n```"
+        node = await repo.create_node(
+            NodeDraft("Character", name="Log", summary="Sidecar-shaped.",
+                      body=body),
+        )
+        fetched = await repo.fetch_body(node.id)
+        in_fence, parsed = False, []
+        for line in fetched.splitlines():
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+            elif in_fence and line.strip():
+                parsed.append(json.loads(line))
+        assert [json.dumps(p, sort_keys=True, separators=(",", ":"))
+                for p in parsed] == lines
 
     async def test_update_without_body_leaves_body_alone(self, repo):
         node = await repo.create_node(

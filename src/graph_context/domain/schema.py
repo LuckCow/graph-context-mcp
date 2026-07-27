@@ -55,6 +55,10 @@ class Role(StrEnum):
     # transition plus a built-in action the rule engine runs. Humans
     # author them in Anytype; the engine writes status back.
     RULE = "AutomationRule"
+    # Revision-history sidecars (WP41, ADR 049): one per tracked node,
+    # body = the append-only keyframe+delta log. Bot-maintained
+    # bookkeeping; humans read them in Anytype but should not edit.
+    NODE_HISTORY = "NodeHistory"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
@@ -62,7 +66,7 @@ class Role(StrEnum):
 INFRA_ROLES: frozenset[Role] = frozenset(
     {
         Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE,
-        Role.SCHEDULED, Role.SPACE_CONTEXT, Role.RULE,
+        Role.SCHEDULED, Role.SPACE_CONTEXT, Role.RULE, Role.NODE_HISTORY,
     }
 )
 
@@ -89,6 +93,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_scheduled_event": Role.SCHEDULED,
     "gc_space_context": Role.SPACE_CONTEXT,
     "gc_rule": Role.RULE,
+    "gc_node_history": Role.NODE_HISTORY,
     # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
     # the gc_ keys above; backends without a key registry (the in-memory
     # repository, eval worlds) see the display name as the type, and these
@@ -98,6 +103,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "scheduled event": Role.SCHEDULED,
     "space context": Role.SPACE_CONTEXT,
     "automation rule": Role.RULE,
+    "node history": Role.NODE_HISTORY,
 }
 
 

@@ -96,6 +96,48 @@ class TestParseSeedModes:
         assert seed.spec.goal == "g"
 
 
+class TestDocumentTypeKey:
+    """ADR 048: a document mode maintains its manuscript as nodes."""
+
+    def test_document_type_parses_stripped(self) -> None:
+        (seed,) = parse_seed_modes(
+            '[modes.prose]\ngoal = "g"\nmutating = true\n'
+            'document_type = " Chapter "\n',
+            "test",
+        )
+        assert seed.spec.document_type == "Chapter"
+
+    def test_document_type_requires_mutating(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            parse_seed_modes(
+                '[modes.prose]\ngoal = "g"\ndocument_type = "Chapter"\n',
+                "test",
+            )
+        assert "[modes.prose]" in str(err.value)
+        assert "mutating" in str(err.value)
+
+    def test_document_type_and_capture_conflict(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            parse_seed_modes(
+                '[modes.prose]\ngoal = "g"\nmutating = true\n'
+                'document_type = "Chapter"\n'
+                '[modes.prose.capture]\nartifact_type = "gc_prose"\n',
+                "test",
+            )
+        assert "document_type and capture" in str(err.value)
+
+    def test_document_type_rides_seed_payloads(self) -> None:
+        seeds = parse_seed_modes(
+            '[modes.prose]\ngoal = "g"\nmutating = true\n'
+            'document_type = "Chapter"\n'
+            '[modes.plain]\ngoal = "g"\n',
+            "test",
+        )
+        prose, plain = seed_payloads(seeds)
+        assert prose["document_type"] == "Chapter"
+        assert "document_type" not in plain
+
+
 class TestDriverOptionKeys:
     """ADR 037: thinking / max_tokens / web-search limits parse with the
     same "empty = unset" normalization the model choice uses."""
