@@ -64,6 +64,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "automation",
     "send_file",
     "schema",
+    "edit_document",
 )
 
 
@@ -336,6 +337,32 @@ updated view in the response shows the result). {_CREATE_MISSING_DOC}
 remove_links: list of {{"source", "edge_type", "target"}} exactly as shown
 by get_node.
 """
+
+_EDIT_DOCUMENT_DOC = """\
+Edit ONE section of a document node's long-form text without re-sending
+the whole body. Sections are paragraph blocks addressed by a stable hash
+anchor, shown as [§hash] in section listings and the context block.
+
+action='sections' (default): list the document's current anchors -- one
+line per block with its review state (status · intent, when history is
+on) and first line. Start here when you don't have fresh anchors; every
+edit response re-lists them (an edited block's anchor CHANGES with its
+text).
+
+action='replace': swap the anchored section for `text` (full markdown,
+one or more paragraphs). action='insert_after': add `text` as new
+section(s) after the anchor; anchor='top' inserts at the very beginning.
+action='delete': remove the anchored section. Anchors accept a unique
+prefix of the hash.
+
+Prefer this over update_node for targeted revisions -- untouched
+sections survive verbatim by construction (update_node's `description`
+stays right for full rewrites). Sections the user LOCKED
+(intent=locked) cannot be changed or deleted; if a change is needed
+there, ask the user to unlock the section. The summary staleness rule
+applies: pass `summary` when the change is meaningful.
+"""
+
 
 def _properties_doc(examples: str) -> str:
     """The create_node ``properties`` parameter doc (ADR 042): shared
@@ -808,6 +835,7 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
     "schema": _SCHEMA_DOC,
+    "edit_document": _EDIT_DOCUMENT_DOC,
 }
 
 # Starter activity modes live in mode_seeds/*.toml since ADR 035 -- the
@@ -927,6 +955,7 @@ EXAMPLES:
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
     "schema": _SCHEMA_DOC,
+    "edit_document": _EDIT_DOCUMENT_DOC,
 }
 
 WORKSPACE = DomainProfile(
@@ -1042,6 +1071,7 @@ EXAMPLES:
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
     "schema": _SCHEMA_DOC,
+    "edit_document": _EDIT_DOCUMENT_DOC,
 }
 
 ASSISTANT = DomainProfile(

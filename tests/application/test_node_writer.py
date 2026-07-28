@@ -2,10 +2,12 @@
 
 import pytest
 
+from graph_context.application.node_writer import NodeWriter
 from graph_context.domain.models import LinkSpec, NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.errors import (
     InfraWriteDenied,
+    LockedSectionsChanged,
     NodeNotFound,
     SchemaViolation,
 )
@@ -223,3 +225,50 @@ class TestInfraWriteGuard:
                 NodeDraft("Scheduled Event", name="Ping", summary="s."),
                 admitted_infra_roles=frozenset({Role.MODE}),
             )
+
+
+class TestSectionGuard:
+    class _Guard:
+        """Recording fake; raises when armed with missing sections."""
+
+        def __init__(
+            self, missing: tuple[tuple[str, str], ...] = ()
+        ) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self._missing = missing
+
+        def check_body_update(self, node_id: str, new_body: str) -> None:
+            self.calls.append((node_id, new_body))
+            if self._missing:
+                raise LockedSectionsChanged("Chapter One", self._missing)
+
+    async def test_guard_runs_only_on_body_updates(
+        self, repository, session, world: World
+    ):
+        guard = self._Guard()
+        writer = NodeWriter(repository, session, section_guard=guard)
+        await writer.update_node(world.mira.id, summary="Fresh summary.")
+        assert guard.calls == []
+        await writer.update_node(world.mira.id, description="New body.")
+        assert guard.calls == [(world.mira.id, "New body.")]
+
+    async def test_a_locked_violation_blocks_the_repository_write(
+        self, repository, session, world: World
+    ):
+        guard = self._Guard(missing=(("abc123", "the locked text"),))
+        writer = NodeWriter(repository, session, section_guard=guard)
+        with pytest.raises(LockedSectionsChanged):
+            await writer.update_node(world.mira.id, description="Clobbered.")
+        assert await repository.fetch_body(world.mira.id) != "Clobbered."
+
+    async def test_create_never_guards(self, repository, session):
+        guard = self._Guard(missing=(("abc123", "the locked text"),))
+        writer = NodeWriter(repository, session, section_guard=guard)
+        await writer.create_node(NodeDraft(
+            "Character", name="Orla", summary="A smuggler.",
+            body="A first body.",
+        ))
+        assert guard.calls == []
+
+    async def test_no_guard_means_no_enforcement(self, writer, world: World):
+        await writer.update_node(world.mira.id, description="Free rewrite.")

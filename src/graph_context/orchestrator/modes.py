@@ -71,9 +71,15 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     # not let a read-only mode change anything unilaterally -- the human
     # authorizes every apply. Same posture as schedule/automation.
     "schema": tools.schema_tool,
+    # WP42 (ADR 049): hash-anchored single-section body edits. Writes
+    # through the same NodeWriter as update_node, so it is a mutation
+    # tool -- read-only modes never bind it.
+    "edit_document": tools.edit_document_tool,
 }
 
-MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})
+MUTATION_TOOLS: frozenset[str] = frozenset(
+    {"create_node", "update_node", "edit_document"}
+)
 
 _READ_SURFACE: dict[str, ToolFn] = {
     name: fn for name, fn in _FULL_SURFACE.items() if name not in MUTATION_TOOLS
@@ -93,9 +99,10 @@ Document discipline: this mode maintains long-form documents as {type} \
 nodes -- the document lives in the node, never in chat.
 - First draft: create ONE {type} node and write the full text into its \
 `description`.
-- Revisions: update THAT SAME node's `description` with the complete \
-revised text (an update replaces the whole body, so always send the \
-full document).
+- Revisions: for targeted changes prefer `edit_document` on THAT SAME \
+node (action='sections' shows the anchors; untouched sections survive \
+verbatim). For a full restructure, update the node's `description` \
+with the complete revised text (it replaces the whole body).
 - Keep the document's `references` property (when the type has one) \
 linked to the entities -- characters, places, events -- that appear in \
 the text.

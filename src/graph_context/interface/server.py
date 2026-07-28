@@ -283,6 +283,22 @@ async def send_file(
     return await tools.send_file_tool(_services(ctx), name=name, content=content)
 
 
+@mcp.tool(description=_PROFILE.tool_docs["edit_document"])
+async def edit_document(
+    ctx: Context[Any, Any, Any],
+    node_id: str,
+    action: str = "sections",
+    anchor: str = "",
+    text: str = "",
+    summary: str | None = None,
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.edit_document_tool(
+        _services(ctx), node_id=node_id, action=action, anchor=anchor,
+        text=text, summary=summary,
+    )
+
+
 @mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
     ctx: Context[Any, Any, Any],

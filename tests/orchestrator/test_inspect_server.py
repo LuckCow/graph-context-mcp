@@ -306,10 +306,274 @@ class TestEvalRootSetting:
 
 
 class TestPackagedHtml:
-    def test_both_pages_ship_next_to_the_module(self) -> None:
+    def test_all_pages_ship_next_to_the_module(self) -> None:
         # A missing file would only surface at first launch without this pin.
         from graph_context.orchestrator import inspect_server
 
         parent = Path(inspect_server.__file__).parent
         assert (parent / "turn_log_viewer.html").exists()
         assert (parent / "inspect.html").exists()
+        assert (parent / "prose.html").exists()
+
+
+# -- prose routes (WP43) ------------------------------------------------
+
+PROSE_P1 = "The city fell quiet before the siege began, every gate barred."
+PROSE_P2 = "Mira counted the engines twice; one was missing from the yard."
+PROSE_TOKEN = "sekrit-token"
+
+
+def _prose_hash(text: str) -> str:
+    from graph_context.domain import revisions
+
+    return revisions.block_hash(revisions.normalize_block(text))
+
+
+@pytest.fixture
+def prose_world():
+    """A background loop hosting one registered space with a real
+    historian -- the bridge's owning-loop side of the thread contract."""
+    import asyncio
+
+    from graph_context.application.node_historian import NodeHistorian
+    from graph_context.domain import revisions
+    from graph_context.domain.models import NodeDraft
+    from graph_context.infrastructure.memory.fake_repository import (
+        InMemoryGraphRepository,
+    )
+    from graph_context.orchestrator.prose_bridge import (
+        ProseBridge,
+        register_space,
+    )
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    bridge = ProseBridge()
+
+    async def build() -> str:
+        repo = InMemoryGraphRepository()
+        await repo.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await repo.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{PROSE_P1}\n\n{PROSE_P2}",
+        ))
+        historian = NodeHistorian(repo, now=lambda: "T1")
+        await historian.record_bot_revision(node.id, author_detail="m")
+        register_space(
+            bridge, space_id="sp1", label="Ashfall",
+            historian=historian, repository=repo,
+            route_lock=asyncio.Lock(),
+        )
+        return node.id
+
+    node_id = asyncio.run_coroutine_threadsafe(build(), loop).result(10)
+    try:
+        yield bridge, node_id
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def prose_server(tmp_path, prose_world):
+    """A live server with the prose bridge attached and writes enabled."""
+    bridge, node_id = prose_world
+    log = tmp_path / "turns.jsonl"
+    log.write_text("")
+    server = create_server(
+        "127.0.0.1", 0, log, None, prose=bridge, prose_token=PROSE_TOKEN,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield base, node_id
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _post_mark(
+    base: str,
+    payload: dict,
+    *,
+    token: str | None = PROSE_TOKEN,
+    origin: str | None = None,
+    fetch_site: str | None = None,
+) -> tuple[int, dict]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    if origin is not None:
+        headers["Origin"] = origin
+    if fetch_site is not None:
+        headers["Sec-Fetch-Site"] = fetch_site
+    request = urllib.request.Request(
+        f"{base}/api/prose/mark", data=json.dumps(payload).encode(),
+        method="POST", headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, {}
+
+
+def _mark_payload(node_id: str, **overrides) -> dict:
+    payload = {
+        "space": "sp1", "node": node_id, "hash": _prose_hash(PROSE_P1),
+        "kind": "intent", "value": "locked",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestProseReads:
+    def test_the_page_serves_with_a_viewport_meta(self, prose_server) -> None:
+        base, _ = prose_server
+        status, body = _get(f"{base}/prose")
+        assert status == 200
+        assert b'name="viewport"' in body  # phone-readable, WP43
+
+    def test_spaces_lists_tracked_nodes_and_write_state(
+        self, prose_server
+    ) -> None:
+        base, node_id = prose_server
+        payload = _get_json(f"{base}/api/prose/spaces")
+        assert payload["writes_enabled"] is True
+        (space,) = payload["spaces"]
+        assert (space["space_id"], space["label"]) == ("sp1", "Ashfall")
+        (row,) = space["nodes"]
+        assert row["id"] == node_id and row["name"] == "Chapter One"
+
+    def test_node_view_and_diff_round_trip(self, prose_server) -> None:
+        base, node_id = prose_server
+        view = _get_json(f"{base}/api/prose/node?space=sp1&node={node_id}")
+        assert [b["hash"] for b in view["blocks"]] == [
+            _prose_hash(PROSE_P1), _prose_hash(PROSE_P2),
+        ]
+        diff = _get_json(
+            f"{base}/api/prose/diff?space=sp1&node={node_id}&seq=1"
+        )
+        assert len(diff["pairs"]) == 2  # the opening keyframe: two adds
+
+    def test_unknown_space_node_and_params_are_404_400(
+        self, prose_server
+    ) -> None:
+        base, node_id = prose_server
+        with pytest.raises(urllib.error.HTTPError) as e404:
+            _get(f"{base}/api/prose/node?space=nope&node={node_id}")
+        assert e404.value.code == 404
+        with pytest.raises(urllib.error.HTTPError) as e404b:
+            _get(f"{base}/api/prose/node?space=sp1&node=ghost")
+        assert e404b.value.code == 404
+        with pytest.raises(urllib.error.HTTPError) as e400:
+            _get(f"{base}/api/prose/node?space=sp1")
+        assert e400.value.code == 400
+
+    def test_no_bridge_renders_the_empty_state(self, server) -> None:
+        base, _ = server  # the plain fixture: create_server without prose
+        payload = _get_json(f"{base}/api/prose/spaces")
+        assert payload == {"spaces": [], "writes_enabled": False}
+
+
+class TestProseWrites:
+    def test_a_mark_lands_and_echoes_the_folded_state(
+        self, prose_server
+    ) -> None:
+        base, node_id = prose_server
+        status, result = _post_mark(base, _mark_payload(node_id))
+        assert status == 200
+        assert result["intent"] == "locked"
+
+    def test_missing_or_wrong_token_is_401(self, prose_server) -> None:
+        base, node_id = prose_server
+        assert _post_mark(base, _mark_payload(node_id), token=None)[0] == 401
+        assert _post_mark(base, _mark_payload(node_id), token="wrong")[0] == 401
+
+    def test_cross_origin_is_403_even_with_the_right_token(
+        self, prose_server
+    ) -> None:
+        base, node_id = prose_server
+        status, _ = _post_mark(
+            base, _mark_payload(node_id), origin="http://evil.example",
+        )
+        assert status == 403
+        status, _ = _post_mark(
+            base, _mark_payload(node_id), fetch_site="cross-site",
+        )
+        assert status == 403
+
+    def test_same_origin_headers_pass(self, prose_server) -> None:
+        base, node_id = prose_server
+        status, _ = _post_mark(
+            base, _mark_payload(node_id, value="needs_change"),
+            origin=base, fetch_site="same-origin",
+        )
+        assert status == 200
+
+    def test_a_stale_hash_is_409(self, prose_server) -> None:
+        base, node_id = prose_server
+        status, _ = _post_mark(
+            base, _mark_payload(node_id, hash="feedbeefcafe0123"),
+        )
+        assert status == 409
+
+    def test_bad_values_and_bodies_are_400(self, prose_server) -> None:
+        base, node_id = prose_server
+        assert _post_mark(
+            base, _mark_payload(node_id, value="golden"),
+        )[0] == 400
+        assert _post_mark(base, {"space": "sp1"})[0] == 400
+
+    def test_writes_disabled_without_a_token_is_403(
+        self, tmp_path, prose_world
+    ) -> None:
+        bridge, node_id = prose_world
+        log = tmp_path / "t.jsonl"
+        log.write_text("")
+        server = create_server(
+            "127.0.0.1", 0, log, None, prose=bridge, prose_token="",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            status, _ = _post_mark(base, _mark_payload(node_id), token="x")
+            assert status == 403
+            payload = _get_json(f"{base}/api/prose/spaces")
+            assert payload["writes_enabled"] is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_unknown_post_routes_stay_404(self, prose_server) -> None:
+        base, _ = prose_server
+        request = urllib.request.Request(
+            f"{base}/turns.jsonl", data=b"{}", method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(request, timeout=5)
+        assert err.value.code == 404
+
+
+class TestProseTokenSetting:
+    def test_default_is_read_only(self, monkeypatch) -> None:
+        from graph_context.orchestrator.inspect_server import prose_token_setting
+
+        monkeypatch.delenv("GC_PROSE_TOKEN", raising=False)
+        assert prose_token_setting() == ""
+
+    def test_off_values_disable_and_tokens_pass_through(
+        self, monkeypatch
+    ) -> None:
+        from graph_context.orchestrator.inspect_server import prose_token_setting
+
+        monkeypatch.setenv("GC_PROSE_TOKEN", "off")
+        assert prose_token_setting() == ""
+        monkeypatch.setenv("GC_PROSE_TOKEN", "  hunter2  ")
+        assert prose_token_setting() == "hunter2"

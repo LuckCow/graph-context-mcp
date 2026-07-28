@@ -127,3 +127,6 @@ the same log, enforces locked sections as one rule in `NodeWriter`, and
 adds a block-anchored `edit_document` tool sharing this module's anchor
 vocabulary. Phase 4 (WP43) renders blame/status on an inspect-server
 page. The bare MCP server has no historian (orchestrator feature, v1).
+
+*2026-07-28: both phases shipped — decisions and accepted failure modes
+in [ADR 050](050-section-review-and-prose-page.md).*

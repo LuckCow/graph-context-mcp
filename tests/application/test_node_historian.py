@@ -10,6 +10,8 @@ edits and ignores everything else.
 
 from __future__ import annotations
 
+import pytest
+
 from graph_context.application.node_historian import (
     HISTORY_TYPE,
     NodeHistorian,
@@ -17,6 +19,11 @@ from graph_context.application.node_historian import (
 from graph_context.domain import revisions
 from graph_context.domain.models import Node, NodeDraft
 from graph_context.domain.schema import Role
+from graph_context.errors import (
+    GraphContextError,
+    LockedSectionsChanged,
+    StaleSectionMark,
+)
 from graph_context.infrastructure.memory.fake_repository import (
     InMemoryGraphRepository,
 )
@@ -216,3 +223,112 @@ class TestRebuild:
         (record,) = fresh.history(chapter.id)
         assert record.kind == revisions.KIND_KEYFRAME
         assert record.author_kind == revisions.AUTHOR_HUMAN
+
+
+def _h(text: str) -> str:
+    return revisions.block_hash(revisions.normalize_block(text))
+
+
+async def _tracked_chapter() -> tuple[World, Node]:
+    world = World()
+    await world.seed_space_context()
+    chapter = await world.chapter(OPENING, MIDDLE)
+    await world.historian.record_bot_revision(chapter.id, author_detail="m")
+    return world, chapter
+
+
+class TestSectionMarks:
+    async def test_a_mark_lands_in_the_sidecar_and_survives_rebuild(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_mark(
+            chapter.id, kind="status", block_hash=_h(OPENING),
+            value="approved", by="user",
+        )
+        assert state.status == "approved"
+        fresh = NodeHistorian(world.repo, now=lambda: "T9")
+        await fresh.rebuild()
+        assert fresh.section_states(chapter.id)[_h(OPENING)].status == "approved"
+
+    async def test_re_marking_the_same_value_writes_nothing(self) -> None:
+        world, chapter = await _tracked_chapter()
+        await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user",
+        )
+        (sidecar,) = world.sidecars()
+        before = await world.repo.fetch_body(sidecar.id)
+        again = await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user",
+        )
+        assert again.intent == "locked"
+        assert await world.repo.fetch_body(sidecar.id) == before
+
+    async def test_a_stale_hash_is_rejected_with_reload(self) -> None:
+        world, chapter = await _tracked_chapter()
+        with pytest.raises(StaleSectionMark, match="reload"):
+            await world.historian.record_mark(
+                chapter.id, kind="status", block_hash=_h(REVISED),
+                value="approved", by="user",
+            )
+
+    async def test_bad_kinds_and_values_are_prompt_errors(self) -> None:
+        world, chapter = await _tracked_chapter()
+        with pytest.raises(GraphContextError, match="allowed"):
+            await world.historian.record_mark(
+                chapter.id, kind="mood", block_hash=_h(OPENING),
+                value="approved", by="user",
+            )
+        with pytest.raises(GraphContextError, match="allowed"):
+            await world.historian.record_mark(
+                chapter.id, kind="status", block_hash=_h(OPENING),
+                value="golden", by="user",
+            )
+
+    async def test_short_separator_blocks_cannot_carry_marks(self) -> None:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING, "* * *", MIDDLE)
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        with pytest.raises(GraphContextError, match="too short"):
+            await world.historian.record_mark(
+                chapter.id, kind="intent", block_hash=_h("* * *"),
+                value="locked", by="user",
+            )
+
+    async def test_a_never_recorded_node_is_a_prompt_error(self) -> None:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING)
+        with pytest.raises(GraphContextError, match="no revision history"):
+            await world.historian.record_mark(
+                chapter.id, kind="status", block_hash=_h(OPENING),
+                value="approved", by="user",
+            )
+
+
+class TestSectionGuard:
+    async def test_dropping_a_locked_section_raises_with_excerpt(self) -> None:
+        world, chapter = await _tracked_chapter()
+        await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user",
+        )
+        with pytest.raises(LockedSectionsChanged) as exc:
+            world.historian.check_body_update(chapter.id, MIDDLE)
+        assert "city fell quiet" in str(exc.value)
+        assert "unlock" in str(exc.value)
+
+    async def test_a_moved_locked_section_passes(self) -> None:
+        world, chapter = await _tracked_chapter()
+        await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user",
+        )
+        world.historian.check_body_update(
+            chapter.id, "\n\n".join([MIDDLE, REVISED, OPENING])
+        )
+
+    async def test_untracked_nodes_pass_freely(self) -> None:
+        world = World()
+        world.historian.check_body_update("no-such-node", "anything")

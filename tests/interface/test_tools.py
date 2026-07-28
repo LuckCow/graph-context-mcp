@@ -1401,3 +1401,114 @@ class TestMetaInspection:
             description="Track recipes and plan meals.",
         )
         assert out.startswith("updated:")
+
+
+class TestEditDocumentTool:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+    P3 = "Rain came at dusk and the watch fires guttered along the wall."
+
+    @staticmethod
+    def _h(text: str) -> str:
+        from graph_context.domain import revisions
+
+        return revisions.block_hash(revisions.normalize_block(text))
+
+    async def _chapter(self, services: tools.Services):
+        return await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+
+    async def test_sections_lists_hash_anchors(self, services) -> None:
+        await self._chapter(services)
+        out = await tools.edit_document_tool(services, node_id="Chapter One")
+        assert f"[§{self._h(self.P1)}]" in out
+        assert "sections of Chapter One (2):" in out
+        assert self.P2.split()[0] in out  # first-line excerpts
+
+    async def test_replace_reports_the_new_anchor_listing(
+        self, services
+    ) -> None:
+        node = await self._chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="replace",
+            anchor=self._h(self.P2), text=self.P3,
+        )
+        assert out.startswith("edited Chapter One (replace):")
+        assert f"[§{self._h(self.P3)}]" in out
+        assert f"[§{self._h(self.P2)}]" not in out
+        assert "summary flagged stale" in out
+
+    async def test_unknown_action_and_missing_text_are_prompts(
+        self, services
+    ) -> None:
+        node = await self._chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="append", anchor="top",
+        )
+        assert out.startswith("ERROR:") and "insert_after" in out
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="replace",
+            anchor=self._h(self.P1),
+        )
+        assert out.startswith("ERROR:") and "text" in out
+
+    async def test_anchor_miss_echoes_the_real_anchors(self, services) -> None:
+        node = await self._chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="delete", anchor="feedbeefcafe",
+        )
+        assert out.startswith("ERROR:")
+        assert self._h(self.P1) in out
+
+    async def test_listing_shows_review_state_when_history_is_live(
+        self, services
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await self._chapter(services)
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(node.id, author_detail="m")
+        await historian.record_mark(
+            node.id, kind="intent", block_hash=self._h(self.P1),
+            value="locked", by="user",
+        )
+        services.historian = historian
+        out = await tools.edit_document_tool(services, node_id=node.id)
+        assert f"[§{self._h(self.P1)} · raw_ai · locked]" in out
+        assert f"[§{self._h(self.P2)} · raw_ai · flexible]" in out
+
+    async def test_a_locked_violation_surfaces_as_a_prompt(
+        self, services
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.application.node_writer import NodeWriter
+        from graph_context.domain import revisions
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await self._chapter(services)
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(node.id, author_detail="m")
+        await historian.record_mark(
+            node.id, kind="intent", block_hash=self._h(self.P1),
+            value="locked", by="user",
+        )
+        services.historian = historian
+        services.writer = NodeWriter(
+            services.repository, services.session, section_guard=historian,
+        )
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="replace",
+            anchor=self._h(self.P1), text=self.P3,
+        )
+        assert out.startswith("ERROR:")
+        assert "LOCKED" in out and "unlock" in out

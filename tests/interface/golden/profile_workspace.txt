@@ -431,3 +431,27 @@ do not survive a restart; re-propose if lost). Applied changes are real
 Anytype types and properties -- immediately usable by create_node, and
 the user can rename or refine them in Anytype afterwards (never rename
 what a human set).
+
+### edit_document
+Edit ONE section of a document node's long-form text without re-sending
+the whole body. Sections are paragraph blocks addressed by a stable hash
+anchor, shown as [§hash] in section listings and the context block.
+
+action='sections' (default): list the document's current anchors -- one
+line per block with its review state (status · intent, when history is
+on) and first line. Start here when you don't have fresh anchors; every
+edit response re-lists them (an edited block's anchor CHANGES with its
+text).
+
+action='replace': swap the anchored section for `text` (full markdown,
+one or more paragraphs). action='insert_after': add `text` as new
+section(s) after the anchor; anchor='top' inserts at the very beginning.
+action='delete': remove the anchored section. Anchors accept a unique
+prefix of the hash.
+
+Prefer this over update_node for targeted revisions -- untouched
+sections survive verbatim by construction (update_node's `description`
+stays right for full rewrites). Sections the user LOCKED
+(intent=locked) cannot be changed or deleted; if a change is needed
+there, ask the user to unlock the section. The summary staleness rule
+applies: pass `summary` when the change is meaningful.

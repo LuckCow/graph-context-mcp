@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.application.explorer import Explorer
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
+from graph_context.application.node_historian import NodeHistorian
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
 from graph_context.application.querier import Querier
@@ -83,6 +84,13 @@ class Services:
     # session state); empty -- the default everywhere else, including the
     # bare MCP server -- means no infra surface at all.
     visible_infra_roles: frozenset[Role] = frozenset()
+    # WP42 (ADR 049): the space's revision historian. LATE-BOUND: the
+    # orchestrator's bootstrap sets it on the donor bundle after
+    # ``historian.rebuild()``; sessions derive lazily afterwards, so
+    # every derived writer gets it as its locked-section guard. None --
+    # the bare MCP server, tests -- means no history surface and no
+    # locked enforcement (ADR 049's v1 scope).
+    historian: NodeHistorian | None = None
 
 
 def build_services(
@@ -148,7 +156,8 @@ def derive_services(
         repository=base.repository,
         session=session,
         writer=NodeWriter(
-            base.repository, session, base.journal, proposals=proposals
+            base.repository, session, base.journal, proposals=proposals,
+            section_guard=base.historian,
         ),
         reader=NodeReader(base.repository, session),
         explorer=Explorer(base.repository, session),
@@ -162,4 +171,5 @@ def derive_services(
         ranker=base.ranker,
         session_key=session_key,
         proposals=proposals,
+        historian=base.historian,
     )

@@ -356,6 +356,11 @@ async def _assemble_runtime(
     # while the bot was down.
     historian = NodeHistorian(services.repository)
     await historian.rebuild()
+    # WP42: late-bind the historian onto the donor bundle so every
+    # lazily-derived session writer picks it up as its locked-section
+    # guard (sessions derive through services_for AFTER this point; the
+    # bare MCP server never sets it -- no guard there, per ADR 049).
+    services.historian = historian
 
     async def reload_registry() -> modes.ModeRegistry:
         return modes.load_registry(

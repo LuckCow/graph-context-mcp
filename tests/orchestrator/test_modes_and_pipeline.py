@@ -72,6 +72,12 @@ class TestBindings:
         assert bound.isdisjoint(MUTATION_TOOLS)
         assert bound == set(TOOL_NAMES) - MUTATION_TOOLS
 
+    def test_edit_document_is_a_mutation_tool(self) -> None:
+        """WP42: section edits write bodies -- read-only modes never
+        bind it, exactly like create/update_node."""
+        assert "edit_document" in MUTATION_TOOLS
+        assert "edit_document" not in binding_for(AUTHORING)
+
     def test_automation_is_bookkeeping_not_mutation(self) -> None:
         """ADR 040: like schedule -- read-only modes can still take
         'whenever X changes, do Y' requests."""

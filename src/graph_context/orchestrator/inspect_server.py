@@ -17,6 +17,25 @@ live turn diary. Routes:
   GET /api/summary             -> all cases + runs (eval_index.summary)
   GET /api/runs/<id>           -> one run's results.json, normalized
   GET /api/cases/<id>          -> one case's definition + result history
+  GET /prose                   -> prose.html (WP43: the review page)
+  GET /api/prose/spaces        -> registered spaces + their tracked nodes
+  GET /api/prose/node?space&node    -> blocks + blame + review state
+  GET /api/prose/diff?space&node&seq -> one revision's word-level spans
+  POST /api/prose/mark         -> set one block's status/intent (WP42)
+
+The prose routes speak to live space runtimes through a ``ProseBridge``
+(``prose_bridge.py``): the bridge is handed over EMPTY before the bots
+bootstrap and spaces register as they come up, so the server still
+starts first and the page degrades to an empty state everywhere else
+(standalone launches, memory backend, viewer-only runs).
+
+``POST /api/prose/mark`` is this server's FIRST and ONLY non-GET route.
+Read-only-by-construction was a load-bearing safety property, so writes
+are doubly gated: same-origin enforcement (``Sec-Fetch-Site`` when the
+browser sends it, ``Origin``-vs-``Host`` otherwise) refuses drive-by
+requests from other pages, and a shared bearer token (``GC_PROSE_TOKEN``;
+unset = writes disabled, the page is read-only) authenticates the
+human. GETs stay tokenless.
 
 The viewer HTML reaches its stream via a RELATIVE ``events`` URL, which
 is what lets the same file serve both the live log (``/logs`` ->
@@ -40,16 +59,18 @@ devcontainer.
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from graph_context.errors import GraphContextError
+from graph_context.errors import GraphContextError, StaleSectionMark
 from graph_context.orchestrator import eval_index
+from graph_context.orchestrator.prose_bridge import ProseBridge
 from graph_context.orchestrator.turn_log import (
     DEFAULT_TURN_LOG,
     OFF_VALUES,
@@ -62,6 +83,7 @@ HEARTBEAT_TICKS = 20  # send an SSE comment after this many idle polls (~10s)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_EVAL_ROOT = "evals"
+MAX_MARK_BODY_BYTES = 65_536  # a mark payload is tiny; anything big is abuse
 
 
 def viewer_settings() -> tuple[str, int] | None:
@@ -84,6 +106,18 @@ def viewer_settings() -> tuple[str, int] | None:
         ) from None
     host = os.environ.get("GC_LOG_VIEWER_HOST", "").strip() or DEFAULT_HOST
     return host, port
+
+
+def prose_token_setting() -> str:
+    """GC_PROSE_TOKEN resolution -> the shared write token, or ``""``.
+
+    Empty/off means the prose page is read-only (marks return 403) --
+    the operator consciously enables the server's only write surface.
+    Follows the off-value convention of every other knob."""
+    raw = os.environ.get("GC_PROSE_TOKEN", "").strip()
+    if raw.lower() in OFF_VALUES:
+        return ""
+    return raw
 
 
 def eval_root_setting() -> Path | None:
@@ -134,6 +168,8 @@ class Handler(BaseHTTPRequestHandler):
     log_path: Path = Path(DEFAULT_TURN_LOG)
     html_dir: Path = Path(__file__).resolve().parent
     eval_root: Path | None = None
+    prose: ProseBridge | None = None
+    prose_token: str = ""
 
     def do_GET(self) -> None:  # http.server naming
         route = urlparse(self.path).path
@@ -143,6 +179,20 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/logs":
             self._serve_file(self.html_dir / "turn_log_viewer.html",
                              "text/html; charset=utf-8")
+        elif route == "/prose":
+            self._serve_file(self.html_dir / "prose.html",
+                             "text/html; charset=utf-8")
+        elif route == "/api/prose/spaces":
+            self._serve_prose_spaces()
+        elif route == "/api/prose/node":
+            self._serve_prose_call(
+                "node_view", ("node",), lambda q: (q["node"],)
+            )
+        elif route == "/api/prose/diff":
+            self._serve_prose_call(
+                "revision_diff", ("node", "seq"),
+                lambda q: (q["node"], int(q["seq"])),
+            )
         elif route == "/turns.jsonl":
             self._serve_file(self.log_path,
                              "application/x-ndjson; charset=utf-8")
@@ -201,6 +251,146 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_file(log, "application/x-ndjson; charset=utf-8")
         else:
             self.send_error(404, "not found")
+
+    # -- prose routes (WP43) ---------------------------------------------
+
+    def _serve_prose_spaces(self) -> None:
+        """Registered spaces + their tracked-node lists; the page's
+        entry point. Boots-anywhere: no bridge / no spaces / a space
+        whose loop is busy all degrade to renderable JSON, never a 500."""
+        spaces = []
+        if self.prose is not None:
+            for space_id, label in self.prose.spaces():
+                row: dict[str, Any] = {"space_id": space_id, "label": label}
+                try:
+                    row["nodes"] = self.prose.call(space_id, "list_nodes")
+                except (GraphContextError, TimeoutError) as err:
+                    row["nodes"] = []
+                    row["error"] = str(err)
+                spaces.append(row)
+        self._serve_json({
+            "spaces": spaces,
+            "writes_enabled": bool(self.prose_token),
+        })
+
+    def _serve_prose_call(
+        self,
+        name: str,
+        required: tuple[str, ...],
+        args_of: Any,
+    ) -> None:
+        """One bridge read (`node_view`/`revision_diff`) off the query
+        string: ?space=<id> plus ``required`` params -> the callable's
+        JSON. Unknown space/node/seq -> 404; a busy loop -> 504."""
+        query = {
+            key: values[0]
+            for key, values in parse_qs(urlparse(self.path).query).items()
+        }
+        if "space" not in query or any(k not in query for k in required):
+            self.send_error(
+                400, f"missing query params (need space, {', '.join(required)})"
+            )
+            return
+        if self.prose is None:
+            self.send_error(404, "no live spaces")
+            return
+        try:
+            payload = self.prose.call(query["space"], name, *args_of(query))
+        except (KeyError, ValueError):
+            self.send_error(404, "unknown space (or bad seq)")
+            return
+        except GraphContextError as err:
+            self.send_error(404, str(err))
+            return
+        except TimeoutError:
+            self.send_error(504, "space loop busy; retry")
+            return
+        self._serve_json(payload)
+
+    def do_POST(self) -> None:  # http.server naming
+        """The server's ONLY write: set one block's status/intent mark.
+
+        Gate order matters: origin first (drive-by pages get nothing,
+        not even a token prompt), then the token (401 tells the page to
+        prompt; 403 'writes disabled' tells it to stay read-only)."""
+        route = urlparse(self.path).path
+        if route != "/api/prose/mark":
+            self.send_error(404, "not found")
+            return
+        if not self._same_origin():
+            self.send_error(403, "cross-origin writes are refused")
+            return
+        if not self.prose_token:
+            self.send_error(
+                403, "writes disabled: set GC_PROSE_TOKEN to enable marks"
+            )
+            return
+        if not self._bearer_ok():
+            self.send_error(401, "bad or missing bearer token")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        if not 0 < length <= MAX_MARK_BODY_BYTES:
+            self.send_error(400, "bad request body size")
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_error(400, "body must be JSON")
+            return
+        fields = ("space", "node", "hash", "kind", "value")
+        if not isinstance(payload, dict) or any(
+            not isinstance(payload.get(k), str) or not payload[k]
+            for k in fields
+        ):
+            self.send_error(
+                400, f"body needs string fields: {', '.join(fields)}"
+            )
+            return
+        if self.prose is None:
+            self.send_error(404, "no live spaces")
+            return
+        try:
+            result = self.prose.call(
+                payload["space"], "set_mark", payload["node"],
+                payload["hash"], payload["kind"], payload["value"],
+            )
+        except KeyError:
+            self.send_error(404, "unknown space")
+            return
+        except StaleSectionMark as err:
+            self.send_error(409, str(err))
+            return
+        except GraphContextError as err:
+            self.send_error(400, str(err))
+            return
+        except TimeoutError:
+            self.send_error(504, "space loop busy; retry")
+            return
+        self._serve_json(result)
+
+    def _same_origin(self) -> bool:
+        """Refuse cross-site browser requests. ``Sec-Fetch-Site`` is
+        authoritative when present (modern browsers always send it);
+        ``Origin`` vs ``Host`` covers the rest. A bare client (curl,
+        tests) sends neither header and passes -- the TOKEN is the
+        authentication; this check only stops drive-by pages in the
+        operator's own browser."""
+        site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            return False
+        origin = self.headers.get("Origin", "").strip()
+        if origin:
+            host = self.headers.get("Host", "").strip()
+            if urlparse(origin).netloc != host:
+                return False
+        return True
+
+    def _bearer_ok(self) -> bool:
+        supplied = self.headers.get("Authorization", "")
+        return hmac.compare_digest(supplied, f"Bearer {self.prose_token}")
 
     # -- plumbing ------------------------------------------------------------
 
@@ -264,20 +454,32 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_server(
-    host: str, port: int, log: Path, eval_root: Path | None = None
+    host: str,
+    port: int,
+    log: Path,
+    eval_root: Path | None = None,
+    *,
+    prose: ProseBridge | None = None,
+    prose_token: str = "",
 ) -> ThreadingHTTPServer:
     """A ready-to-serve inspection server bound to ``host:port``.
 
     Tails ``log`` on the live routes; ``eval_root`` (usually the repo's
     ``evals/`` directory) feeds the dashboard, None disables the eval
-    pages. Config rides on the Handler CLASS, so a process hosts at most
-    one server -- fine for both entry paths (serve and standalone).
+    pages. ``prose`` is the (initially empty) space registry the chat
+    bot fills as runtimes come up (WP43); None renders the prose page's
+    empty state. ``prose_token`` gates the mark write route -- empty
+    keeps the server read-only. Config rides on the Handler CLASS, so a
+    process hosts at most one server -- fine for both entry paths
+    (serve and standalone).
     """
-    for page in ("inspect.html", "turn_log_viewer.html"):
+    for page in ("inspect.html", "turn_log_viewer.html", "prose.html"):
         if not (Handler.html_dir / page).exists():
             raise GraphContextError(f"viewer HTML missing: {Handler.html_dir / page}")
     Handler.log_path = log
     Handler.eval_root = eval_root
+    Handler.prose = prose
+    Handler.prose_token = prose_token
     return ThreadingHTTPServer((host, port), Handler)
 
 
@@ -299,7 +501,9 @@ def main() -> None:
     args = parser.parse_args()
 
     server = create_server(
-        args.host, args.port, Path(args.log), Path(args.eval_root)
+        args.host, args.port, Path(args.log), Path(args.eval_root),
+        prose_token=prose_token_setting(),  # no bridge standalone: the
+        # prose page renders its empty state; marks 404 on "no spaces"
     )
     print(f"inspection server: http://{args.host}:{args.port}/  "
           f"(live log {Handler.log_path}, evals {Handler.eval_root})")

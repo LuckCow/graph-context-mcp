@@ -287,6 +287,65 @@ class AmbiguousNodeName(GraphContextError):
         )
 
 
+class LockedSectionsChanged(GraphContextError):
+    """A body update dropped or altered LOCKED sections (WP42, ADR 049).
+
+    Raised by the section guard consulted in ``NodeWriter.update_node``
+    when a tracked node's new body no longer contains every block whose
+    intent is ``locked`` (an order-insensitive presence check -- moving
+    a locked block is fine, changing or deleting it is not). The message
+    is a prompt: it shows the missing sections and the ways out.
+    """
+
+    def __init__(
+        self, node_name: str, missing: tuple[tuple[str, str], ...]
+    ) -> None:
+        self.node_name = node_name
+        self.missing = missing
+        listing = "; ".join(
+            f"[§{h}] {excerpt!r}" for h, excerpt in missing
+        )
+        super().__init__(
+            f"this update to {node_name!r} drops {len(missing)} LOCKED "
+            f"section(s): {listing}. Locked sections must survive "
+            "verbatim: reproduce them unchanged in the new body, use "
+            "edit_document to change only other sections, or ask the "
+            "user to unlock them (prose review page)."
+        )
+
+
+class StaleSectionMark(GraphContextError):
+    """A status/intent mark named a hash no longer in the node's current
+    sequence (WP42) -- the marking view is stale. Callers re-fetch and
+    retry; the prose page maps this to HTTP 409."""
+
+
+class SectionAnchorNotFound(GraphContextError):
+    """An ``edit_document`` anchor matched no section (WP42).
+
+    The message echoes the document's current anchor vocabulary (hash +
+    first line) so the model can retry with a real anchor instead of
+    guessing.
+    """
+
+    def __init__(
+        self,
+        anchor: str,
+        sections: tuple[tuple[str, str], ...],
+        reason: str = "no section matches",
+    ) -> None:
+        self.anchor = anchor
+        self.sections = sections
+        listing = "; ".join(
+            f"[§{h}] {first_line!r}" for h, first_line in sections
+        ) or "(document has no sections)"
+        super().__init__(
+            f"{reason} anchor {anchor!r}. Current sections: {listing}. "
+            "Retry with one of these hashes (edit_document "
+            "action='sections' re-lists them)."
+        )
+
+
 class NoDefaultStart(GraphContextError):
     """A query relied on the session default, but nothing is held or recent."""
 

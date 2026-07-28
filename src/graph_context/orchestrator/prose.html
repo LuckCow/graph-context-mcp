@@ -1,0 +1,483 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prose review</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #667085;
+    --line: #e3e7ee; --chip: #eef1f6; --accent: #2f6feb; --err: #c1352b;
+    --err-bg: #fdecea; --code: #f3f4f7; --ok: #12855b; --ok-bg: #e7f5ef;
+    --warn: #8a5b00; --warn-bg: #fdf3e0;
+    --add-bg: #e7f5ef; --del-bg: #fdecea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --ink: #e6e9ee; --muted: #93a0b4;
+      --line: #2c323c; --chip: #262c35; --accent: #5b9bff; --err: #ff8a80;
+      --err-bg: #3a1f1c; --code: #12151a; --ok: #4bd6a0; --ok-bg: #17342a;
+      --warn: #e0b24d; --warn-bg: #363018;
+      --add-bg: #17342a; --del-bg: #3a1f1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.65 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    /* room for the fixed action bar on phones */
+    padding-bottom: calc(150px + env(safe-area-inset-bottom));
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 8px 14px;
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+  }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+  header a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+  .spacer { flex: 1 1 auto; }
+  main { padding: 14px; max-width: 760px; margin: 0 auto; }
+  h2 { font-size: 15px; margin: 18px 2px 8px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 2px; }
+  .crumbs { color: var(--muted); font-size: 12px; margin: 0 2px 12px;
+    overflow-wrap: anywhere; }
+
+  .banner {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; margin: 0 0 12px; font-size: 13px;
+  }
+  .banner.warn { background: var(--warn-bg); color: var(--warn); }
+  .banner.err { background: var(--err-bg); color: var(--err); }
+
+  .row {
+    display: block; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 12px 14px; margin: 0 0 8px;
+    color: inherit;
+  }
+  .row:hover { text-decoration: none; border-color: var(--accent); }
+  .row b { font-weight: 600; }
+  .row .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  .badge {
+    font-size: 11px; padding: 1px 8px; border-radius: 20px; font-weight: 600;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+  }
+  .badge.approved { background: var(--ok-bg); color: var(--ok); }
+  .badge.raw_ai { background: var(--warn-bg); color: var(--warn); }
+  .badge.human { background: var(--chip); color: var(--accent); }
+  .badge.locked { background: var(--err-bg); color: var(--err); }
+  .badge.needs_change { background: var(--warn-bg); color: var(--warn); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 2px;
+    color: var(--muted); font-size: 12px; align-items: center; }
+  .legend i { display: inline-block; width: 12px; height: 12px;
+    border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+
+  .timeline { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
+  .timeline a {
+    font-size: 12px; padding: 3px 9px; border-radius: 16px;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+    border: 1px solid var(--line); min-height: 28px;
+    display: inline-flex; align-items: center;
+  }
+  .timeline a.model { color: var(--accent); }
+  .timeline a.human { color: var(--ok); }
+  .timeline a:hover { text-decoration: none; border-color: var(--accent); }
+
+  .block-card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 4px solid var(--line); border-radius: 9px;
+    padding: 10px 14px; margin: 0 0 10px; cursor: pointer;
+  }
+  .block-card.model { border-left-color: var(--accent); }
+  .block-card.human { border-left-color: var(--ok); }
+  .block-card.selected { outline: 2px solid var(--accent); }
+  .block-card .meta {
+    display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
+    font-size: 11.5px; color: var(--muted); margin-bottom: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .block-card .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .diff-pair {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 14px; margin: 0 0 10px;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .diff-pair .meta { font-size: 11.5px; color: var(--muted);
+    margin-bottom: 6px; font-family: ui-monospace, Menlo, monospace; }
+  ins { background: var(--add-bg); color: var(--ok);
+    text-decoration: none; border-radius: 3px; }
+  del { background: var(--del-bg); color: var(--err); border-radius: 3px; }
+
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    display: none;
+  }
+  #bar.open { display: block; }
+  #bar .inner { max-width: 760px; margin: 0 auto; }
+  #bar .which { font-size: 12px; color: var(--muted); margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, Menlo, monospace; }
+  #bar .which .spacer { flex: 1 1 auto; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+  .btn-row .label { font-size: 11px; color: var(--muted); width: 46px;
+    text-transform: uppercase; letter-spacing: .04em; align-self: center; }
+  button {
+    font: inherit; font-size: 13px; min-height: 44px; padding: 6px 14px;
+    border-radius: 9px; border: 1px solid var(--line);
+    background: var(--chip); color: var(--ink); cursor: pointer;
+    touch-action: manipulation;
+  }
+  button.current { border-color: var(--accent); color: var(--accent);
+    font-weight: 600; }
+  button.close { background: none; border: none; color: var(--muted);
+    min-height: 28px; padding: 2px 8px; }
+
+  #toast {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(160px + env(safe-area-inset-bottom)); z-index: 20;
+    background: var(--ink); color: var(--bg); font-size: 13px;
+    padding: 8px 14px; border-radius: 20px; opacity: 0;
+    transition: opacity .25s; pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: .95; }
+</style>
+
+<header>
+  <h1><a href="#/" id="home">Prose review</a></h1>
+  <a href="./">inspection</a>
+  <a href="logs">turn log</a>
+  <span class="spacer"></span>
+  <span class="note" id="head-note"></span>
+</header>
+
+<main id="main"></main>
+
+<div id="bar"><div class="inner">
+  <div class="which">
+    <span id="bar-hash"></span>
+    <span class="spacer"></span>
+    <button class="close" id="bar-close">close</button>
+  </div>
+  <div class="btn-row" id="bar-status"><span class="label">status</span></div>
+  <div class="btn-row" id="bar-intent"><span class="label">intent</span></div>
+</div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+(function () {
+  const main = document.getElementById("main");
+  const bar = document.getElementById("bar");
+  const STATUS_VALUES = ["raw_ai", "approved", "human"];
+  const INTENT_VALUES = ["flexible", "locked", "needs_change"];
+  const TOKEN_KEY = "gc_prose_token";
+
+  let writesEnabled = false;
+  let knowWrites = false;  // spaces fetched at least once this page-load
+  let selected = null;     // {space, node, hash, status, intent, card}
+
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function link(href, text, cls) {
+    const a = el("a", cls, text);
+    a.href = href;
+    return a;
+  }
+  function fmtTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleString([], { hour12: false });
+  }
+  function shortHash(h) { return h ? h.slice(0, 8) : ""; }
+
+  let toastTimer = null;
+  function toast(message) {
+    const node = document.getElementById("toast");
+    node.textContent = message;
+    node.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => node.classList.remove("show"), 2600);
+  }
+
+  async function fetchJson(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(url + " -> " + res.status);
+    return res.json();
+  }
+
+  async function ensureWriteState() {
+    if (knowWrites) return;
+    const data = await fetchJson("api/prose/spaces");
+    writesEnabled = !!data.writes_enabled;
+    knowWrites = true;
+  }
+
+  // ---- marks (the one write) ----------------------------------------------
+
+  async function postMark(space, node, hash, kind, value, retried) {
+    const token = localStorage.getItem(TOKEN_KEY) || "";
+    const res = await fetch("api/prose/mark", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token,
+      },
+      body: JSON.stringify({ space, node, hash, kind, value }),
+    });
+    if (res.status === 401 && !retried) {
+      const entered = prompt("Write token (GC_PROSE_TOKEN):");
+      if (entered == null) return null;
+      localStorage.setItem(TOKEN_KEY, entered.trim());
+      return postMark(space, node, hash, kind, value, true);
+    }
+    if (res.status === 401) { toast("token rejected"); return null; }
+    if (res.status === 403) { toast("writes are disabled"); return null; }
+    if (res.status === 409) {
+      toast("section changed elsewhere -- reloading");
+      await route();
+      return null;
+    }
+    if (!res.ok) { toast("mark failed: " + res.status); return null; }
+    return res.json();
+  }
+
+  // ---- the action bar ------------------------------------------------------
+
+  function closeBar() {
+    if (selected && selected.card) selected.card.classList.remove("selected");
+    selected = null;
+    bar.classList.remove("open");
+  }
+  document.getElementById("bar-close").addEventListener("click", closeBar);
+
+  function buildBarRow(rowId, values, kind) {
+    const row = document.getElementById(rowId);
+    while (row.children.length > 1) row.removeChild(row.lastChild);
+    for (const value of values) {
+      const button = el("button", null, value.replace("_", " "));
+      const current = kind === "status"
+        ? selected.status === value : selected.intent === value;
+      if (current) button.classList.add("current");
+      button.addEventListener("click", async () => {
+        const result = await postMark(
+          selected.space, selected.node, selected.hash, kind, value);
+        if (!result || !selected) return;
+        selected.status = result.status;
+        selected.intent = result.intent;
+        decorateCard(selected.card, result.status, result.intent);
+        buildBarRow("bar-status", STATUS_VALUES, "status");
+        buildBarRow("bar-intent", INTENT_VALUES, "intent");
+      });
+      row.appendChild(button);
+    }
+  }
+
+  function openBar(entry) {
+    closeBar();
+    selected = entry;
+    entry.card.classList.add("selected");
+    document.getElementById("bar-hash").textContent =
+      "§" + shortHash(entry.hash);
+    buildBarRow("bar-status", STATUS_VALUES, "status");
+    buildBarRow("bar-intent", INTENT_VALUES, "intent");
+    bar.classList.add("open");
+  }
+
+  function decorateCard(card, status, intent) {
+    const meta = card.querySelector(".meta");
+    for (const badge of meta.querySelectorAll(".badge")) badge.remove();
+    if (status !== "raw_ai") {
+      meta.appendChild(el("span", "badge " + status,
+        status.replace("_", " ")));
+    } else {
+      meta.appendChild(el("span", "badge raw_ai", "raw ai"));
+    }
+    if (intent !== "flexible") {
+      meta.appendChild(el("span", "badge " + intent,
+        intent.replace("_", " ")));
+    }
+  }
+
+  // ---- views ---------------------------------------------------------------
+
+  async function renderHome() {
+    closeBar();
+    main.textContent = "";
+    const data = await fetchJson("api/prose/spaces");
+    writesEnabled = !!data.writes_enabled;
+    knowWrites = true;
+    document.getElementById("head-note").textContent =
+      writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
+    if (!data.spaces.length) {
+      main.appendChild(el("p", "note",
+        "No live spaces. This page needs the consolidated server " +
+        "(orchestrator.serve) with at least one bound space whose Space " +
+        "Context lists Tracked types."));
+      return;
+    }
+    for (const space of data.spaces) {
+      main.appendChild(el("h2", null, space.label));
+      if (space.error)
+        main.appendChild(el("div", "banner warn", space.error));
+      if (!space.nodes.length)
+        main.appendChild(el("p", "note",
+          "No tracked nodes yet (Space Context > Tracked types, then a " +
+          "first revision)."));
+      for (const node of space.nodes) {
+        const row = link("#/node/" + encodeURIComponent(space.space_id) +
+          "/" + encodeURIComponent(node.id), "", "row");
+        row.appendChild(el("b", null, node.name));
+        row.appendChild(el("div", "sub", node.revisions + " revision" +
+          (node.revisions === 1 ? "" : "s") +
+          (node.last_at ? " · last " + node.last_author +
+            " · " + fmtTime(node.last_at) : "")));
+        main.appendChild(row);
+      }
+    }
+  }
+
+  async function renderNode(space, node) {
+    closeBar();
+    await ensureWriteState();
+    main.textContent = "";
+    const view = await fetchJson("api/prose/node?space=" +
+      encodeURIComponent(space) + "&node=" + encodeURIComponent(node));
+    const crumbs = el("div", "crumbs");
+    crumbs.appendChild(link("#/", "spaces"));
+    crumbs.appendChild(document.createTextNode(" / " + view.name));
+    main.appendChild(crumbs);
+
+    const legend = el("div", "legend");
+    for (const cls of ["model", "human"]) {
+      const item = el("span");
+      const swatch = el("i");
+      swatch.style.background = cls === "model"
+        ? "var(--accent)" : "var(--ok)";
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(cls + "-written"));
+      legend.appendChild(item);
+    }
+    legend.appendChild(el("span", null, writesEnabled
+      ? "tap a paragraph to set status / intent"
+      : "read-only: set GC_PROSE_TOKEN to enable marks"));
+    main.appendChild(legend);
+
+    if (view.revisions.length) {
+      const strip = el("div", "timeline");
+      for (const rev of view.revisions) {
+        const chip = link("#/node/" + encodeURIComponent(space) + "/" +
+          encodeURIComponent(node) + "/rev/" + rev.seq,
+          "r" + rev.seq + " " + rev.author + " +" + rev.added +
+          " −" + rev.removed, rev.author);
+        chip.title = rev.detail + " · " + fmtTime(rev.at);
+        strip.appendChild(chip);
+      }
+      main.appendChild(strip);
+    }
+
+    for (const block of view.blocks) {
+      const card = el("div", "block-card" +
+        (block.blame ? " " + block.blame.author : ""));
+      const meta = el("div", "meta");
+      meta.appendChild(el("span", null, "§" + shortHash(block.hash)));
+      if (block.blame) {
+        meta.appendChild(el("span", null,
+          block.blame.detail + " · r" + block.blame.seq +
+          " · " + fmtTime(block.blame.at)));
+      } else {
+        meta.appendChild(el("span", null, "not yet recorded"));
+      }
+      card.appendChild(meta);
+      card.appendChild(el("div", "text", block.text));
+      decorateCard(card, block.status, block.intent);
+      if (writesEnabled && block.blame) {
+        card.addEventListener("click", () => openBar({
+          space: space, node: node, hash: block.hash,
+          status: block.status, intent: block.intent, card: card,
+        }));
+      } else {
+        card.style.cursor = "default";
+      }
+      main.appendChild(card);
+    }
+    if (!view.blocks.length)
+      main.appendChild(el("p", "note", "The document body is empty."));
+  }
+
+  async function renderDiff(space, node, seq) {
+    closeBar();
+    main.textContent = "";
+    const diff = await fetchJson("api/prose/diff?space=" +
+      encodeURIComponent(space) + "&node=" + encodeURIComponent(node) +
+      "&seq=" + encodeURIComponent(seq));
+    const crumbs = el("div", "crumbs");
+    crumbs.appendChild(link("#/", "spaces"));
+    crumbs.appendChild(document.createTextNode(" / "));
+    crumbs.appendChild(link("#/node/" + encodeURIComponent(space) + "/" +
+      encodeURIComponent(node), "document"));
+    crumbs.appendChild(document.createTextNode(" / revision " + diff.seq));
+    main.appendChild(crumbs);
+    main.appendChild(el("p", "note", diff.detail + " · " + fmtTime(diff.at) +
+      " · historical text is shown normalized (headings flattened)"));
+    if (!diff.pairs.length)
+      main.appendChild(el("p", "note",
+        "No paragraph changes in this revision (a pure move keeps every " +
+        "paragraph's identity)."));
+    for (const pair of diff.pairs) {
+      const wrap = el("div", "diff-pair");
+      const meta = el("div", "meta");
+      const label = pair.new_hash
+        ? (pair.old_hash
+            ? "§" + shortHash(pair.old_hash) + " → §" +
+              shortHash(pair.new_hash)
+            : "new §" + shortHash(pair.new_hash))
+        : "deleted §" + shortHash(pair.old_hash);
+      meta.appendChild(el("span", null, label));
+      wrap.appendChild(meta);
+      for (const span of pair.spans) {
+        const kind = span[0];
+        const tag = kind === "add" ? "ins" : kind === "del" ? "del" : "span";
+        wrap.appendChild(el(tag, null, span[1]));
+      }
+      main.appendChild(wrap);
+    }
+  }
+
+  // ---- router --------------------------------------------------------------
+
+  async function route() {
+    const hash = location.hash || "#/";
+    try {
+      const diff = hash.match(/^#\/node\/([^/]+)\/([^/]+)\/rev\/(\d+)$/);
+      const node = hash.match(/^#\/node\/([^/]+)\/([^/]+)$/);
+      if (diff) {
+        await renderDiff(decodeURIComponent(diff[1]),
+          decodeURIComponent(diff[2]), diff[3]);
+      } else if (node) {
+        await renderNode(decodeURIComponent(node[1]),
+          decodeURIComponent(node[2]));
+      } else {
+        await renderHome();
+      }
+    } catch (err) {
+      main.textContent = "";
+      main.appendChild(el("div", "banner err",
+        "failed to load: " + err.message));
+      const back = el("p", "note");
+      back.appendChild(link("#/", "back to the space list"));
+      main.appendChild(back);
+    }
+    window.scrollTo(0, 0);
+  }
+  window.addEventListener("hashchange", route);
+  route();
+})();
+</script>

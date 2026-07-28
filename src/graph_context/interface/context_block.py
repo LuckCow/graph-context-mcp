@@ -25,7 +25,7 @@ Rules the block guarantees:
 
 from __future__ import annotations
 
-from graph_context.domain import schema
+from graph_context.domain import revisions, schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Detail, Node, NodeId
 from graph_context.domain.session import WorkingSetEntry
@@ -113,9 +113,10 @@ def _render(
             if entry.detail is Detail.FULL:
                 body = bodies.get(entry.node_id, "")
                 if body:
-                    lines.append(
-                        f"    {body}" if with_bodies else _BODY_OMITTED
-                    )
+                    if with_bodies:
+                        lines.extend(_body_lines(services, entry.node_id, body))
+                    else:
+                        lines.append(_BODY_OMITTED)
                 lines.extend(_edge_lines(graph, node))
             elif with_summary_edges:
                 lines.extend(_edge_lines(graph, node))
@@ -123,6 +124,30 @@ def _render(
         names = ", ".join(graph.node(i).name for i in recent)
         lines.append(f"recent (automatic trail): {names}")
     return "\n".join(lines)
+
+
+def _body_lines(
+    services: Services, node_id: NodeId, body: str
+) -> list[str]:
+    """A FULL entry's body. Tracked nodes (WP42) render per section with
+    the hash anchor `edit_document` speaks -- plus the section's intent
+    when a human set one (locked/needs_change are instructions to the
+    model; the default flexible says nothing). Untracked nodes keep the
+    single-line rendering byte-identical."""
+    historian = services.historian
+    if historian is None or not historian.is_tracked(node_id):
+        return [f"    {body}"]
+    states = historian.section_states(node_id)
+    rendered = []
+    for block_hash, raw in revisions.body_blocks(body):
+        state = states.get(block_hash)
+        badge = (
+            f" · {state.intent}"
+            if state and state.intent != revisions.INTENT_FLEXIBLE
+            else ""
+        )
+        rendered.append(f"    [§{block_hash}{badge}] {raw}")
+    return rendered or [f"    {body}"]
 
 
 def _edge_lines(graph: GraphIndex, node: Node) -> list[str]:

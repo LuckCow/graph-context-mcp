@@ -35,6 +35,11 @@ from datetime import UTC, datetime
 from graph_context.domain import revisions
 from graph_context.domain.models import NodeDraft, NodeId
 from graph_context.domain.schema import INFRA_ROLES, Role
+from graph_context.errors import (
+    GraphContextError,
+    LockedSectionsChanged,
+    StaleSectionMark,
+)
 from graph_context.ports.graph_repository import GraphRepository
 
 logger = logging.getLogger(__name__)
@@ -52,18 +57,23 @@ class _Baseline:
     """One tracked node's in-memory history state."""
 
     sidecar_id: NodeId
-    records: tuple[revisions.RevisionRecord, ...]
+    entries: tuple[revisions.LogEntry, ...]  # revisions + section marks
+    records: tuple[revisions.RevisionRecord, ...]  # the revisions-only view
     hashes: tuple[str, ...]
     seq: int
     known_hashes: frozenset[str]
 
 
 def _state(
-    sidecar_id: NodeId, records: tuple[revisions.RevisionRecord, ...]
+    sidecar_id: NodeId, entries: tuple[revisions.LogEntry, ...]
 ) -> _Baseline:
+    records = tuple(
+        e for e in entries if isinstance(e, revisions.RevisionRecord)
+    )
     usable = [r for r in records if r.kind != revisions.KIND_TRUNCATED]
     return _Baseline(
         sidecar_id=sidecar_id,
+        entries=entries,
         records=records,
         hashes=revisions.current_hashes(records),
         seq=max((r.seq for r in usable), default=0),
@@ -144,7 +154,7 @@ class NodeHistorian:
                     "historian: sidecar %s has %d unreadable log lines",
                     sidecar.id, parsed.skipped,
                 )
-            self._baselines[target] = _state(sidecar.id, parsed.records)
+            self._baselines[target] = _state(sidecar.id, parsed.entries)
         for node_id in list(self._baselines):
             if self._repository.graph.has_node(node_id):
                 await self.record_external_revision(node_id)
@@ -201,10 +211,10 @@ class NodeHistorian:
             author_detail=author_detail,
             known_hashes=baseline.known_hashes if baseline else frozenset(),
         )
-        records = revisions.compact(
-            (*(baseline.records if baseline else ()), record)
+        entries = revisions.compact(
+            (*(baseline.entries if baseline else ()), record)
         )
-        rendered = revisions.render_log(records)
+        rendered = revisions.render_log(entries)
         if baseline is None:
             sidecar = await self._repository.create_node(NodeDraft(
                 type=HISTORY_TYPE,
@@ -217,12 +227,77 @@ class NodeHistorian:
         else:
             sidecar_id = baseline.sidecar_id
             await self._repository.update_node(sidecar_id, body=rendered)
-        self._baselines[node_id] = _state(sidecar_id, records)
+        self._baselines[node_id] = _state(sidecar_id, entries)
         logger.info(
             "historian: recorded %s revision %d of %s",
             author_kind, record.seq, node_id,
         )
         return True
+
+    async def record_mark(
+        self, node_id: NodeId, *, kind: str, block_hash: str,
+        value: str, by: str,
+    ) -> revisions.SectionState:
+        """Append one status/intent mark (WP42) and return the block's
+        folded state. Validates against the CURRENT baseline -- a hash
+        that is no longer live means the page is stale, and the error
+        says to reload rather than guessing lineage."""
+        baseline = self._baselines.get(node_id)
+        if baseline is None:
+            raise GraphContextError(
+                f"no revision history for {node_id!r} yet; marks attach "
+                "to recorded sections only."
+            )
+        if kind not in (revisions.MARK_STATUS, revisions.MARK_INTENT):
+            raise GraphContextError(
+                f"unknown mark kind {kind!r}; allowed: "
+                f"{revisions.MARK_STATUS}, {revisions.MARK_INTENT}."
+            )
+        allowed = (
+            revisions.STATUS_VALUES if kind == revisions.MARK_STATUS
+            else revisions.INTENT_VALUES
+        )
+        if value not in allowed:
+            raise GraphContextError(
+                f"unknown {kind} value {value!r}; allowed: "
+                f"{', '.join(sorted(allowed))}."
+            )
+        if block_hash not in baseline.hashes:
+            raise StaleSectionMark(
+                f"section {block_hash} is not in the current version of "
+                f"{self._name_of(node_id)!r} -- it changed since this view "
+                "loaded; reload and re-apply the mark."
+            )
+        texts = revisions.texts_of(baseline.records)
+        if len(texts.get(block_hash, "")) < revisions.MIN_BLAME_CHARS:
+            raise GraphContextError(
+                "this section is too short to mark (separators share "
+                "hashes and cannot carry review state)."
+            )
+        current = revisions.section_states(baseline.entries).get(
+            block_hash, revisions.SectionState()
+        )
+        already = (
+            current.status if kind == revisions.MARK_STATUS
+            else current.intent
+        )
+        if already == value:
+            return current  # change-only: no log line, no PATCH
+        mark = revisions.SectionMark(
+            kind=kind, hash=block_hash, value=value, at=self._now(), by=by,
+        )
+        entries = revisions.compact((*baseline.entries, mark))
+        await self._repository.update_node(
+            baseline.sidecar_id, body=revisions.render_log(entries)
+        )
+        self._baselines[node_id] = _state(baseline.sidecar_id, entries)
+        logger.info(
+            "historian: marked %s %s=%s on %s", block_hash, kind, value,
+            node_id,
+        )
+        return revisions.section_states(entries).get(
+            block_hash, revisions.SectionState()
+        )
 
     def _name_of(self, node_id: NodeId) -> str:
         graph = self._repository.graph
@@ -241,3 +316,32 @@ class NodeHistorian:
 
     def blame(self, node_id: NodeId) -> dict[str, revisions.BlameEntry]:
         return revisions.blame(self.history(node_id))
+
+    def entries(self, node_id: NodeId) -> tuple[revisions.LogEntry, ...]:
+        baseline = self._baselines.get(node_id)
+        return baseline.entries if baseline else ()
+
+    def section_states(
+        self, node_id: NodeId
+    ) -> dict[str, revisions.SectionState]:
+        baseline = self._baselines.get(node_id)
+        return revisions.section_states(baseline.entries) if baseline else {}
+
+    # -- the section guard (WP42) ------------------------------------------
+
+    def check_body_update(self, node_id: NodeId, new_body: str) -> None:
+        """NodeWriter's injected body-guard: raise if the new body drops
+        a LOCKED section. Sync on purpose (in-memory fold, no awaits in
+        the writer); untracked / never-recorded nodes pass freely."""
+        baseline = self._baselines.get(node_id)
+        if baseline is None:
+            return
+        states = revisions.section_states(baseline.entries)
+        missing = revisions.missing_locked(states, new_body)
+        if not missing:
+            return
+        texts = revisions.texts_of(baseline.records)
+        raise LockedSectionsChanged(
+            self._name_of(node_id),
+            tuple((h, texts.get(h, "")[:60]) for h in missing),
+        )

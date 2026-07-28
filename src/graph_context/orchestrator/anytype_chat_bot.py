@@ -74,7 +74,7 @@ from graph_context.infrastructure.anytype.chat import (
 )
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
-from graph_context.orchestrator import bootstrap
+from graph_context.orchestrator import bootstrap, prose_bridge
 from graph_context.orchestrator.anytype_chat_transport import (
     IMAGE_MEDIA_TYPES,
     MAX_TEXT_BYTES,
@@ -97,6 +97,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import ImageAttachment
 from graph_context.orchestrator.pipeline import ReplyEvent, is_command
+from graph_context.orchestrator.prose_bridge import ProseBridge
 from graph_context.orchestrator.rendering import TURN_FAILED_NOTICE
 from graph_context.orchestrator.spaces import SpaceBinding, served_chat_ids
 from graph_context.orchestrator.turn_activity import ChatActivity
@@ -858,12 +859,16 @@ def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
     return [("rules", rules), ("modes", refresh_modes), ("history", history)]
 
 
-async def run() -> None:
+async def run(prose: ProseBridge | None = None) -> None:
     """Serve every bound space's chats until cancelled.
 
     Loop-composable: no logging setup, teardown in ``finally`` -- the
     consolidated server (``serve``) runs this next to the other
-    transports; ``main()`` wraps it for standalone launches.
+    transports; ``main()`` wraps it for standalone launches. ``prose``
+    (WP43) is the inspection server's space registry: each bootstrapped
+    space registers its historian/repository handles so the prose page
+    can read blame and write marks through the bot loop; None (the
+    standalone bot, viewer off) skips registration entirely.
     """
     chat_clients: dict[str, AnytypeChatClient] = {}  # space id -> client
     transport_clients: list[AnytypeClient] = []
@@ -894,6 +899,23 @@ async def run() -> None:
     runtimes = await bootstrap.build_space_runtimes(list_chats)
     teardown = list(runtimes.teardown)
     teardown.extend(client.aclose for client in transport_clients)
+
+    if prose is not None:
+        # WP43: hand each live space to the prose page. Registration
+        # runs ON this serving loop -- that captured loop is what the
+        # inspection server's thread schedules calls onto.
+        for space_id, route in runtimes.space_routes.items():
+            if route.orchestrator.historian is None:
+                continue
+            binding = runtimes.space_bindings[space_id]
+            prose_bridge.register_space(
+                prose,
+                space_id=space_id,
+                label=binding.project or space_id,
+                historian=route.orchestrator.historian,
+                repository=route.orchestrator.services.repository,
+                route_lock=route.lock,
+            )
 
     cursor_path = _cursor_path()
     handler = AnytypeChatTurnHandler(

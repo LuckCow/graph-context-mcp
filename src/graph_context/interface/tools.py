@@ -45,6 +45,7 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
+from graph_context.application.document_editor import DocumentEditor
 from graph_context.application.node_writer import WriteOutcome
 from graph_context.application.scheduler import Scheduler
 from graph_context.application.schema_proposals import SchemaProposal
@@ -775,6 +776,79 @@ async def update_node_tool(
     view = await services.reader.get_node(node.id)
     return (
         f"updated:\n{presenters.render_node_view(view)}{stale_note}"
+        f"{_render_write_outcome_notes(outcome)}"
+    )
+
+
+_EDIT_DOCUMENT_ACTIONS = ("sections", "replace", "insert_after", "delete")
+
+
+def _render_sections(
+    services: Services,
+    node_id: NodeId,
+    blocks: tuple[tuple[str, str], ...],
+) -> str:
+    """The document's anchor listing: one line per block -- hash, review
+    state when a historian is live (WP42), first line of the text."""
+    graph = services.repository.graph
+    name = graph.node(node_id).name if graph.has_node(node_id) else node_id
+    if not blocks:
+        return f"{name} has no sections (empty body)."
+    states = (
+        services.historian.section_states(node_id)
+        if services.historian is not None else {}
+    )
+    lines = [f"sections of {name} ({len(blocks)}):"]
+    for block_hash, raw in blocks:
+        state = states.get(block_hash)
+        badge = f" · {state.status} · {state.intent}" if state else ""
+        first_line = raw.splitlines()[0][:70]
+        lines.append(f"[§{block_hash}{badge}] {first_line}")
+    return "\n".join(lines)
+
+
+@guarded
+async def edit_document_tool(
+    services: Services,
+    node_id: str,
+    action: str = "sections",
+    anchor: str = "",
+    text: str = "",
+    summary: str | None = None,
+) -> str:
+    if action not in _EDIT_DOCUMENT_ACTIONS:
+        raise GraphContextError(
+            f"unknown action {action!r}; allowed: "
+            f"{', '.join(_EDIT_DOCUMENT_ACTIONS)}."
+        )
+    resolved = await _resolve(services, node_id)
+    editor = DocumentEditor(services.repository, services.writer)
+    if action == "sections":
+        return _render_sections(
+            services, resolved, await editor.sections(resolved)
+        )
+    if action in ("replace", "insert_after") and not text.strip():
+        raise GraphContextError(
+            f"action={action!r} needs `text`: the section's full markdown "
+            "(one or more paragraphs)."
+        )
+    outcome = await editor.edit(
+        resolved, action=action, anchor=anchor, text=text, summary=summary,
+        admitted_infra_roles=services.visible_infra_roles,
+    )
+    await _note_mutation(services)
+    node = outcome.node
+    stale_note = (
+        "\nNOTE: summary flagged stale (no fresh summary in this update); "
+        "supply `summary` to clear it."
+        if node.summary_stale
+        else ""
+    )
+    listing = _render_sections(
+        services, resolved, await editor.sections(resolved)
+    )
+    return (
+        f"edited {node.name} ({action}):\n{listing}{stale_note}"
         f"{_render_write_outcome_notes(outcome)}"
     )
 

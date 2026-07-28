@@ -125,3 +125,48 @@ class TestToolAndBlockAgree:
         block = await build_turn_context(services)
         assert "follow up on the vault door" in block
         assert "Mira (Character" in block
+
+
+class TestTrackedBodies:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    async def test_tracked_full_entries_render_per_section_anchors(
+        self, services, world
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+        from graph_context.domain.models import NodeDraft
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        chapter = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(chapter.id, author_detail="m")
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        await historian.record_mark(
+            chapter.id, kind="intent", block_hash=h1,
+            value="locked", by="user",
+        )
+        services.historian = historian
+        services.session.working_set.hold(chapter.id, Detail.FULL)
+        block = await build_turn_context(services)
+        assert f"[§{h1} · locked] {self.P1}" in block
+        assert f"[§{h2}] {self.P2}" in block  # default intent says nothing
+
+    async def test_untracked_bodies_render_unchanged(
+        self, services, world
+    ) -> None:
+        services.session.working_set.hold(world.mira.id, Detail.FULL)
+        await services.repository.update_node(
+            world.mira.id, body="Leads the survivors through the vaults."
+        )
+        block = await build_turn_context(services)
+        assert "    Leads the survivors through the vaults." in block
+        assert "[§" not in block

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
 from graph_context.application.schema_proposals import SchemaProposal, SchemaProposals
@@ -63,6 +64,17 @@ class WriteOutcome:
     warnings: tuple[str, ...] = ()
 
 
+class SectionGuard(Protocol):
+    """Locked-section enforcement seam (WP42, ADR 049): consulted on
+    tracked-type body updates. Structural on purpose -- the writer never
+    imports the historian; the composition root injects it."""
+
+    def check_body_update(self, node_id: NodeId, new_body: str) -> None:
+        """Raise :class:`~graph_context.errors.LockedSectionsChanged`
+        if ``new_body`` drops a locked section; return otherwise."""
+        ...
+
+
 class NodeWriter:
     """Composite, rule-enforcing writes against the story-world graph."""
 
@@ -72,6 +84,7 @@ class NodeWriter:
         session: SessionState,
         journal: MutationJournal | None = None,
         proposals: SchemaProposals | None = None,
+        section_guard: SectionGuard | None = None,
     ) -> None:
         self._repository = repository
         self._session = session
@@ -82,6 +95,10 @@ class NodeWriter:
         # proposal ledger. None (bare construction, recorders' internal
         # writes) turns type-scope drafting into a warning.
         self._proposals = proposals
+        # WP42: locked-section enforcement, one rule in one place. None
+        # (bare MCP server -- no historian) means no enforcement, per
+        # ADR 049's v1 scope.
+        self._section_guard = section_guard
 
     async def create_node(
         self,
@@ -142,6 +159,8 @@ class NodeWriter:
         declared = dict(declarations or {})
         written = set(fields or {}) | {link.edge_type for link in add_links}
         validate_property_declarations(written, declared)
+        if description is not None and self._section_guard is not None:
+            self._section_guard.check_body_update(node_id, description)
 
         await self._repository.update_node(
             node_id,

@@ -2522,38 +2522,63 @@ then).
 
 ---
 
-## WP42 — Section status, revision intent, locked enforcement — roadmap
+## WP42 — Section status, revision intent, locked enforcement (ADR 050) — **shipped 2026-07-28**
 
-**Status:** not started (design direction fixed in ADR 049). Per-block
-`status` (`raw_ai | approved | human`) and `intent`
-(`locked | flexible | needs_change`) records join the same sidecar log,
-keyed by block hash; a domain fold derives the current maps; statuses
-follow successor blocks across HUMAN edits via the similarity match,
-and any AI edit voids `approved`. Locked enforcement is one rule in one
-place: `NodeWriter` gains an injected body-guard consulted on
-tracked-type body updates; a violation raises a typed
-`LockedSectionsChanged` errors-are-prompts message ("reproduce these
-sections verbatim or ask the user to unlock") — an order-insensitive
-locked-hash-presence check, no diffing. Ships with the block-anchored
-`edit_document` tool (replace/insert-after/delete one section, anchored
-on the same hash vocabulary): cheap iterations without re-emitting the
-whole chapter, untouched blocks unchanged by construction; plain
-`update_node` stays valid. Intent feeds the model via the context
-block's full-detail entries.
+**Status:** complete. Per-block `status` (`raw_ai | approved | human`)
+and `intent` (`locked | flexible | needs_change`) marks are new line
+kinds in the SAME sidecar log (no `seq`; file order is fold order;
+pre-WP42 readers skip them leniently). `revisions.section_states`
+folds the interleaved log into current state keyed to the final
+sequence: lineage through the ONE similarity rule (`closest`, shared
+with blame); a HUMAN edit's successor inherits status AND intent (a
+no-ancestor human block starts `human`; editing is not approving); a
+MODEL edit drops the successor to `raw_ai` — any AI edit voids
+`approved` — while intent follows. Compaction hoists live dropped-era
+marks after the first kept keyframe. Locked enforcement is one rule in
+one place: `NodeWriter` consults an injected `SectionGuard` protocol on
+body updates (`historian.check_body_update` — sync, in-memory fold,
+order-insensitive `missing_locked` presence check, no diffing), raising
+`LockedSectionsChanged` errors-are-prompts; the historian late-binds
+onto the donor `Services` in bootstrap (`services.historian`), so every
+derived session writer is guarded while the bare MCP server stays
+unguarded (no historian, ADR 049 v1 scope); infra writers bypass
+NodeWriter and the guard — locked is a contract with the model, never
+a storage ACL against the human. The `edit_document` mutation tool
+(`sections | replace | insert_after | delete`, hash anchors with
+git-style unique prefixes, `top` prepends) rides
+`application/document_editor.py` → `fetch_body` → `revisions.edit_body`
+→ the session writer, so guard/journal/staleness/infra checks apply
+with zero new enforcement points and untouched blocks keep their hashes
+byte-verbatim; `SectionAnchorNotFound` echoes the real anchors;
+`update_node` full rewrites stay valid (ADR 048 guidance now prefers
+the tool for targeted revisions). Tracked FULL working-set entries
+render per block in the context block as `[§hash · intent]` (default
+intent bare), feeding anchors + constraints into every turn.
 
 ---
 
-## WP43 — Prose review page on the inspect server — roadmap
+## WP43 — Prose review page on the inspect server (ADR 050) — **shipped 2026-07-28**
 
-**Status:** not started. `prose.html` beside `inspect_server.py` (ADR
-025 house style: stdlib server, one self-contained page); the
-composition root injects read/write callables into `create_server`
-(import-linter forbids the inspect server importing infrastructure).
-Per-block blame coloring from the WP41 log, on-demand word-level
-intra-block diffs, and status/intent setting — the server's FIRST
-non-GET surface, which needs an explicit origin-check decision since
-read-only was a load-bearing safety property. Highlight-a-selection-as-
-context deliberately deferred with this phase.
+**Status:** complete. `prose.html` beside `inspect_server.py`, ADR 025
+house style plus a first: mobile-responsive (viewport meta, thumb-reach
+fixed action bar, ≥44 px targets, dark scheme) — the user reads it on a
+phone over Tailscale (network reach is ops, not code). The thread/loop
+seam is `orchestrator/prose_bridge.py`: an initially-EMPTY registry
+handed to `create_server` before the bots bootstrap; each space
+registers (historian + repository + route lock + its serving loop) as
+runtimes come up, and every page read/write crosses via
+`run_coroutine_threadsafe` onto the owning loop (`set_mark` under the
+route lock; 15 s timeout → 504). GET routes `/prose`,
+`/api/prose/spaces|node|diff` serve blocks joined with blame +
+section states, a revision timeline, and word-level intra-block diffs
+computed server-side with difflib (no client diff library). The
+server's FIRST non-GET route, `POST /api/prose/mark`, is doubly gated:
+same-origin enforcement (`Sec-Fetch-Site`/`Origin`-vs-`Host`) plus a
+shared bearer token — `GC_PROSE_TOKEN`, off-values = writes disabled
+(403; the page renders read-only), bad token = 401 (the page prompts
+once, caches in localStorage), stale hash = 409 (toast + reload). GETs
+stay tokenless; standalone inspect launches have no bridge and render
+the empty state. Highlight-a-selection-as-context stays deferred.
 
 ---
 
