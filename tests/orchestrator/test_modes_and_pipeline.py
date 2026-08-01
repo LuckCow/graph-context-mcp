@@ -959,6 +959,26 @@ class TestRevisionRecording:
         assert record.author_kind == revisions.AUTHOR_MODEL
         assert record.author_detail == "scripted · chapters · u1"
 
+    async def test_the_revision_author_prefers_the_display_name(
+        self,
+    ) -> None:
+        # The user leg of "model · mode · user" is a DISPLAY string (the
+        # prose page's blame banner): the transport's readable sender
+        # wins over the raw id (`anytype:_participant_…`); the raw id
+        # keeps living on the intent node's gc_user_id stamp.
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message(
+            "s1", "anytype:_participant_deadbeef", "Draft it.",
+            sender="Nick",
+        )
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (record,) = historian.history(chapter.id)
+        assert record.author_detail == "scripted · chapters · Nick"
+
     async def test_the_tick_after_a_bot_turn_records_no_phantom(
         self,
     ) -> None:

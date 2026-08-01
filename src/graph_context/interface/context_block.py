@@ -138,6 +138,8 @@ def _body_lines(
     if historian is None or not historian.is_tracked(node_id):
         return [f"    {body}"]
     states = historian.section_states(node_id)
+    tokens = historian.token_states(node_id)
+    runs = historian.locked_runs(node_id)
     rendered = []
     for block_hash, raw in revisions.body_blocks(body):
         state = states.get(block_hash)
@@ -147,6 +149,17 @@ def _body_lines(
             else ""
         )
         rendered.append(f"    [§{block_hash}{badge}] {raw}")
+        # WP46: partially-locked blocks spell out the verbatim text the
+        # model must not alter (a fully locked block needs no list --
+        # the badge covers it).
+        token_state = tokens.get(block_hash)
+        partial = token_state is not None and any(
+            intent != revisions.INTENT_LOCKED
+            for intent in token_state.intent
+        )
+        if partial and block_hash in runs:
+            listed = " | ".join(f'"{run}"' for run in runs[block_hash])
+            rendered.append(f"      locked verbatim: {listed}")
     return rendered or [f"    {body}"]
 
 

@@ -2582,6 +2582,144 @@ the empty state. Highlight-a-selection-as-context stays deferred.
 
 ---
 
+## WP44 — Human-revision roll-up (ADR 051) — **shipped 2026-07-28**
+
+**Status:** complete. Consecutive HUMAN revisions coalesce into ONE
+pending revision: `revisions.rollup_base` (pure) trims a human tail
+that is still the log's LAST entry, and the historian re-records
+against that base — same seq, so keyframe cadence (seq-derived)
+survives; `known_hashes` re-derivation re-carries tail-only texts.
+Solidification is structural: a model revision or ANY mark displaces
+the tail as last entry (a mark pins exactly the reviewed text); the
+next human edit opens a new revision. The full-baseline no-op guard
+runs first (idle ticks never rewrite); a full undo REMOVES the pending
+revision (revert-to-base) instead of minting an empty delta; roll-up
+refuses over a post-compaction marker-then-keyframe log (re-recording
+would regress seq). No new persistence — restart + `rebuild()` keeps
+coalescing. Net: a typing session in Anytype is one revision, not one
+per 5-second tick.
+
+---
+
+## WP45 — Derived word-level authorship (ADR 051) — **shipped 2026-07-28**
+
+**Status:** complete. `revisions.word_authorship(records)` — a pure,
+derived view (nothing stored): one pass over `state_walk` carrying a
+per-token author for every hash ever seen; added blocks inherit their
+ancestor's authors on token-equal ranges (`closest` WITHOUT consuming
+matches — a split paragraph's halves BOTH inherit; `revision_diff`'s
+greedy display pairing is deliberately different) and take the
+introducing revision's author elsewhere; restored-verbatim hashes keep
+their authorship; `MIN_BLAME_CHARS` floor applies; truncation degrades
+to introduced-at-keyframe. `prose_bridge.node_view` blocks gain
+`authorship` spans over the NORMALIZED text (raw heading marker
+re-prepended; fenced blocks and unrecorded edits degrade to `None`) and
+`prose.html` renders human-typed words as a subtle highlight. Roll-up
+(WP44) compounds: one authorship hop per editing session.
+
+**Editor roadmap (decisions recorded in ADR 051):** stage 3 = in-page
+editing + selection-to-approve with TRUE sub-paragraph span state (user
+decision — accepts new span-anchoring machinery); stage 4 = embedded
+chat panel, one session per document (`prose:<node-id>`), async turn
+jobs + SSE (turns outrun the bridge's 15s call timeout), selection as
+turn context.
+
+---
+
+## WP46 — Span-level review marks (ADR 052) — **shipped 2026-07-28**
+
+**Status:** complete. Highlight any stretch of text on the prose page
+and approve / lock / flag exactly that portion. `SectionMark` gains an
+optional TOKEN range (wire keys `s`/`e`; absent = whole block — old
+marks and old readers unaffected); review state now lives per token in
+`revisions.token_states`, carried across edits by the SAME positional
+inheritance as word authorship — no stored offsets, no re-anchoring
+machinery: the "span drift" problem never exists because ranges are
+consumed at fold time and state rides tokens thereafter. Fallout
+semantics (deliberate, ADR 052): an AI edit voids `approved` exactly on
+the words it changed; `section_states` becomes the derived badge view
+(all tokens agree → `approved`/`human`, mixed → `raw_ai`; intent =
+strictest token). Locked enforcement is now verbatim-RUN presence
+(`locked_runs` + substring check, still no diffing): the model may edit
+the rest of a partially locked paragraph and may move locked text
+anywhere, but the locked words must survive character-perfect; the
+guard error and the context block (`locked verbatim: "…"` lines under
+partially locked blocks) both teach the exact runs. Surfaces:
+`record_mark(start=, end=)` with per-slice change-only, `node_view`
+serves merged `[author, status, intent, text]` spans + `token_lens` +
+heading `glue`, `POST /api/prose/mark` takes optional `start`/`end`,
+and the page renders state as composable underline decorations
+(approved solid / locked double / needs-change wavy over the
+authorship background), with text selection opening the action bar on
+one token-ranged target per touched paragraph (tap still = whole
+block). Remaining stage-3/4 work: in-page text EDITING, then the
+embedded chat panel.
+
+---
+
+## WP47 — In-page prose editing (ADR 053) — **shipped 2026-07-28**
+
+**Status:** complete. The prose page edits paragraphs directly: tap a
+block → `edit` / `insert below` on the action bar (plus `＋ add
+paragraph` at the document end and a confirmed delete) → a plain
+`<textarea>` in the card — NO editor library (the block is the editing
+atom; ADR 025's no-dependency rule stands) and NO websockets (writes
+are POSTs; future bot-edit auto-refresh is an SSE job, deferred).
+`POST /api/prose/edit` (`replace | insert_after | delete`, hash
+anchors, same origin+token gates, 256 KB cap, stale anchor → 409)
+reaches the bridge's `edit_block`: under the route lock,
+`fetch_body → edit_body → repository.update_node →
+record_external_revision(detail="human:prose-page")` — recorded
+IMMEDIATELY (fresh blame on the refreshed view, no tick wait),
+coalescing into any pending human revision (WP44). Page edits are
+HUMAN edits end to end: they bypass the NodeWriter locked guard (the
+human is the locking authority — same standing as an Anytype-UI edit),
+and the historian's no-op guard absorbs the next change tick. Also
+amended ADR 052's display: state indicators are now subtle background
+highlights, one per word by priority (locked red > needs-change amber
+> approved green > human-typed lavender), replacing underlines.
+Remaining stage-4 work: the embedded chat panel.
+
+---
+
+## WP48 — The prose editor: CodeMirror, raw indexing, document wire (ADR 054) — **shipped 2026-07-28**
+
+**Status:** complete. Total rework of WP42–47's page after dogfooding
+rejected the block-card model (tap-to-textarea editing, blank-page
+re-render on every action, one POST per selected paragraph).
+Supersedes ADR 053's no-library decision: the page is now ONE
+CodeMirror 6 editor over the whole raw body — direct inline typing,
+styled-raw markdown (never WYSIWYG: a markdown serializer would
+rewrite source text and reintroduce the drift this WP removes). The
+bundle is vendored PREBUILT (`orchestrator/static/`, MIT, ~500 KB;
+reproducible build documented in `scripts/vendor/codemirror/`) — no
+build step in repo or CI; the server grew its first static route
+(`safe_child`, 404 on missing) and `create_server` verifies the
+bundle ships. Domain: identity hashes stay normalized (ADR 010), but
+every text index went RAW — `new_blocks` stores raw text, tokens/mark
+ranges/authorship/locked runs index it, `missing_locked` folds
+whitespace instead of normalizing, `MIN_BLAME_CHARS` died for a
+`has_words` separator rule (short dialogue is markable; fences no
+longer degrade), and `next_record` re-emits drifted texts — one
+mechanism that also auto-migrates pre-054 sidecars on the first
+`rebuild()`. New pure helpers `block_offsets` / `char_range_to_tokens`
+feed the document wire: `GET /api/prose/doc` (raw body + hash-sequence
+`base` token + offset segments/spans), `POST /api/prose/save`
+(whole-document, 409 on base mismatch → conflict banner with
+overwrite/discard; autosave debounce coalesces via WP44 roll-up;
+still bypasses the locked guard — human authority), `POST
+/api/prose/marks` (batch: one selection gesture = one lock hold = one
+sidecar rewrite via the historian's new `record_marks`), and `GET
+/api/prose/events` (SSE version bumps off the historian's new
+`on_record` hook → bridge counter; an open page reconciles bot edits
+in place by minimal-diff transaction). Decorations live in a CM
+StateField and MAP through local edits, so highlights ride the text
+while typing; nothing ever blanks. Old routes/callables
+(`node`/`mark`/`edit`, `node_view`/`set_mark`/`edit_block`, `glue`/
+`token_lens`) removed; gate order re-pinned on the new POSTs.
+
+---
+
 ## Sequencing
 
 ```

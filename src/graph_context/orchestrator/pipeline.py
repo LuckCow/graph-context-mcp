@@ -601,6 +601,7 @@ class Orchestrator:
         intent, mutations = await self._finish_turn(
             state.services, spec, user_id, stripped, reply_text, trace,
             origin, process.render() if process.worked else "",
+            sender=sender,
         )
         attach_ids: list[str] = []
         if intent is not None and process.worked and not spec.hide_intent_card:
@@ -663,6 +664,7 @@ class Orchestrator:
         trace: list[ToolTrace],
         origin: str = "",
         process_trace: str = "",
+        sender: str = "",
     ) -> tuple[Node | None, tuple[MutationRecord, ...]]:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
         drain -> intent node (returned, with the drained mutations, so
@@ -694,10 +696,13 @@ class Orchestrator:
         if self.historian is not None and mutations:
             # WP41 (ADR 049): one attributed revision per touched tracked
             # node -- the turn is the revision granularity. A history
-            # failure never fails the turn that did the real work.
+            # failure never fails the turn that did the real work. The
+            # user leg prefers the transport's DISPLAY name (the prose
+            # page shows this string); the raw id stays on the intent
+            # node's gc_user_id stamp, which is the real provenance.
             author = (
                 f"{model_id(spec.model) or self.model_name}"
-                f" · {spec.name} · {user_id}"
+                f" · {spec.name} · {sender or user_id}"
             )
             for record in mutations:
                 try:

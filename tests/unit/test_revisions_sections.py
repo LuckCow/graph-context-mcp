@@ -17,7 +17,6 @@ from graph_context.domain.revisions import (
     compact,
     current_hashes,
     edit_body,
-    hash_sequence,
     missing_locked,
     next_record,
     normalize_block,
@@ -40,7 +39,7 @@ def _h(paragraph: str) -> str:
 
 
 def _pairs(*paragraphs: str) -> tuple[tuple[str, str], ...]:
-    return hash_sequence("\n\n".join(paragraphs))
+    return body_blocks("\n\n".join(paragraphs))
 
 
 def _records(entries: list[LogEntry]) -> list[RevisionRecord]:
@@ -53,10 +52,10 @@ def _grow(
 ) -> None:
     records = _records(entries)
     prev = current_hashes(records)
-    known = frozenset(revisions.texts_of(records))
     entries.append(next_record(
         prev, records[-1].seq if records else 0, _pairs(*body_paragraphs),
-        at=at, author_kind=author, author_detail=detail, known_hashes=known,
+        at=at, author_kind=author, author_detail=detail,
+        known_texts=revisions.texts_of(records),
     ))
 
 
@@ -120,7 +119,12 @@ class TestSectionStatesFold:
         assert (state.status_at, state.status_by) == ("T9", "h:page")
         assert state.intent == "flexible"  # untouched field keeps default
 
-    def test_human_edit_inherits_status_and_intent_via_similarity(self) -> None:
+    def test_human_edit_inherits_state_token_wise(self) -> None:
+        # WP46 semantics: state follows TOKENS. The one word the human
+        # changed is no longer approved (the block badge drops to
+        # raw_ai for the mixed block), but every untouched word keeps
+        # approved+locked -- and one locked token keeps the block's
+        # intent badge locked.
         entries: list[LogEntry] = []
         _grow(entries, [PARA_A, PARA_B])
         _mark(entries, revisions.MARK_STATUS, PARA_A, "approved")
@@ -129,8 +133,11 @@ class TestSectionStatesFold:
               author=revisions.AUTHOR_HUMAN, detail="human")
         states = section_states(entries)
         assert _h(PARA_A) not in states  # keyed to the final sequence
-        assert states[_h(PARA_A_EDIT)].status == "approved"
+        assert states[_h(PARA_A_EDIT)].status == "raw_ai"  # mixed badge
         assert states[_h(PARA_A_EDIT)].intent == "locked"
+        tokens = revisions.token_states(entries)[_h(PARA_A_EDIT)]
+        assert tokens.status.count("approved") == len(tokens.status) - 1
+        assert "human" in tokens.status  # the edited word alone
 
     def test_a_brand_new_human_block_starts_human(self) -> None:
         entries: list[LogEntry] = []
@@ -168,31 +175,63 @@ class TestSectionStatesFold:
 
 
 class TestMissingLocked:
-    def _locked_a(self) -> dict[str, revisions.SectionState]:
+    def _locked_a(
+        self,
+    ) -> tuple[dict[str, revisions.TokenState], dict[str, str]]:
         entries: list[LogEntry] = []
         _grow(entries, [PARA_A, PARA_B])
         _mark(entries, revisions.MARK_INTENT, PARA_A, "locked")
-        return section_states(entries)
+        records = [e for e in entries if isinstance(e, RevisionRecord)]
+        return revisions.token_states(entries), revisions.texts_of(records)
 
     def test_a_moved_locked_block_passes(self) -> None:
-        states = self._locked_a()
+        states, texts = self._locked_a()
         moved = "\n\n".join([PARA_B, PARA_C, PARA_A])
-        assert missing_locked(states, moved) == ()
+        assert missing_locked(states, texts, moved) == ()
 
     def test_a_dropped_locked_block_is_reported(self) -> None:
-        states = self._locked_a()
-        assert missing_locked(states, PARA_B) == (_h(PARA_A),)
+        states, texts = self._locked_a()
+        missing = missing_locked(states, texts, PARA_B)
+        assert missing == ((_h(PARA_A), revisions.normalize_block(PARA_A)),)
 
     def test_an_edited_locked_block_is_reported(self) -> None:
-        # Editing changes the hash -- presence check fails, no diffing.
-        states = self._locked_a()
+        # Editing the locked text breaks verbatim presence -- no diffing.
+        states, texts = self._locked_a()
         body = "\n\n".join([PARA_A_EDIT, PARA_B])
-        assert missing_locked(states, body) == (_h(PARA_A),)
+        assert missing_locked(states, texts, body) != ()
+
+    def test_locked_text_merged_into_a_bigger_paragraph_passes(self) -> None:
+        # WP46 refinement: LOCKED means the TEXT survives verbatim --
+        # embedding it in a larger paragraph is legal.
+        states, texts = self._locked_a()
+        merged = f"{PARA_A} {PARA_C}\n\n{PARA_B}"
+        assert missing_locked(states, texts, merged) == ()
 
     def test_unlocked_blocks_never_report(self) -> None:
-        states = self._locked_a()
+        states, texts = self._locked_a()
         del states[_h(PARA_A)]
-        assert missing_locked(states, "") == ()
+        assert missing_locked(states, texts, "") == ()
+
+    def test_a_partial_lock_demands_only_its_run(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        tokens = revisions.block_tokens(revisions.normalize_block(PARA_A))
+        # Lock "the siege began" (tokens 6..9 of PARA_A).
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_INTENT, hash=_h(PARA_A), value="locked",
+            at="TM", by="user", start=6, end=9,
+        ))
+        states = revisions.token_states(entries)
+        records = [e for e in entries if isinstance(e, RevisionRecord)]
+        texts = revisions.texts_of(records)
+        run = "".join(tokens[6:9]).strip()
+        assert revisions.locked_runs(states, texts) == {_h(PARA_A): (run,)}
+        # A rewrite that keeps the run verbatim passes...
+        assert missing_locked(
+            states, texts, f"Now rewritten, but {run} still stands."
+        ) == ()
+        # ...and one that loses it is reported with the run text.
+        assert missing_locked(states, texts, PARA_B) == ((_h(PARA_A), run),)
 
 
 class TestEditBody:
@@ -300,3 +339,99 @@ class TestMarkCompaction:
             isinstance(e, SectionMark) and e.hash == _h(dead_filler)
             for e in compacted
         )
+
+
+class TestSpanMarks:
+    """WP46: marks narrowed to a token range; state follows tokens."""
+
+    def _tokens(self, text: str) -> list[str]:
+        return revisions.block_tokens(revisions.normalize_block(text))
+
+    def test_a_span_mark_round_trips(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_STATUS, hash=_h(PARA_A), value="approved",
+            at="TM", by="user", start=2, end=5,
+        ))
+        parsed = parse_log(render_log(entries))
+        assert parsed.skipped == 0
+        assert parsed.entries == tuple(entries)
+
+    def test_a_mangled_range_is_skipped_not_fatal(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        rendered = render_log(entries)
+        bad = (
+            '{"kind":"status","hash":"' + _h(PARA_A) + '",'
+            '"value":"approved","at":"T","by":"u","s":5,"e":2}'
+        )
+        parsed = parse_log(rendered.removesuffix("```") + bad + "\n```")
+        assert parsed.skipped == 1
+
+    def test_a_span_approval_sets_only_its_tokens(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_STATUS, hash=_h(PARA_A), value="approved",
+            at="TM", by="user", start=0, end=3,
+        ))
+        state = revisions.token_states(entries)[_h(PARA_A)]
+        n = len(self._tokens(PARA_A))
+        assert state.status == ("approved",) * 3 + ("raw_ai",) * (n - 3)
+
+    def test_span_state_follows_tokens_across_an_edit(self) -> None:
+        # Approve the first three words, then a model edit changes ONE
+        # later word: the approved words survive; the changed word is
+        # raw_ai. The void is token-local (WP46 refinement of WP42).
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_STATUS, hash=_h(PARA_A), value="approved",
+            at="TM", by="user", start=0, end=3,
+        ))
+        _grow(entries, [PARA_A_EDIT])  # model author; "began" -> "started"
+        state = revisions.token_states(entries)[_h(PARA_A_EDIT)]
+        assert state.status[:3] == ("approved",) * 3
+        assert "raw_ai" in state.status[3:]
+
+    def test_an_out_of_range_span_clamps_to_the_current_text(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        n = len(self._tokens(PARA_A))
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_INTENT, hash=_h(PARA_A), value="locked",
+            at="TM", by="user", start=n - 2, end=n + 50,
+        ))
+        state = revisions.token_states(entries)[_h(PARA_A)]
+        assert state.intent[-2:] == ("locked", "locked")
+        assert set(state.intent[:-2]) == {"flexible"}
+
+
+class TestLockedRawIndexing:
+    """ADR 054: locked runs are raw substrings; the presence check folds
+    whitespace on both sides (store reflow is not a violation)."""
+
+    def _locked_heading(self) -> tuple[dict, dict]:
+        heading = "## The Gate\nIt stayed barred through the siege."
+        entries: list[LogEntry] = []
+        _grow(entries, [heading])
+        _mark(entries, revisions.MARK_INTENT, heading, "locked")
+        records = _records(entries)
+        return revisions.token_states(entries), revisions.texts_of(records)
+
+    def test_a_locked_run_keeps_its_heading_marker(self) -> None:
+        states, texts = self._locked_heading()
+        runs = revisions.locked_runs(states, texts)
+        assert runs[_h("## The Gate\nIt stayed barred through the siege.")] \
+            == ("## The Gate\nIt stayed barred through the siege.",)
+
+    def test_reflowed_whitespace_is_not_a_violation(self) -> None:
+        states, texts = self._locked_heading()
+        reflowed = "## The Gate\nIt stayed barred\nthrough   the siege."
+        assert missing_locked(states, texts, reflowed) == ()
+
+    def test_changed_locked_words_still_report(self) -> None:
+        states, texts = self._locked_heading()
+        edited = "## The Gate\nIt stayed open through the siege."
+        assert len(missing_locked(states, texts, edited)) == 1

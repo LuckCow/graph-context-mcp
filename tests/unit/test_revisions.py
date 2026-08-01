@@ -11,9 +11,9 @@ from graph_context.domain.revisions import (
     RevisionRecord,
     blame,
     block_hash,
+    body_blocks,
     compact,
     current_hashes,
-    hash_sequence,
     next_record,
     normalize_block,
     parse_log,
@@ -28,7 +28,7 @@ PARA_C = "Rain came at dusk and the watch fires guttered along the wall."
 
 
 def _pairs(*paragraphs: str) -> tuple[tuple[str, str], ...]:
-    return hash_sequence("\n\n".join(paragraphs))
+    return body_blocks("\n\n".join(paragraphs))
 
 
 def _grow(
@@ -38,10 +38,10 @@ def _grow(
     """Append the record for a new body state to ``log`` (test-side
     convenience mirroring the historian's bookkeeping)."""
     prev = current_hashes(log)
-    known = frozenset(revisions.texts_of(log))
     log.append(next_record(
         prev, log[-1].seq if log else 0, _pairs(*body_paragraphs),
-        at=at, author_kind=author, author_detail=detail, known_hashes=known,
+        at=at, author_kind=author, author_detail=detail,
+        known_texts=revisions.texts_of(log),
     ))
 
 
@@ -237,3 +237,163 @@ class TestTrackedTypes:
     def test_empty_input_tracks_nothing(self) -> None:
         assert parse_tracked_types("") == ()
         assert parse_tracked_types("  ,\n ") == ()
+
+
+class TestRollupBase:
+    """WP44: which logs allow coalescing a pending human tail."""
+
+    def _human_tail(self) -> list[revisions.LogEntry]:
+        log: list[RevisionRecord] = []
+        _grow(log, [PARA_A])
+        _grow(log, [PARA_A, PARA_B], author=revisions.AUTHOR_HUMAN)
+        return list(log)
+
+    def test_a_human_tail_yields_the_trimmed_log(self) -> None:
+        entries = self._human_tail()
+        assert revisions.rollup_base(entries) == tuple(entries[:-1])
+
+    def test_a_model_tail_does_not_roll_up(self) -> None:
+        log: list[RevisionRecord] = []
+        _grow(log, [PARA_A])
+        _grow(log, [PARA_A, PARA_B])  # model author
+        assert revisions.rollup_base(log) is None
+
+    def test_a_mark_after_the_tail_solidifies_it(self) -> None:
+        entries = self._human_tail()
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_STATUS,
+            hash=block_hash(normalize_block(PARA_B)),
+            value="approved", at="T", by="user",
+        ))
+        assert revisions.rollup_base(entries) is None
+
+    def test_a_truncated_tail_never_rolls_up(self) -> None:
+        marker = RevisionRecord(
+            seq=5, at="T", author_kind=revisions.AUTHOR_HUMAN,
+            author_detail="human", kind=revisions.KIND_TRUNCATED,
+        )
+        assert revisions.rollup_base([marker]) is None
+
+    def test_an_empty_log_does_not_roll_up(self) -> None:
+        assert revisions.rollup_base([]) is None
+
+    def test_the_sole_first_keyframe_rolls_up_to_an_empty_log(self) -> None:
+        log: list[RevisionRecord] = []
+        _grow(log, [PARA_A], author=revisions.AUTHOR_HUMAN)
+        assert revisions.rollup_base(log) == ()
+
+    def test_a_marker_then_keyframe_log_refuses_to_roll_up(self) -> None:
+        # Post-compaction shape: the human tail IS the first kept
+        # keyframe; re-recording over the bare marker would regress seq.
+        log: list[RevisionRecord] = []
+        _grow(log, [PARA_A], author=revisions.AUTHOR_HUMAN)
+        keyframe = log[0]
+        marker = RevisionRecord(
+            seq=19, at="T", author_kind=revisions.AUTHOR_MODEL,
+            author_detail="compaction", kind=revisions.KIND_TRUNCATED,
+        )
+        assert revisions.rollup_base([marker, keyframe]) is None
+
+
+class TestRawIndexing:
+    """ADR 054: identity hashes stay normalized, stored texts and every
+    text-indexed artifact go raw."""
+
+    def test_new_blocks_store_raw_text(self) -> None:
+        log: list[RevisionRecord] = []
+        _grow(log, ["## A Heading\nwith a body line."])
+        assert list(log[0].new_blocks.values()) == [
+            "## A Heading\nwith a body line."
+        ]
+
+    def test_a_stored_text_drift_re_emits_on_a_hash_equal_body(self) -> None:
+        """One mechanism refreshes store rewrites AND migrates v1 logs:
+        a hash-equal pair whose stored text differs re-emits raw."""
+        log: list[RevisionRecord] = []
+        heading = "## Tournament Morning\nThe yard filled before dawn."
+        _grow(log, [heading])
+        # Simulate a pre-ADR-054 log: stored text is the normalization.
+        v1 = RevisionRecord(
+            seq=1, at="T", author_kind=revisions.AUTHOR_MODEL,
+            author_detail="m", kind=revisions.KIND_KEYFRAME,
+            hashes=log[0].hashes,
+            new_blocks={h: normalize_block(t)
+                        for h, t in log[0].new_blocks.items()},
+        )
+        refresh = revisions.next_record(
+            v1.hashes, 1, _pairs(heading),
+            at="T2", author_kind=revisions.AUTHOR_HUMAN, author_detail="h",
+            known_texts=revisions.texts_of([v1]),
+        )
+        assert refresh.new_blocks == {log[0].hashes[0]: heading}
+        assert revisions.texts_of([v1, refresh])[log[0].hashes[0]] == heading
+
+    def test_an_unchanged_body_emits_no_blocks(self) -> None:
+        log: list[RevisionRecord] = []
+        _grow(log, [PARA_A])
+        _grow(log, [PARA_A])
+        assert log[1].new_blocks == {}
+
+    def test_records_carry_the_version_tag(self) -> None:
+        log: list[RevisionRecord] = []
+        _grow(log, [PARA_A])
+        assert '"v":2' in render_log(log)
+
+
+class TestHasWords:
+    def test_separators_have_no_words(self) -> None:
+        assert not revisions.has_words("* * *")
+        assert not revisions.has_words("---")
+        assert not revisions.has_words("")
+
+    def test_short_prose_has_words(self) -> None:
+        assert revisions.has_words("No.")
+        assert revisions.has_words("She ran.")
+
+
+class TestBlockOffsets:
+    def test_offsets_slice_the_raw_body(self) -> None:
+        body = f"# Title\n\n{PARA_A}\n\n```python\ncode\n\nmore\n```\n\n{PARA_B}"
+        offsets = revisions.block_offsets(body)
+        assert [body[s:e] for _, s, e in offsets] == [
+            "# Title", PARA_A, "```python\ncode\n\nmore\n```", PARA_B,
+        ]
+        assert [h for h, _, _ in offsets] == [
+            h for h, _ in revisions.body_blocks(body)
+        ]
+
+    def test_duplicate_paragraphs_repeat_their_hash(self) -> None:
+        body = f"{PARA_A}\n\n{PARA_A}"
+        offsets = revisions.block_offsets(body)
+        assert len(offsets) == 2
+        assert offsets[0][0] == offsets[1][0]
+        assert offsets[0][1:] != offsets[1][1:]
+
+    def test_trailing_and_leading_blank_lines_are_skipped(self) -> None:
+        body = f"\n\n{PARA_A}\n\n\n"
+        offsets = revisions.block_offsets(body)
+        assert len(offsets) == 1
+        _, s, e = offsets[0]
+        assert body[s:e] == PARA_A
+
+
+class TestCharRangeToTokens:
+    def test_a_range_maps_to_the_tokens_it_touches(self) -> None:
+        text = "one two three"
+        # "two" spans chars 4..7 -> token 1
+        assert revisions.char_range_to_tokens(text, 4, 7) == (1, 2)
+        assert revisions.char_range_to_tokens(text, 0, len(text)) == (0, 3)
+
+    def test_partial_overlap_counts(self) -> None:
+        text = "one two three"
+        assert revisions.char_range_to_tokens(text, 2, 5) == (0, 2)
+
+    def test_an_empty_or_out_of_bounds_range_is_a_prompt_error(self) -> None:
+        import pytest
+
+        from graph_context.errors import GraphContextError
+
+        with pytest.raises(GraphContextError, match="empty"):
+            revisions.char_range_to_tokens("one two", 3, 3)
+        with pytest.raises(GraphContextError, match="outside"):
+            revisions.char_range_to_tokens("one two", 40, 50)

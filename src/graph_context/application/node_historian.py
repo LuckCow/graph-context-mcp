@@ -28,7 +28,7 @@ identity; see the ADR's open spike).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -52,6 +52,20 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+@dataclass(frozen=True, slots=True)
+class MarkRequest:
+    """One requested status/intent mark -- the unit of the batch write
+    (WP48): a multi-paragraph selection arrives as one request list and
+    lands in ONE sidecar rewrite. ``start``/``end`` (both or neither)
+    are token indices over the block's raw text."""
+
+    kind: str
+    block_hash: str
+    value: str
+    start: int | None = None
+    end: int | None = None
+
+
 @dataclass(slots=True)
 class _Baseline:
     """One tracked node's in-memory history state."""
@@ -61,7 +75,7 @@ class _Baseline:
     records: tuple[revisions.RevisionRecord, ...]  # the revisions-only view
     hashes: tuple[str, ...]
     seq: int
-    known_hashes: frozenset[str]
+    known_texts: dict[str, str]  # texts_of(records): hash -> raw text
 
 
 def _state(
@@ -77,7 +91,7 @@ def _state(
         records=records,
         hashes=revisions.current_hashes(records),
         seq=max((r.seq for r in usable), default=0),
-        known_hashes=frozenset(revisions.texts_of(records)),
+        known_texts=revisions.texts_of(records),
     )
 
 
@@ -93,6 +107,15 @@ class NodeHistorian:
         self._repository = repository
         self._now = now
         self._baselines: dict[NodeId, _Baseline] = {}
+        # Fired after every sidecar write (revision or mark) with the
+        # tracked node's id -- the prose page's live-update signal
+        # (WP48). Injected by the composition root (the bridge's
+        # registration); None = no listener. Must not raise.
+        self.on_record: Callable[[NodeId], None] | None = None
+
+    def _notify(self, node_id: NodeId) -> None:
+        if self.on_record is not None:
+            self.on_record(node_id)
 
     # -- configuration ---------------------------------------------------
 
@@ -175,12 +198,15 @@ class NodeHistorian:
             node_id, revisions.AUTHOR_MODEL, author_detail
         )
 
-    async def record_external_revision(self, node_id: NodeId) -> bool:
+    async def record_external_revision(
+        self, node_id: NodeId, *, detail: str = revisions.AUTHOR_HUMAN
+    ) -> bool:
         """Record the current body as a human revision (change tick /
         startup catch-up; identity is the generic ``human`` until the
-        last-modified-by spike lands)."""
+        last-modified-by spike lands). Surfaces that DO know who edited
+        pass ``detail`` -- the prose page stamps ``human:prose-page``."""
         return await self._record(
-            node_id, revisions.AUTHOR_HUMAN, revisions.AUTHOR_HUMAN
+            node_id, revisions.AUTHOR_HUMAN, detail
         )
 
     async def sweep(self, changed: Iterable[NodeId]) -> None:
@@ -194,25 +220,63 @@ class NodeHistorian:
     async def _record(
         self, node_id: NodeId, author_kind: str, author_detail: str
     ) -> bool:
+        """Record the current body state; returns whether the sidecar
+        was rewritten. Consecutive human revisions COALESCE (WP44): a
+        human recording whose pending human tail is still the last log
+        entry re-records against the pre-tail base (same seq), so one
+        editing session is one revision; a model revision or any mark
+        solidifies the tail by displacing it as last entry.
+
+        A hash-equal body whose stored texts drifted from the live raw
+        text (a store rewrite, or a pre-ADR-054 normalized-text log)
+        still records: an all-equal delta that only refreshes texts."""
         body = await self._repository.fetch_body(node_id)
-        pairs = revisions.hash_sequence(body)
+        pairs = revisions.body_blocks(body)
         baseline = self._baselines.get(node_id)
         if baseline is None and not pairs:
             return False  # tracking starts at the first body-bearing state
         hashes = tuple(h for h, _ in pairs)
-        if baseline is not None and hashes == baseline.hashes:
-            return False
+        if (
+            baseline is not None
+            and hashes == baseline.hashes
+            and all(
+                baseline.known_texts.get(h) == text for h, text in pairs
+            )
+        ):
+            return False  # BEFORE roll-up: idle ticks must not rewrite
+        base = baseline
+        if (
+            baseline is not None
+            and author_kind == revisions.AUTHOR_HUMAN
+            and (trimmed := revisions.rollup_base(baseline.entries)) is not None
+        ):
+            base = _state(baseline.sidecar_id, trimmed)
+            if hashes == base.hashes and all(
+                base.known_texts.get(h) == text for h, text in pairs
+            ):
+                # The human undid the whole pending revision: it
+                # disappears rather than becoming an empty delta.
+                await self._repository.update_node(
+                    base.sidecar_id, body=revisions.render_log(trimmed)
+                )
+                self._baselines[node_id] = base
+                logger.info(
+                    "historian: human edits reverted; dropped the pending "
+                    "revision of %s", node_id,
+                )
+                self._notify(node_id)
+                return True
         record = revisions.next_record(
-            baseline.hashes if baseline else (),
-            baseline.seq if baseline else 0,
+            base.hashes if base else (),
+            base.seq if base else 0,
             pairs,
             at=self._now(),
             author_kind=author_kind,
             author_detail=author_detail,
-            known_hashes=baseline.known_hashes if baseline else frozenset(),
+            known_texts=base.known_texts if base else {},
         )
         entries = revisions.compact(
-            (*(baseline.entries if baseline else ()), record)
+            (*(base.entries if base else ()), record)
         )
         rendered = revisions.render_log(entries)
         if baseline is None:
@@ -232,72 +296,132 @@ class NodeHistorian:
             "historian: recorded %s revision %d of %s",
             author_kind, record.seq, node_id,
         )
+        self._notify(node_id)
         return True
 
     async def record_mark(
         self, node_id: NodeId, *, kind: str, block_hash: str,
         value: str, by: str,
+        start: int | None = None, end: int | None = None,
     ) -> revisions.SectionState:
-        """Append one status/intent mark (WP42) and return the block's
-        folded state. Validates against the CURRENT baseline -- a hash
-        that is no longer live means the page is stale, and the error
-        says to reload rather than guessing lineage."""
+        """Append one status/intent mark (WP42; token-ranged since WP46)
+        and return the block's folded BADGE state. A one-item
+        :meth:`record_marks`."""
+        states = await self.record_marks(
+            node_id,
+            requests=(MarkRequest(
+                kind=kind, block_hash=block_hash, value=value,
+                start=start, end=end,
+            ),),
+            by=by,
+        )
+        return states.get(block_hash, revisions.SectionState())
+
+    async def record_marks(
+        self, node_id: NodeId, *,
+        requests: Sequence[MarkRequest], by: str,
+    ) -> dict[str, revisions.SectionState]:
+        """Append a BATCH of status/intent marks in one sidecar rewrite
+        (WP48: a multi-paragraph selection is one gesture -> one write,
+        one compaction, one PATCH). Every request validates against the
+        CURRENT baseline before anything lands -- all-or-nothing; a
+        hash that is no longer live means the page is stale, and the
+        error says to reload rather than guessing lineage. Requests
+        whose slice already folds to the value drop out silently
+        (change-only, tracked across the batch). Returns the folded
+        badge per requested hash."""
         baseline = self._baselines.get(node_id)
         if baseline is None:
             raise GraphContextError(
                 f"no revision history for {node_id!r} yet; marks attach "
                 "to recorded sections only."
             )
-        if kind not in (revisions.MARK_STATUS, revisions.MARK_INTENT):
-            raise GraphContextError(
-                f"unknown mark kind {kind!r}; allowed: "
-                f"{revisions.MARK_STATUS}, {revisions.MARK_INTENT}."
+        folded = revisions.token_states(baseline.entries)
+        simulated: dict[tuple[str, str], list[str]] = {}
+        for block, state in folded.items():
+            simulated[(revisions.MARK_STATUS, block)] = list(state.status)
+            simulated[(revisions.MARK_INTENT, block)] = list(state.intent)
+        marks: list[revisions.SectionMark] = []
+        for request in requests:
+            kind, value = request.kind, request.value
+            block_hash, start, end = (
+                request.block_hash, request.start, request.end
             )
-        allowed = (
-            revisions.STATUS_VALUES if kind == revisions.MARK_STATUS
-            else revisions.INTENT_VALUES
-        )
-        if value not in allowed:
-            raise GraphContextError(
-                f"unknown {kind} value {value!r}; allowed: "
-                f"{', '.join(sorted(allowed))}."
+            if kind not in (revisions.MARK_STATUS, revisions.MARK_INTENT):
+                raise GraphContextError(
+                    f"unknown mark kind {kind!r}; allowed: "
+                    f"{revisions.MARK_STATUS}, {revisions.MARK_INTENT}."
+                )
+            allowed = (
+                revisions.STATUS_VALUES if kind == revisions.MARK_STATUS
+                else revisions.INTENT_VALUES
             )
-        if block_hash not in baseline.hashes:
-            raise StaleSectionMark(
-                f"section {block_hash} is not in the current version of "
-                f"{self._name_of(node_id)!r} -- it changed since this view "
-                "loaded; reload and re-apply the mark."
+            if value not in allowed:
+                raise GraphContextError(
+                    f"unknown {kind} value {value!r}; allowed: "
+                    f"{', '.join(sorted(allowed))}."
+                )
+            if block_hash not in baseline.hashes:
+                raise StaleSectionMark(
+                    f"section {block_hash} is not in the current version "
+                    f"of {self._name_of(node_id)!r} -- it changed since "
+                    "this view loaded; reload and re-apply the mark."
+                )
+            text = baseline.known_texts.get(block_hash, "")
+            if not revisions.has_words(text):
+                raise GraphContextError(
+                    "this section has no words to mark (separators share "
+                    "hashes and cannot carry review state)."
+                )
+            token_count = len(revisions.block_tokens(text))
+            if (start is None) != (end is None):
+                raise GraphContextError(
+                    "a ranged mark needs BOTH start and end (token "
+                    "indices); omit both to mark the whole section."
+                )
+            if start is not None and end is not None and not (
+                0 <= start < end <= token_count
+            ):
+                raise GraphContextError(
+                    f"mark range {start}..{end} is outside this section's "
+                    f"0..{token_count} tokens; reload and reselect."
+                )
+            target = simulated.get((kind, block_hash))
+            if target is not None:
+                lo, hi = (
+                    (start, end) if start is not None and end is not None
+                    else (0, len(target))
+                )
+                already = target[lo:hi]
+                if already and all(v == value for v in already):
+                    continue  # change-only: no log line, no PATCH
+                for i in range(lo, hi):
+                    target[i] = value
+            marks.append(revisions.SectionMark(
+                kind=kind, hash=block_hash, value=value,
+                at=self._now(), by=by,
+                start=start if start is not None else -1,
+                end=end if end is not None else -1,
+            ))
+        if marks:
+            entries = revisions.compact((*baseline.entries, *marks))
+            await self._repository.update_node(
+                baseline.sidecar_id, body=revisions.render_log(entries)
             )
-        texts = revisions.texts_of(baseline.records)
-        if len(texts.get(block_hash, "")) < revisions.MIN_BLAME_CHARS:
-            raise GraphContextError(
-                "this section is too short to mark (separators share "
-                "hashes and cannot carry review state)."
+            self._baselines[node_id] = _state(baseline.sidecar_id, entries)
+            logger.info(
+                "historian: marked %d section(s) on %s", len(marks), node_id,
             )
-        current = revisions.section_states(baseline.entries).get(
-            block_hash, revisions.SectionState()
+            self._notify(node_id)
+        states = revisions.section_states(
+            self._baselines[node_id].entries
         )
-        already = (
-            current.status if kind == revisions.MARK_STATUS
-            else current.intent
-        )
-        if already == value:
-            return current  # change-only: no log line, no PATCH
-        mark = revisions.SectionMark(
-            kind=kind, hash=block_hash, value=value, at=self._now(), by=by,
-        )
-        entries = revisions.compact((*baseline.entries, mark))
-        await self._repository.update_node(
-            baseline.sidecar_id, body=revisions.render_log(entries)
-        )
-        self._baselines[node_id] = _state(baseline.sidecar_id, entries)
-        logger.info(
-            "historian: marked %s %s=%s on %s", block_hash, kind, value,
-            node_id,
-        )
-        return revisions.section_states(entries).get(
-            block_hash, revisions.SectionState()
-        )
+        return {
+            request.block_hash: states.get(
+                request.block_hash, revisions.SectionState()
+            )
+            for request in requests
+        }
 
     def _name_of(self, node_id: NodeId) -> str:
         graph = self._repository.graph
@@ -327,21 +451,45 @@ class NodeHistorian:
         baseline = self._baselines.get(node_id)
         return revisions.section_states(baseline.entries) if baseline else {}
 
+    def token_states(
+        self, node_id: NodeId
+    ) -> dict[str, revisions.TokenState]:
+        baseline = self._baselines.get(node_id)
+        return revisions.token_states(baseline.entries) if baseline else {}
+
+    def locked_runs(self, node_id: NodeId) -> dict[str, tuple[str, ...]]:
+        """Per block: the locked runs' verbatim text (WP46) -- what the
+        context block shows the model beside partially-locked blocks."""
+        baseline = self._baselines.get(node_id)
+        if baseline is None:
+            return {}
+        return revisions.locked_runs(
+            revisions.token_states(baseline.entries),
+            revisions.texts_of(baseline.records),
+        )
+
     # -- the section guard (WP42) ------------------------------------------
 
     def check_body_update(self, node_id: NodeId, new_body: str) -> None:
         """NodeWriter's injected body-guard: raise if the new body drops
-        a LOCKED section. Sync on purpose (in-memory fold, no awaits in
-        the writer); untracked / never-recorded nodes pass freely."""
+        LOCKED text -- verbatim-presence per locked run since WP46
+        (moving locked text is fine, changing or deleting it is not).
+        Sync on purpose (in-memory fold, no awaits in the writer);
+        untracked / never-recorded nodes pass freely."""
         baseline = self._baselines.get(node_id)
         if baseline is None:
             return
-        states = revisions.section_states(baseline.entries)
-        missing = revisions.missing_locked(states, new_body)
+        missing = revisions.missing_locked(
+            revisions.token_states(baseline.entries),
+            revisions.texts_of(baseline.records),
+            new_body,
+        )
         if not missing:
             return
-        texts = revisions.texts_of(baseline.records)
         raise LockedSectionsChanged(
             self._name_of(node_id),
-            tuple((h, texts.get(h, "")[:60]) for h in missing),
+            tuple(
+                (block, run if len(run) <= 240 else run[:240] + "…")
+                for block, run in missing
+            ),
         )

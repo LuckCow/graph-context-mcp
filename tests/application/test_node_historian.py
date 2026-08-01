@@ -285,16 +285,29 @@ class TestSectionMarks:
                 value="golden", by="user",
             )
 
-    async def test_short_separator_blocks_cannot_carry_marks(self) -> None:
+    async def test_word_free_separator_blocks_cannot_carry_marks(self) -> None:
         world = World()
         await world.seed_space_context()
         chapter = await world.chapter(OPENING, "* * *", MIDDLE)
         await world.historian.record_bot_revision(chapter.id, author_detail="m")
-        with pytest.raises(GraphContextError, match="too short"):
+        with pytest.raises(GraphContextError, match="no words"):
             await world.historian.record_mark(
                 chapter.id, kind="intent", block_hash=_h("* * *"),
                 value="locked", by="user",
             )
+
+    async def test_short_prose_is_markable(self) -> None:
+        """ADR 054: the old MIN_BLAME_CHARS floor made short dialogue
+        unmarkable; only word-free blocks stay out now."""
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING, "No.", MIDDLE)
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        state = await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h("No."),
+            value="locked", by="user",
+        )
+        assert state.intent == "locked"
 
     async def test_a_never_recorded_node_is_a_prompt_error(self) -> None:
         world = World()
@@ -332,3 +345,283 @@ class TestSectionGuard:
     async def test_untracked_nodes_pass_freely(self) -> None:
         world = World()
         world.historian.check_body_update("no-such-node", "anything")
+
+
+class TestRollup:
+    """WP44: consecutive human revisions coalesce into one pending
+    revision; a model revision or any mark solidifies it."""
+
+    async def _chapter_world(self) -> tuple[World, Node]:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING)
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        return world, chapter
+
+    async def test_consecutive_human_revisions_coalesce(self) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        await world.repo.update_node(
+            chapter.id, body=f"{OPENING}\n\n{MIDDLE}\n\n{REVISED}"
+        )
+        await world.historian.sweep({chapter.id})
+        records = world.historian.history(chapter.id)
+        assert [r.author_kind for r in records] == [
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+        ]
+        assert records[-1].seq == 2  # replaced in place, not appended
+        assert records[-1].at == "T3"  # latest tick wins
+        assert _h(REVISED) in revisions.current_hashes(records)
+
+    async def test_a_model_revision_solidifies_the_pending_human_one(
+        self,
+    ) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        await world.repo.update_node(
+            chapter.id, body=f"{OPENING}\n\n{MIDDLE}\n\n{REVISED}"
+        )
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        await world.repo.update_node(chapter.id, body=OPENING)
+        await world.historian.sweep({chapter.id})
+        kinds = [r.author_kind for r in world.historian.history(chapter.id)]
+        assert kinds == [
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+        ]
+
+    async def test_a_mark_solidifies_the_pending_human_revision(self) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        await world.historian.record_mark(
+            chapter.id, kind="status", block_hash=_h(MIDDLE),
+            value="approved", by="user",
+        )
+        await world.repo.update_node(
+            chapter.id, body=f"{OPENING}\n\n{MIDDLE}\n\n{REVISED}"
+        )
+        await world.historian.sweep({chapter.id})
+        records = world.historian.history(chapter.id)
+        assert [r.author_kind for r in records] == [
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+            revisions.AUTHOR_HUMAN,
+        ]
+        state = world.historian.section_states(chapter.id)[_h(MIDDLE)]
+        assert state.status == "approved"  # the mark survived the edits
+
+    async def test_idle_ticks_never_rewrite_the_log(self) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        (sidecar,) = world.sidecars()
+        before = await world.repo.fetch_body(sidecar.id)
+        await world.historian.sweep({chapter.id})  # nothing changed
+        assert await world.repo.fetch_body(sidecar.id) == before
+
+    async def test_reverting_to_base_removes_the_pending_revision(
+        self,
+    ) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        await world.repo.update_node(chapter.id, body=OPENING)  # full undo
+        await world.historian.sweep({chapter.id})
+        records = world.historian.history(chapter.id)
+        assert [r.author_kind for r in records] == [revisions.AUTHOR_MODEL]
+        # And the on-disk log agrees after a rebuild.
+        fresh = NodeHistorian(world.repo, now=lambda: "T9")
+        await fresh.rebuild()
+        assert len(fresh.history(chapter.id)) == 1
+
+    async def test_keyframe_cadence_survives_coalescing(self) -> None:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING)
+        # March the log to seq 19 with alternating model bodies.
+        for i in range(19):
+            await world.repo.update_node(
+                chapter.id, body=f"{OPENING}\n\nFiller paragraph {i} words."
+            )
+            await world.historian.record_bot_revision(
+                chapter.id, author_detail="m",
+            )
+        assert world.historian.history(chapter.id)[-1].seq == 19
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})  # human seq 20 -> keyframe
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{REVISED}")
+        await world.historian.sweep({chapter.id})  # coalesces, still seq 20
+        tail = world.historian.history(chapter.id)[-1]
+        assert (tail.seq, tail.kind) == (20, revisions.KIND_KEYFRAME)
+
+    async def test_coalescing_re_carries_tail_only_texts(self) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        await world.repo.update_node(
+            chapter.id, body=f"{OPENING}\n\n{MIDDLE}\n\n{REVISED}"
+        )
+        await world.historian.sweep({chapter.id})
+        texts = revisions.texts_of(world.historian.history(chapter.id))
+        assert texts[_h(MIDDLE)]  # first seen in the dropped tail, re-carried
+        assert texts[_h(REVISED)]
+
+    async def test_rebuild_then_human_edits_keep_coalescing(self) -> None:
+        world, chapter = await self._chapter_world()
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        fresh = NodeHistorian(world.repo, now=lambda: "T9")
+        await fresh.rebuild()
+        await world.repo.update_node(
+            chapter.id, body=f"{OPENING}\n\n{MIDDLE}\n\n{REVISED}"
+        )
+        await fresh.sweep({chapter.id})
+        records = fresh.history(chapter.id)
+        assert [r.author_kind for r in records] == [
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+        ]
+
+    async def test_the_sole_first_revision_coalesces(self) -> None:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING)
+        await world.historian.sweep({chapter.id})  # human seq-1 keyframe
+        await world.repo.update_node(chapter.id, body=f"{OPENING}\n\n{MIDDLE}")
+        await world.historian.sweep({chapter.id})
+        (record,) = world.historian.history(chapter.id)
+        assert (record.seq, record.kind) == (1, revisions.KIND_KEYFRAME)
+        assert record.author_kind == revisions.AUTHOR_HUMAN
+
+
+class TestSpanMarks:
+    """WP46: token-ranged marks and the verbatim-run locked guard."""
+
+    async def _tracked(self) -> tuple[World, Node, list[str]]:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING, MIDDLE)
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        tokens = revisions.block_tokens(revisions.normalize_block(OPENING))
+        return world, chapter, tokens
+
+    async def test_a_ranged_mark_sets_only_its_tokens(self) -> None:
+        world, chapter, tokens = await self._tracked()
+        await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user", start=0, end=3,
+        )
+        state = world.historian.token_states(chapter.id)[_h(OPENING)]
+        assert state.intent[:3] == ("locked",) * 3
+        assert set(state.intent[3:]) == {"flexible"}
+        badge = world.historian.section_states(chapter.id)[_h(OPENING)]
+        assert badge.intent == "locked"  # one locked token flags the block
+
+    async def test_one_sided_and_out_of_range_marks_are_prompts(self) -> None:
+        world, chapter, tokens = await self._tracked()
+        with pytest.raises(GraphContextError, match="BOTH start and end"):
+            await world.historian.record_mark(
+                chapter.id, kind="status", block_hash=_h(OPENING),
+                value="approved", by="user", start=2,
+            )
+        with pytest.raises(GraphContextError, match=f"0..{len(tokens)}"):
+            await world.historian.record_mark(
+                chapter.id, kind="status", block_hash=_h(OPENING),
+                value="approved", by="user", start=0, end=len(tokens) + 9,
+            )
+
+    async def test_re_marking_an_already_set_range_writes_nothing(self) -> None:
+        world, chapter, _ = await self._tracked()
+        await world.historian.record_mark(
+            chapter.id, kind="status", block_hash=_h(OPENING),
+            value="approved", by="user", start=1, end=4,
+        )
+        (sidecar,) = world.sidecars()
+        before = await world.repo.fetch_body(sidecar.id)
+        await world.historian.record_mark(
+            chapter.id, kind="status", block_hash=_h(OPENING),
+            value="approved", by="user", start=2, end=3,  # inside the range
+        )
+        assert await world.repo.fetch_body(sidecar.id) == before
+
+    async def test_the_model_may_edit_around_a_locked_run(self) -> None:
+        world, chapter, tokens = await self._tracked()
+        await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user", start=0, end=4,
+        )
+        run = "".join(tokens[:4]).strip()
+        # Rewriting the REST of the paragraph keeps the run verbatim.
+        world.historian.check_body_update(
+            chapter.id, f"{run} and then everything changed.\n\n{MIDDLE}"
+        )
+        # Touching the run itself is refused, naming its text.
+        with pytest.raises(LockedSectionsChanged) as exc:
+            world.historian.check_body_update(chapter.id, MIDDLE)
+        assert run in str(exc.value)
+
+    async def test_marks_survive_via_rebuild(self) -> None:
+        world, chapter, _ = await self._tracked()
+        await world.historian.record_mark(
+            chapter.id, kind="status", block_hash=_h(OPENING),
+            value="approved", by="user", start=0, end=2,
+        )
+        fresh = NodeHistorian(world.repo, now=lambda: "T9")
+        await fresh.rebuild()
+        state = fresh.token_states(chapter.id)[_h(OPENING)]
+        assert state.status[:2] == ("approved", "approved")
+
+
+class TestRawTextMigration:
+    """ADR 054: a pre-upgrade sidecar stores NORMALIZED block texts; the
+    first post-upgrade record (rebuild's catch-up included) re-emits the
+    live raw text on the same hashes -- no wipe, no version gate."""
+
+    HEADING = "## The Gate\nIt stayed barred through the siege."
+
+    async def _v1_world(self) -> tuple[World, Node]:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(self.HEADING, MIDDLE)
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        # Rewrite the sidecar as a v1 log: same records, normalized texts.
+        sidecar = world.sidecars()[0]
+        parsed = revisions.parse_log(await world.repo.fetch_body(sidecar.id))
+        v1_entries = tuple(
+            revisions.RevisionRecord(
+                seq=e.seq, at=e.at, author_kind=e.author_kind,
+                author_detail=e.author_detail, kind=e.kind, hashes=e.hashes,
+                ops=e.ops,
+                new_blocks={
+                    h: revisions.normalize_block(t)
+                    for h, t in e.new_blocks.items()
+                },
+            ) if isinstance(e, revisions.RevisionRecord) else e
+            for e in parsed.entries
+        )
+        await world.repo.update_node(
+            sidecar.id, body=revisions.render_log(v1_entries)
+        )
+        return world, chapter
+
+    async def test_rebuild_refreshes_normalized_texts_to_raw(self) -> None:
+        world, chapter = await self._v1_world()
+        await world.historian.rebuild()
+        texts = revisions.texts_of(world.historian.history(chapter.id))
+        assert self.HEADING in texts.values()  # raw again, marker intact
+
+    async def test_the_refresh_is_hash_stable_and_once(self) -> None:
+        world, chapter = await self._v1_world()
+        await world.historian.rebuild()
+        hashes_after = revisions.current_hashes(
+            world.historian.history(chapter.id)
+        )
+        body = await world.repo.fetch_body(chapter.id)
+        assert hashes_after == tuple(
+            h for h, _ in revisions.body_blocks(body)
+        )
+        # A second catch-up finds nothing stale: no new record.
+        before = len(world.historian.history(chapter.id))
+        assert not await world.historian.record_external_revision(chapter.id)
+        assert len(world.historian.history(chapter.id)) == before

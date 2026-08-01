@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prose review</title>
+<title>Prose editor</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #667085;
@@ -8,6 +8,8 @@
     --err-bg: #fdecea; --code: #f3f4f7; --ok: #12855b; --ok-bg: #e7f5ef;
     --warn: #8a5b00; --warn-bg: #fdf3e0;
     --add-bg: #e7f5ef; --del-bg: #fdecea;
+    --ink-bg: #ede7fb;  /* human-typed words: lavender, distinct from
+                           the green/amber/red state highlights */
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -16,6 +18,7 @@
       --err-bg: #3a1f1c; --code: #12151a; --ok: #4bd6a0; --ok-bg: #17342a;
       --warn: #e0b24d; --warn-bg: #363018;
       --add-bg: #17342a; --del-bg: #3a1f1c;
+      --ink-bg: #2b2343;
     }
   }
   * { box-sizing: border-box; }
@@ -34,6 +37,9 @@
   header a { color: var(--accent); text-decoration: none; font-size: 13px; }
   header a:hover { text-decoration: underline; }
   .spacer { flex: 1 1 auto; }
+  #save-state { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #save-state.dirty { color: var(--warn); }
+  #save-state.err { color: var(--err); }
   main { padding: 14px; max-width: 760px; margin: 0 auto; }
   h2 { font-size: 15px; margin: 18px 2px 8px; }
   a { color: var(--accent); text-decoration: none; }
@@ -48,6 +54,7 @@
   }
   .banner.warn { background: var(--warn-bg); color: var(--warn); }
   .banner.err { background: var(--err-bg); color: var(--err); }
+  .banner .btn-row { margin-top: 6px; }
 
   .row {
     display: block; background: var(--panel); border: 1px solid var(--line);
@@ -72,6 +79,11 @@
     color: var(--muted); font-size: 12px; align-items: center; }
   .legend i { display: inline-block; width: 12px; height: 12px;
     border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+  .legend mark { border-radius: 3px; color: inherit; }
+  .legend mark.st-approved { background: var(--ok-bg); }
+  .legend mark.st-locked { background: var(--err-bg); }
+  .legend mark.st-needs { background: var(--warn-bg); }
+  .legend mark.ink-human { background: var(--ink-bg); }
 
   .timeline { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
   .timeline a {
@@ -84,20 +96,47 @@
   .timeline a.human { color: var(--ok); }
   .timeline a:hover { text-decoration: none; border-color: var(--accent); }
 
-  .block-card {
-    background: var(--panel); border: 1px solid var(--line);
-    border-left: 4px solid var(--line); border-radius: 9px;
-    padding: 10px 14px; margin: 0 0 10px; cursor: pointer;
-  }
-  .block-card.model { border-left-color: var(--accent); }
-  .block-card.human { border-left-color: var(--ok); }
-  .block-card.selected { outline: 2px solid var(--accent); }
-  .block-card .meta {
-    display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
-    font-size: 11.5px; color: var(--muted); margin-bottom: 6px;
+  /* One slim strip: the paragraph under the caret (blame + badges). */
+  #seg-info {
+    font-size: 11.5px; color: var(--muted); margin: 0 2px 8px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    min-height: 18px; display: flex; flex-wrap: wrap; gap: 4px 10px;
+    align-items: center;
   }
-  .block-card .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* ---- the editor ---- */
+  #editor-host {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; overflow: hidden;
+  }
+  .cm-editor { font: 16px/1.75 Georgia, "Times New Roman", serif; }
+  .cm-editor.cm-focused { outline: none; }
+  .cm-content { padding: 16px 18px 40vh; caret-color: var(--ink); }
+  .cm-line { padding: 0; }
+  .cm-cursor { border-left-color: var(--ink); }
+  .cm-editor .cm-selectionBackground,
+  .cm-editor.cm-focused .cm-selectionBackground {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  /* markdown syntax: readable raw source, markup dimmed via lezer tags */
+  .tok-heading { font-weight: 700; font-size: 1.25em; }
+  .tok-emphasis { font-style: italic; }
+  .tok-strong { font-weight: 700; }
+  .tok-monospace, .tok-literal {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .85em; background: var(--code); border-radius: 3px;
+  }
+  .tok-meta, .tok-processing { color: var(--muted); }
+  .tok-link, .tok-url { color: var(--accent); }
+  /* review-state highlights: one background per word run, priority
+     locked > needs_change > approved > human-typed (ADR 053 amendment) */
+  .cm-ink { background: var(--ink-bg); border-radius: 3px; }
+  .cm-approved { background: var(--ok-bg); border-radius: 3px; }
+  .cm-needs { background: var(--warn-bg); border-radius: 3px; }
+  .cm-locked { background: var(--err-bg); border-radius: 3px; }
+  /* blame tick: first line of each paragraph, no layout shift */
+  .cm-blame-model { box-shadow: inset 3px 0 var(--accent); }
+  .cm-blame-human { box-shadow: inset 3px 0 var(--ok); }
 
   .diff-pair {
     background: var(--panel); border: 1px solid var(--line);
@@ -135,6 +174,8 @@
     font-weight: 600; }
   button.close { background: none; border: none; color: var(--muted);
     min-height: 28px; padding: 2px 8px; }
+  button.mini { min-height: 28px; padding: 2px 10px; font-size: 12px; }
+  button.mini.on { border-color: var(--accent); color: var(--accent); }
 
   #toast {
     position: fixed; left: 50%; transform: translateX(-50%);
@@ -147,10 +188,11 @@
 </style>
 
 <header>
-  <h1><a href="#/" id="home">Prose review</a></h1>
+  <h1><a href="#/" id="home">Prose editor</a></h1>
   <a href="./">inspection</a>
   <a href="logs">turn log</a>
   <span class="spacer"></span>
+  <span id="save-state"></span>
   <span class="note" id="head-note"></span>
 </header>
 
@@ -158,7 +200,8 @@
 
 <div id="bar"><div class="inner">
   <div class="which">
-    <span id="bar-hash"></span>
+    <span id="bar-which"></span>
+    <button class="mini" id="bar-whole" title="apply to whole paragraphs">¶ whole</button>
     <span class="spacer"></span>
     <button class="close" id="bar-close">close</button>
   </div>
@@ -167,317 +210,717 @@
 </div></div>
 <div id="toast"></div>
 
-<script>
+<script type="module">
 "use strict";
-(function () {
-  const main = document.getElementById("main");
-  const bar = document.getElementById("bar");
-  const STATUS_VALUES = ["raw_ai", "approved", "human"];
-  const INTENT_VALUES = ["flexible", "locked", "needs_change"];
-  const TOKEN_KEY = "gc_prose_token";
+import * as CM from "./static/codemirror.bundle.js";
 
-  let writesEnabled = false;
-  let knowWrites = false;  // spaces fetched at least once this page-load
-  let selected = null;     // {space, node, hash, status, intent, card}
+const main = document.getElementById("main");
+const bar = document.getElementById("bar");
+const STATUS_VALUES = ["raw_ai", "approved", "human"];
+const INTENT_VALUES = ["flexible", "locked", "needs_change"];
+const TOKEN_KEY = "gc_prose_token";
+const AUTOSAVE_MS = 2500;
 
-  function el(tag, cls, text) {
-    const n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text != null) n.textContent = text;
-    return n;
+let writesEnabled = false;
+let knowWrites = false;   // spaces fetched at least once this page-load
+
+// The open document view, or null. One object owns everything the doc
+// view holds live: the CM view, the SSE stream, dirty/save state, and
+// the latest server payload (with code-point offsets pre-converted to
+// UTF-16 -- the wire speaks Python code points, CM speaks JS units).
+let doc = null;
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function link(href, text, cls) {
+  const a = el("a", cls, text);
+  a.href = href;
+  return a;
+}
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString([], { hour12: false });
+}
+function shortHash(h) { return h ? h.slice(0, 8) : ""; }
+
+let toastTimer = null;
+function toast(message) {
+  const node = document.getElementById("toast");
+  node.textContent = message;
+  node.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove("show"), 2600);
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(url + " -> " + res.status);
+  return res.json();
+}
+
+async function ensureWriteState() {
+  if (knowWrites) return;
+  const data = await fetchJson("api/prose/spaces");
+  writesEnabled = !!data.writes_enabled;
+  knowWrites = true;
+}
+
+// ---- writes (shared 401-prompt / gate handling) ---------------------------
+
+class StaleWrite extends Error {}
+
+async function postWrite(path, body, retried) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + token,
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401 && !retried) {
+    const entered = prompt("Write token (GC_PROSE_TOKEN):");
+    if (entered == null) return null;
+    localStorage.setItem(TOKEN_KEY, entered.trim());
+    return postWrite(path, body, true);
   }
-  function link(href, text, cls) {
-    const a = el("a", cls, text);
-    a.href = href;
-    return a;
-  }
-  function fmtTime(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? iso : d.toLocaleString([], { hour12: false });
-  }
-  function shortHash(h) { return h ? h.slice(0, 8) : ""; }
+  if (res.status === 401) { toast("token rejected"); return null; }
+  if (res.status === 403) { toast("writes are disabled"); return null; }
+  if (res.status === 409) throw new StaleWrite();
+  if (!res.ok) { toast("write failed: " + res.status); return null; }
+  return res.json();
+}
 
-  let toastTimer = null;
-  function toast(message) {
-    const node = document.getElementById("toast");
-    node.textContent = message;
-    node.classList.add("show");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => node.classList.remove("show"), 2600);
+// ---- code point <-> UTF-16 offset conversion ------------------------------
+// The wire's offsets (segments, spans, start_char/end_char) count Python
+// code points; CodeMirror positions count JS UTF-16 units. Identity when
+// the body has no astral characters (the common case).
+
+function offsetMaps(text) {
+  let hasAstral = false;
+  for (const ch of text) if (ch.length === 2) { hasAstral = true; break; }
+  if (!hasAstral) {
+    return { toU16: (cp) => cp, toCp: (u16) => u16 };
   }
-
-  async function fetchJson(url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(url + " -> " + res.status);
-    return res.json();
+  const cpToU16 = [0];
+  let units = 0;
+  for (const ch of text) {
+    units += ch.length;
+    cpToU16.push(units);
   }
-
-  async function ensureWriteState() {
-    if (knowWrites) return;
-    const data = await fetchJson("api/prose/spaces");
-    writesEnabled = !!data.writes_enabled;
-    knowWrites = true;
+  const u16ToCp = new Array(text.length + 1);
+  for (let cp = 0; cp < cpToU16.length; cp++) u16ToCp[cpToU16[cp]] = cp;
+  let last = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (u16ToCp[i] == null) u16ToCp[i] = last; else last = u16ToCp[i];
   }
+  return {
+    toU16: (cp) => cpToU16[Math.max(0, Math.min(cp, cpToU16.length - 1))],
+    toCp: (u16) => u16ToCp[Math.max(0, Math.min(u16, text.length))],
+  };
+}
 
-  // ---- marks (the one write) ----------------------------------------------
+// ---- decorations ----------------------------------------------------------
 
-  async function postMark(space, node, hash, kind, value, retried) {
-    const token = localStorage.getItem(TOKEN_KEY) || "";
-    const res = await fetch("api/prose/mark", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + token,
-      },
-      body: JSON.stringify({ space, node, hash, kind, value }),
+const setAnnotations = CM.StateEffect.define();
+
+const annotationsField = CM.StateField.define({
+  create: () => CM.Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const effect of tr.effects) {
+      if (effect.is(setAnnotations)) value = effect.value;
+    }
+    return value;
+  },
+  provide: (field) => CM.EditorView.decorations.from(field),
+});
+
+function spanClass(status, intent, author) {
+  if (intent === "locked") return "cm-locked";
+  if (intent === "needs_change") return "cm-needs";
+  if (status === "approved") return "cm-approved";
+  // Lavender covers both human PROVENANCE: authorship (typed by the
+  // human) and a human status mark. raw_ai stays unhighlighted -- its
+  // meaning is "unreviewed model text", the page's neutral state.
+  if (status === "human" || author === "human") return "cm-ink";
+  return "";
+}
+
+function buildDecorations(data, state) {
+  const ranges = [];
+  for (const span of data.spans) {
+    const cls = spanClass(span[3], span[4], span[2]);
+    if (!cls) continue;
+    const from = data.map.toU16(span[0]);
+    let to = data.map.toU16(span[1]);
+    // trim the run's trailing whitespace out of the highlight
+    while (to > from && /\s/.test(state.doc.sliceString(to - 1, to))) to--;
+    if (to > from && to <= state.doc.length) {
+      ranges.push(CM.Decoration.mark({ class: cls }).range(from, to));
+    }
+  }
+  for (const segment of data.segments) {
+    if (!segment.blame) continue;
+    const from = data.map.toU16(segment.start);
+    if (from > state.doc.length) continue;
+    const line = state.doc.lineAt(from);
+    ranges.push(CM.Decoration.line({
+      class: "cm-blame-" + segment.blame.author,
+    }).range(line.from));
+  }
+  return CM.Decoration.set(ranges, true);
+}
+
+// ---- the action bar (marks over the live selection) -----------------------
+
+let wholeMode = false;
+
+function closeBar() {
+  bar.classList.remove("open");
+  document.getElementById("bar-which").textContent = "";
+}
+
+function segmentsU16(data) {
+  return data.segments.map((s) => ({
+    seg: s,
+    from: data.map.toU16(s.start),
+    to: data.map.toU16(s.end),
+  }));
+}
+
+function currentTargets() {
+  if (!doc || !writesEnabled) return null;
+  const sel = doc.view.state.selection.main;
+  if (sel.empty) return null;
+  const targets = [];
+  for (const { seg, from, to } of segmentsU16(doc.data)) {
+    const ovFrom = Math.max(sel.from, from);
+    const ovTo = Math.min(sel.to, to);
+    if (ovFrom >= ovTo) continue;  // the blank gap between paragraphs
+    targets.push({
+      seg,
+      whole: ovFrom <= from && ovTo >= to,
+      startCp: doc.data.map.toCp(ovFrom) - seg.start,
+      endCp: doc.data.map.toCp(ovTo) - seg.start,
     });
-    if (res.status === 401 && !retried) {
-      const entered = prompt("Write token (GC_PROSE_TOKEN):");
-      if (entered == null) return null;
-      localStorage.setItem(TOKEN_KEY, entered.trim());
-      return postMark(space, node, hash, kind, value, true);
-    }
-    if (res.status === 401) { toast("token rejected"); return null; }
-    if (res.status === 403) { toast("writes are disabled"); return null; }
-    if (res.status === 409) {
-      toast("section changed elsewhere -- reloading");
-      await route();
-      return null;
-    }
-    if (!res.ok) { toast("mark failed: " + res.status); return null; }
-    return res.json();
   }
+  return targets.length ? targets : null;
+}
 
-  // ---- the action bar ------------------------------------------------------
-
-  function closeBar() {
-    if (selected && selected.card) selected.card.classList.remove("selected");
-    selected = null;
-    bar.classList.remove("open");
+function selectionAgreedValue(kind) {
+  // The value the SELECTION's own tokens agree on (from the server's
+  // span runs), not the paragraph badge -- a badge only flips when the
+  // whole paragraph agrees, so it misreports ranged marks.
+  if (!doc) return null;
+  const sel = doc.view.state.selection.main;
+  const index = kind === "status" ? 3 : 4;
+  const seen = new Set();
+  for (const span of doc.data.spans) {
+    const from = doc.data.map.toU16(span[0]);
+    const to = doc.data.map.toU16(span[1]);
+    if (from < sel.to && to > sel.from) seen.add(span[index]);
   }
-  document.getElementById("bar-close").addEventListener("click", closeBar);
+  return seen.size === 1 ? seen.values().next().value : null;
+}
 
-  function buildBarRow(rowId, values, kind) {
-    const row = document.getElementById(rowId);
-    while (row.children.length > 1) row.removeChild(row.lastChild);
-    for (const value of values) {
-      const button = el("button", null, value.replace("_", " "));
-      const current = kind === "status"
-        ? selected.status === value : selected.intent === value;
-      if (current) button.classList.add("current");
-      button.addEventListener("click", async () => {
-        const result = await postMark(
-          selected.space, selected.node, selected.hash, kind, value);
-        if (!result || !selected) return;
-        selected.status = result.status;
-        selected.intent = result.intent;
-        decorateCard(selected.card, result.status, result.intent);
-        buildBarRow("bar-status", STATUS_VALUES, "status");
-        buildBarRow("bar-intent", INTENT_VALUES, "intent");
-      });
-      row.appendChild(button);
+function renderBarButtons(row, values, kind) {
+  for (const old of row.querySelectorAll("button")) old.remove();
+  const agreed = selectionAgreedValue(kind);
+  for (const value of values) {
+    const btn = el("button", value === agreed ? "current" : "",
+      value.replace("_", " "));
+    btn.addEventListener("click", () => applyMarks(kind, value));
+    row.appendChild(btn);
+  }
+}
+
+function updateBar() {
+  const targets = currentTargets();
+  if (!targets) { closeBar(); return; }
+  const which = document.getElementById("bar-which");
+  const allWhole = wholeMode || targets.every((t) => t.whole);
+  if (targets.length === 1) {
+    const t = targets[0];
+    which.textContent = "§" + shortHash(t.seg.hash) +
+      (allWhole ? " · whole paragraph" : " · selection");
+  } else {
+    which.textContent = targets.length + " paragraphs" +
+      (allWhole ? "" : " · selection");
+  }
+  document.getElementById("bar-whole").classList.toggle("on", wholeMode);
+  renderBarButtons(
+    document.getElementById("bar-status"), STATUS_VALUES, "status");
+  renderBarButtons(
+    document.getElementById("bar-intent"), INTENT_VALUES, "intent");
+  bar.classList.add("open");
+}
+
+async function applyMarks(kind, value) {
+  const targets = currentTargets();
+  if (!targets || !doc) return;
+  try {
+    await ensureSaved();
+  } catch (err) {
+    if (err instanceof StaleWrite) { showConflict(); return; }
+    throw err;
+  }
+  const marks = targets.map((t) => {
+    const mark = { hash: t.seg.hash, kind, value };
+    if (!wholeMode && !t.whole) {
+      mark.start_char = t.startCp;
+      mark.end_char = t.endCp;
     }
-  }
-
-  function openBar(entry) {
-    closeBar();
-    selected = entry;
-    entry.card.classList.add("selected");
-    document.getElementById("bar-hash").textContent =
-      "§" + shortHash(entry.hash);
-    buildBarRow("bar-status", STATUS_VALUES, "status");
-    buildBarRow("bar-intent", INTENT_VALUES, "intent");
-    bar.classList.add("open");
-  }
-
-  function decorateCard(card, status, intent) {
-    const meta = card.querySelector(".meta");
-    for (const badge of meta.querySelectorAll(".badge")) badge.remove();
-    if (status !== "raw_ai") {
-      meta.appendChild(el("span", "badge " + status,
-        status.replace("_", " ")));
-    } else {
-      meta.appendChild(el("span", "badge raw_ai", "raw ai"));
-    }
-    if (intent !== "flexible") {
-      meta.appendChild(el("span", "badge " + intent,
-        intent.replace("_", " ")));
-    }
-  }
-
-  // ---- views ---------------------------------------------------------------
-
-  async function renderHome() {
-    closeBar();
-    main.textContent = "";
-    const data = await fetchJson("api/prose/spaces");
-    writesEnabled = !!data.writes_enabled;
-    knowWrites = true;
-    document.getElementById("head-note").textContent =
-      writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
-    if (!data.spaces.length) {
-      main.appendChild(el("p", "note",
-        "No live spaces. This page needs the consolidated server " +
-        "(orchestrator.serve) with at least one bound space whose Space " +
-        "Context lists Tracked types."));
+    return mark;
+  });
+  let fresh;
+  try {
+    fresh = await postWrite("api/prose/marks", {
+      space: doc.space, node: doc.node, base: doc.data.base, marks,
+    });
+  } catch (err) {
+    if (err instanceof StaleWrite) {
+      toast("document changed elsewhere -- refreshing");
+      await refetchDoc();
       return;
     }
-    for (const space of data.spaces) {
-      main.appendChild(el("h2", null, space.label));
-      if (space.error)
-        main.appendChild(el("div", "banner warn", space.error));
-      if (!space.nodes.length)
-        main.appendChild(el("p", "note",
-          "No tracked nodes yet (Space Context > Tracked types, then a " +
-          "first revision)."));
-      for (const node of space.nodes) {
-        const row = link("#/node/" + encodeURIComponent(space.space_id) +
-          "/" + encodeURIComponent(node.id), "", "row");
-        row.appendChild(el("b", null, node.name));
-        row.appendChild(el("div", "sub", node.revisions + " revision" +
-          (node.revisions === 1 ? "" : "s") +
-          (node.last_at ? " · last " + node.last_author +
-            " · " + fmtTime(node.last_at) : "")));
-        main.appendChild(row);
-      }
+    throw err;
+  }
+  if (!fresh) return;
+  applyDocPayload(fresh);
+  toast(kind + " → " + value.replace("_", " "));
+}
+
+// ---- saving ---------------------------------------------------------------
+
+function saveState(text, cls) {
+  const node = document.getElementById("save-state");
+  node.textContent = text;
+  node.className = cls || "";
+}
+
+function markDirty() {
+  if (!doc) return;
+  doc.dirty = true;
+  saveState("unsaved changes", "dirty");
+  clearTimeout(doc.autosaveTimer);
+  doc.autosaveTimer = setTimeout(() => { save().catch(() => {}); },
+    AUTOSAVE_MS);
+}
+
+async function save() {
+  if (!doc || !doc.dirty || doc.saving || !writesEnabled) return;
+  doc.saving = true;
+  const body = doc.view.state.doc.toString();
+  saveState("saving…");
+  try {
+    const fresh = await postWrite("api/prose/save", {
+      space: doc.space, node: doc.node, base: doc.data.base, body,
+    });
+    if (!fresh) { saveState("save failed", "err"); return; }
+    // Edits typed while the save was in flight keep the buffer dirty;
+    // the next autosave picks them up against the new base.
+    const stillDirty = doc.view.state.doc.toString() !== body;
+    doc.dirty = stillDirty;
+    applyDocPayload(fresh);
+    if (stillDirty) markDirty(); else saveState("saved");
+  } catch (err) {
+    if (err instanceof StaleWrite) { showConflict(); return; }
+    saveState("save failed", "err");
+    throw err;
+  } finally {
+    doc.saving = false;
+  }
+}
+
+async function ensureSaved() {
+  if (!doc) return;
+  while (doc.saving) await new Promise((r) => setTimeout(r, 60));
+  if (doc.dirty) {
+    clearTimeout(doc.autosaveTimer);
+    await save();
+  }
+  while (doc && doc.saving) await new Promise((r) => setTimeout(r, 60));
+}
+
+// ---- conflicts (a 409'd save: the node changed under the page) ------------
+
+function showConflict() {
+  if (!doc || doc.conflictOpen) return;
+  doc.conflictOpen = true;
+  saveState("conflict", "err");
+  const banner = el("div", "banner err",
+    "This document changed elsewhere while you were editing.");
+  const row = el("div", "btn-row");
+  const mine = el("button", null, "keep mine (overwrite)");
+  mine.addEventListener("click", async () => {
+    const body = doc.view.state.doc.toString();
+    const current = await fetchJson("api/prose/doc?space=" +
+      encodeURIComponent(doc.space) + "&node=" + encodeURIComponent(doc.node));
+    const fresh = await postWrite("api/prose/save", {
+      space: doc.space, node: doc.node, base: current.base, body,
+    }).catch(() => null);
+    banner.remove();
+    doc.conflictOpen = false;
+    if (fresh) { doc.dirty = false; applyDocPayload(fresh); saveState("saved"); }
+  });
+  const theirs = el("button", null, "take theirs (discard mine)");
+  theirs.addEventListener("click", async () => {
+    banner.remove();
+    doc.conflictOpen = false;
+    doc.dirty = false;
+    await refetchDoc();
+    saveState("");
+  });
+  row.appendChild(mine);
+  row.appendChild(theirs);
+  banner.appendChild(row);
+  doc.above.insertBefore(banner, doc.above.firstChild);
+}
+
+// ---- the document view ----------------------------------------------------
+
+function minimalChange(oldText, newText) {
+  let start = 0;
+  const minLen = Math.min(oldText.length, newText.length);
+  while (start < minLen && oldText[start] === newText[start]) start++;
+  let endOld = oldText.length;
+  let endNew = newText.length;
+  while (endOld > start && endNew > start
+         && oldText[endOld - 1] === newText[endNew - 1]) { endOld--; endNew--; }
+  return { from: start, to: endOld, insert: newText.slice(start, endNew) };
+}
+
+function renderTimeline(strip, data, space, node) {
+  strip.textContent = "";
+  for (const rev of data.revisions) {
+    const chip = link("#/node/" + encodeURIComponent(space) + "/" +
+      encodeURIComponent(node) + "/rev/" + rev.seq,
+      "r" + rev.seq + " " + rev.author + " +" + rev.added +
+      " −" + rev.removed, rev.author);
+    chip.title = rev.detail + " · " + fmtTime(rev.at);
+    strip.appendChild(chip);
+  }
+}
+
+function renderSegInfo(info) {
+  info.textContent = "";
+  if (!doc) return;
+  const head = doc.view.state.selection.main.head;
+  const hit = segmentsU16(doc.data).find(
+    ({ from, to }) => head >= from && head <= to);
+  if (!hit) return;
+  const seg = hit.seg;
+  info.appendChild(el("span", null, "§" + shortHash(seg.hash)));
+  info.appendChild(el("span", null, seg.blame
+    ? seg.blame.detail + " · r" + seg.blame.seq + " · " + fmtTime(seg.blame.at)
+    : "not yet recorded"));
+  info.appendChild(el("span", "badge " + seg.status,
+    seg.status.replace("_", " ")));
+  if (seg.intent !== "flexible") {
+    info.appendChild(el("span", "badge " + seg.intent,
+      seg.intent.replace("_", " ")));
+  }
+}
+
+function applyDocPayload(fresh, reconcileText) {
+  if (!doc) return;
+  fresh.map = offsetMaps(fresh.body);
+  doc.data = fresh;
+  if (reconcileText) {
+    const current = doc.view.state.doc.toString();
+    if (current !== fresh.body) {
+      doc.view.dispatch({ changes: minimalChange(current, fresh.body) });
     }
   }
+  doc.view.dispatch({
+    effects: setAnnotations.of(buildDecorations(fresh, doc.view.state)),
+  });
+  renderTimeline(doc.timeline, fresh, doc.space, doc.node);
+  renderSegInfo(doc.segInfo);
+  // An effects-only transaction doesn't fire the selection listener,
+  // so the action bar's .current buttons must re-render here or they
+  // show the PRE-mark state forever.
+  updateBar();
+}
 
-  async function renderNode(space, node) {
-    closeBar();
-    await ensureWriteState();
-    main.textContent = "";
-    const view = await fetchJson("api/prose/node?space=" +
-      encodeURIComponent(space) + "&node=" + encodeURIComponent(node));
-    const crumbs = el("div", "crumbs");
-    crumbs.appendChild(link("#/", "spaces"));
-    crumbs.appendChild(document.createTextNode(" / " + view.name));
-    main.appendChild(crumbs);
+async function refetchDoc() {
+  if (!doc) return;
+  const fresh = await fetchJson("api/prose/doc?space=" +
+    encodeURIComponent(doc.space) + "&node=" + encodeURIComponent(doc.node));
+  applyDocPayload(fresh, true);
+}
 
-    const legend = el("div", "legend");
-    for (const cls of ["model", "human"]) {
-      const item = el("span");
-      const swatch = el("i");
-      swatch.style.background = cls === "model"
-        ? "var(--accent)" : "var(--ok)";
-      item.appendChild(swatch);
-      item.appendChild(document.createTextNode(cls + "-written"));
-      legend.appendChild(item);
+function openEvents(space) {
+  const source = new EventSource(
+    "api/prose/events?space=" + encodeURIComponent(space));
+  source.onmessage = (event) => {
+    if (!doc) return;
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; }
+    if (payload.node !== doc.node) return;
+    if (payload.version === doc.data.version) return;  // our own write
+    if (doc.dirty || doc.saving) return;  // the save's 409 will surface it
+    refetchDoc().catch(() => {});
+  };
+  return source;
+}
+
+function closeDoc() {
+  if (!doc) return;
+  clearTimeout(doc.autosaveTimer);
+  if (doc.events) doc.events.close();
+  doc.view.destroy();
+  doc = null;
+  closeBar();
+  saveState("");
+}
+
+async function renderNode(space, node) {
+  closeDoc();
+  await ensureWriteState();
+  const data = await fetchJson("api/prose/doc?space=" +
+    encodeURIComponent(space) + "&node=" + encodeURIComponent(node));
+  data.map = offsetMaps(data.body);
+
+  const frag = document.createDocumentFragment();
+  const crumbs = el("div", "crumbs");
+  crumbs.appendChild(link("#/", "spaces"));
+  crumbs.appendChild(document.createTextNode(" / " + data.name));
+  frag.appendChild(crumbs);
+  const above = el("div");
+  frag.appendChild(above);
+
+  const legend = el("div", "legend");
+  for (const [cls, label] of [["ink-human", "human (typed / marked)"],
+                              ["st-approved", "approved"],
+                              ["st-locked", "locked"],
+                              ["st-needs", "needs change"]]) {
+    const item = el("span");
+    item.appendChild(el("mark", cls, label));
+    legend.appendChild(item);
+  }
+  legend.appendChild(el("span", null, writesEnabled
+    ? "type anywhere · select text to set status / intent"
+    : "read-only: set GC_PROSE_TOKEN to enable editing"));
+  frag.appendChild(legend);
+
+  const timeline = el("div", "timeline");
+  frag.appendChild(timeline);
+  const segInfo = el("div");
+  segInfo.id = "seg-info";
+  frag.appendChild(segInfo);
+  const host = el("div");
+  host.id = "editor-host";
+  frag.appendChild(host);
+
+  const highlight = CM.HighlightStyle.define([
+    { tag: CM.tags.heading, class: "tok-heading" },
+    { tag: CM.tags.emphasis, class: "tok-emphasis" },
+    { tag: CM.tags.strong, class: "tok-strong" },
+    { tag: CM.tags.monospace, class: "tok-monospace" },
+    { tag: CM.tags.meta, class: "tok-meta" },
+    { tag: CM.tags.processingInstruction, class: "tok-meta" },
+    { tag: CM.tags.link, class: "tok-link" },
+    { tag: CM.tags.url, class: "tok-url" },
+  ]);
+
+  let barTick = null;
+  const listener = CM.EditorView.updateListener.of((update) => {
+    if (!doc) return;
+    if (update.docChanged) markDirty();
+    if (update.selectionSet || update.docChanged) {
+      clearTimeout(barTick);
+      barTick = setTimeout(() => { updateBar(); renderSegInfo(segInfo); }, 120);
     }
-    legend.appendChild(el("span", null, writesEnabled
-      ? "tap a paragraph to set status / intent"
-      : "read-only: set GC_PROSE_TOKEN to enable marks"));
-    main.appendChild(legend);
+  });
 
-    if (view.revisions.length) {
-      const strip = el("div", "timeline");
-      for (const rev of view.revisions) {
-        const chip = link("#/node/" + encodeURIComponent(space) + "/" +
-          encodeURIComponent(node) + "/rev/" + rev.seq,
-          "r" + rev.seq + " " + rev.author + " +" + rev.added +
-          " −" + rev.removed, rev.author);
-        chip.title = rev.detail + " · " + fmtTime(rev.at);
-        strip.appendChild(chip);
-      }
-      main.appendChild(strip);
-    }
-
-    for (const block of view.blocks) {
-      const card = el("div", "block-card" +
-        (block.blame ? " " + block.blame.author : ""));
-      const meta = el("div", "meta");
-      meta.appendChild(el("span", null, "§" + shortHash(block.hash)));
-      if (block.blame) {
-        meta.appendChild(el("span", null,
-          block.blame.detail + " · r" + block.blame.seq +
-          " · " + fmtTime(block.blame.at)));
-      } else {
-        meta.appendChild(el("span", null, "not yet recorded"));
-      }
-      card.appendChild(meta);
-      card.appendChild(el("div", "text", block.text));
-      decorateCard(card, block.status, block.intent);
-      if (writesEnabled && block.blame) {
-        card.addEventListener("click", () => openBar({
-          space: space, node: node, hash: block.hash,
-          status: block.status, intent: block.intent, card: card,
-        }));
-      } else {
-        card.style.cursor = "default";
-      }
-      main.appendChild(card);
-    }
-    if (!view.blocks.length)
-      main.appendChild(el("p", "note", "The document body is empty."));
+  const extensions = [
+    CM.history(),
+    CM.drawSelection(),
+    CM.EditorView.lineWrapping,
+    CM.markdown(),
+    CM.syntaxHighlighting(highlight),
+    annotationsField,
+    listener,
+    CM.keymap.of([
+      {
+        key: "Mod-s",
+        run: () => { save().catch(() => {}); return true; },
+      },
+      ...CM.defaultKeymap,
+      ...CM.historyKeymap,
+    ]),
+  ];
+  if (!writesEnabled) {
+    extensions.push(CM.EditorState.readOnly.of(true));
+    extensions.push(CM.EditorView.editable.of(false));
   }
 
-  async function renderDiff(space, node, seq) {
-    closeBar();
-    main.textContent = "";
-    const diff = await fetchJson("api/prose/diff?space=" +
-      encodeURIComponent(space) + "&node=" + encodeURIComponent(node) +
-      "&seq=" + encodeURIComponent(seq));
-    const crumbs = el("div", "crumbs");
-    crumbs.appendChild(link("#/", "spaces"));
-    crumbs.appendChild(document.createTextNode(" / "));
-    crumbs.appendChild(link("#/node/" + encodeURIComponent(space) + "/" +
-      encodeURIComponent(node), "document"));
-    crumbs.appendChild(document.createTextNode(" / revision " + diff.seq));
-    main.appendChild(crumbs);
-    main.appendChild(el("p", "note", diff.detail + " · " + fmtTime(diff.at) +
-      " · historical text is shown normalized (headings flattened)"));
-    if (!diff.pairs.length)
-      main.appendChild(el("p", "note",
-        "No paragraph changes in this revision (a pure move keeps every " +
-        "paragraph's identity)."));
-    for (const pair of diff.pairs) {
-      const wrap = el("div", "diff-pair");
-      const meta = el("div", "meta");
-      const label = pair.new_hash
-        ? (pair.old_hash
-            ? "§" + shortHash(pair.old_hash) + " → §" +
-              shortHash(pair.new_hash)
-            : "new §" + shortHash(pair.new_hash))
-        : "deleted §" + shortHash(pair.old_hash);
-      meta.appendChild(el("span", null, label));
-      wrap.appendChild(meta);
-      for (const span of pair.spans) {
-        const kind = span[0];
-        const tag = kind === "add" ? "ins" : kind === "del" ? "del" : "span";
-        wrap.appendChild(el(tag, null, span[1]));
-      }
-      main.appendChild(wrap);
+  const state = CM.EditorState.create({ doc: data.body, extensions });
+  main.replaceChildren(frag);
+  const view = new CM.EditorView({ state, parent: host });
+
+  doc = {
+    space, node, data, view, above, timeline, segInfo,
+    dirty: false, saving: false, conflictOpen: false,
+    autosaveTimer: null, events: null,
+  };
+  view.dispatch({
+    effects: setAnnotations.of(buildDecorations(data, view.state)),
+  });
+  renderTimeline(timeline, data, space, node);
+  doc.events = openEvents(space);
+  document.getElementById("head-note").textContent =
+    writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
+}
+
+// ---- home + diff views (detached render, single swap) ---------------------
+
+async function renderHome() {
+  closeDoc();
+  const data = await fetchJson("api/prose/spaces");
+  writesEnabled = !!data.writes_enabled;
+  knowWrites = true;
+  document.getElementById("head-note").textContent =
+    writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
+  const frag = document.createDocumentFragment();
+  if (!data.spaces.length) {
+    frag.appendChild(el("p", "note",
+      "No live spaces. This page needs the consolidated server " +
+      "(orchestrator.serve) with at least one bound space whose Space " +
+      "Context lists Tracked types."));
+  }
+  for (const space of data.spaces) {
+    frag.appendChild(el("h2", null, space.label));
+    if (space.error)
+      frag.appendChild(el("div", "banner warn", space.error));
+    if (!space.nodes.length)
+      frag.appendChild(el("p", "note",
+        "No tracked nodes yet (Space Context > Tracked types, then a " +
+        "first revision)."));
+    for (const node of space.nodes) {
+      const row = link("#/node/" + encodeURIComponent(space.space_id) +
+        "/" + encodeURIComponent(node.id), "", "row");
+      row.appendChild(el("b", null, node.name));
+      row.appendChild(el("div", "sub", node.revisions + " revision" +
+        (node.revisions === 1 ? "" : "s") +
+        (node.last_at ? " · last " + node.last_author +
+          " · " + fmtTime(node.last_at) : "")));
+      frag.appendChild(row);
     }
   }
+  main.replaceChildren(frag);
+}
 
-  // ---- router --------------------------------------------------------------
-
-  async function route() {
-    const hash = location.hash || "#/";
-    try {
-      const diff = hash.match(/^#\/node\/([^/]+)\/([^/]+)\/rev\/(\d+)$/);
-      const node = hash.match(/^#\/node\/([^/]+)\/([^/]+)$/);
-      if (diff) {
-        await renderDiff(decodeURIComponent(diff[1]),
-          decodeURIComponent(diff[2]), diff[3]);
-      } else if (node) {
-        await renderNode(decodeURIComponent(node[1]),
-          decodeURIComponent(node[2]));
-      } else {
-        await renderHome();
-      }
-    } catch (err) {
-      main.textContent = "";
-      main.appendChild(el("div", "banner err",
-        "failed to load: " + err.message));
-      const back = el("p", "note");
-      back.appendChild(link("#/", "back to the space list"));
-      main.appendChild(back);
+async function renderDiff(space, node, seq) {
+  closeDoc();
+  const diff = await fetchJson("api/prose/diff?space=" +
+    encodeURIComponent(space) + "&node=" + encodeURIComponent(node) +
+    "&seq=" + encodeURIComponent(seq));
+  const frag = document.createDocumentFragment();
+  const crumbs = el("div", "crumbs");
+  crumbs.appendChild(link("#/", "spaces"));
+  crumbs.appendChild(document.createTextNode(" / "));
+  crumbs.appendChild(link("#/node/" + encodeURIComponent(space) + "/" +
+    encodeURIComponent(node), "document"));
+  crumbs.appendChild(document.createTextNode(" / revision " + diff.seq));
+  frag.appendChild(crumbs);
+  frag.appendChild(el("p", "note", diff.detail + " · " + fmtTime(diff.at)));
+  if (!diff.pairs.length)
+    frag.appendChild(el("p", "note",
+      "No paragraph changes in this revision (a pure move keeps every " +
+      "paragraph's identity)."));
+  for (const pair of diff.pairs) {
+    const wrap = el("div", "diff-pair");
+    const meta = el("div", "meta");
+    const label = pair.new_hash
+      ? (pair.old_hash
+          ? "§" + shortHash(pair.old_hash) + " → §" +
+            shortHash(pair.new_hash)
+          : "new §" + shortHash(pair.new_hash))
+      : "deleted §" + shortHash(pair.old_hash);
+    meta.appendChild(el("span", null, label));
+    wrap.appendChild(meta);
+    for (const span of pair.spans) {
+      const kind = span[0];
+      const tag = kind === "add" ? "ins" : kind === "del" ? "del" : "span";
+      wrap.appendChild(el(tag, null, span[1]));
     }
-    window.scrollTo(0, 0);
+    frag.appendChild(wrap);
   }
-  window.addEventListener("hashchange", route);
-  route();
-})();
+  main.replaceChildren(frag);
+}
+
+// ---- router ---------------------------------------------------------------
+
+let routing = false;
+async function route() {
+  if (routing) return;  // a hashchange mid-fetch must not interleave renders
+  routing = true;
+  const hash = location.hash || "#/";
+  try {
+    const diffMatch = hash.match(/^#\/node\/([^/]+)\/([^/]+)\/rev\/(\d+)$/);
+    const nodeMatch = hash.match(/^#\/node\/([^/]+)\/([^/]+)$/);
+    if (diffMatch) {
+      await renderDiff(decodeURIComponent(diffMatch[1]),
+        decodeURIComponent(diffMatch[2]), diffMatch[3]);
+    } else if (nodeMatch) {
+      await renderNode(decodeURIComponent(nodeMatch[1]),
+        decodeURIComponent(nodeMatch[2]));
+    } else {
+      await renderHome();
+    }
+  } catch (err) {
+    closeDoc();
+    const frag = document.createDocumentFragment();
+    frag.appendChild(el("div", "banner err",
+      "failed to load: " + err.message));
+    const back = el("p", "note");
+    back.appendChild(link("#/", "back to the space list"));
+    frag.appendChild(back);
+    main.replaceChildren(frag);
+  } finally {
+    routing = false;
+  }
+  window.scrollTo(0, 0);
+}
+
+document.getElementById("bar-close").addEventListener("click", () => {
+  if (doc) {
+    const head = doc.view.state.selection.main.head;
+    doc.view.dispatch({ selection: { anchor: head } });
+  }
+  closeBar();
+});
+document.getElementById("bar-whole").addEventListener("click", () => {
+  wholeMode = !wholeMode;
+  updateBar();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeBar();
+});
+window.addEventListener("beforeunload", (event) => {
+  if (doc && doc.dirty) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && doc && doc.dirty) {
+    save().catch(() => {});
+  }
+});
+window.addEventListener("hashchange", () => {
+  const leave = () => route();
+  if (doc && doc.dirty) { ensureSaved().catch(() => {}).then(leave); }
+  else leave();
+});
+route();
 </script>

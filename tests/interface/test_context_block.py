@@ -170,3 +170,45 @@ class TestTrackedBodies:
         block = await build_turn_context(services)
         assert "    Leads the survivors through the vaults." in block
         assert "[§" not in block
+
+
+class TestLockedRunLines:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    async def test_partially_locked_blocks_spell_out_their_runs(
+        self, services, world
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+        from graph_context.domain.models import Detail, NodeDraft
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        chapter = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(chapter.id, author_detail="m")
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        tokens = revisions.block_tokens(revisions.normalize_block(self.P1))
+        await historian.record_mark(
+            chapter.id, kind="intent", block_hash=h1,
+            value="locked", by="user", start=0, end=4,
+        )
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        await historian.record_mark(  # fully locked: badge only, no list
+            chapter.id, kind="intent", block_hash=h2,
+            value="locked", by="user",
+        )
+        services.historian = historian
+        services.session.working_set.hold(chapter.id, Detail.FULL)
+        block = await build_turn_context(services)
+        run = "".join(tokens[:4]).strip()
+        assert f'locked verbatim: "{run}"' in block
+        # The fully locked block gets the badge, not a redundant list.
+        assert block.count("locked verbatim:") == 1
+        assert f"[§{h2} · locked]" in block

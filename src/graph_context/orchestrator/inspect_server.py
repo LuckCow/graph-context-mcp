@@ -17,11 +17,17 @@ live turn diary. Routes:
   GET /api/summary             -> all cases + runs (eval_index.summary)
   GET /api/runs/<id>           -> one run's results.json, normalized
   GET /api/cases/<id>          -> one case's definition + result history
-  GET /prose                   -> prose.html (WP43: the review page)
+  GET /prose                   -> prose.html (WP43/48: the editor page)
+  GET /static/<name>           -> packaged static assets (the vendored
+                                  CodeMirror bundle; safe_child + 404)
   GET /api/prose/spaces        -> registered spaces + their tracked nodes
-  GET /api/prose/node?space&node    -> blocks + blame + review state
+  GET /api/prose/doc?space&node -> full raw body + offset segments/spans
+  GET /api/prose/events?space  -> SSE: per-node version bumps (live
+                                  updates for an open editor page)
   GET /api/prose/diff?space&node&seq -> one revision's word-level spans
-  POST /api/prose/mark         -> set one block's status/intent (WP42)
+  POST /api/prose/save         -> whole-document save (WP48; base-token
+                                  concurrency, 409 on mismatch)
+  POST /api/prose/marks        -> batch status/intent marks (WP48)
 
 The prose routes speak to live space runtimes through a ``ProseBridge``
 (``prose_bridge.py``): the bridge is handed over EMPTY before the bots
@@ -29,7 +35,7 @@ bootstrap and spaces register as they come up, so the server still
 starts first and the page degrades to an empty state everywhere else
 (standalone launches, memory backend, viewer-only runs).
 
-``POST /api/prose/mark`` is this server's FIRST and ONLY non-GET route.
+The save/marks POSTs are this server's only non-GET routes.
 Read-only-by-construction was a load-bearing safety property, so writes
 are doubly gated: same-origin enforcement (``Sec-Fetch-Site`` when the
 browser sends it, ``Origin``-vs-``Host`` otherwise) refuses drive-by
@@ -83,7 +89,19 @@ HEARTBEAT_TICKS = 20  # send an SSE comment after this many idle polls (~10s)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_EVAL_ROOT = "evals"
-MAX_MARK_BODY_BYTES = 65_536  # a mark payload is tiny; anything big is abuse
+MAX_WRITE_BODY_BYTES = 262_144  # a whole-document save, with slack
+MAX_MARKS_PER_POST = 50  # one selection gesture, not a bulk import
+
+
+class _BadRequest(Exception):
+    """Internal: a malformed write payload -> HTTP 400 with the message."""
+
+
+def _require_strings(payload: dict[str, Any], fields: tuple[str, ...]) -> None:
+    if any(
+        not isinstance(payload.get(k), str) or not payload[k] for k in fields
+    ):
+        raise _BadRequest(f"body needs string fields: {', '.join(fields)}")
 
 
 def viewer_settings() -> tuple[str, int] | None:
@@ -182,12 +200,16 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/prose":
             self._serve_file(self.html_dir / "prose.html",
                              "text/html; charset=utf-8")
+        elif route.startswith("/static/"):
+            self._serve_static(route.removeprefix("/static/"))
         elif route == "/api/prose/spaces":
             self._serve_prose_spaces()
-        elif route == "/api/prose/node":
+        elif route == "/api/prose/doc":
             self._serve_prose_call(
-                "node_view", ("node",), lambda q: (q["node"],)
+                "doc_view", ("node",), lambda q: (q["node"],)
             )
+        elif route == "/api/prose/events":
+            self._serve_prose_events()
         elif route == "/api/prose/diff":
             self._serve_prose_call(
                 "revision_diff", ("node", "seq"),
@@ -195,7 +217,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif route == "/turns.jsonl":
             self._serve_file(self.log_path,
-                             "application/x-ndjson; charset=utf-8")
+                             "application/x-ndjson; charset=utf-8",
+                             missing_ok=True)
         elif route == "/events":
             self._serve_events(self.log_path)
         elif route == "/api/summary":
@@ -248,7 +271,8 @@ class Handler(BaseHTTPRequestHandler):
         elif tail == "events":
             self._serve_events(log)
         elif tail == "turns.jsonl":
-            self._serve_file(log, "application/x-ndjson; charset=utf-8")
+            self._serve_file(log, "application/x-ndjson; charset=utf-8",
+                             missing_ok=True)
         else:
             self.send_error(404, "not found")
 
@@ -279,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
         required: tuple[str, ...],
         args_of: Any,
     ) -> None:
-        """One bridge read (`node_view`/`revision_diff`) off the query
+        """One bridge read (`doc_view`/`revision_diff`) off the query
         string: ?space=<id> plus ``required`` params -> the callable's
         JSON. Unknown space/node/seq -> 404; a busy loop -> 504."""
         query = {
@@ -307,14 +331,76 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._serve_json(payload)
 
+    def _serve_static(self, name: str) -> None:
+        """Packaged static assets (WP48: the vendored CodeMirror
+        bundle). ``safe_child`` containment like the run routes; a
+        missing asset 404s loudly -- a typo'd path must never render
+        as an empty 200."""
+        child = eval_index.safe_child(self.html_dir / "static", name)
+        if child is None or not child.is_file():
+            self.send_error(404, "not found")
+            return
+        content_type = (
+            "text/javascript; charset=utf-8" if name.endswith(".js")
+            else "text/plain; charset=utf-8"
+        )
+        self._serve_file(child, content_type)
+
+    def _serve_prose_events(self) -> None:
+        """SSE: per-node version bumps for one space (WP48). Polls the
+        bridge's thread-safe version ledger -- no cross-thread
+        coroutine per tick -- and emits ``{"node", "version"}`` frames;
+        an open editor page refetches the doc on a bump it didn't
+        cause. On connect every known version emits once (the client
+        compares against what it loaded). Same loop shape as
+        ``/events``: heartbeat comments, quiet teardown."""
+        query = {
+            key: values[0]
+            for key, values in parse_qs(urlparse(self.path).query).items()
+        }
+        space = query.get("space", "")
+        if not space or self.prose is None:
+            self.send_error(404, "no live spaces")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        last: dict[str, int] = {}
+        idle = 0
+        try:
+            while True:
+                current = self.prose.versions_for(space)
+                changed = {
+                    node: version for node, version in current.items()
+                    if last.get(node) != version
+                }
+                for node, version in sorted(changed.items()):
+                    frame = json.dumps({"node": node, "version": version})
+                    self._send(b"data: " + frame.encode("utf-8") + b"\n\n")
+                last = current
+                if changed:
+                    idle = 0
+                else:
+                    idle += 1
+                    if idle >= HEARTBEAT_TICKS:
+                        self._send(b": ping\n\n")
+                        idle = 0
+                time.sleep(POLL_SECONDS)
+        except (BrokenPipeError, ConnectionResetError, ValueError):
+            pass  # client went away -- end the stream quietly
+
     def do_POST(self) -> None:  # http.server naming
-        """The server's ONLY write: set one block's status/intent mark.
+        """The server's two writes (WP48): the whole-document save and
+        the batch status/intent marks.
 
         Gate order matters: origin first (drive-by pages get nothing,
         not even a token prompt), then the token (401 tells the page to
         prompt; 403 'writes disabled' tells it to stay read-only)."""
         route = urlparse(self.path).path
-        if route != "/api/prose/mark":
+        if route not in ("/api/prose/save", "/api/prose/marks"):
             self.send_error(404, "not found")
             return
         if not self._same_origin():
@@ -332,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             length = 0
-        if not 0 < length <= MAX_MARK_BODY_BYTES:
+        if not 0 < length <= MAX_WRITE_BODY_BYTES:
             self.send_error(400, "bad request body size")
             return
         try:
@@ -340,28 +426,25 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             self.send_error(400, "body must be JSON")
             return
-        fields = ("space", "node", "hash", "kind", "value")
-        if not isinstance(payload, dict) or any(
-            not isinstance(payload.get(k), str) or not payload[k]
-            for k in fields
-        ):
-            self.send_error(
-                400, f"body needs string fields: {', '.join(fields)}"
-            )
+        if not isinstance(payload, dict):
+            self.send_error(400, "body must be a JSON object")
             return
         if self.prose is None:
             self.send_error(404, "no live spaces")
             return
         try:
-            result = self.prose.call(
-                payload["space"], "set_mark", payload["node"],
-                payload["hash"], payload["kind"], payload["value"],
-            )
+            if route == "/api/prose/save":
+                result = self._call_save(payload)
+            else:
+                result = self._call_marks(payload)
+        except _BadRequest as bad:
+            self.send_error(400, str(bad))
+            return
         except KeyError:
             self.send_error(404, "unknown space")
             return
         except StaleSectionMark as err:
-            self.send_error(409, str(err))
+            self.send_error(409, str(err))  # stale view: reload and retry
             return
         except GraphContextError as err:
             self.send_error(400, str(err))
@@ -370,6 +453,48 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(504, "space loop busy; retry")
             return
         self._serve_json(result)
+
+    def _call_save(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _require_strings(payload, ("space", "node", "base", "body"))
+        assert self.prose is not None  # gated by the caller
+        return dict(self.prose.call(
+            payload["space"], "save_body", payload["node"],
+            payload["base"], payload["body"],
+        ))
+
+    def _call_marks(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _require_strings(payload, ("space", "node", "base"))
+        marks = payload.get("marks")
+        if (
+            not isinstance(marks, list)
+            or not marks
+            or len(marks) > MAX_MARKS_PER_POST
+        ):
+            raise _BadRequest(
+                f"marks must be a non-empty list (max {MAX_MARKS_PER_POST})"
+            )
+        for mark in marks:
+            if not isinstance(mark, dict):
+                raise _BadRequest("each mark must be an object")
+            _require_strings(mark, ("hash", "kind", "value"))
+            start = mark.get("start_char")
+            end = mark.get("end_char")
+            if (start is None) != (end is None):
+                raise _BadRequest(
+                    "start_char/end_char must come together"
+                )
+            if start is not None and any(
+                isinstance(v, bool) or not isinstance(v, int) or v < 0
+                for v in (start, end)
+            ):
+                raise _BadRequest(
+                    "start_char/end_char must be non-negative integers"
+                )
+        assert self.prose is not None  # gated by the caller
+        return dict(self.prose.call(
+            payload["space"], "set_marks", payload["node"],
+            payload["base"], marks,
+        ))
 
     def _same_origin(self) -> bool:
         """Refuse cross-site browser requests. ``Sec-Fetch-Site`` is
@@ -404,10 +529,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
-    def _serve_file(self, path: Path, content_type: str) -> None:
+    def _serve_file(
+        self, path: Path, content_type: str, *, missing_ok: bool = False
+    ) -> None:
+        """Serve one file, fresh per request. Missing files 404 unless
+        ``missing_ok`` (the live turn log legitimately doesn't exist
+        before the first turn; a missing PAGE or asset is a bug and
+        must fail loudly, not render blank)."""
         try:
             data = path.read_bytes()
         except FileNotFoundError:
+            if not missing_ok:
+                self.send_error(404, "not found")
+                return
             data = b""
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -473,7 +607,10 @@ def create_server(
     process hosts at most one server -- fine for both entry paths
     (serve and standalone).
     """
-    for page in ("inspect.html", "turn_log_viewer.html", "prose.html"):
+    for page in (
+        "inspect.html", "turn_log_viewer.html", "prose.html",
+        "static/codemirror.bundle.js",
+    ):
         if not (Handler.html_dir / page).exists():
             raise GraphContextError(f"viewer HTML missing: {Handler.html_dir / page}")
     Handler.log_path = log

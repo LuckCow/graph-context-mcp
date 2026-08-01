@@ -1,19 +1,26 @@
-"""Node revision history: the pure rules (WP41, ADR 049).
+"""Node revision history: the pure rules (WP41, ADR 049; raw indexing
+since WP48, ADR 054).
 
 The single home of every segmentation / normalization / blame rule. A
 tracked node's body is split into markdown BLOCKS; each block's identity
 is a hash of its NORMALIZED text, so an unchanged paragraph keeps its
 identity across moves and across edits elsewhere -- no stored offsets,
 nothing to re-anchor. Revisions are an append-only log of keyframe +
-delta records (hash sequences, plus the text of first-seen blocks);
-blame is DERIVED from the log at read time, never stored.
+delta records (hash sequences, plus the RAW text of blocks whose text
+the log doesn't already carry); blame is DERIVED from the log at read
+time, never stored.
 
 Normalization exists because the store rewrites markdown (ADR 010:
 nothing may compare bodies byte-exact; quirk A9 flattens a leading
 heading, A13 drops fence info strings, whitespace shifts on round-trip).
-ALL body comparison anywhere in the system must route through
+IDENTITY comparison anywhere in the system must route through
 :func:`hash_sequence` -- a second comparison rule would be a second
-place to get it wrong.
+place to get it wrong. Everything ELSE -- stored block texts, word
+tokens, mark ranges, authorship, locked runs -- indexes the RAW text as
+fetched from the store (ADR 054): what the editor shows is what the
+state is keyed on, and baselines always come from ``fetch_body`` output
+so store rewrites surface as ordinary text refreshes, never as drift
+between two indexing schemes.
 
 Pure module: no I/O, no clocks -- timestamps are injected strings; the
 historian (``application/node_historian.py``) owns the side effects.
@@ -26,15 +33,15 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from graph_context.errors import GraphContextError, SectionAnchorNotFound
 
 KEYFRAME_INTERVAL = 20    # every Nth revision stores the full hash list
 LOG_SOFT_CAP = 400_000    # rendered-log chars; compaction target
-MIN_BLAME_CHARS = 20      # shorter blocks (scene separators) skip blame
 SIMILARITY_THRESHOLD = 0.6  # edited-block lineage match (difflib ratio)
+RECORD_VERSION = 2        # "v" on new records: 2 = raw new_blocks (ADR 054)
 
 AUTHOR_MODEL = "model"
 AUTHOR_HUMAN = "human"
@@ -81,6 +88,20 @@ _MIN_ANCHOR_CHARS = 4  # shortest accepted unique hash prefix
 
 _FENCE = re.compile(r"^\s{0,3}(```+|~~~+)")
 _WORD = re.compile(r"\S+\s*|\s+")  # word_diff tokens; join reproduces input
+_WORD_CHAR = re.compile(r"\w")
+_WS_RUN = re.compile(r"\s+")
+
+
+def has_words(text: str) -> bool:
+    """Whether a block can carry review state / blame / authorship.
+
+    Word-free blocks (scene separators ``***``, rules ``---``) are
+    duplicated across a manuscript and share hashes, so state on one
+    would alias onto all -- they stay unmarkable. This replaced the old
+    MIN_BLAME_CHARS length floor (ADR 054): short PROSE ("No.", "She
+    ran.") is markable and blameable.
+    """
+    return _WORD_CHAR.search(text) is not None
 
 
 def parse_tracked_types(raw: str) -> tuple[str, ...]:
@@ -147,6 +168,14 @@ def block_hash(normalized: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
+def block_tokens(text: str) -> list[str]:
+    """A block's word tokens -- THE token rule (WP45/46): span-mark
+    ranges, authorship, and state inheritance all index these (joining
+    them reproduces the text). Since ADR 054 the tokenized text is the
+    RAW block text as fetched, not its normalization."""
+    return _WORD.findall(text)
+
+
 def hash_sequence(body: str) -> tuple[tuple[str, str], ...]:
     """The body's ordered ``(hash, normalized_text)`` pairs; empty
     blocks (nothing survives normalization) are skipped."""
@@ -168,6 +197,70 @@ def body_blocks(body: str) -> tuple[tuple[str, str], ...]:
         if normalized:
             pairs.append((block_hash(normalized), block))
     return tuple(pairs)
+
+
+def block_offsets(body: str) -> tuple[tuple[str, int, int], ...]:
+    """The body's identity-bearing blocks as ``(hash, start, end)``
+    absolute character offsets (``body[start:end]`` is the raw block
+    text) -- the document-level segment map the prose wire serves
+    (ADR 054). Same segmentation and skip rules as :func:`body_blocks`;
+    identical blocks repeat their shared hash at each position."""
+    offsets: list[tuple[str, int, int]] = []
+    spans: list[tuple[int, int]] = []  # (line start, line content end)
+    lines: list[str] = []
+    in_fence = False
+    cursor = 0
+
+    def _flush() -> None:
+        if not lines:
+            return
+        normalized = normalize_block("\n".join(lines))
+        if normalized:
+            offsets.append((block_hash(normalized), spans[0][0], spans[-1][1]))
+        lines.clear()
+        spans.clear()
+
+    for raw_line in body.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        if _FENCE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and not line.strip():
+            _flush()
+            cursor += len(raw_line)
+            continue
+        lines.append(line)
+        spans.append((cursor, cursor + len(line)))
+        cursor += len(raw_line)
+    _flush()
+    return tuple(offsets)
+
+
+def char_range_to_tokens(text: str, start: int, end: int) -> tuple[int, int]:
+    """A character range over a block's raw text -> the ``(s, e)`` token
+    range it touches (any overlap counts; ``e`` is one past the last).
+    The wire takes character offsets -- the browser selection's native
+    unit -- and this is the ONLY place they become tokens; nothing
+    offset-shaped is ever stored. Raises on a range that touches no
+    token (empty or out of bounds)."""
+    if start >= end:
+        raise GraphContextError(
+            f"empty mark range {start}..{end}; select at least one "
+            "character."
+        )
+    s = e = -1
+    cursor = 0
+    for index, token in enumerate(_WORD.findall(text)):
+        token_start, cursor = cursor, cursor + len(token)
+        if token_start < end and cursor > start:
+            if s < 0:
+                s = index
+            e = index + 1
+    if s < 0:
+        raise GraphContextError(
+            f"mark range {start}..{end} is outside this section's "
+            f"0..{len(text)} characters; reload and reselect."
+        )
+    return s, e
 
 
 def resolve_anchor(
@@ -277,7 +370,8 @@ class RevisionRecord:
     hashes: tuple[str, ...] = ()        # keyframe: the full sequence
     ops: tuple[DeltaOp, ...] = ()       # delta: ops against the previous
     new_blocks: Mapping[str, str] = field(default_factory=dict)
-    # ^ normalized text for hashes first seen in this revision
+    # ^ RAW text for hashes first seen (or refreshed) in this revision;
+    #   pre-ADR-054 logs carry normalized text here until refreshed
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +381,13 @@ class SectionMark:
     Marks live in the same JSONL log as revisions; a mark applies at its
     file position iff its hash is live in the sequence at that point (a
     stale mark folds to nothing, harmlessly).
+
+    ``start``/``end`` (WP46) narrow the mark to a TOKEN range over the
+    block's raw text (normalized in pre-ADR-054 logs) -- ``(-1, -1)``
+    (the default, and the wire shape without ``s``/``e`` keys) means the
+    whole block. Ranges are positions AT MARKING TIME; under later edits
+    the state follows the tokens through the fold's positional
+    inheritance, never a stored offset.
     """
 
     kind: str    # MARK_STATUS | MARK_INTENT
@@ -294,6 +395,8 @@ class SectionMark:
     value: str   # STATUS_VALUES | INTENT_VALUES member
     at: str      # injected ISO timestamp
     by: str      # who set it ("user", "human:prose-page", ...)
+    start: int = -1  # first token of the marked range, -1 = whole block
+    end: int = -1    # one past the last token, -1 = whole block
 
 
 LogEntry = RevisionRecord | SectionMark
@@ -301,11 +404,28 @@ LogEntry = RevisionRecord | SectionMark
 
 @dataclass(frozen=True, slots=True)
 class SectionState:
-    """One block's folded review state (WP42). Defaults are the state of
-    a never-marked model-authored block."""
+    """One block's review state as a BADGE (WP42): derived from the
+    per-token fold since WP46 -- ``approved``/``human`` only when every
+    token agrees, mixed blocks read ``raw_ai``; intent is the strictest
+    token's (`locked` > `needs_change` > `flexible`)."""
 
     status: str = STATUS_RAW_AI
     intent: str = INTENT_FLEXIBLE
+    status_at: str = ""
+    status_by: str = ""
+    intent_at: str = ""
+    intent_by: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TokenState:
+    """One block's folded review state per TOKEN (WP46), aligned with
+    the ``_WORD`` tokens of its raw text. The at/by stamps are
+    block-level: the last mark (or introducing revision) that touched
+    the block."""
+
+    status: tuple[str, ...]
+    intent: tuple[str, ...]
     status_at: str = ""
     status_by: str = ""
     intent_at: str = ""
@@ -361,16 +481,20 @@ def next_record(
     at: str,
     author_kind: str,
     author_detail: str,
-    known_hashes: frozenset[str],
+    known_texts: Mapping[str, str],
 ) -> RevisionRecord:
     """The record for a new body state (``pairs`` from
-    :func:`hash_sequence`). Keyframes recur every KEYFRAME_INTERVAL and
-    open every log (seq 1); ``known_hashes`` = every hash whose text an
-    earlier record already carries, so ``new_blocks`` stays minimal.
+    :func:`body_blocks` -- hash, RAW text). Keyframes recur every
+    KEYFRAME_INTERVAL and open every log (seq 1); ``known_texts`` =
+    :func:`texts_of` over the earlier records, so ``new_blocks`` stays
+    minimal -- but a hash whose STORED text differs from the live raw
+    text re-emits (last-write-wins in :func:`texts_of`): one mechanism
+    refreshes store-rewritten text AND migrates pre-ADR-054 logs whose
+    stored texts are normalized.
     """
     seq = prev_seq + 1
     hashes = tuple(h for h, _ in pairs)
-    new_blocks = {h: text for h, text in pairs if h not in known_hashes}
+    new_blocks = {h: text for h, text in pairs if known_texts.get(h) != text}
     if seq == 1 or seq % KEYFRAME_INTERVAL == 0:
         return RevisionRecord(
             seq=seq, at=at, author_kind=author_kind,
@@ -411,7 +535,9 @@ def current_hashes(records: Sequence[RevisionRecord]) -> tuple[str, ...]:
 
 
 def texts_of(records: Sequence[RevisionRecord]) -> dict[str, str]:
-    """Every hash the log can still name -> its normalized text."""
+    """Every hash the log can still name -> its raw text, last write
+    wins (a re-emitted refresh supersedes; pre-ADR-054 entries yield
+    normalized text until their hash is refreshed)."""
     texts: dict[str, str] = {}
     for record in records:
         texts.update(record.new_blocks)
@@ -438,10 +564,14 @@ def render_log(entries: Sequence[LogEntry]) -> str:
 
 def _entry_payload(entry: LogEntry) -> dict[str, Any]:
     if isinstance(entry, SectionMark):
-        return {
+        payload: dict[str, Any] = {
             "kind": entry.kind, "hash": entry.hash, "value": entry.value,
             "at": entry.at, "by": entry.by,
         }
+        if entry.start >= 0:
+            payload["s"] = entry.start
+            payload["e"] = entry.end
+        return payload
     return _record_payload(entry)
 
 
@@ -449,6 +579,7 @@ def _record_payload(record: RevisionRecord) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "seq": record.seq, "at": record.at, "author": record.author_kind,
         "detail": record.author_detail, "kind": record.kind,
+        "v": RECORD_VERSION,  # forensics only; the lenient parser ignores it
     }
     if record.kind == KIND_KEYFRAME:
         payload["hashes"] = list(record.hashes)
@@ -498,10 +629,14 @@ def _parse_entry(line: str) -> LogEntry | None:
                 value=str(payload["value"]),
                 at=str(payload["at"]),
                 by=str(payload["by"]),
+                start=int(payload.get("s", -1)),
+                end=int(payload.get("e", -1)),
             )
             allowed = STATUS_VALUES if kind == MARK_STATUS else INTENT_VALUES
             if not mark.hash or mark.value not in allowed:
                 return None
+            if mark.start >= 0 and mark.end <= mark.start:
+                return None  # a mangled range degrades, never applies odd
             return mark
         ops = tuple(
             DeltaOp(
@@ -544,8 +679,8 @@ def blame(records: Sequence[RevisionRecord]) -> dict[str, BlameEntry]:
     """Current hash -> the revision that INTRODUCED it, derived by
     walking the log. An introduced block is similarity-matched against
     the same revision's removed blocks for lineage (an edit reads as
-    "replaced its ancestor", a brand-new paragraph has none). Blocks
-    shorter than MIN_BLAME_CHARS stay out (separators share hashes)."""
+    "replaced its ancestor", a brand-new paragraph has none). Word-free
+    blocks stay out (separators share hashes; :func:`has_words`)."""
     states = state_walk(records)
     texts = texts_of(records)
     entries: dict[str, BlameEntry] = {}
@@ -565,7 +700,7 @@ def blame(records: Sequence[RevisionRecord]) -> dict[str, BlameEntry]:
         previous = hashes
     return {
         h: entry for h, entry in entries.items()
-        if h in previous and len(texts.get(h, "")) >= MIN_BLAME_CHARS
+        if h in previous and has_words(texts.get(h, ""))
     }
 
 
@@ -588,36 +723,79 @@ def closest(
     return best
 
 
-def section_states(entries: Sequence[LogEntry]) -> dict[str, SectionState]:
-    """The fold (WP42): interleaved log entries -> current per-block
-    status/intent, keyed to the FINAL hash sequence.
+def _inherit(
+    base: Sequence[str],
+    old_tokens: Sequence[str],
+    new_tokens: Sequence[str],
+    fill: str,
+) -> list[str]:
+    """Positional per-token inheritance (WP45/46): token-equal ranges
+    copy the ancestor's payload, everything else takes ``fill``. A
+    length-mismatched base (a hand-mangled log) degrades to uniform."""
+    if len(base) != len(old_tokens):
+        return [fill] * len(new_tokens)
+    matcher = difflib.SequenceMatcher(
+        a=list(old_tokens), b=list(new_tokens), autojunk=False
+    )
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            out.extend(base[i1:i2])
+        else:
+            out.extend([fill] * (j2 - j1))
+    return out
 
-    Walked in file order. A revision's added blocks similarity-match its
-    removed blocks through :func:`closest` (the one lineage rule):
-    across a HUMAN edit the successor inherits its ancestor's status and
-    intent (a no-ancestor human block starts ``human``); across a MODEL
-    edit the successor drops to ``raw_ai`` -- any AI edit voids
-    ``approved`` -- while intent follows. A mark applies iff its hash is
-    live at that point in the fold; stale marks fold to nothing.
+
+def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
+    """The fold (WP42, token-grained since WP46): interleaved log
+    entries -> per-token status/intent for the FINAL hash sequence.
+
+    Review state lives on TOKENS and follows them through edits by the
+    same positional inheritance authorship uses: a revision's added
+    blocks similarity-match its removed blocks through :func:`closest`
+    (no match consumption -- lineage, not pairing); token-equal ranges
+    carry their state, new tokens default (``human``/``flexible`` when
+    a human typed them, ``raw_ai``/``flexible`` for the model -- so an
+    AI edit voids ``approved`` exactly on the words it changed, and
+    approval on untouched words survives). A mark applies to its token
+    range (whole block when unranged) iff its hash is live at that fold
+    position; stale marks and dead ranges fold to nothing. A hash seen
+    before keeps its state when restored verbatim.
     """
-    states: dict[str, SectionState] = {}
-    texts: dict[str, str] = {}
+    records = [e for e in entries if isinstance(e, RevisionRecord)]
+    texts = texts_of(records)
+    tokens_of: dict[str, list[str]] = {}
+
+    def _tokens(block: str) -> list[str]:
+        if block not in tokens_of:
+            tokens_of[block] = _WORD.findall(texts.get(block, ""))
+        return tokens_of[block]
+
+    statuses: dict[str, list[str]] = {}
+    intents: dict[str, list[str]] = {}
+    stamps: dict[str, dict[str, str]] = {}
     current: tuple[str, ...] | None = None
     for entry in entries:
         if isinstance(entry, SectionMark):
             if current is None or entry.hash not in current:
                 continue
-            prior = states.get(entry.hash, SectionState())
-            if entry.kind == MARK_STATUS:
-                states[entry.hash] = replace(
-                    prior, status=entry.value,
-                    status_at=entry.at, status_by=entry.by,
-                )
-            else:
-                states[entry.hash] = replace(
-                    prior, intent=entry.value,
-                    intent_at=entry.at, intent_by=entry.by,
-                )
+            target = (
+                statuses if entry.kind == MARK_STATUS else intents
+            ).get(entry.hash)
+            if target is None:
+                continue
+            start, end = (
+                (0, len(target)) if entry.start < 0
+                else (max(0, entry.start), min(len(target), entry.end))
+            )
+            if start >= end:
+                continue  # a range the current text no longer has
+            for i in range(start, end):
+                target[i] = entry.value
+            stamp = stamps.setdefault(entry.hash, {})
+            prefix = "status" if entry.kind == MARK_STATUS else "intent"
+            stamp[f"{prefix}_at"] = entry.at
+            stamp[f"{prefix}_by"] = entry.by
             continue
         if entry.kind == KIND_KEYFRAME:
             new = entry.hashes
@@ -625,41 +803,225 @@ def section_states(entries: Sequence[LogEntry]) -> dict[str, SectionState]:
             new = apply_ops(current, entry.ops)
         else:
             continue
-        texts.update(entry.new_blocks)
         previous = current or ()
         removed = set(previous) - set(new)
-        for added_hash in set(new) - set(previous):
-            ancestor = closest(texts.get(added_hash, ""), removed, texts)
-            inherited = states.get(ancestor) if ancestor else None
-            if entry.author_kind == AUTHOR_HUMAN:
-                states[added_hash] = (
-                    inherited if inherited is not None
-                    else SectionState(
-                        status=STATUS_HUMAN,
-                        status_at=entry.at, status_by=entry.author_detail,
-                    )
+        default_status = (
+            STATUS_HUMAN if entry.author_kind == AUTHOR_HUMAN
+            else STATUS_RAW_AI
+        )
+        for added in set(new) - set(previous):
+            if added in statuses:
+                continue  # restored verbatim: state rides the hash
+            tokens = _tokens(added)
+            ancestor = closest(texts.get(added, ""), removed, texts)
+            if ancestor and ancestor in statuses:
+                old_tokens = _tokens(ancestor)
+                statuses[added] = _inherit(
+                    statuses[ancestor], old_tokens, tokens, default_status
                 )
+                intents[added] = _inherit(
+                    intents[ancestor], old_tokens, tokens, INTENT_FLEXIBLE
+                )
+                stamps[added] = dict(stamps.get(ancestor, {}))
             else:
-                base = inherited or SectionState()
-                states[added_hash] = replace(
-                    base, status=STATUS_RAW_AI,
-                    status_at=entry.at, status_by=entry.author_detail,
-                )
+                statuses[added] = [default_status] * len(tokens)
+                intents[added] = [INTENT_FLEXIBLE] * len(tokens)
+                stamps[added] = {
+                    "status_at": entry.at, "status_by": entry.author_detail,
+                }
         current = new
-    final = set(current or ())
-    return {h: s for h, s in states.items() if h in final}
+    result: dict[str, TokenState] = {}
+    for block in set(current or ()):
+        status = statuses.get(block)
+        if status is None:
+            continue
+        stamp = stamps.get(block, {})
+        result[block] = TokenState(
+            status=tuple(status),
+            intent=tuple(intents.get(block, ())),
+            status_at=stamp.get("status_at", ""),
+            status_by=stamp.get("status_by", ""),
+            intent_at=stamp.get("intent_at", ""),
+            intent_by=stamp.get("intent_by", ""),
+        )
+    return result
+
+
+def section_states(entries: Sequence[LogEntry]) -> dict[str, SectionState]:
+    """Block-level BADGES derived from the token fold (WP46): a block is
+    ``approved``/``human`` only when every token agrees (mixed reads
+    ``raw_ai`` -- the word-level view shows the split); intent is the
+    strictest token's, so one locked word makes the block read locked."""
+    derived: dict[str, SectionState] = {}
+    for block, state in token_states(entries).items():
+        status = STATUS_RAW_AI
+        if state.status and all(s == STATUS_APPROVED for s in state.status):
+            status = STATUS_APPROVED
+        elif state.status and all(s == STATUS_HUMAN for s in state.status):
+            status = STATUS_HUMAN
+        if INTENT_LOCKED in state.intent:
+            intent = INTENT_LOCKED
+        elif INTENT_NEEDS_CHANGE in state.intent:
+            intent = INTENT_NEEDS_CHANGE
+        else:
+            intent = INTENT_FLEXIBLE
+        derived[block] = SectionState(
+            status=status, intent=intent,
+            status_at=state.status_at, status_by=state.status_by,
+            intent_at=state.intent_at, intent_by=state.intent_by,
+        )
+    return derived
+
+
+def locked_runs(
+    states: Mapping[str, TokenState], texts: Mapping[str, str]
+) -> dict[str, tuple[str, ...]]:
+    """Per block: the contiguous LOCKED token runs' text (edge-stripped,
+    over the block's raw text) -- what the guard demands survive
+    verbatim and what the context block shows the model (WP46)."""
+    runs: dict[str, tuple[str, ...]] = {}
+    for block, state in states.items():
+        if INTENT_LOCKED not in state.intent:
+            continue
+        tokens = _WORD.findall(texts.get(block, ""))
+        if len(tokens) != len(state.intent):
+            continue  # mangled log: no run to demand
+        found: list[str] = []
+        run: list[str] = []
+        for token, intent in zip(tokens, state.intent, strict=True):
+            if intent == INTENT_LOCKED:
+                run.append(token)
+            elif run:
+                found.append("".join(run).strip())
+                run = []
+        if run:
+            found.append("".join(run).strip())
+        cleaned = tuple(r for r in found if r)
+        if cleaned:
+            runs[block] = cleaned
+    return runs
 
 
 def missing_locked(
-    states: Mapping[str, SectionState], new_body: str
-) -> tuple[str, ...]:
-    """LOCKED hashes absent from ``new_body`` -- an order-insensitive
-    presence check (moving a locked block is fine), no diffing (WP42)."""
-    present = {h for h, _ in hash_sequence(new_body)}
-    return tuple(sorted(
-        h for h, state in states.items()
-        if state.intent == INTENT_LOCKED and h not in present
-    ))
+    states: Mapping[str, TokenState],
+    texts: Mapping[str, str],
+    new_body: str,
+) -> tuple[tuple[str, str], ...]:
+    """LOCKED runs absent from ``new_body`` as ``(hash, run text)`` --
+    an order-insensitive verbatim-presence check (moving locked text is
+    fine, even into another paragraph; changing or deleting it is not),
+    still no diffing (WP42, refined by WP46). Runs and body are raw
+    text; both sides fold whitespace runs to single spaces before the
+    substring check (ADR 010 forbids byte-exact comparison -- the store
+    reflows whitespace, and reflow is not a locked-text violation)."""
+    haystack = _WS_RUN.sub(" ", new_body)
+    return tuple(
+        (block, run)
+        for block, runs in sorted(locked_runs(states, texts).items())
+        for run in runs
+        if _WS_RUN.sub(" ", run) not in haystack
+    )
+
+
+def word_authorship(
+    records: Sequence[RevisionRecord],
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Final-state hash -> ``(author_kind, text)`` word spans over the
+    block's raw text; span concatenation reproduces it (WP45).
+
+    Derived, never stored -- one forward pass over the log carrying a
+    per-token author for EVERY hash ever seen (a removed-then-restored
+    block keeps its authorship; identity is the hash). An added block
+    inherits its ancestor's authors on token-equal ranges and takes the
+    introducing revision's author elsewhere. Ancestors resolve through
+    :func:`closest` WITHOUT consuming matches: a paragraph split in two
+    lets BOTH halves inherit the original's words -- authorship is
+    lineage, not a one-to-one pairing (``revision_diff``'s display
+    pairing differs deliberately). Word-free blocks stay out (blame's
+    rule: separators share hashes); pre-truncation ancestry degrades
+    to introduced-at-keyframe authorship.
+    """
+    texts = texts_of(records)
+    authors = word_token_authors(records)
+    spans: dict[str, tuple[tuple[str, str], ...]] = {}
+    for block, block_authors in authors.items():
+        text = texts.get(block, "")
+        if not has_words(text):
+            continue
+        tokens = _WORD.findall(text)
+        if len(tokens) != len(block_authors):
+            continue  # unreachable unless the log was hand-mangled
+        merged: list[tuple[str, str]] = []
+        for author, token in zip(block_authors, tokens, strict=True):
+            if merged and merged[-1][0] == author:
+                merged[-1] = (author, merged[-1][1] + token)
+            else:
+                merged.append((author, token))
+        spans[block] = tuple(merged)
+    return spans
+
+
+def word_token_authors(
+    records: Sequence[RevisionRecord],
+) -> dict[str, tuple[str, ...]]:
+    """Final-state hash -> one author per token (WP45/46) -- the
+    token-aligned form :func:`word_authorship` merges for display and
+    the prose bridge joins with token review states. No word-free
+    filter here; callers apply :func:`has_words` where display rules
+    demand it."""
+    texts = texts_of(records)
+    token_authors: dict[str, tuple[str, ...]] = {}
+    previous: tuple[str, ...] = ()
+    for record, hashes in state_walk(records):
+        removed = set(previous) - set(hashes)
+        for added in set(hashes) - set(previous):
+            if added in token_authors:
+                continue  # restored verbatim: authorship rides the hash
+            text = texts.get(added, "")
+            tokens = _WORD.findall(text)
+            ancestor = closest(text, removed, texts)
+            base = token_authors.get(ancestor, ()) if ancestor else ()
+            old_tokens = _WORD.findall(texts.get(ancestor, "")) if base else []
+            token_authors[added] = tuple(
+                _inherit(base, old_tokens, tokens, record.author_kind)
+            )
+        previous = hashes
+    return {
+        block: token_authors[block]
+        for block in set(previous) if block in token_authors
+    }
+
+
+def rollup_base(entries: Sequence[LogEntry]) -> tuple[LogEntry, ...] | None:
+    """The log minus a coalescible human tail (WP44), or None.
+
+    Consecutive human revisions collapse into ONE pending revision: the
+    historian drops the tail and re-records against this trimmed base
+    (same seq -- keyframe cadence is seq-derived, so it survives). A
+    pending revision coalesces only while it is the LAST log entry: a
+    model revision or any section mark after it solidifies it -- a mark
+    pins exactly the text that was reviewed.
+
+    Refuses (None) when the trimmed log would still contain records but
+    no usable keyframe -- the post-compaction ``truncated-marker +
+    keyframe`` shape, where the human tail IS the first kept keyframe:
+    re-recording over that base would regress seq behind the marker and
+    could strand deltas with no keyframe ancestor.
+    """
+    if not entries:
+        return None
+    tail = entries[-1]
+    if not isinstance(tail, RevisionRecord):
+        return None  # a mark solidified the pending revision
+    if tail.author_kind != AUTHOR_HUMAN:
+        return None
+    if tail.kind not in (KIND_KEYFRAME, KIND_DELTA):
+        return None  # truncated marker or lenient-parse oddity
+    trimmed = tuple(entries[:-1])
+    records = [e for e in trimmed if isinstance(e, RevisionRecord)]
+    if records and not state_walk(records):
+        return None
+    return trimmed
 
 
 def compact(
