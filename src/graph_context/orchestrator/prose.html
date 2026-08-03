@@ -129,11 +129,11 @@
   .tok-heading { font-weight: 700; font-size: 1.25em; }
   .tok-emphasis { font-style: italic; }
   .tok-strong { font-weight: 700; }
-  .tok-monospace, .tok-literal {
+  .tok-monospace {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .85em; background: var(--code); border-radius: 3px;
   }
-  .tok-meta, .tok-processing { color: var(--muted); }
+  .tok-meta { color: var(--muted); }
   .tok-link, .tok-url { color: var(--accent); }
   /* review-state highlights: one background per word run, priority
      locked > needs_change > approved > human-typed (ADR 053 amendment) */
@@ -214,7 +214,7 @@
 </style>
 
 <header>
-  <h1><a href="#/" id="home">Prose editor</a></h1>
+  <h1><a href="#/">Prose editor</a></h1>
   <a href="./">inspection</a>
   <a href="logs">turn log</a>
   <span class="spacer"></span>
@@ -300,11 +300,26 @@ async function fetchJson(url) {
   return res.json();
 }
 
-async function ensureWriteState() {
-  if (knowWrites) return;
+function docUrl(space, node) {
+  return "api/prose/doc?space=" + encodeURIComponent(space) +
+    "&node=" + encodeURIComponent(node);
+}
+
+async function fetchSpaces() {
   const data = await fetchJson("api/prose/spaces");
   writesEnabled = !!data.writes_enabled;
   knowWrites = true;
+  return data;
+}
+
+async function ensureWriteState() {
+  if (knowWrites) return;
+  await fetchSpaces();
+}
+
+function setHeadNote() {
+  document.getElementById("head-note").textContent =
+    writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
 }
 
 // ---- writes (shared 401-prompt / gate handling) ---------------------------
@@ -403,15 +418,21 @@ function spanClass(status, intent, author) {
   return "";
 }
 
+// trim a range's trailing whitespace out of the highlight
+function trimTrailingWs(state, from, to) {
+  while (to > from && /\s/.test(state.doc.sliceString(to - 1, to))) to--;
+  return to;
+}
+
 function buildDecorations(data, state) {
   const ranges = [];
+  // span layout (prose_bridge._segment_rows, positional):
+  // [start, end, author, status, intent]
   for (const span of data.spans) {
     const cls = spanClass(span[3], span[4], span[2]);
     if (!cls) continue;
     const from = data.map.toU16(span[0]);
-    let to = data.map.toU16(span[1]);
-    // trim the run's trailing whitespace out of the highlight
-    while (to > from && /\s/.test(state.doc.sliceString(to - 1, to))) to--;
+    const to = trimTrailingWs(state, from, data.map.toU16(span[1]));
     if (to > from && to <= state.doc.length) {
       ranges.push(CM.Decoration.mark({ class: cls }).range(from, to));
     }
@@ -421,8 +442,8 @@ function buildDecorations(data, state) {
     for (const comment of data.comments || []) {
       if (!comment.anchor) continue;  // detached: panel-only
       const from = data.map.toU16(comment.anchor.start);
-      let to = data.map.toU16(comment.anchor.end);
-      while (to > from && /\s/.test(state.doc.sliceString(to - 1, to))) to--;
+      const to = trimTrailingWs(state, from,
+        data.map.toU16(comment.anchor.end));
       if (to > from && to <= state.doc.length) {
         ranges.push(CM.Decoration.mark({
           class: comment.state === "addressed"
@@ -603,65 +624,68 @@ function closeComposer() {
   updateBar();
 }
 
-async function postComment(text) {
-  if (!doc || !composerTarget) return;
+// The shared write skeleton (comments, resolve, marks): flush any
+// pending save first (a stale save opens the conflict banner), POST,
+// and on a stale base toast + refetch instead. `buildPayload` runs
+// AFTER the flush -- a save in flight refreshes doc.data.base, and the
+// POST must carry the new one. save() itself stays a separate flow:
+// its dirty/in-flight bookkeeping would contort both.
+async function submitWrite(path, buildPayload, { onStale, onFresh,
+    success } = {}) {
   try {
     await ensureSaved();
   } catch (err) {
     if (err instanceof StaleWrite) { showConflict(); return; }
     throw err;
   }
-  const comment = { hash: composerTarget.hash, text };
-  if (!composerTarget.whole) {
-    comment.start_char = composerTarget.startCp;
-    comment.end_char = composerTarget.endCp;
-  }
   let fresh;
   try {
-    fresh = await postWrite("api/prose/comments", {
-      space: doc.space, node: doc.node, base: doc.data.base, comment,
-    });
+    fresh = await postWrite(path, buildPayload());
   } catch (err) {
     if (err instanceof StaleWrite) {
       toast("document changed elsewhere -- refreshing");
-      closeComposer();
+      if (onStale) onStale();
       await refetchDoc();
       return;
     }
     throw err;
   }
   if (!fresh) return;
-  composerOpen = false;
-  composerTarget = null;
-  renderCommentRow();
+  if (onFresh) onFresh();
   applyDocPayload(fresh);
-  toast("comment added");
+  toast(success);
+}
+
+async function postComment(text) {
+  if (!doc || !composerTarget) return;
+  const buildComment = () => {
+    const comment = { hash: composerTarget.hash, text };
+    if (!composerTarget.whole) {
+      comment.start_char = composerTarget.startCp;
+      comment.end_char = composerTarget.endCp;
+    }
+    return comment;
+  };
+  await submitWrite("api/prose/comments",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             comment: buildComment() }),
+    {
+      onStale: closeComposer,
+      onFresh: () => {
+        composerOpen = false;
+        composerTarget = null;
+        renderCommentRow();
+      },
+      success: "comment added",
+    });
 }
 
 async function resolveComment(id) {
   if (!doc) return;
-  try {
-    await ensureSaved();
-  } catch (err) {
-    if (err instanceof StaleWrite) { showConflict(); return; }
-    throw err;
-  }
-  let fresh;
-  try {
-    fresh = await postWrite("api/prose/comments", {
-      space: doc.space, node: doc.node, base: doc.data.base, resolve: id,
-    });
-  } catch (err) {
-    if (err instanceof StaleWrite) {
-      toast("document changed elsewhere -- refreshing");
-      await refetchDoc();
-      return;
-    }
-    throw err;
-  }
-  if (!fresh) return;
-  applyDocPayload(fresh);
-  toast("comment resolved");
+  await submitWrite("api/prose/comments",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             resolve: id }),
+    { success: "comment resolved" });
 }
 
 function renderComments(panel) {
@@ -737,13 +761,7 @@ function updateBar() {
 async function applyMarks(kind, value) {
   const targets = currentTargets();
   if (!targets || !doc) return;
-  try {
-    await ensureSaved();
-  } catch (err) {
-    if (err instanceof StaleWrite) { showConflict(); return; }
-    throw err;
-  }
-  const marks = targets.map((t) => {
+  const buildMarks = () => targets.map((t) => {
     const mark = { hash: t.seg.hash, kind, value };
     if (!wholeMode && !t.whole) {
       mark.start_char = t.startCp;
@@ -751,22 +769,10 @@ async function applyMarks(kind, value) {
     }
     return mark;
   });
-  let fresh;
-  try {
-    fresh = await postWrite("api/prose/marks", {
-      space: doc.space, node: doc.node, base: doc.data.base, marks,
-    });
-  } catch (err) {
-    if (err instanceof StaleWrite) {
-      toast("document changed elsewhere -- refreshing");
-      await refetchDoc();
-      return;
-    }
-    throw err;
-  }
-  if (!fresh) return;
-  applyDocPayload(fresh);
-  toast(kind + " → " + value.replace("_", " "));
+  await submitWrite("api/prose/marks",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             marks: buildMarks() }),
+    { success: kind + " → " + value.replace("_", " ") });
 }
 
 // ---- saving ---------------------------------------------------------------
@@ -833,8 +839,7 @@ function showConflict() {
   const mine = el("button", null, "keep mine (overwrite)");
   mine.addEventListener("click", async () => {
     const body = doc.view.state.doc.toString();
-    const current = await fetchJson("api/prose/doc?space=" +
-      encodeURIComponent(doc.space) + "&node=" + encodeURIComponent(doc.node));
+    const current = await fetchJson(docUrl(doc.space, doc.node));
     const fresh = await postWrite("api/prose/save", {
       space: doc.space, node: doc.node, base: current.base, body,
     }).catch(() => null);
@@ -928,8 +933,7 @@ function applyDocPayload(fresh, reconcileText) {
 
 async function refetchDoc() {
   if (!doc) return;
-  const fresh = await fetchJson("api/prose/doc?space=" +
-    encodeURIComponent(doc.space) + "&node=" + encodeURIComponent(doc.node));
+  const fresh = await fetchJson(docUrl(doc.space, doc.node));
   applyDocPayload(fresh, true);
 }
 
@@ -961,9 +965,7 @@ function closeDoc() {
 async function renderNode(space, node) {
   closeDoc();
   await ensureWriteState();
-  const data = await fetchJson("api/prose/doc?space=" +
-    encodeURIComponent(space) + "&node=" + encodeURIComponent(node));
-  data.map = offsetMaps(data.body);
+  const data = await fetchJson(docUrl(space, node));
 
   const frag = document.createDocumentFragment();
   const crumbs = el("div", "crumbs");
@@ -985,7 +987,6 @@ async function renderNode(space, node) {
   host.id = "editor-host";
   frag.appendChild(host);
   const panel = el("div");
-  panel.id = "comments-panel";
   frag.appendChild(panel);
 
   const highlight = CM.HighlightStyle.define([
@@ -1060,26 +1061,20 @@ async function renderNode(space, node) {
     dirty: false, saving: false, conflictOpen: false,
     autosaveTimer: null, events: null,
   };
-  view.dispatch({
-    effects: setAnnotations.of(buildDecorations(data, view.state)),
-  });
-  renderTimeline(timeline, data, space, node);
-  renderComments(panel);
-  renderLegend(legend);
+  // The initial render is the payload funnel too (it attaches the
+  // offset map, dispatches decorations, renders timeline / comments /
+  // legend / seg-info) -- one render path, first paint included.
+  applyDocPayload(data);
   doc.events = openEvents(space);
-  document.getElementById("head-note").textContent =
-    writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
+  setHeadNote();
 }
 
 // ---- home + diff views (detached render, single swap) ---------------------
 
 async function renderHome() {
   closeDoc();
-  const data = await fetchJson("api/prose/spaces");
-  writesEnabled = !!data.writes_enabled;
-  knowWrites = true;
-  document.getElementById("head-note").textContent =
-    writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
+  const data = await fetchSpaces();
+  setHeadNote();
   const frag = document.createDocumentFragment();
   if (!data.spaces.length) {
     frag.appendChild(el("p", "note",
