@@ -24,7 +24,13 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -174,11 +180,8 @@ def register_space(
             return name if name != match.group(1) else match.group(0)
         return _ANYTYPE_ID.sub(_swap, detail)
 
-    def _usable(node_id: str) -> list[revisions.RevisionRecord]:
-        return [
-            r for r in historian.history(node_id)
-            if r.kind != revisions.KIND_TRUNCATED
-        ]
+    def _usable(node_id: str) -> tuple[revisions.RevisionRecord, ...]:
+        return revisions.usable_records(historian.history(node_id))
 
     async def list_nodes() -> list[dict[str, Any]]:
         rows = []
@@ -200,15 +203,15 @@ def register_space(
     async def revision_diff(node_id: str, seq: int) -> dict[str, Any]:
         records = _usable(node_id)
         texts = revisions.texts_of(records)
-        previous: tuple[str, ...] = ()
-        for record, hashes in revisions.state_walk(records):
-            if record.seq != seq:
-                previous = hashes
+        for step in revisions.revision_steps(records):
+            if step.record.seq != seq:
                 continue
-            added = [h for h in hashes if h not in set(previous)]
-            removed = {h for h in previous if h not in set(hashes)}
+            # Display pairing CONSUMES matches (one old block pairs one
+            # new block) -- deliberately unlike the lineage folds, so it
+            # stays here rather than riding RevisionStep.ancestors.
+            removed = set(step.removed)
             pairs = []
-            for new_hash in added:
+            for new_hash in step.added:
                 text = texts.get(new_hash, "")
                 ancestor = revisions.closest(text, removed, texts)
                 old = texts.get(ancestor, "") if ancestor else ""
@@ -228,10 +231,10 @@ def register_space(
                     "spans": [["del", texts.get(old_hash, "")]],
                 })
             return {
-                "seq": record.seq,
-                "at": record.at,
-                "author": record.author_kind,
-                "detail": _display_detail(record.author_detail),
+                "seq": step.record.seq,
+                "at": step.record.at,
+                "author": step.record.author_kind,
+                "detail": _display_detail(step.record.author_detail),
                 "pairs": pairs,
             }
         raise GraphContextError(f"no revision {seq} of {node_id!r}")
@@ -247,16 +250,63 @@ def register_space(
             "\n".join(h for h, _ in revisions.hash_sequence(body))
         )
 
-    async def _doc_payload(node_id: str) -> dict[str, Any]:
-        body = await repository.fetch_body(node_id)
-        usable = _usable(node_id)
+    async def _fetch_checked(
+        node_id: str, base: str, retry_action: str
+    ) -> str:
+        """fetch_body plus THE base-token gate every write route runs:
+        a mismatch raises StaleSectionMark (the server's 409) with the
+        route's retry wording."""
+        current = await repository.fetch_body(node_id)
+        if _body_token(current) != base:
+            raise StaleSectionMark(
+                f"{_name_of(node_id)!r} changed since this view "
+                f"loaded; reload and {retry_action}."
+            )
+        return current
+
+    def _blocks_by_hash(body: str) -> dict[str, str]:
+        """hash -> the block's raw text (a duplicated hash keeps the
+        last occurrence, like the original mapping comprehension)."""
+        return {
+            h: body[s:e] for h, s, e in revisions.block_offsets(body)
+        }
+
+    def _token_range(
+        by_hash: Mapping[str, str], node_id: str,
+        block_hash: str, item: Mapping[str, Any],
+    ) -> tuple[int | None, int | None]:
+        """An item's optional ``start_char``/``end_char`` selection
+        offsets -> token indices over the block's raw text (the
+        domain's ``char_range_to_tokens`` is the only place chars
+        become tokens); absent -> ``(None, None)``."""
+        if item.get("start_char") is None:
+            return None, None
+        text = by_hash.get(block_hash)
+        if text is None:
+            raise StaleSectionMark(
+                f"section {block_hash} is not in the current "
+                f"version of {_name_of(node_id)!r}; reload."
+            )
+        return revisions.char_range_to_tokens(
+            text, int(item["start_char"]), int(item["end_char"])
+        )
+
+    def _segment_rows(
+        node_id: str, body: str,
+        offsets: Sequence[tuple[str, int, int]],
+        usable: Sequence[revisions.RevisionRecord],
+    ) -> tuple[list[dict[str, Any]], list[list[Any]]]:
+        """Per-block segment rows PLUS the merged token spans -- one
+        walk, since spans coalesce inside blocks. Span layout is
+        positional: ``[start, end, author, status, intent]``
+        (prose.html indexes by number)."""
         blame = historian.blame(node_id)
         badges = historian.section_states(node_id)
         tokens_state = historian.token_states(node_id)
         authors = revisions.word_token_authors(usable)
         segments: list[dict[str, Any]] = []
         spans: list[list[Any]] = []
-        for block_hash, start, end in revisions.block_offsets(body):
+        for block_hash, start, end in offsets:
             text = body[start:end]
             badge = badges.get(block_hash)
             entry = blame.get(block_hash)
@@ -310,19 +360,25 @@ def register_space(
                         [cursor, token_end, author, status, intent]
                     )
                 cursor = token_end
-        # WP50: live comments with ABSOLUTE anchors (code-point offsets
-        # over the body; null = detached). Ranged anchors derive through
-        # token_range_to_chars; a range the fetched text no longer has
-        # degrades to the whole block, never a crash.
+        return segments, spans
+
+    def _comment_rows(
+        node_id: str, body: str,
+        offsets: Sequence[tuple[str, int, int]],
+    ) -> list[dict[str, Any]]:
+        """WP50: live comments with ABSOLUTE anchors (code-point
+        offsets over the body; null = detached). Ranged anchors derive
+        through token_range_to_chars; a range the fetched text no
+        longer has degrades to the whole block, never a crash."""
         first_offset: dict[str, tuple[int, int]] = {}
-        for block_hash, start, end in revisions.block_offsets(body):
+        for block_hash, start, end in offsets:
             first_offset.setdefault(block_hash, (start, end))
         comments: list[dict[str, Any]] = []
         for comment in historian.comments(node_id):
             anchor: dict[str, int] | None = None
-            offsets = first_offset.get(comment.hash) if comment.hash else None
-            if offsets is not None:
-                block_start, block_end = offsets
+            span = first_offset.get(comment.hash) if comment.hash else None
+            if span is not None:
+                block_start, block_end = span
                 anchor = {"start": block_start, "end": block_end}
                 if comment.start >= 0:
                     try:
@@ -347,18 +403,28 @@ def register_space(
                 "state_by": _display_detail(comment.state_by),
                 "anchor": anchor,
             })
-        timeline = []
-        previous: tuple[str, ...] = ()
-        for record, hashes in revisions.state_walk(usable):
-            timeline.append({
-                "seq": record.seq,
-                "at": record.at,
-                "author": record.author_kind,
-                "detail": _display_detail(record.author_detail),
-                "added": len(set(hashes) - set(previous)),
-                "removed": len(set(previous) - set(hashes)),
-            })
-            previous = hashes
+        return comments
+
+    def _timeline_rows(
+        usable: Sequence[revisions.RevisionRecord],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "seq": step.record.seq,
+                "at": step.record.at,
+                "author": step.record.author_kind,
+                "detail": _display_detail(step.record.author_detail),
+                "added": len(set(step.added)),
+                "removed": len(step.removed),
+            }
+            for step in revisions.revision_steps(usable)
+        ]
+
+    async def _doc_payload(node_id: str) -> dict[str, Any]:
+        body = await repository.fetch_body(node_id)
+        usable = _usable(node_id)
+        offsets = revisions.block_offsets(body)
+        segments, spans = _segment_rows(node_id, body, offsets, usable)
         return {
             "id": node_id,
             "name": _name_of(node_id),
@@ -367,8 +433,8 @@ def register_space(
             "body": body,
             "segments": segments,
             "spans": spans,
-            "comments": comments,
-            "revisions": timeline,
+            "comments": _comment_rows(node_id, body, offsets),
+            "revisions": _timeline_rows(usable),
         }
 
     async def doc_view(node_id: str) -> dict[str, Any]:
@@ -388,12 +454,7 @@ def register_space(
         if node_id not in historian.tracked_ids():
             raise GraphContextError(f"no tracked node {node_id!r}")
         async with route_lock:
-            current = await repository.fetch_body(node_id)
-            if _body_token(current) != base:
-                raise StaleSectionMark(
-                    f"{_name_of(node_id)!r} changed since this view "
-                    "loaded; reload and merge your edits."
-                )
+            await _fetch_checked(node_id, base, "merge your edits")
             await repository.update_node(node_id, body=body)
             await historian.record_external_revision(
                 node_id, detail=MARK_AUTHOR
@@ -409,32 +470,16 @@ def register_space(
         text; the domain's ``char_range_to_tokens`` is the only place
         they become token indices."""
         async with route_lock:
-            current = await repository.fetch_body(node_id)
-            if _body_token(current) != base:
-                raise StaleSectionMark(
-                    f"{_name_of(node_id)!r} changed since this view "
-                    "loaded; reload and re-apply the marks."
-                )
-            by_hash = {
-                h: current[s:e]
-                for h, s, e in revisions.block_offsets(current)
-            }
+            current = await _fetch_checked(
+                node_id, base, "re-apply the marks"
+            )
+            by_hash = _blocks_by_hash(current)
             requests = []
             for mark in marks:
                 block_hash = str(mark["hash"])
-                start = end = None
-                if mark.get("start_char") is not None:
-                    text = by_hash.get(block_hash)
-                    if text is None:
-                        raise StaleSectionMark(
-                            f"section {block_hash} is not in the current "
-                            f"version of {_name_of(node_id)!r}; reload."
-                        )
-                    start, end = revisions.char_range_to_tokens(
-                        text,
-                        int(mark["start_char"]),
-                        int(mark["end_char"]),
-                    )
+                start, end = _token_range(
+                    by_hash, node_id, block_hash, mark
+                )
                 requests.append(MarkRequest(
                     kind=str(mark["kind"]),
                     block_hash=block_hash,
@@ -457,12 +502,7 @@ def register_space(
         token indices); resolve takes a comment id. The base token gates
         both -- a stale page reconciles before it comments."""
         async with route_lock:
-            current = await repository.fetch_body(node_id)
-            if _body_token(current) != base:
-                raise StaleSectionMark(
-                    f"{_name_of(node_id)!r} changed since this view "
-                    "loaded; reload and retry."
-                )
+            current = await _fetch_checked(node_id, base, "retry")
             resolve = payload.get("resolve")
             if resolve is not None:
                 await historian.set_comment_state(
@@ -474,20 +514,11 @@ def register_space(
                 block_hash = str(comment["hash"])
                 start = end = None
                 if comment.get("start_char") is not None:
-                    by_hash = {
-                        h: current[s:e]
-                        for h, s, e in revisions.block_offsets(current)
-                    }
-                    text = by_hash.get(block_hash)
-                    if text is None:
-                        raise StaleSectionMark(
-                            f"section {block_hash} is not in the current "
-                            f"version of {_name_of(node_id)!r}; reload."
-                        )
-                    start, end = revisions.char_range_to_tokens(
-                        text,
-                        int(comment["start_char"]),
-                        int(comment["end_char"]),
+                    # by_hash builds lazily: resolve-only posts and
+                    # whole-block comments never pay for the offsets.
+                    start, end = _token_range(
+                        _blocks_by_hash(current), node_id,
+                        block_hash, comment,
                     )
                 await historian.record_comment(
                     node_id, block_hash=block_hash,
