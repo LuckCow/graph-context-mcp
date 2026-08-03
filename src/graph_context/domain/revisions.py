@@ -136,25 +136,39 @@ def parse_tracked_types(raw: str) -> tuple[str, ...]:
 
 # -- segmentation and identity --------------------------------------------
 
-def split_blocks(body: str) -> tuple[str, ...]:
-    """Markdown -> blocks: blank-line separated, fenced blocks kept whole."""
-    blocks: list[str] = []
-    current: list[str] = []
+def _scan_blocks(body: str) -> Iterator[tuple[str, int, int]]:
+    """THE fence/blank-line walk: every block with its absolute
+    ``(start, end)`` character span over ``body``. Block text is the
+    ``"\\n"``-join of its lines WITHOUT line endings (never a body
+    slice, so ``\\r\\n`` bodies segment identically); ``end`` is the
+    last line's content end. Every segmentation view derives from
+    this."""
+    lines: list[str] = []
+    start = end = 0
     in_fence = False
-    for line in body.splitlines():
+    cursor = 0
+    for raw_line in body.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
         if _FENCE.match(line):
             in_fence = not in_fence
-            current.append(line)
+        elif not in_fence and not line.strip():
+            if lines:
+                yield "\n".join(lines), start, end
+                lines = []
+            cursor += len(raw_line)
             continue
-        if not in_fence and not line.strip():
-            if current:
-                blocks.append("\n".join(current))
-                current = []
-            continue
-        current.append(line)
-    if current:
-        blocks.append("\n".join(current))
-    return tuple(blocks)
+        if not lines:
+            start = cursor
+        end = cursor + len(line)
+        lines.append(line)
+        cursor += len(raw_line)
+    if lines:
+        yield "\n".join(lines), start, end
+
+
+def split_blocks(body: str) -> tuple[str, ...]:
+    """Markdown -> blocks: blank-line separated, fenced blocks kept whole."""
+    return tuple(text for text, _, _ in _scan_blocks(body))
 
 
 def normalize_block(text: str) -> str:
@@ -183,6 +197,22 @@ def block_hash(normalized: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
+def _block_identity(block: str) -> str:
+    """A block's identity hash, ``""`` when nothing survives
+    normalization (no identity to anchor)."""
+    normalized = normalize_block(block)
+    return block_hash(normalized) if normalized else ""
+
+
+def _identity_blocks(body: str) -> Iterator[tuple[str, str, str]]:
+    """Every identity-bearing block as ``(hash, raw, normalized)``;
+    blocks whose normalization is empty are skipped."""
+    for block in split_blocks(body):
+        normalized = normalize_block(block)
+        if normalized:
+            yield block_hash(normalized), block, normalized
+
+
 def block_tokens(text: str) -> list[str]:
     """A block's word tokens -- THE token rule (WP45/46): span-mark
     ranges, authorship, and state inheritance all index these (joining
@@ -194,24 +224,14 @@ def block_tokens(text: str) -> list[str]:
 def hash_sequence(body: str) -> tuple[tuple[str, str], ...]:
     """The body's ordered ``(hash, normalized_text)`` pairs; empty
     blocks (nothing survives normalization) are skipped."""
-    pairs = []
-    for block in split_blocks(body):
-        normalized = normalize_block(block)
-        if normalized:
-            pairs.append((block_hash(normalized), normalized))
-    return tuple(pairs)
+    return tuple((h, norm) for h, _, norm in _identity_blocks(body))
 
 
 def body_blocks(body: str) -> tuple[tuple[str, str], ...]:
     """The body's ordered ``(hash, RAW block text)`` pairs -- the display
     and anchor listing (hash_sequence's normalized twin). Blocks whose
     normalization is empty are skipped: they have no identity to anchor."""
-    pairs = []
-    for block in split_blocks(body):
-        normalized = normalize_block(block)
-        if normalized:
-            pairs.append((block_hash(normalized), block))
-    return tuple(pairs)
+    return tuple((h, raw) for h, raw, _ in _identity_blocks(body))
 
 
 def block_offsets(body: str) -> tuple[tuple[str, int, int], ...]:
@@ -220,34 +240,11 @@ def block_offsets(body: str) -> tuple[tuple[str, int, int], ...]:
     text) -- the document-level segment map the prose wire serves
     (ADR 054). Same segmentation and skip rules as :func:`body_blocks`;
     identical blocks repeat their shared hash at each position."""
-    offsets: list[tuple[str, int, int]] = []
-    spans: list[tuple[int, int]] = []  # (line start, line content end)
-    lines: list[str] = []
-    in_fence = False
-    cursor = 0
-
-    def _flush() -> None:
-        if not lines:
-            return
-        normalized = normalize_block("\n".join(lines))
-        if normalized:
-            offsets.append((block_hash(normalized), spans[0][0], spans[-1][1]))
-        lines.clear()
-        spans.clear()
-
-    for raw_line in body.splitlines(keepends=True):
-        line = raw_line.rstrip("\r\n")
-        if _FENCE.match(line):
-            in_fence = not in_fence
-        elif not in_fence and not line.strip():
-            _flush()
-            cursor += len(raw_line)
-            continue
-        lines.append(line)
-        spans.append((cursor, cursor + len(line)))
-        cursor += len(raw_line)
-    _flush()
-    return tuple(offsets)
+    return tuple(
+        (h, start, end)
+        for text, start, end in _scan_blocks(body)
+        if (h := _block_identity(text))
+    )
 
 
 def char_range_to_tokens(text: str, start: int, end: int) -> tuple[int, int]:
@@ -330,10 +327,7 @@ def edit_body(
             f"{', '.join(EDIT_ACTIONS)}."
         )
     blocks = list(split_blocks(body))
-    hashes = [
-        block_hash(normalized) if (normalized := normalize_block(b)) else ""
-        for b in blocks
-    ]
+    hashes = [_block_identity(b) for b in blocks]
     sections = tuple(
         (h, b.splitlines()[0][:60] if b else "")
         for h, b in zip(hashes, blocks, strict=True) if h
