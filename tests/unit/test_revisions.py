@@ -11,38 +11,17 @@ from graph_context.domain.revisions import (
     RevisionRecord,
     blame,
     block_hash,
-    body_blocks,
     compact,
     current_hashes,
-    next_record,
     normalize_block,
     parse_log,
     parse_tracked_types,
     render_log,
     split_blocks,
 )
-
-PARA_A = "The city fell quiet before the siege began, every gate barred."
-PARA_B = "Mira counted the engines twice; one was missing from the yard."
-PARA_C = "Rain came at dusk and the watch fires guttered along the wall."
-
-
-def _pairs(*paragraphs: str) -> tuple[tuple[str, str], ...]:
-    return body_blocks("\n\n".join(paragraphs))
-
-
-def _grow(
-    log: list[RevisionRecord], body_paragraphs: list[str], *,
-    author: str = revisions.AUTHOR_MODEL, detail: str = "m", at: str = "T",
-) -> None:
-    """Append the record for a new body state to ``log`` (test-side
-    convenience mirroring the historian's bookkeeping)."""
-    prev = current_hashes(log)
-    log.append(next_record(
-        prev, log[-1].seq if log else 0, _pairs(*body_paragraphs),
-        at=at, author_kind=author, author_detail=detail,
-        known_texts=revisions.texts_of(log),
-    ))
+from tests.unit.revlog import PARA_A, PARA_B, PARA_C
+from tests.unit.revlog import grow as _grow
+from tests.unit.revlog import pairs as _pairs
 
 
 class TestSegmentation:

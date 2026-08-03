@@ -12,52 +12,19 @@ from graph_context.domain.revisions import (
     CommentEntry,
     CommentStateEntry,
     LogEntry,
-    RevisionRecord,
-    block_hash,
-    body_blocks,
     comment_id,
     comment_states,
     compact,
-    current_hashes,
-    next_record,
-    normalize_block,
     parse_log,
     render_log,
     rollup_base,
     token_range_to_chars,
 )
 from graph_context.errors import GraphContextError
-
-PARA_A = "The city fell quiet before the siege began, every gate barred."
-PARA_B = "Mira counted the engines twice; one was missing from the yard."
-PARA_C = "Rain came at dusk and the watch fires guttered along the wall."
-# A human's light touch on PARA_A -- similar enough for lineage.
-PARA_A_EDIT = "The city fell quiet before the siege started, every gate barred."
-
-
-def _h(paragraph: str) -> str:
-    return block_hash(normalize_block(paragraph))
-
-
-def _pairs(*paragraphs: str) -> tuple[tuple[str, str], ...]:
-    return body_blocks("\n\n".join(paragraphs))
-
-
-def _records(entries: list[LogEntry]) -> list[RevisionRecord]:
-    return [e for e in entries if isinstance(e, RevisionRecord)]
-
-
-def _grow(
-    entries: list[LogEntry], body_paragraphs: list[str], *,
-    author: str = revisions.AUTHOR_MODEL, detail: str = "m", at: str = "T",
-) -> None:
-    records = _records(entries)
-    prev = current_hashes(records)
-    entries.append(next_record(
-        prev, records[-1].seq if records else 0, _pairs(*body_paragraphs),
-        at=at, author_kind=author, author_detail=detail,
-        known_texts=revisions.texts_of(records),
-    ))
+from tests.unit.revlog import PARA_A, PARA_A_EDIT, PARA_B, PARA_C
+from tests.unit.revlog import grow as _grow
+from tests.unit.revlog import h as _h
+from tests.unit.revlog import records as _records
 
 
 def _comment(

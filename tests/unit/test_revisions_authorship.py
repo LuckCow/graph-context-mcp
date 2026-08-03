@@ -12,40 +12,17 @@ from collections.abc import Sequence
 from graph_context.domain import revisions
 from graph_context.domain.revisions import (
     RevisionRecord,
-    block_hash,
-    body_blocks,
-    current_hashes,
-    next_record,
     normalize_block,
     word_token_authors,
 )
+from tests.unit.revlog import PARA_A, PARA_B
+from tests.unit.revlog import grow as _grow
+from tests.unit.revlog import h as _h
 
-PARA_A = "The city fell quiet before the siege began, every gate barred."
-PARA_B = "Mira counted the engines twice; one was missing from the yard."
-# A light human touch on PARA_A: one word changes.
+# This suite's own PARA_A edits (deliberately different from revlog's
+# PARA_A_EDIT): a light human touch, then the model's later pass.
 PARA_A_EDIT = "The city fell silent before the siege began, every gate barred."
-# The model's later pass over the human-touched sentence.
 PARA_A_MODEL = "The city fell silent before the long siege began, every gate barred."
-
-
-def _h(text: str) -> str:
-    return block_hash(normalize_block(text))
-
-
-def _pairs(*paragraphs: str) -> tuple[tuple[str, str], ...]:
-    return body_blocks("\n\n".join(paragraphs))
-
-
-def _grow(
-    log: list[RevisionRecord], paragraphs: list[str], *,
-    author: str = revisions.AUTHOR_MODEL, at: str = "T",
-) -> None:
-    prev = current_hashes(log)
-    log.append(next_record(
-        prev, log[-1].seq if log else 0, _pairs(*paragraphs),
-        at=at, author_kind=author, author_detail=author,
-        known_texts=revisions.texts_of(log),
-    ))
 
 
 def _word_authorship(
