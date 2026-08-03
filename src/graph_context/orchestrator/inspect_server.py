@@ -106,6 +106,23 @@ def _require_strings(payload: dict[str, Any], fields: tuple[str, ...]) -> None:
         raise _BadRequest(f"body needs string fields: {', '.join(fields)}")
 
 
+def _require_char_range(obj: dict[str, Any]) -> None:
+    """The optional ``start_char``/``end_char`` selection pair, shared
+    by the marks and comments routes: both or neither, non-negative
+    ints (bools rejected). Range-vs-text validation is the domain's."""
+    start = obj.get("start_char")
+    end = obj.get("end_char")
+    if (start is None) != (end is None):
+        raise _BadRequest("start_char/end_char must come together")
+    if start is not None and any(
+        isinstance(v, bool) or not isinstance(v, int) or v < 0
+        for v in (start, end)
+    ):
+        raise _BadRequest(
+            "start_char/end_char must be non-negative integers"
+        )
+
+
 def viewer_settings() -> tuple[str, int] | None:
     """GC_LOG_VIEWER_HOST / GC_LOG_VIEWER_PORT resolution -> (host, port).
 
@@ -483,19 +500,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(mark, dict):
                 raise _BadRequest("each mark must be an object")
             _require_strings(mark, ("hash", "kind", "value"))
-            start = mark.get("start_char")
-            end = mark.get("end_char")
-            if (start is None) != (end is None):
-                raise _BadRequest(
-                    "start_char/end_char must come together"
-                )
-            if start is not None and any(
-                isinstance(v, bool) or not isinstance(v, int) or v < 0
-                for v in (start, end)
-            ):
-                raise _BadRequest(
-                    "start_char/end_char must be non-negative integers"
-                )
+            _require_char_range(mark)
         assert self.prose is not None  # gated by the caller
         return dict(self.prose.call(
             payload["space"], "set_marks", payload["node"],
@@ -522,17 +527,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(comment, dict):
                 raise _BadRequest("comment must be an object")
             _require_strings(comment, ("hash", "text"))
-            start = comment.get("start_char")
-            end = comment.get("end_char")
-            if (start is None) != (end is None):
-                raise _BadRequest("start_char/end_char must come together")
-            if start is not None and any(
-                isinstance(v, bool) or not isinstance(v, int) or v < 0
-                for v in (start, end)
-            ):
-                raise _BadRequest(
-                    "start_char/end_char must be non-negative integers"
-                )
+            _require_char_range(comment)
             op = {"comment": comment}
         assert self.prose is not None  # gated by the caller
         return dict(self.prose.call(
