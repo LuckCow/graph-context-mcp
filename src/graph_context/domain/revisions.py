@@ -32,7 +32,8 @@ import difflib
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -600,25 +601,90 @@ def next_record(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RevisionStep:
+    """One usable record plus the walk scaffolding every derived view
+    shares (blame, the review fold, authorship, the comment fold, the
+    prose bridge's diff and timeline): the hash sequences around the
+    record and its added/removed hashes."""
+
+    record: RevisionRecord
+    previous: tuple[str, ...]  # hash sequence BEFORE this record
+    hashes: tuple[str, ...]    # hash sequence AFTER it
+    added: tuple[str, ...]     # new at this step, in SEQUENCE order --
+                               # a duplicated new block repeats its hash
+    removed: frozenset[str]    # dropped at this step
+
+    def ancestor(self, added_hash: str, texts: Mapping[str, str]) -> str:
+        """Lineage for ONE added hash via :func:`closest` -- lazy, so
+        walks that skip already-seen hashes never pay for the match."""
+        return closest(texts.get(added_hash, ""), self.removed, texts)
+
+    def ancestors(self, texts: Mapping[str, str]) -> dict[str, str]:
+        """Added hash -> its ancestor ("" = none), the eager map the
+        comment fold rides."""
+        return {h: self.ancestor(h, texts) for h in self.added}
+
+
+def _step(
+    record: RevisionRecord,
+    previous: tuple[str, ...],
+    hashes: tuple[str, ...],
+) -> RevisionStep:
+    prev_set = set(previous)
+    return RevisionStep(
+        record=record, previous=previous, hashes=hashes,
+        added=tuple(h for h in hashes if h not in prev_set),
+        removed=frozenset(prev_set - set(hashes)),
+    )
+
+
+def _log_steps(
+    entries: Sequence[LogEntry],
+) -> Iterator[tuple[LogEntry, RevisionStep | None]]:
+    """THE log walk: every entry in file order, paired with a
+    :class:`RevisionStep` exactly when the entry advances the hash
+    sequence -- a keyframe, or a delta with a reconstructable base
+    (deltas before the first keyframe, possible only after a mangled
+    compaction, yield ``None`` like marks and comments do). Folds over
+    the interleaved log ride this; marks and comments consult the
+    LATEST step's ``hashes``."""
+    current: tuple[str, ...] = ()
+    started = False
+    for entry in entries:
+        step: RevisionStep | None = None
+        if isinstance(entry, RevisionRecord):
+            if entry.kind == KIND_KEYFRAME:
+                new = entry.hashes
+            elif entry.kind == KIND_DELTA and started:
+                new = apply_ops(current, entry.ops)
+            else:
+                yield entry, None
+                continue
+            step = _step(entry, current, new)
+            current = new
+            started = True
+        yield entry, step
+
+
+def revision_steps(
+    records: Sequence[RevisionRecord],
+) -> tuple[RevisionStep, ...]:
+    """:func:`_log_steps` restricted to the usable records -- the
+    revisions-only walk with the added/removed bookkeeping every
+    derived view needs precomputed once."""
+    return tuple(
+        step for _, step in _log_steps(records) if step is not None
+    )
+
+
 def state_walk(
     records: Sequence[RevisionRecord],
 ) -> tuple[tuple[RevisionRecord, tuple[str, ...]], ...]:
-    """Each usable record paired with the FULL hash sequence after it.
-
-    Starts at the first keyframe (deltas before it -- possible only
-    after a mangled compaction -- are unreconstructable and skipped).
-    """
-    states: list[tuple[RevisionRecord, tuple[str, ...]]] = []
-    current: tuple[str, ...] | None = None
-    for record in records:
-        if record.kind == KIND_KEYFRAME:
-            current = record.hashes
-        elif record.kind == KIND_DELTA and current is not None:
-            current = apply_ops(current, record.ops)
-        else:
-            continue
-        states.append((record, current))
-    return tuple(states)
+    """Each usable record paired with the FULL hash sequence after it."""
+    return tuple(
+        (step.record, step.hashes) for step in revision_steps(records)
+    )
 
 
 def current_hashes(records: Sequence[RevisionRecord]) -> tuple[str, ...]:
@@ -814,31 +880,27 @@ def blame(records: Sequence[RevisionRecord]) -> dict[str, BlameEntry]:
     the same revision's removed blocks for lineage (an edit reads as
     "replaced its ancestor", a brand-new paragraph has none). Word-free
     blocks stay out (separators share hashes; :func:`has_words`)."""
-    states = state_walk(records)
     texts = texts_of(records)
     entries: dict[str, BlameEntry] = {}
-    previous: tuple[str, ...] = ()
-    for record, hashes in states:
-        added = set(hashes) - set(previous)
-        removed = set(previous) - set(hashes)
-        for added_hash in added:
-            text = texts.get(added_hash, "")
+    final: tuple[str, ...] = ()
+    for step in revision_steps(records):
+        for added_hash in step.added:
             entries[added_hash] = BlameEntry(
-                author_kind=record.author_kind,
-                author_detail=record.author_detail,
-                at=record.at,
-                seq=record.seq,
-                ancestor=closest(text, removed, texts),
+                author_kind=step.record.author_kind,
+                author_detail=step.record.author_detail,
+                at=step.record.at,
+                seq=step.record.seq,
+                ancestor=step.ancestor(added_hash, texts),
             )
-        previous = hashes
+        final = step.hashes
     return {
         h: entry for h, entry in entries.items()
-        if h in previous and has_words(texts.get(h, ""))
+        if h in final and has_words(texts.get(h, ""))
     }
 
 
 def closest(
-    text: str, candidates: set[str], texts: Mapping[str, str]
+    text: str, candidates: AbstractSet[str], texts: Mapping[str, str]
 ) -> str:
     """The candidate hash whose text most resembles ``text`` (difflib
     ratio >= SIMILARITY_THRESHOLD), or "". THE lineage rule: blame,
@@ -854,6 +916,41 @@ def closest(
         if ratio >= best_ratio:
             best, best_ratio = candidate, ratio
     return best
+
+
+def _token_cache(
+    texts: Mapping[str, str],
+) -> Callable[[str], list[str]]:
+    """Memoized hash -> the block's :func:`block_tokens`, shared walk
+    scaffolding over one :func:`texts_of` view."""
+    cache: dict[str, list[str]] = {}
+
+    def tokens(block: str) -> list[str]:
+        if block not in cache:
+            cache[block] = block_tokens(texts.get(block, ""))
+        return cache[block]
+
+    return tokens
+
+
+def apply_mark(
+    values: list[str], value: str, start: int = -1, end: int = -1
+) -> tuple[bool, bool]:
+    """THE mark-application kernel: write ``value`` over the clamped
+    token slice (``-1, -1`` = the whole block) of a per-token vector,
+    in place. Returns ``(applied, changed)``: ``applied`` -- the
+    clamped slice was nonempty (the fold stamps at/by on this; an empty
+    slice is a range the current text no longer has); ``changed`` -- at
+    least one token actually flipped (the historian's change-only
+    no-op test: it skips a mark iff ``applied and not changed``)."""
+    lo, hi = (0, len(values)) if start < 0 else (
+        max(0, start), min(len(values), end)
+    )
+    if lo >= hi:
+        return False, False
+    changed = any(values[i] != value for i in range(lo, hi))
+    values[lo:hi] = [value] * (hi - lo)
+    return True, changed
 
 
 _Payload = TypeVar("_Payload")
@@ -900,74 +997,59 @@ def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
     """
     records = [e for e in entries if isinstance(e, RevisionRecord)]
     texts = texts_of(records)
-    tokens_of: dict[str, list[str]] = {}
-
-    def _tokens(block: str) -> list[str]:
-        if block not in tokens_of:
-            tokens_of[block] = block_tokens(texts.get(block, ""))
-        return tokens_of[block]
-
+    tokens = _token_cache(texts)
     statuses: dict[str, list[str]] = {}
     intents: dict[str, list[str]] = {}
     stamps: dict[str, dict[str, str]] = {}
-    current: tuple[str, ...] | None = None
-    for entry in entries:
+    current: tuple[str, ...] = ()
+    for entry, step in _log_steps(entries):
         if isinstance(entry, SectionMark):
-            if current is None or entry.hash not in current:
+            if entry.hash not in current:
                 continue
             target = (
                 statuses if entry.kind == MARK_STATUS else intents
             )[entry.hash]
-            start, end = (
-                (0, len(target)) if entry.start < 0
-                else (max(0, entry.start), min(len(target), entry.end))
+            applied, _ = apply_mark(
+                target, entry.value, entry.start, entry.end
             )
-            if start >= end:
+            if not applied:
                 continue  # a range the current text no longer has
-            for i in range(start, end):
-                target[i] = entry.value
             stamp = stamps.setdefault(entry.hash, {})
             prefix = "status" if entry.kind == MARK_STATUS else "intent"
             stamp[f"{prefix}_at"] = entry.at
             stamp[f"{prefix}_by"] = entry.by
             continue
-        if not isinstance(entry, RevisionRecord):
+        if step is None:
             continue  # comments and future kinds are inert here
-        if entry.kind == KIND_KEYFRAME:
-            new = entry.hashes
-        elif entry.kind == KIND_DELTA and current is not None:
-            new = apply_ops(current, entry.ops)
-        else:
-            continue
-        previous = current or ()
-        removed = set(previous) - set(new)
         default_status = (
-            STATUS_HUMAN if entry.author_kind == AUTHOR_HUMAN
+            STATUS_HUMAN if step.record.author_kind == AUTHOR_HUMAN
             else STATUS_RAW_AI
         )
-        for added in set(new) - set(previous):
+        for added in step.added:
             if added in statuses:
                 continue  # restored verbatim: state rides the hash
-            tokens = _tokens(added)
-            ancestor = closest(texts.get(added, ""), removed, texts)
+            ancestor = step.ancestor(added, texts)
             if ancestor and ancestor in statuses:
-                old_tokens = _tokens(ancestor)
+                old_tokens = tokens(ancestor)
                 statuses[added] = _inherit(
-                    statuses[ancestor], old_tokens, tokens, default_status
+                    statuses[ancestor], old_tokens, tokens(added),
+                    default_status,
                 )
                 intents[added] = _inherit(
-                    intents[ancestor], old_tokens, tokens, INTENT_FLEXIBLE
+                    intents[ancestor], old_tokens, tokens(added),
+                    INTENT_FLEXIBLE,
                 )
                 stamps[added] = dict(stamps.get(ancestor, {}))
             else:
-                statuses[added] = [default_status] * len(tokens)
-                intents[added] = [INTENT_FLEXIBLE] * len(tokens)
+                statuses[added] = [default_status] * len(tokens(added))
+                intents[added] = [INTENT_FLEXIBLE] * len(tokens(added))
                 stamps[added] = {
-                    "status_at": entry.at, "status_by": entry.author_detail,
+                    "status_at": step.record.at,
+                    "status_by": step.record.author_detail,
                 }
-        current = new
+        current = step.hashes
     result: dict[str, TokenState] = {}
-    for block in set(current or ()):
+    for block in set(current):
         status = statuses[block]
         stamp = stamps.get(block, {})
         result[block] = TokenState(
@@ -1074,25 +1156,24 @@ def word_token_authors(
     word-free filter here; callers apply :func:`has_words` where
     display rules demand it."""
     texts = texts_of(records)
+    tokens = _token_cache(texts)
     token_authors: dict[str, tuple[str, ...]] = {}
-    previous: tuple[str, ...] = ()
-    for record, hashes in state_walk(records):
-        removed = set(previous) - set(hashes)
-        for added in set(hashes) - set(previous):
+    final: tuple[str, ...] = ()
+    for step in revision_steps(records):
+        for added in step.added:
             if added in token_authors:
                 continue  # restored verbatim: authorship rides the hash
-            text = texts.get(added, "")
-            tokens = block_tokens(text)
-            ancestor = closest(text, removed, texts)
+            ancestor = step.ancestor(added, texts)
             base = token_authors.get(ancestor, ()) if ancestor else ()
-            old_tokens = block_tokens(texts.get(ancestor, "")) if base else []
+            old_tokens = tokens(ancestor) if base else []
             token_authors[added] = tuple(
-                _inherit(base, old_tokens, tokens, record.author_kind)
+                _inherit(base, old_tokens, tokens(added),
+                         step.record.author_kind)
             )
-        previous = hashes
+        final = step.hashes
     return {
         block: token_authors[block]
-        for block in set(previous) if block in token_authors
+        for block in set(final) if block in token_authors
     }
 
 
@@ -1110,19 +1191,14 @@ class _CommentFold:
 
 
 def _fold_comments(
-    entries: Sequence[LogEntry],
+    entries: Sequence[LogEntry], texts: Mapping[str, str]
 ) -> dict[str, _CommentFold]:
     """The comment fold walk (WP50): file-ordered comments with their
-    anchors ridden forward through every revision. Shared by
-    :func:`comment_states` and compaction's hoist-with-rewrite."""
-    records = [e for e in entries if isinstance(e, RevisionRecord)]
-    texts = texts_of(records)
-    tokens_of: dict[str, list[str]] = {}
-
-    def _tokens(block: str) -> list[str]:
-        if block not in tokens_of:
-            tokens_of[block] = block_tokens(texts.get(block, ""))
-        return tokens_of[block]
+    anchors ridden forward through every revision. ``texts`` is the
+    caller's :func:`texts_of` view over the walked records (compaction
+    passes its dropped-era subset). Shared by :func:`comment_states`
+    and compaction's hoist-with-rewrite."""
+    tokens = _token_cache(texts)
 
     def _attach(fold: _CommentFold) -> None:
         fold.attached = True
@@ -1131,20 +1207,22 @@ def _fold_comments(
             fold.flags is None and entry.start >= 0
             and fold.anchor == entry.hash
         ):
-            tokens = _tokens(fold.anchor)
+            anchor_tokens = tokens(fold.anchor)
             lo = max(0, entry.start)
-            hi = min(len(tokens), entry.end)
+            hi = min(len(anchor_tokens), entry.end)
             if lo < hi:
-                fold.flags = [lo <= i < hi for i in range(len(tokens))]
+                fold.flags = [
+                    lo <= i < hi for i in range(len(anchor_tokens))
+                ]
 
     folds: dict[str, _CommentFold] = {}
-    current: tuple[str, ...] | None = None
-    for entry in entries:
+    current: tuple[str, ...] = ()
+    for entry, step in _log_steps(entries):
         if isinstance(entry, CommentEntry):
             if entry.id in folds:
                 continue  # first line owns the identity
             fold = _CommentFold(entry=entry, anchor=entry.hash)
-            if entry.hash and current is not None and entry.hash in current:
+            if entry.hash and entry.hash in current:
                 _attach(fold)
             folds[entry.id] = fold
             continue
@@ -1156,22 +1234,10 @@ def _fold_comments(
             fold_or_none.state_at = entry.at
             fold_or_none.state_by = entry.by
             continue
-        if not isinstance(entry, RevisionRecord):
+        if step is None:
             continue
-        if entry.kind == KIND_KEYFRAME:
-            new = entry.hashes
-        elif entry.kind == KIND_DELTA and current is not None:
-            new = apply_ops(current, entry.ops)
-        else:
-            continue
-        previous = set(current or ())
-        new_set = set(new)
-        removed = previous - new_set
-        added_in_order = [h for h in new if h not in previous]
-        ancestor_of = {
-            added: closest(texts.get(added, ""), removed, texts)
-            for added in added_in_order
-        }
+        new_set = set(step.hashes)
+        ancestor_of = step.ancestors(texts)
         for fold in folds.values():
             if fold.state == COMMENT_RESOLVED:
                 continue
@@ -1182,14 +1248,14 @@ def _fold_comments(
             if fold.anchor in new_set:
                 continue  # anchor still live (moves are free)
             successors = [
-                h for h in added_in_order
+                h for h in step.added
                 if ancestor_of.get(h) == fold.anchor
             ]
             if fold.flags is not None:
-                old_tokens = _tokens(fold.anchor)
+                old_tokens = tokens(fold.anchor)
                 for successor in successors:
                     inherited = _inherit(
-                        fold.flags, old_tokens, _tokens(successor), False
+                        fold.flags, old_tokens, tokens(successor), False
                     )
                     if any(inherited):
                         fold.anchor = successor
@@ -1207,7 +1273,7 @@ def _fold_comments(
                 fold.anchor = successors[0]
             else:
                 fold.attached = False
-        current = new
+        current = step.hashes
     return folds
 
 
@@ -1230,16 +1296,18 @@ def comment_states(entries: Sequence[LogEntry]) -> tuple[CommentState, ...]:
     fold away (the log keeps them until compaction)."""
     records = [e for e in entries if isinstance(e, RevisionRecord)]
     texts = texts_of(records)
+    tokens = _token_cache(texts)
     states: list[CommentState] = []
-    for fold in _fold_comments(entries).values():
+    for fold in _fold_comments(entries, texts).values():
         if fold.state == COMMENT_RESOLVED:
             continue
         anchor = fold.anchor if fold.attached else ""
         start = end = -1
-        if anchor and fold.flags is not None:
-            tokens = block_tokens(texts.get(anchor, ""))
-            if len(fold.flags) == len(tokens):
-                start, end = _flag_bounds(fold.flags)
+        if (
+            anchor and fold.flags is not None
+            and len(fold.flags) == len(tokens(anchor))
+        ):
+            start, end = _flag_bounds(fold.flags)
         states.append(CommentState(
             id=fold.entry.id, text=fold.entry.text, state=fold.state,
             hash=anchor, start=start, end=end,
@@ -1308,8 +1376,6 @@ def compact(
         return tuple(entries)
     records = [e for e in entries if isinstance(e, RevisionRecord)]
     all_texts = texts_of(records)
-    dropped_through = 0
-    dropped_marks: list[SectionMark] = []
     while len(render_log(kept)) > cap:
         next_keyframe = next(
             (i for i, e in enumerate(kept)
@@ -1319,16 +1385,17 @@ def compact(
         )
         if next_keyframe is None:
             break  # nothing older left to shed; over-cap is the lesser evil
-        dropped = kept[:next_keyframe]
-        dropped_through = max(
-            r.seq for r in dropped if isinstance(r, RevisionRecord)
-        )
-        dropped_marks.extend(
-            e for e in dropped if isinstance(e, SectionMark)
-        )
         kept = kept[next_keyframe:]
-    if dropped_through == 0:
+    dropped_all = list(entries)[:len(entries) - len(kept)]
+    dropped_records = [
+        e for e in dropped_all if isinstance(e, RevisionRecord)
+    ]
+    if not dropped_records:
         return tuple(entries)
+    # seq never decreases in file order (append-only; roll-up rewrites
+    # the SAME seq), so the max over everything dropped is the seq the
+    # truncation marker records.
+    dropped_through = max(r.seq for r in dropped_records)
     kept_records = [e for e in kept if isinstance(e, RevisionRecord)]
     # Blocks introduced in the dropped era but still alive lose their
     # text with the dropped records -- re-carry it on the first kept
@@ -1351,13 +1418,18 @@ def compact(
             new_blocks={**missing, **first.new_blocks},
         )
     live = set(first.hashes)
-    hoisted = [m for m in dropped_marks if m.hash in live]
-    dropped_all = list(entries)[:len(entries) - len(kept)]
+    hoisted = [
+        m for m in dropped_all
+        if isinstance(m, SectionMark) and m.hash in live
+    ]
     kept_comment_ids = {
         e.id for e in kept if isinstance(e, CommentEntry)
     }
     hoisted_comments: list[LogEntry] = []
-    for cid, fold in _fold_comments((*dropped_all, first)).items():
+    dropped_texts = texts_of([*dropped_records, first])
+    for cid, fold in _fold_comments(
+        (*dropped_all, first), dropped_texts
+    ).items():
         if cid in kept_comment_ids or fold.state == COMMENT_RESOLVED:
             continue
         start, end = (
