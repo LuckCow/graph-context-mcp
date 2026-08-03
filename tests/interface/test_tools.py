@@ -1586,3 +1586,106 @@ class TestEditDocumentTool:
         )
         assert out.startswith("ERROR:")
         assert "LOCKED" in out and "unlock" in out
+
+
+class TestEditDocumentComments:
+    """WP50 (ADR 056): comments in the sections listing, and the model's
+    address_comment action -- addressing is sidecar bookkeeping, resolve
+    stays human-only."""
+
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    @staticmethod
+    def _h(text: str) -> str:
+        from graph_context.domain import revisions
+
+        return revisions.block_hash(revisions.normalize_block(text))
+
+    async def _commented_chapter(self, services: tools.Services):
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(node.id, author_detail="m")
+        services.historian = historian
+        state = await historian.record_comment(
+            node.id, block_hash=self._h(self.P2),
+            text="count them again", by="human:prose-page",
+        )
+        return node, historian, state
+
+    async def test_the_listing_shows_comments_and_teaches_addressing(
+        self, services
+    ) -> None:
+        node, _, state = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(services, node_id=node.id)
+        assert "comments (1 open, 0 addressed):" in out
+        assert (
+            f'#{state.id} open on §{self._h(self.P2)}: "count them again"'
+            in out
+        )
+        assert "address_comment" in out
+
+    async def test_addressing_reports_and_lists_whats_still_open(
+        self, services
+    ) -> None:
+        node, historian, state = await self._commented_chapter(services)
+        other = await historian.record_comment(
+            node.id, block_hash=self._h(self.P1), text="why barred?", by="u",
+        )
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id=f"#{state.id}",  # the sigil-prefixed form works
+        )
+        assert f"addressed comment #{state.id}." in out
+        assert "still open (1):" in out and other.id in out
+        from graph_context.domain import revisions
+
+        by_id = {c.id: c for c in historian.comments(node.id)}
+        assert by_id[state.id].state == revisions.COMMENT_ADDRESSED
+        assert by_id[other.id].state == revisions.COMMENT_OPEN
+
+    async def test_addressing_the_last_comment_says_none_remain(
+        self, services
+    ) -> None:
+        node, _, state = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id=state.id,
+        )
+        assert "no comments remain open." in out
+
+    async def test_an_unknown_id_error_lists_the_live_ids(
+        self, services
+    ) -> None:
+        node, _, state = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id="cnosuch01",
+        )
+        assert out.startswith("ERROR:")
+        assert state.id in out
+
+    async def test_missing_id_and_missing_historian_are_prompts(
+        self, services
+    ) -> None:
+        node, _, _ = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+        )
+        assert out.startswith("ERROR:") and "comment_id" in out
+        services.historian = None
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id="c12345678",
+        )
+        assert out.startswith("ERROR:") and "unavailable" in out

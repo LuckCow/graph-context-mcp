@@ -49,7 +49,7 @@ from graph_context.application.document_editor import DocumentEditor
 from graph_context.application.node_writer import WriteOutcome
 from graph_context.application.scheduler import Scheduler
 from graph_context.application.schema_proposals import SchemaProposal
-from graph_context.domain import rules, schema
+from graph_context.domain import revisions, rules, schema
 from graph_context.domain.models import (
     Edge,
     Node,
@@ -814,7 +814,13 @@ async def update_node_tool(
     )
 
 
-_EDIT_DOCUMENT_ACTIONS = ("sections", "replace", "insert_after", "delete")
+_EDIT_DOCUMENT_ACTIONS = (
+    "sections", "replace", "insert_after", "delete", "address_comment",
+)
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _render_sections(
@@ -823,7 +829,8 @@ def _render_sections(
     blocks: tuple[tuple[str, str], ...],
 ) -> str:
     """The document's anchor listing: one line per block -- hash, review
-    state when a historian is live (WP42), first line of the text."""
+    state when a historian is live (WP42), first line of the text --
+    plus the user's live comments (WP50)."""
     graph = services.repository.graph
     name = graph.node(node_id).name if graph.has_node(node_id) else node_id
     if not blocks:
@@ -838,6 +845,32 @@ def _render_sections(
         badge = f" · {state.status} · {state.intent}" if state else ""
         first_line = raw.splitlines()[0][:70]
         lines.append(f"[§{block_hash}{badge}] {first_line}")
+    comments = (
+        services.historian.comments(node_id)
+        if services.historian is not None else ()
+    )
+    if comments:
+        open_count = sum(
+            1 for c in comments if c.state == revisions.COMMENT_OPEN
+        )
+        lines.append(
+            f"comments ({open_count} open, "
+            f"{len(comments) - open_count} addressed):"
+        )
+        for comment in comments:
+            where = (
+                f"on §{comment.hash}" if comment.hash
+                else "(detached; its text was removed)"
+            )
+            lines.append(
+                f'  #{comment.id} {comment.state} {where}: '
+                f'"{_clip(comment.text, 100)}"'
+            )
+        lines.append(
+            "address a comment you have acted on with "
+            "action='address_comment' + comment_id; only the user "
+            "resolves it."
+        )
     return "\n".join(lines)
 
 
@@ -849,6 +882,7 @@ async def edit_document_tool(
     anchor: str = "",
     text: str = "",
     summary: str | None = None,
+    comment_id: str = "",
 ) -> str:
     if action not in _EDIT_DOCUMENT_ACTIONS:
         raise GraphContextError(
@@ -861,6 +895,38 @@ async def edit_document_tool(
         return _render_sections(
             services, resolved, await editor.sections(resolved)
         )
+    if action == "address_comment":
+        # A sidecar bookkeeping write, not a body write: no journal
+        # entry, no card -- the comment log keeps the record (WP50).
+        historian = services.historian
+        if historian is None:
+            raise GraphContextError(
+                "comments are unavailable on this surface (no revision "
+                "history service)."
+            )
+        wanted = comment_id.strip().lstrip("#")
+        if not wanted:
+            raise GraphContextError(
+                "action='address_comment' needs comment_id -- the #id "
+                "shown in the sections listing and the context block."
+            )
+        await historian.set_comment_state(
+            resolved, comment_id=wanted,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        remaining = [
+            c for c in historian.comments(resolved)
+            if c.state == revisions.COMMENT_OPEN
+        ]
+        lines = [f"addressed comment #{wanted}."]
+        if remaining:
+            lines.append(f"still open ({len(remaining)}):")
+            lines.extend(
+                f'  #{c.id}: "{_clip(c.text, 100)}"' for c in remaining
+            )
+        else:
+            lines.append("no comments remain open.")
+        return "\n".join(lines)
     if action in ("replace", "insert_after") and not text.strip():
         raise GraphContextError(
             f"action={action!r} needs `text`: the section's full markdown "

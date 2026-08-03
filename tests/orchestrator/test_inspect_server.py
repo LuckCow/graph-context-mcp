@@ -740,6 +740,112 @@ class TestProseMarksRoute:
         assert status == 409
 
 
+class TestProseCommentsRoute:
+    """WP50 (ADR 056): comment create/resolve behind the same gates as
+    save/marks."""
+
+    def _doc(self, base: str, node_id: str) -> dict:
+        return _get_json(f"{base}/api/prose/doc?space=sp1&node={node_id}")
+
+    def test_a_comment_lands_and_echoes_in_the_payload(
+        self, prose_server
+    ) -> None:
+        base, node_id = prose_server
+        doc = self._doc(base, node_id)
+        status, fresh = _post_prose(base, "/api/prose/comments", {
+            "space": "sp1", "node": node_id, "base": doc["base"],
+            "comment": {
+                "hash": _prose_hash(PROSE_P1), "text": "why barred?",
+                "start_char": 0, "end_char": 8,
+            },
+        })
+        assert status == 200
+        (comment,) = fresh["comments"]
+        assert comment["state"] == "open"
+        anchor = comment["anchor"]
+        assert fresh["body"][anchor["start"]:anchor["end"]] == "The city"
+
+    def test_resolve_round_trips(self, prose_server) -> None:
+        base, node_id = prose_server
+        doc = self._doc(base, node_id)
+        _, fresh = _post_prose(base, "/api/prose/comments", {
+            "space": "sp1", "node": node_id, "base": doc["base"],
+            "comment": {"hash": _prose_hash(PROSE_P1), "text": "x"},
+        })
+        (comment,) = fresh["comments"]
+        status, after = _post_prose(base, "/api/prose/comments", {
+            "space": "sp1", "node": node_id, "base": fresh["base"],
+            "resolve": comment["id"],
+        })
+        assert status == 200
+        assert after["comments"] == []
+
+    def test_exactly_one_of_comment_or_resolve(self, prose_server) -> None:
+        base, node_id = prose_server
+        doc = self._doc(base, node_id)
+        common = {"space": "sp1", "node": node_id, "base": doc["base"]}
+        assert _post_prose(
+            base, "/api/prose/comments", dict(common),
+        )[0] == 400
+        assert _post_prose(base, "/api/prose/comments", {
+            **common, "resolve": "cid",
+            "comment": {"hash": "h", "text": "x"},
+        })[0] == 400
+
+    def test_bad_shapes_are_400(self, prose_server) -> None:
+        base, node_id = prose_server
+        doc = self._doc(base, node_id)
+        common = {"space": "sp1", "node": node_id, "base": doc["base"]}
+        assert _post_prose(base, "/api/prose/comments", {
+            **common, "comment": {"hash": _prose_hash(PROSE_P1)},
+        })[0] == 400  # no text
+        assert _post_prose(base, "/api/prose/comments", {
+            **common, "comment": {
+                "hash": _prose_hash(PROSE_P1), "text": "x", "start_char": 3,
+            },
+        })[0] == 400  # half a range
+        assert _post_prose(base, "/api/prose/comments", {
+            **common, "resolve": "",
+        })[0] == 400
+
+    def test_a_stale_base_is_409(self, prose_server) -> None:
+        base, node_id = prose_server
+        status, _ = _post_prose(base, "/api/prose/comments", {
+            "space": "sp1", "node": node_id, "base": "0" * 16,
+            "comment": {"hash": _prose_hash(PROSE_P1), "text": "x"},
+        })
+        assert status == 409
+
+    def test_an_unknown_space_is_404(self, prose_server) -> None:
+        base, node_id = prose_server
+        status, _ = _post_prose(base, "/api/prose/comments", {
+            "space": "ghost", "node": node_id, "base": "0" * 16,
+            "comment": {"hash": _prose_hash(PROSE_P1), "text": "x"},
+        })
+        assert status == 404
+
+    def test_token_and_origin_gates_hold(self, prose_server) -> None:
+        base, node_id = prose_server
+        payload = {
+            "space": "sp1", "node": node_id, "base": "0" * 16,
+            "comment": {"hash": _prose_hash(PROSE_P1), "text": "x"},
+        }
+        assert _post_prose(
+            base, "/api/prose/comments", payload, token="wrong",
+        )[0] == 401
+        request = urllib.request.Request(
+            f"{base}/api/prose/comments",
+            data=json.dumps(payload).encode(), method="POST",
+            headers={
+                "Authorization": f"Bearer {PROSE_TOKEN}",
+                "Origin": "http://evil.example",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(request, timeout=5)
+        assert err.value.code == 403
+
+
 class TestStaticRoute:
     """WP48: the server's first static assets (the vendored bundle)."""
 

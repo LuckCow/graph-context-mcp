@@ -28,6 +28,8 @@ live turn diary. Routes:
   POST /api/prose/save         -> whole-document save (WP48; base-token
                                   concurrency, 409 on mismatch)
   POST /api/prose/marks        -> batch status/intent marks (WP48)
+  POST /api/prose/comments     -> comment create/resolve (WP50; same
+                                  base-token concurrency as save/marks)
 
 The prose routes speak to live space runtimes through a ``ProseBridge``
 (``prose_bridge.py``): the bridge is handed over EMPTY before the bots
@@ -35,7 +37,7 @@ bootstrap and spaces register as they come up, so the server still
 starts first and the page degrades to an empty state everywhere else
 (standalone launches, memory backend, viewer-only runs).
 
-The save/marks POSTs are this server's only non-GET routes.
+The save/marks/comments POSTs are this server's only non-GET routes.
 Read-only-by-construction was a load-bearing safety property, so writes
 are doubly gated: same-origin enforcement (``Sec-Fetch-Site`` when the
 browser sends it, ``Origin``-vs-``Host`` otherwise) refuses drive-by
@@ -393,14 +395,16 @@ class Handler(BaseHTTPRequestHandler):
             pass  # client went away -- end the stream quietly
 
     def do_POST(self) -> None:  # http.server naming
-        """The server's two writes (WP48): the whole-document save and
-        the batch status/intent marks.
+        """The server's writes: the whole-document save, the batch
+        status/intent marks (WP48), and comment create/resolve (WP50).
 
         Gate order matters: origin first (drive-by pages get nothing,
         not even a token prompt), then the token (401 tells the page to
         prompt; 403 'writes disabled' tells it to stay read-only)."""
         route = urlparse(self.path).path
-        if route not in ("/api/prose/save", "/api/prose/marks"):
+        if route not in (
+            "/api/prose/save", "/api/prose/marks", "/api/prose/comments",
+        ):
             self.send_error(404, "not found")
             return
         if not self._same_origin():
@@ -435,8 +439,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/prose/save":
                 result = self._call_save(payload)
-            else:
+            elif route == "/api/prose/marks":
                 result = self._call_marks(payload)
+            else:
+                result = self._call_comments(payload)
         except _BadRequest as bad:
             self.send_error(400, str(bad))
             return
@@ -494,6 +500,44 @@ class Handler(BaseHTTPRequestHandler):
         return dict(self.prose.call(
             payload["space"], "set_marks", payload["node"],
             payload["base"], marks,
+        ))
+
+    def _call_comments(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Comment create/resolve (WP50): exactly one of ``comment``
+        (an object: hash, text, optional start_char/end_char pair) or
+        ``resolve`` (a comment id)."""
+        _require_strings(payload, ("space", "node", "base"))
+        comment = payload.get("comment")
+        resolve = payload.get("resolve")
+        if (comment is None) == (resolve is None):
+            raise _BadRequest(
+                "pass exactly one of comment (create) or resolve (an id)"
+            )
+        op: dict[str, Any]
+        if resolve is not None:
+            if not isinstance(resolve, str) or not resolve:
+                raise _BadRequest("resolve must be a comment id")
+            op = {"resolve": resolve}
+        else:
+            if not isinstance(comment, dict):
+                raise _BadRequest("comment must be an object")
+            _require_strings(comment, ("hash", "text"))
+            start = comment.get("start_char")
+            end = comment.get("end_char")
+            if (start is None) != (end is None):
+                raise _BadRequest("start_char/end_char must come together")
+            if start is not None and any(
+                isinstance(v, bool) or not isinstance(v, int) or v < 0
+                for v in (start, end)
+            ):
+                raise _BadRequest(
+                    "start_char/end_char must be non-negative integers"
+                )
+            op = {"comment": comment}
+        assert self.prose is not None  # gated by the caller
+        return dict(self.prose.call(
+            payload["space"], "set_comment", payload["node"],
+            payload["base"], op,
         ))
 
     def _same_origin(self) -> bool:

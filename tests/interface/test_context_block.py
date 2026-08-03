@@ -212,3 +212,98 @@ class TestLockedRunLines:
         # The fully locked block gets the badge, not a redundant list.
         assert block.count("locked verbatim:") == 1
         assert f"[§{h2} · locked]" in block
+
+
+class TestCommentLines:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    async def _tracked(self, services):
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+        from graph_context.domain.models import NodeDraft
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        chapter = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(chapter.id, author_detail="m")
+        services.historian = historian
+        services.session.working_set.hold(chapter.id, Detail.FULL)
+        return chapter, historian
+
+    async def test_comments_render_under_their_anchor_block(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        state = await historian.record_comment(
+            chapter.id, block_hash=h2, text="count them again",
+            by="human:prose-page", start=0, end=3,
+        )
+        block = await build_turn_context(services)
+        line = (
+            f'comment #{state.id} (open): "count them again"'
+            f' — on: "Mira counted the"'
+        )
+        assert line in block
+        assert block.index(self.P2) < block.index(f"#{state.id}")
+
+    async def test_addressed_comments_say_they_await_review(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        state = await historian.record_comment(
+            chapter.id, block_hash=h1, text="fix the tense", by="u",
+        )
+        await historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        block = await build_turn_context(services)
+        assert (
+            f"comment #{state.id} (addressed; awaiting human review)"
+            in block
+        )
+
+    async def test_detached_comments_trail_the_body(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        state = await historian.record_comment(
+            chapter.id, block_hash=h2, text="count them again", by="u",
+        )
+        await services.repository.update_node(chapter.id, body=self.P1)
+        await historian.record_external_revision(chapter.id)
+        block = await build_turn_context(services)
+        assert (
+            f"detached comment #{state.id} (its text was removed): "
+            '"count them again"' in block
+        )
+
+    async def test_comments_drop_with_bodies_over_budget(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        await historian.record_comment(
+            chapter.id, block_hash=h1, text="fix the tense", by="u",
+        )
+        block = await build_turn_context(services, budget_chars=500)
+        assert "fix the tense" not in block
+        assert "[body omitted: over context budget" in block

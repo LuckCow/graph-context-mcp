@@ -66,6 +66,11 @@ class ProseSpace:
     set_marks: Callable[
         [str, str, list[dict[str, Any]]], Awaitable[dict[str, Any]]
     ]
+    # WP50 (ADR 056): (node, base, payload) -- comment create/resolve,
+    # one sidecar write; payload carries exactly one of comment/resolve
+    set_comment: Callable[
+        [str, str, dict[str, Any]], Awaitable[dict[str, Any]]
+    ]
 
 
 class ProseBridge:
@@ -305,6 +310,43 @@ def register_space(
                         [cursor, token_end, author, status, intent]
                     )
                 cursor = token_end
+        # WP50: live comments with ABSOLUTE anchors (code-point offsets
+        # over the body; null = detached). Ranged anchors derive through
+        # token_range_to_chars; a range the fetched text no longer has
+        # degrades to the whole block, never a crash.
+        first_offset: dict[str, tuple[int, int]] = {}
+        for block_hash, start, end in revisions.block_offsets(body):
+            first_offset.setdefault(block_hash, (start, end))
+        comments: list[dict[str, Any]] = []
+        for comment in historian.comments(node_id):
+            anchor: dict[str, int] | None = None
+            offsets = first_offset.get(comment.hash) if comment.hash else None
+            if offsets is not None:
+                block_start, block_end = offsets
+                anchor = {"start": block_start, "end": block_end}
+                if comment.start >= 0:
+                    try:
+                        lo, hi = revisions.token_range_to_chars(
+                            body[block_start:block_end],
+                            comment.start, comment.end,
+                        )
+                        anchor = {
+                            "start": block_start + lo,
+                            "end": block_start + hi,
+                        }
+                    except GraphContextError:
+                        pass  # whole-block anchor stands
+            comments.append({
+                "id": comment.id,
+                "text": comment.text,
+                "state": comment.state,
+                "hash": comment.hash,
+                "at": comment.at,
+                "by": _display_detail(comment.by),
+                "state_at": comment.state_at,
+                "state_by": _display_detail(comment.state_by),
+                "anchor": anchor,
+            })
         timeline = []
         previous: tuple[str, ...] = ()
         for record, hashes in revisions.state_walk(usable):
@@ -325,6 +367,7 @@ def register_space(
             "body": body,
             "segments": segments,
             "spans": spans,
+            "comments": comments,
             "revisions": timeline,
         }
 
@@ -404,6 +447,55 @@ def register_space(
             )
         return await _doc_payload(node_id)
 
+    async def set_comment(
+        node_id: str, base: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Comment create/resolve (WP50): one POST, one route-lock hold,
+        one sidecar rewrite. Create takes the anchored block's hash plus
+        optional ``start_char``/``end_char`` selection offsets (the
+        domain's ``char_range_to_tokens`` is the only place they become
+        token indices); resolve takes a comment id. The base token gates
+        both -- a stale page reconciles before it comments."""
+        async with route_lock:
+            current = await repository.fetch_body(node_id)
+            if _body_token(current) != base:
+                raise StaleSectionMark(
+                    f"{_name_of(node_id)!r} changed since this view "
+                    "loaded; reload and retry."
+                )
+            resolve = payload.get("resolve")
+            if resolve is not None:
+                await historian.set_comment_state(
+                    node_id, comment_id=str(resolve),
+                    value=revisions.COMMENT_RESOLVED, by=MARK_AUTHOR,
+                )
+            else:
+                comment = payload["comment"]
+                block_hash = str(comment["hash"])
+                start = end = None
+                if comment.get("start_char") is not None:
+                    by_hash = {
+                        h: current[s:e]
+                        for h, s, e in revisions.block_offsets(current)
+                    }
+                    text = by_hash.get(block_hash)
+                    if text is None:
+                        raise StaleSectionMark(
+                            f"section {block_hash} is not in the current "
+                            f"version of {_name_of(node_id)!r}; reload."
+                        )
+                    start, end = revisions.char_range_to_tokens(
+                        text,
+                        int(comment["start_char"]),
+                        int(comment["end_char"]),
+                    )
+                await historian.record_comment(
+                    node_id, block_hash=block_hash,
+                    text=str(comment["text"]), by=MARK_AUTHOR,
+                    start=start, end=end,
+                )
+        return await _doc_payload(node_id)
+
     # WP48: every historian write (turn boundary, change tick, page
     # save, marks) bumps the live-update ledger the SSE route polls.
     historian.on_record = lambda node_id: bridge.bump(space_id, node_id)
@@ -417,4 +509,5 @@ def register_space(
         doc_view=doc_view,
         save_body=save_body,
         set_marks=set_marks,
+        set_comment=set_comment,
     ))

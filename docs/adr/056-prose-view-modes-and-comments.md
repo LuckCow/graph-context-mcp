@@ -1,0 +1,118 @@
+# ADR 056: Prose editor — highlight view modes and comments
+
+Date: 2026-08-03
+Status: accepted (extends ADR 050/052/054)
+
+## Context
+
+The prose page stacks four word-level highlight classes — locked (red),
+needs_change (amber), approved (green), human-typed (lavender) — with
+first-match-wins priority (ADR 053 amendment). Dogfooding found two
+gaps:
+
+1. **The layers are illegible together.** Priority also *masks*: a
+   locked word's red hides its lavender authorship; a page full of
+   mixed state reads as noise.
+2. **There is no channel for the human to talk ABOUT the text.** Notes
+   like "make this darker" went through chat, where they lose their
+   anchor to the words they discuss and scroll out of the model's
+   memory. Review state (WP42/46) says *what* a section is, never
+   *what the human wants done to it*.
+
+## Decision
+
+### View modes: the legend becomes the control
+
+A six-way mode — `all · authorship · status · intent · comments ·
+none` — rendered as chips where the legend was (the swatches double as
+samples; the active chip is lit). Selection is persisted in
+`localStorage` (`gc_prose_view_mode`) and switching re-dispatches
+decorations from the retained doc payload: no refetch, never through
+the router (the CM view, scroll, and selection survive).
+
+Single-concern modes **unmask**, not filter: spans carry the full
+`(author, status, intent)` triple, so `authorship` shows lavender on
+words the `all` priority paints red, `status` shows only approved
+green, `intent` shows locked + needs_change. `spanClass` is the one
+mode-aware seam. Blame line ticks stay on in every mode (gutter-edge,
+not text background). Comment underlines render in `all` and
+`comments`. Frontend-only — no wire change.
+
+### Comments: notes on selections, stored in the sidecar log
+
+A comment is human-authored (the prose page's action bar grows an
+`add comment` composer beside status/intent), anchored like a ranged
+mark — block hash + token range via `char_range_to_tokens`, the only
+char→token door — and stored as two new line kinds in the SAME
+revision sidecar log (ADR 049's fence):
+
+```
+{"kind":"comment","id":"c3f81a2b","hash":"<block>","text":"…","at":"…","by":"human:prose-page","s":4,"e":9}
+{"kind":"comment_state","id":"c3f81a2b","value":"addressed","at":"…","by":"model"}
+```
+
+- **Identity**: `comment_id(at, by, hash, text)` — clock-free content
+  hash; an identical same-second duplicate folds to the same id and
+  the historian drops it change-only. Lifecycle `open → addressed →
+  resolved` rides append-only `comment_state` lines (last-wins,
+  `resolved` terminal); `open` is implicit and never serialized.
+- **Anchors ride edits.** The `comment_states` fold tracks each live
+  comment's anchor with the SAME lineage machinery as review state
+  (`closest` similarity + positional `_inherit`, no match
+  consumption): an edit moves the anchor to the successor block and
+  keeps the surviving tokens; deleting the commented words falls back
+  to the successor's whole block; deleting the block **detaches** the
+  comment (`hash=""` — still listed until resolved, and a verbatim
+  restore re-attaches it). Nothing offset-shaped is stored.
+- **Compaction rewrites, not hoists.** A dropped-era live comment's
+  anchor may have migrated during the dropped era, so mark-style
+  `hash in live` hoisting would kill it. `compact` folds comments
+  over the full log first and re-emits each dropped-era live comment
+  REWRITTEN to its anchor as of the first kept keyframe (last-known
+  anchor kept when detached), plus one `addressed` line when set.
+  Resolved comments drop with their era.
+- **The lifecycle is split by authority.** The MODEL may only mark a
+  comment `addressed` — `edit_document action="address_comment"`
+  (comment ids surface in the sections listing and the context
+  block); addressing is sidecar bookkeeping, so it never journals,
+  cards, or touches the body. Only the HUMAN resolves, on the page
+  (`POST /api/prose/comments`, same gate order and base-token
+  concurrency as save/marks; one route-lock hold, one sidecar
+  rewrite). Addressed-but-unresolved stays visible to both sides as
+  "awaiting human review".
+- **The model sees comments where it sees the text.** The context
+  block renders each live comment under its anchor block —
+  `comment #id (open): "…" — on: "<the anchored words>"` — with
+  detached ones trailing the body; `edit_document`'s sections listing
+  appends a comments section plus one teaching line. Comment lines
+  ride the body, so budget rung 2 drops them with it.
+- **The page renders comments twice**: dotted underlines stacked on
+  top of state backgrounds (dashed + muted once addressed), and a
+  panel below the editor — state badge, text, author, resolve button;
+  row-click selects and scrolls to the anchor, clicking an underline
+  scrolls to the row (plain `domEventHandlers`, no tooltip machinery,
+  no bundle rebuild). The composer is guarded: while it is open,
+  `updateBar` never rebuilds the bar rows, so an SSE refetch cannot
+  destroy a half-typed note.
+
+## Consequences
+
+- A comment (or transition) line ends the log's revision tail, so it
+  **solidifies the WP44 pending human roll-up** — deliberate: a
+  comment pins exactly the text it discusses; an autosave session
+  bisects into two revisions around it.
+- Old readers skip the new line kinds leniently, but a pre-056 WRITER
+  re-renders the log from its parsed entries and would silently drop
+  comment lines. Accepted: single-version deployment (same stance as
+  WP42's mark lines).
+- The wire's `comments` entries carry absolute code-point anchors
+  derived at payload time (`token_range_to_chars`, `block_offsets`);
+  detached comments serve `anchor: null` and are panel-only.
+- The bare MCP server has no historian: `address_comment` degrades to
+  a teaching error there, and nothing can create comments.
+- Model addressing bumps the SSE version ledger like every sidecar
+  write — an open clean page restyles the underline live.
+- `_inherit` became generic (`TypeVar`) to carry the comment fold's
+  boolean flag vectors; the review folds now guard on
+  `isinstance(entry, RevisionRecord)` so any future line kind is
+  inert by construction.

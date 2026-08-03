@@ -138,6 +138,7 @@ class TestThreadContract:
                 doc_view=None,  # type: ignore[arg-type]
                 save_body=None,  # type: ignore[arg-type]
                 set_marks=None,  # type: ignore[arg-type]
+                set_comment=None,  # type: ignore[arg-type]
             ))
             return threading.get_ident()
 
@@ -164,6 +165,7 @@ class TestThreadContract:
                 doc_view=None,  # type: ignore[arg-type]
                 save_body=None,  # type: ignore[arg-type]
                 set_marks=None,  # type: ignore[arg-type]
+                set_comment=None,  # type: ignore[arg-type]
             ))
 
         asyncio.run_coroutine_threadsafe(register(), loop).result(10)
@@ -319,6 +321,90 @@ class TestDocWireDegradation:
         assert [s["hash"] for s in rewritten["segments"]] == [
             _h(P3), _h(P2_EDIT),
         ]
+
+
+class TestCommentWire:
+    """WP50 (ADR 056): comment create/resolve on the doc wire -- one
+    lock hold per POST, base-token gating, absolute anchors in the
+    payload."""
+
+    def test_create_holds_the_lock_and_serves_the_comment(
+        self, world
+    ) -> None:
+        bridge, node_id, lock = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        before = lock.acquisitions
+        fresh = bridge.call("sp1", "set_comment", node_id, doc["base"], {
+            "comment": {"hash": _h(P1), "text": "why barred?"},
+        })
+        assert lock.acquisitions == before + 1
+        (comment,) = fresh["comments"]
+        assert comment["state"] == "open"
+        assert comment["by"] == "human:prose-page"
+        segment = {s["hash"]: s for s in fresh["segments"]}[_h(P1)]
+        assert comment["anchor"] == {
+            "start": segment["start"], "end": segment["end"],
+        }
+
+    def test_a_ranged_comment_anchors_to_the_selected_chars(
+        self, world
+    ) -> None:
+        bridge, node_id, _ = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        fresh = bridge.call("sp1", "set_comment", node_id, doc["base"], {
+            "comment": {
+                "hash": _h(P1), "text": "gates?",
+                "start_char": 0, "end_char": 8,  # "The city"
+            },
+        })
+        (comment,) = fresh["comments"]
+        anchor = comment["anchor"]
+        assert fresh["body"][anchor["start"]:anchor["end"]] == "The city"
+
+    def test_resolve_removes_the_comment_from_the_payload(
+        self, world
+    ) -> None:
+        bridge, node_id, _ = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        fresh = bridge.call("sp1", "set_comment", node_id, doc["base"], {
+            "comment": {"hash": _h(P1), "text": "drop this"},
+        })
+        (comment,) = fresh["comments"]
+        after = bridge.call("sp1", "set_comment", node_id, fresh["base"], {
+            "resolve": comment["id"],
+        })
+        assert after["comments"] == []
+
+    def test_a_stale_base_raises_for_the_409(self, world) -> None:
+        from graph_context.errors import StaleSectionMark
+
+        bridge, node_id, _ = world
+        with pytest.raises(StaleSectionMark, match="changed since"):
+            bridge.call("sp1", "set_comment", node_id, "0" * 16, {
+                "comment": {"hash": _h(P1), "text": "x"},
+            })
+
+    def test_a_detached_comment_serves_a_null_anchor(self, world) -> None:
+        bridge, node_id, _ = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        fresh = bridge.call("sp1", "set_comment", node_id, doc["base"], {
+            "comment": {"hash": _h(P2_EDIT), "text": "count them again"},
+        })
+        rewritten = bridge.call(
+            "sp1", "save_body", node_id, fresh["base"], f"{P1}\n\n{P3}",
+        )
+        (comment,) = rewritten["comments"]
+        assert comment["hash"] == ""
+        assert comment["anchor"] is None
+
+    def test_comment_writes_bump_the_version_ledger(self, world) -> None:
+        bridge, node_id, _ = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        v0 = bridge.version_of("sp1", node_id)
+        bridge.call("sp1", "set_comment", node_id, doc["base"], {
+            "comment": {"hash": _h(P1), "text": "x"},
+        })
+        assert bridge.version_of("sp1", node_id) > v0
 
 
 class TestAuthorDisplay:

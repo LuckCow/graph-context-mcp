@@ -423,6 +423,134 @@ class NodeHistorian:
             for request in requests
         }
 
+    # -- comments (WP50, ADR 056) ----------------------------------------
+
+    async def record_comment(
+        self, node_id: NodeId, *, block_hash: str, text: str, by: str,
+        start: int | None = None, end: int | None = None,
+    ) -> revisions.CommentState:
+        """Append one comment on a selection (``start``/``end`` are token
+        indices over the block's raw text; both or neither) and return
+        its folded state. Same discipline as marks: validate against the
+        CURRENT baseline, one compaction, one sidecar rewrite; an
+        identical comment written in the same second folds to the same
+        id and drops out as a change-only no-op."""
+        baseline = self._baselines.get(node_id)
+        if baseline is None:
+            raise GraphContextError(
+                f"no revision history for {node_id!r} yet; comments "
+                "attach to recorded sections only."
+            )
+        cleaned = text.strip()
+        if not cleaned:
+            raise GraphContextError("a comment needs text.")
+        if len(cleaned) > revisions.COMMENT_TEXT_CAP:
+            raise GraphContextError(
+                f"comment text is {len(cleaned)} chars; the cap is "
+                f"{revisions.COMMENT_TEXT_CAP}."
+            )
+        if block_hash not in baseline.hashes:
+            raise StaleSectionMark(
+                f"section {block_hash} is not in the current version "
+                f"of {self._name_of(node_id)!r} -- it changed since "
+                "this view loaded; reload and re-add the comment."
+            )
+        block_text = baseline.known_texts.get(block_hash, "")
+        if not revisions.has_words(block_text):
+            raise GraphContextError(
+                "this section has no words to comment on (separators "
+                "share hashes and cannot carry comments)."
+            )
+        token_count = len(revisions.block_tokens(block_text))
+        if (start is None) != (end is None):
+            raise GraphContextError(
+                "a ranged comment needs BOTH start and end (token "
+                "indices); omit both to comment on the whole section."
+            )
+        if start is not None and end is not None and not (
+            0 <= start < end <= token_count
+        ):
+            raise GraphContextError(
+                f"comment range {start}..{end} is outside this "
+                f"section's 0..{token_count} tokens; reload and "
+                "reselect."
+            )
+        at = self._now()
+        cid = revisions.comment_id(at, by, block_hash, cleaned)
+        live = {
+            c.id: c for c in revisions.comment_states(baseline.entries)
+        }
+        if cid in live:
+            return live[cid]  # change-only: no log line, no PATCH
+        entry = revisions.CommentEntry(
+            id=cid, hash=block_hash, text=cleaned, at=at, by=by,
+            start=start if start is not None else -1,
+            end=end if end is not None else -1,
+        )
+        entries = revisions.compact((*baseline.entries, entry))
+        await self._repository.update_node(
+            baseline.sidecar_id, body=revisions.render_log(entries)
+        )
+        self._baselines[node_id] = _state(baseline.sidecar_id, entries)
+        logger.info("historian: comment %s on %s", cid, node_id)
+        self._notify(node_id)
+        return next(
+            c for c in revisions.comment_states(entries) if c.id == cid
+        )
+
+    async def set_comment_state(
+        self, node_id: NodeId, *, comment_id: str, value: str, by: str,
+    ) -> revisions.CommentState | None:
+        """Transition a comment: ``addressed`` (the model acted on it)
+        or ``resolved`` (the human closed it). Returns the folded state,
+        or None once resolved. The unknown-id error lists the live ids
+        -- its consumer may be the model (errors are prompts)."""
+        baseline = self._baselines.get(node_id)
+        if baseline is None:
+            raise GraphContextError(
+                f"no revision history for {node_id!r} yet."
+            )
+        if value not in revisions.COMMENT_STATE_VALUES:
+            raise GraphContextError(
+                f"unknown comment state {value!r}; allowed: "
+                f"{', '.join(sorted(revisions.COMMENT_STATE_VALUES))}."
+            )
+        live = {
+            c.id: c for c in revisions.comment_states(baseline.entries)
+        }
+        target = live.get(comment_id)
+        if target is None:
+            listed = ", ".join(f"#{cid}" for cid in live) or "none"
+            raise GraphContextError(
+                f"no live comment {comment_id!r} on "
+                f"{self._name_of(node_id)!r}; live comments: {listed}."
+            )
+        if value == revisions.COMMENT_ADDRESSED and (
+            target.state == revisions.COMMENT_ADDRESSED
+        ):
+            return target  # change-only: no log line, no PATCH
+        entry = revisions.CommentStateEntry(
+            id=comment_id, value=value, at=self._now(), by=by,
+        )
+        entries = revisions.compact((*baseline.entries, entry))
+        await self._repository.update_node(
+            baseline.sidecar_id, body=revisions.render_log(entries)
+        )
+        self._baselines[node_id] = _state(baseline.sidecar_id, entries)
+        logger.info(
+            "historian: comment %s %s on %s", comment_id, value, node_id,
+        )
+        self._notify(node_id)
+        for state in revisions.comment_states(entries):
+            if state.id == comment_id:
+                return state
+        return None  # resolved
+
+    def comments(self, node_id: NodeId) -> tuple[revisions.CommentState, ...]:
+        """The node's live comments (open + addressed), current anchors."""
+        baseline = self._baselines.get(node_id)
+        return revisions.comment_states(baseline.entries) if baseline else ()
+
     def _name_of(self, node_id: NodeId) -> str:
         graph = self._repository.graph
         return graph.node(node_id).name if graph.has_node(node_id) else node_id

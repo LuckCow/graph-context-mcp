@@ -625,3 +625,171 @@ class TestRawTextMigration:
         before = len(world.historian.history(chapter.id))
         assert not await world.historian.record_external_revision(chapter.id)
         assert len(world.historian.history(chapter.id)) == before
+
+
+class TestComments:
+    async def test_a_comment_lands_in_the_sidecar_and_survives_rebuild(
+        self,
+    ) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(MIDDLE), text="count them again",
+            by="human:prose-page",
+        )
+        assert state.state == revisions.COMMENT_OPEN
+        assert state.hash == _h(MIDDLE)
+        fresh = NodeHistorian(world.repo, now=lambda: "T9")
+        await fresh.rebuild()
+        (reloaded,) = fresh.comments(chapter.id)
+        assert reloaded.id == state.id
+        assert reloaded.text == "count them again"
+
+    async def test_a_ranged_comment_keeps_its_token_range(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="gates?",
+            by="u", start=8, end=11,
+        )
+        assert (state.start, state.end) == (8, 11)
+
+    async def test_comment_writes_fire_the_on_record_hook(self) -> None:
+        world, chapter = await _tracked_chapter()
+        seen: list[str] = []
+        world.historian.on_record = seen.append
+        await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="x", by="u",
+        )
+        assert seen == [chapter.id]
+
+    async def test_a_stale_hash_is_rejected_with_reload(self) -> None:
+        world, chapter = await _tracked_chapter()
+        with pytest.raises(StaleSectionMark, match="reload"):
+            await world.historian.record_comment(
+                chapter.id, block_hash=_h(REVISED), text="x", by="u",
+            )
+
+    async def test_empty_capped_and_word_free_comments_are_rejected(
+        self,
+    ) -> None:
+        world = World()
+        await world.seed_space_context()
+        chapter = await world.chapter(OPENING, "* * *", MIDDLE)
+        await world.historian.record_bot_revision(chapter.id, author_detail="m")
+        with pytest.raises(GraphContextError, match="needs text"):
+            await world.historian.record_comment(
+                chapter.id, block_hash=_h(OPENING), text="   ", by="u",
+            )
+        with pytest.raises(GraphContextError, match="cap"):
+            await world.historian.record_comment(
+                chapter.id, block_hash=_h(OPENING),
+                text="x" * (revisions.COMMENT_TEXT_CAP + 1), by="u",
+            )
+        with pytest.raises(GraphContextError, match="no words"):
+            await world.historian.record_comment(
+                chapter.id, block_hash=_h("* * *"), text="here?", by="u",
+            )
+
+    async def test_a_bad_range_is_rejected_by_token_count(self) -> None:
+        world, chapter = await _tracked_chapter()
+        with pytest.raises(GraphContextError, match="BOTH"):
+            await world.historian.record_comment(
+                chapter.id, block_hash=_h(OPENING), text="x", by="u",
+                start=1,
+            )
+        with pytest.raises(GraphContextError, match="tokens"):
+            await world.historian.record_comment(
+                chapter.id, block_hash=_h(OPENING), text="x", by="u",
+                start=0, end=999,
+            )
+
+    async def test_an_identical_same_second_comment_writes_nothing(
+        self,
+    ) -> None:
+        world, chapter = await _tracked_chapter()
+        world.historian = NodeHistorian(world.repo, now=lambda: "TX")
+        await world.historian.rebuild()
+        first = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="dup", by="u",
+        )
+        (sidecar,) = world.sidecars()
+        before = await world.repo.fetch_body(sidecar.id)
+        again = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="dup", by="u",
+        )
+        assert again.id == first.id
+        assert await world.repo.fetch_body(sidecar.id) == before
+
+    async def test_addressed_then_resolved_then_gone(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="fix the tense", by="u",
+        )
+        addressed = await world.historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        assert addressed is not None
+        assert addressed.state == revisions.COMMENT_ADDRESSED
+        resolved = await world.historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_RESOLVED, by="human:prose-page",
+        )
+        assert resolved is None
+        assert world.historian.comments(chapter.id) == ()
+
+    async def test_direct_resolve_without_addressing_works(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="drop this", by="u",
+        )
+        assert await world.historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_RESOLVED, by="u",
+        ) is None
+
+    async def test_addressing_twice_writes_nothing(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="x", by="u",
+        )
+        await world.historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        (sidecar,) = world.sidecars()
+        before = await world.repo.fetch_body(sidecar.id)
+        again = await world.historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        assert again is not None
+        assert await world.repo.fetch_body(sidecar.id) == before
+
+    async def test_an_unknown_id_error_lists_the_live_ids(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="x", by="u",
+        )
+        with pytest.raises(GraphContextError, match=state.id):
+            await world.historian.set_comment_state(
+                chapter.id, comment_id="cnosuch01",
+                value=revisions.COMMENT_ADDRESSED, by="model",
+            )
+
+    async def test_a_comment_solidifies_the_pending_human_rollup(
+        self,
+    ) -> None:
+        world, chapter = await _tracked_chapter()
+        await world.repo.update_node(
+            chapter.id, body="\n\n".join([OPENING, MIDDLE, REVISED])
+        )
+        assert await world.historian.record_external_revision(chapter.id)
+        assert revisions.rollup_base(
+            world.historian.entries(chapter.id)
+        ) is not None
+        await world.historian.record_comment(
+            chapter.id, block_hash=_h(REVISED), text="nice", by="u",
+        )
+        assert revisions.rollup_base(
+            world.historian.entries(chapter.id)
+        ) is None

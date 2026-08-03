@@ -34,7 +34,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from graph_context.errors import GraphContextError, SectionAnchorNotFound
 
@@ -70,6 +70,20 @@ KIND_TRUNCATED = "truncated"  # compaction marker: older history dropped
 # log. No seq -- file order is fold order.
 MARK_STATUS = "status"
 MARK_INTENT = "intent"
+
+# Comments (WP50, ADR 056): human-authored notes on a selection,
+# interleaved in the SAME log. Lifecycle open -> addressed (the model
+# acted on it) -> resolved (the human closed it); transitions are
+# separate append-only ``comment_state`` lines, folded last-wins with
+# ``resolved`` terminal. ``open`` is implicit and never serialized.
+KIND_COMMENT = "comment"
+KIND_COMMENT_STATE = "comment_state"
+
+COMMENT_OPEN = "open"
+COMMENT_ADDRESSED = "addressed"
+COMMENT_RESOLVED = "resolved"
+COMMENT_STATE_VALUES = frozenset({COMMENT_ADDRESSED, COMMENT_RESOLVED})
+COMMENT_TEXT_CAP = 2000  # comment text chars; they ride the LLM context
 
 STATUS_RAW_AI = "raw_ai"
 STATUS_APPROVED = "approved"
@@ -263,6 +277,23 @@ def char_range_to_tokens(text: str, start: int, end: int) -> tuple[int, int]:
     return s, e
 
 
+def token_range_to_chars(text: str, s: int, e: int) -> tuple[int, int]:
+    """A ``(s, e)`` token range over a block's raw text -> the character
+    offsets it spans -- :func:`char_range_to_tokens`'s inverse, for
+    DISPLAY (the wire's absolute anchors, the context block's quoted
+    words). The end trims the last token's trailing whitespace. Raises
+    on a range the text doesn't have."""
+    tokens = _WORD.findall(text)
+    if not (0 <= s < e <= len(tokens)):
+        raise GraphContextError(
+            f"token range {s}..{e} is outside this section's "
+            f"0..{len(tokens)} tokens."
+        )
+    start = sum(len(token) for token in tokens[:s])
+    end = start + len("".join(tokens[s:e]).rstrip())
+    return start, end
+
+
 def resolve_anchor(
     anchor: str,
     hashes: Sequence[str],
@@ -399,7 +430,49 @@ class SectionMark:
     end: int = -1    # one past the last token, -1 = whole block
 
 
-LogEntry = RevisionRecord | SectionMark
+@dataclass(frozen=True, slots=True)
+class CommentEntry:
+    """A comment on a selection (WP50), keyed by block hash + optional
+    token range -- same anchoring as a ranged :class:`SectionMark`, but
+    a comment is an OBJECT with identity: its anchor rides edits forward
+    through the fold (:func:`comment_states`), it is not consumed by
+    them. ``hash`` may be ``""`` on a compaction-rewritten line whose
+    anchor was already detached (it can never re-attach)."""
+
+    id: str      # stable, clock-free: :func:`comment_id`
+    hash: str    # anchor block hash AT WRITE TIME; "" = born detached
+    text: str    # the human's note (<= COMMENT_TEXT_CAP)
+    at: str      # injected ISO timestamp
+    by: str      # who wrote it ("human:prose-page", ...)
+    start: int = -1  # first token of the anchored range, -1 = whole block
+    end: int = -1    # one past the last token, -1 = whole block
+    kind: str = KIND_COMMENT
+
+
+@dataclass(frozen=True, slots=True)
+class CommentStateEntry:
+    """A comment lifecycle transition (WP50): ``addressed`` (the model
+    acted on it) or ``resolved`` (the human closed it). Folded
+    last-wins; ``resolved`` is terminal; unknown ids fold to nothing."""
+
+    id: str      # the comment this transitions
+    value: str   # COMMENT_ADDRESSED | COMMENT_RESOLVED
+    at: str      # injected ISO timestamp
+    by: str      # who transitioned it ("model", "human:prose-page", ...)
+    kind: str = KIND_COMMENT_STATE
+
+
+LogEntry = RevisionRecord | SectionMark | CommentEntry | CommentStateEntry
+
+
+def comment_id(at: str, by: str, block_hash: str, text: str) -> str:
+    """A comment's stable id, clock-free (``at`` is injected like every
+    timestamp): identical duplicates collide deliberately -- the
+    historian drops them as change-only no-ops."""
+    digest = hashlib.sha256(
+        f"{at}|{by}|{block_hash}|{text}".encode()
+    ).hexdigest()
+    return "c" + digest[:8]
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +503,27 @@ class TokenState:
     status_by: str = ""
     intent_at: str = ""
     intent_by: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CommentState:
+    """One live comment's folded state (WP50): its CURRENT anchor after
+    riding every edit. ``hash`` is the anchor block hash, ``""`` when
+    detached (the commented text was removed -- the comment stays listed
+    until resolved); ``start``/``end`` are the current token range over
+    the anchor, ``(-1, -1)`` = whole block. Resolved comments never
+    appear here -- they stay in the log until compaction."""
+
+    id: str
+    text: str
+    state: str   # COMMENT_OPEN | COMMENT_ADDRESSED
+    hash: str    # current anchor; "" = detached
+    start: int = -1
+    end: int = -1
+    at: str = ""
+    by: str = ""
+    state_at: str = ""
+    state_by: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +666,20 @@ def _entry_payload(entry: LogEntry) -> dict[str, Any]:
             payload["s"] = entry.start
             payload["e"] = entry.end
         return payload
+    if isinstance(entry, CommentEntry):
+        payload = {
+            "kind": KIND_COMMENT, "id": entry.id, "hash": entry.hash,
+            "text": entry.text, "at": entry.at, "by": entry.by,
+        }
+        if entry.start >= 0:
+            payload["s"] = entry.start
+            payload["e"] = entry.end
+        return payload
+    if isinstance(entry, CommentStateEntry):
+        return {
+            "kind": KIND_COMMENT_STATE, "id": entry.id,
+            "value": entry.value, "at": entry.at, "by": entry.by,
+        }
     return _record_payload(entry)
 
 
@@ -638,6 +746,33 @@ def _parse_entry(line: str) -> LogEntry | None:
             if mark.start >= 0 and mark.end <= mark.start:
                 return None  # a mangled range degrades, never applies odd
             return mark
+        if kind == KIND_COMMENT:
+            comment = CommentEntry(
+                id=str(payload["id"]),
+                hash=str(payload.get("hash", "")),
+                text=str(payload["text"]),
+                at=str(payload["at"]),
+                by=str(payload["by"]),
+                start=int(payload.get("s", -1)),
+                end=int(payload.get("e", -1)),
+            )
+            if not comment.id or not comment.text:
+                return None
+            if comment.start >= 0 and comment.end <= comment.start:
+                return None
+            return comment
+        if kind == KIND_COMMENT_STATE:
+            transition = CommentStateEntry(
+                id=str(payload["id"]),
+                value=str(payload["value"]),
+                at=str(payload["at"]),
+                by=str(payload["by"]),
+            )
+            if not transition.id or (
+                transition.value not in COMMENT_STATE_VALUES
+            ):
+                return None
+            return transition
         ops = tuple(
             DeltaOp(
                 tag=str(op[0]), i1=int(op[1]), i2=int(op[2]),
@@ -723,12 +858,15 @@ def closest(
     return best
 
 
+_Payload = TypeVar("_Payload")
+
+
 def _inherit(
-    base: Sequence[str],
+    base: Sequence[_Payload],
     old_tokens: Sequence[str],
     new_tokens: Sequence[str],
-    fill: str,
-) -> list[str]:
+    fill: _Payload,
+) -> list[_Payload]:
     """Positional per-token inheritance (WP45/46): token-equal ranges
     copy the ancestor's payload, everything else takes ``fill``. A
     length-mismatched base (a hand-mangled log) degrades to uniform."""
@@ -737,7 +875,7 @@ def _inherit(
     matcher = difflib.SequenceMatcher(
         a=list(old_tokens), b=list(new_tokens), autojunk=False
     )
-    out: list[str] = []
+    out: list[_Payload] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             out.extend(base[i1:i2])
@@ -797,6 +935,8 @@ def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
             stamp[f"{prefix}_at"] = entry.at
             stamp[f"{prefix}_by"] = entry.by
             continue
+        if not isinstance(entry, RevisionRecord):
+            continue  # comments and future kinds are inert here
         if entry.kind == KIND_KEYFRAME:
             new = entry.hashes
         elif entry.kind == KIND_DELTA and current is not None:
@@ -992,6 +1132,159 @@ def word_token_authors(
     }
 
 
+@dataclass(slots=True)
+class _CommentFold:
+    """One comment's mutable state inside the fold walk (internal)."""
+
+    entry: CommentEntry
+    state: str = COMMENT_OPEN
+    state_at: str = ""
+    state_by: str = ""
+    anchor: str = ""          # last known anchor hash; "" = born detached
+    attached: bool = False
+    flags: list[bool] | None = None  # per anchor token; None = whole block
+
+
+def _fold_comments(
+    entries: Sequence[LogEntry],
+) -> dict[str, _CommentFold]:
+    """The comment fold walk (WP50): file-ordered comments with their
+    anchors ridden forward through every revision. Shared by
+    :func:`comment_states` and compaction's hoist-with-rewrite."""
+    records = [e for e in entries if isinstance(e, RevisionRecord)]
+    texts = texts_of(records)
+    tokens_of: dict[str, list[str]] = {}
+
+    def _tokens(block: str) -> list[str]:
+        if block not in tokens_of:
+            tokens_of[block] = _WORD.findall(texts.get(block, ""))
+        return tokens_of[block]
+
+    def _attach(fold: _CommentFold) -> None:
+        fold.attached = True
+        entry = fold.entry
+        if (
+            fold.flags is None and entry.start >= 0
+            and fold.anchor == entry.hash
+        ):
+            tokens = _tokens(fold.anchor)
+            lo = max(0, entry.start)
+            hi = min(len(tokens), entry.end)
+            if lo < hi:
+                fold.flags = [lo <= i < hi for i in range(len(tokens))]
+
+    folds: dict[str, _CommentFold] = {}
+    current: tuple[str, ...] | None = None
+    for entry in entries:
+        if isinstance(entry, CommentEntry):
+            if entry.id in folds:
+                continue  # first line owns the identity
+            fold = _CommentFold(entry=entry, anchor=entry.hash)
+            if entry.hash and current is not None and entry.hash in current:
+                _attach(fold)
+            folds[entry.id] = fold
+            continue
+        if isinstance(entry, CommentStateEntry):
+            fold_or_none = folds.get(entry.id)
+            if fold_or_none is None or fold_or_none.state == COMMENT_RESOLVED:
+                continue  # unknown id, or resolved is terminal
+            fold_or_none.state = entry.value
+            fold_or_none.state_at = entry.at
+            fold_or_none.state_by = entry.by
+            continue
+        if not isinstance(entry, RevisionRecord):
+            continue
+        if entry.kind == KIND_KEYFRAME:
+            new = entry.hashes
+        elif entry.kind == KIND_DELTA and current is not None:
+            new = apply_ops(current, entry.ops)
+        else:
+            continue
+        previous = set(current or ())
+        new_set = set(new)
+        removed = previous - new_set
+        added_in_order = [h for h in new if h not in previous]
+        ancestor_of = {
+            added: closest(texts.get(added, ""), removed, texts)
+            for added in added_in_order
+        }
+        for fold in folds.values():
+            if fold.state == COMMENT_RESOLVED:
+                continue
+            if not fold.attached:
+                if fold.anchor and fold.anchor in new_set:
+                    _attach(fold)  # the commented text came back verbatim
+                continue
+            if fold.anchor in new_set:
+                continue  # anchor still live (moves are free)
+            successors = [
+                h for h in added_in_order
+                if ancestor_of.get(h) == fold.anchor
+            ]
+            if fold.flags is not None:
+                old_tokens = _tokens(fold.anchor)
+                for successor in successors:
+                    inherited = _inherit(
+                        fold.flags, old_tokens, _tokens(successor), False
+                    )
+                    if any(inherited):
+                        fold.anchor = successor
+                        fold.flags = inherited
+                        break
+                else:
+                    if successors:
+                        # the commented words themselves were deleted:
+                        # fall back to the whole successor block
+                        fold.anchor = successors[0]
+                        fold.flags = None
+                    else:
+                        fold.attached = False  # detached until resolved
+            elif successors:
+                fold.anchor = successors[0]
+            else:
+                fold.attached = False
+        current = new
+    return folds
+
+
+def _flag_bounds(flags: Sequence[bool]) -> tuple[int, int]:
+    """A flag vector's bounding ``(s, e)`` token range; ``(-1, -1)``
+    when nothing is flagged."""
+    marked = [i for i, flag in enumerate(flags) if flag]
+    if not marked:
+        return -1, -1
+    return marked[0], marked[-1] + 1
+
+
+def comment_states(entries: Sequence[LogEntry]) -> tuple[CommentState, ...]:
+    """The live comments (WP50): open and addressed, file order, each
+    with its CURRENT anchor -- a comment rides edits through the same
+    ``closest``/positional inheritance the review fold uses, falls back
+    to its successor's whole block when the commented words are deleted,
+    detaches (``hash=""``) when the block vanishes with no successor,
+    and re-attaches if the hash reappears verbatim. Resolved comments
+    fold away (the log keeps them until compaction)."""
+    records = [e for e in entries if isinstance(e, RevisionRecord)]
+    texts = texts_of(records)
+    states: list[CommentState] = []
+    for fold in _fold_comments(entries).values():
+        if fold.state == COMMENT_RESOLVED:
+            continue
+        anchor = fold.anchor if fold.attached else ""
+        start = end = -1
+        if anchor and fold.flags is not None:
+            tokens = _WORD.findall(texts.get(anchor, ""))
+            if len(fold.flags) == len(tokens):
+                start, end = _flag_bounds(fold.flags)
+        states.append(CommentState(
+            id=fold.entry.id, text=fold.entry.text, state=fold.state,
+            hash=anchor, start=start, end=end,
+            at=fold.entry.at, by=fold.entry.by,
+            state_at=fold.state_at, state_by=fold.state_by,
+        ))
+    return tuple(states)
+
+
 def rollup_base(entries: Sequence[LogEntry]) -> tuple[LogEntry, ...] | None:
     """The log minus a coalescible human tail (WP44), or None.
 
@@ -1037,6 +1330,14 @@ def compact(
     hoisted to just after it, original order kept (fold-equivalent:
     they historically preceded everything in the suffix); marks on
     dead hashes drop with their era.
+
+    Dropped-era COMMENTS (WP50) hoist differently: a live (unresolved)
+    comment's anchor may have migrated during the dropped era, so its
+    line is REWRITTEN -- same id/text/at/by, anchor and range replaced
+    by the fold's state as of the first kept keyframe (last-known
+    anchor kept when detached, so a verbatim restore in the kept era
+    still re-attaches) -- plus one ``addressed`` transition line when
+    set. Resolved comments drop with their era.
     """
     kept = list(entries)
     if len(render_log(kept)) <= cap:
@@ -1087,8 +1388,28 @@ def compact(
         )
     live = set(first.hashes)
     hoisted = [m for m in dropped_marks if m.hash in live]
+    dropped_all = list(entries)[:len(entries) - len(kept)]
+    kept_comment_ids = {
+        e.id for e in kept if isinstance(e, CommentEntry)
+    }
+    hoisted_comments: list[LogEntry] = []
+    for cid, fold in _fold_comments((*dropped_all, first)).items():
+        if cid in kept_comment_ids or fold.state == COMMENT_RESOLVED:
+            continue
+        start, end = (
+            _flag_bounds(fold.flags) if fold.flags is not None else (-1, -1)
+        )
+        hoisted_comments.append(CommentEntry(
+            id=cid, hash=fold.anchor, text=fold.entry.text,
+            at=fold.entry.at, by=fold.entry.by, start=start, end=end,
+        ))
+        if fold.state == COMMENT_ADDRESSED:
+            hoisted_comments.append(CommentStateEntry(
+                id=cid, value=COMMENT_ADDRESSED,
+                at=fold.state_at, by=fold.state_by,
+            ))
     marker = RevisionRecord(
         seq=dropped_through, at=first.at, author_kind=AUTHOR_MODEL,
         author_detail="compaction", kind=KIND_TRUNCATED,
     )
-    return (marker, first, *hoisted, *kept[1:])
+    return (marker, first, *hoisted, *hoisted_comments, *kept[1:])

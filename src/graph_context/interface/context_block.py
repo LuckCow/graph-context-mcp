@@ -29,6 +29,7 @@ from graph_context.domain import revisions, schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Detail, Node, NodeId
 from graph_context.domain.session import WorkingSetEntry
+from graph_context.errors import GraphContextError
 from graph_context.interface.services import Services
 
 DEFAULT_BUDGET_CHARS = 3500
@@ -140,6 +141,15 @@ def _body_lines(
     states = historian.section_states(node_id)
     tokens = historian.token_states(node_id)
     runs = historian.locked_runs(node_id)
+    # WP50: the user's live comments, grouped under their anchor block;
+    # detached ones (their text was removed) trail the body.
+    anchored: dict[str, list[revisions.CommentState]] = {}
+    detached: list[revisions.CommentState] = []
+    for comment in historian.comments(node_id):
+        if comment.hash:
+            anchored.setdefault(comment.hash, []).append(comment)
+        else:
+            detached.append(comment)
     rendered = []
     for block_hash, raw in revisions.body_blocks(body):
         state = states.get(block_hash)
@@ -160,7 +170,38 @@ def _body_lines(
         if partial and block_hash in runs:
             listed = " | ".join(f'"{run}"' for run in runs[block_hash])
             rendered.append(f"      locked verbatim: {listed}")
+        for comment in anchored.get(block_hash, ()):
+            rendered.append(f"      {_comment_line(comment, raw)}")
+    for comment in detached:
+        rendered.append(
+            f"      detached comment #{comment.id} (its text was "
+            f'removed): "{comment.text}"'
+        )
     return rendered or [f"    {body}"]
+
+
+def _comment_line(comment: revisions.CommentState, raw: str) -> str:
+    """One live comment under its anchor block: state, text, and -- for
+    a ranged comment -- the anchored words themselves, so the model
+    knows exactly which text the note discusses."""
+    label = (
+        "open" if comment.state == revisions.COMMENT_OPEN
+        else "addressed; awaiting human review"
+    )
+    quoted = ""
+    if comment.start >= 0:
+        try:
+            lo, hi = revisions.token_range_to_chars(
+                raw, comment.start, comment.end
+            )
+        except GraphContextError:
+            pass  # a range the raw text no longer has: whole-block note
+        else:
+            words = raw[lo:hi]
+            if len(words) > 60:
+                words = words[:60] + "…"
+            quoted = f' — on: "{words}"'
+    return f'comment #{comment.id} ({label}): "{comment.text}"{quoted}'
 
 
 def _edge_lines(graph: GraphIndex, node: Node) -> list[str]:

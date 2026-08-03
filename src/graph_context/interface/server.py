@@ -293,11 +293,12 @@ async def edit_document(
     anchor: str = "",
     text: str = "",
     summary: str | None = None,
+    comment_id: str = "",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.edit_document_tool(
         _services(ctx), node_id=node_id, action=action, anchor=anchor,
-        text=text, summary=summary,
+        text=text, summary=summary, comment_id=comment_id,
     )
 
 

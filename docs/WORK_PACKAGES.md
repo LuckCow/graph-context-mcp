@@ -2755,6 +2755,43 @@ reflection) and the seeded explainer teaches the one-of choice.
 
 ---
 
+## WP50 — Prose editor: highlight view modes + comments (ADR 056) — **shipped 2026-08-03**
+
+**Status:** complete. Two prose-page enhancements. **View modes**
+(frontend-only): the legend became the control — six chips (`all ·
+authorship · status · intent · comments · none`, persisted in
+`localStorage`) where single-concern modes UNMASK layers the `all`
+priority hides (authorship lavender shows on locked words; spans carry
+the full triple, `spanClass` is the one mode-aware seam); switching
+re-dispatches decorations from the retained payload, never through the
+router. **Comments**: human-authored notes on selections, stored as two
+new line kinds in the SAME sidecar log (`comment` with the ranged-mark
+anchor shape, `comment_state` transitions folded last-wins with
+`resolved` terminal; `open` implicit; clock-free content-hash ids).
+The `comment_states` fold rides anchors through edits with the shared
+`closest`/`_inherit` lineage (whole-block fallback when the commented
+words are deleted; detach on block removal — still listed until
+resolved; verbatim restore re-attaches), and `compact` REWRITES
+dropped-era live comments to their fold-current anchors (mark-style
+hoisting would kill migrated/detached ones); a comment line solidifies
+the WP44 roll-up (pins the text it discusses). Lifecycle splits by
+authority: the model may only mark `addressed` — `edit_document
+action="address_comment"` (bookkeeping: no journal, no card); the
+human resolves on the page via `POST /api/prose/comments` (same gates
++ base token as save/marks, one lock hold, one sidecar rewrite; the
+doc payload grew `comments` with absolute anchors, detached = null).
+The model sees comments under their anchor block in the context block
+(`comment #id (open): "…" — on: "<words>"`) and in the sections
+listing; the page shows dotted underlines (dashed once addressed)
+stacked on state backgrounds plus a panel with resolve buttons —
+row-click scrolls to the anchor, underline-click scrolls to the row,
+and the composer guard keeps SSE refetches from destroying a
+half-typed note. `_inherit` went generic; the review folds guard on
+`isinstance(RevisionRecord)` so future line kinds are inert. No
+bundle rebuild.
+
+---
+
 ## Sequencing
 
 ```

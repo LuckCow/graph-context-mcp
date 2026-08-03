@@ -466,3 +466,10 @@ stays right for full rewrites). Sections the user LOCKED
 (intent=locked) cannot be changed or deleted; if a change is needed
 there, ask the user to unlock the section. The summary staleness rule
 applies: pass `summary` when the change is meaningful.
+
+The user leaves COMMENTS on document text (shown as `comment #id` lines
+in the sections listing and the context block, anchored to the words
+they discuss). After an edit that acts on one, mark it done:
+action='address_comment' + comment_id. Addressed comments stay visible
+as awaiting the user's review -- only the user resolves them; a
+detached comment (its text was removed) stays listed until resolved.

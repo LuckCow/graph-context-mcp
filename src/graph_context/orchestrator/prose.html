@@ -74,16 +74,23 @@
   .badge.human { background: var(--chip); color: var(--accent); }
   .badge.locked { background: var(--err-bg); color: var(--err); }
   .badge.needs_change { background: var(--warn-bg); color: var(--warn); }
+  .badge.open { background: var(--warn-bg); color: var(--warn); }
+  .badge.addressed { background: var(--ok-bg); color: var(--ok); }
 
-  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 2px;
+  /* The legend IS the view-mode control (WP50): one chip per highlight
+     concern, the active chip lit, swatches double as samples. */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 8px 2px;
     color: var(--muted); font-size: 12px; align-items: center; }
-  .legend i { display: inline-block; width: 12px; height: 12px;
-    border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
   .legend mark { border-radius: 3px; color: inherit; }
   .legend mark.st-approved { background: var(--ok-bg); }
   .legend mark.st-locked { background: var(--err-bg); }
   .legend mark.st-needs { background: var(--warn-bg); }
   .legend mark.ink-human { background: var(--ink-bg); }
+  .legend mark.cmt { background: none;
+    border-bottom: 2px dotted var(--accent); }
+  .legend button.mini { display: inline-flex; gap: 5px; align-items: center;
+    color: var(--muted); }
+  .legend button.mini.on { color: var(--accent); }
 
   .timeline { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
   .timeline a {
@@ -137,6 +144,10 @@
   /* blame tick: first line of each paragraph, no layout shift */
   .cm-blame-model { box-shadow: inset 3px 0 var(--accent); }
   .cm-blame-human { box-shadow: inset 3px 0 var(--ok); }
+  /* comment underlines (WP50): stack ON TOP of any state background */
+  .cm-comment { border-bottom: 2px dotted var(--accent); }
+  .cm-comment-addressed { border-bottom-style: dashed;
+    border-bottom-color: var(--muted); }
 
   .diff-pair {
     background: var(--panel); border: 1px solid var(--line);
@@ -177,6 +188,21 @@
   button.mini { min-height: 28px; padding: 2px 10px; font-size: 12px; }
   button.mini.on { border-color: var(--accent); color: var(--accent); }
 
+  /* the comment composer inside the action bar (WP50) */
+  #bar textarea {
+    flex: 1 1 100%; min-height: 60px; font: inherit; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px;
+    background: var(--bg); color: var(--ink); resize: vertical;
+  }
+
+  /* the comments panel under the editor (WP50) */
+  .comment-row { cursor: pointer; }
+  .comment-row .txt { margin: 4px 0 0; white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .comment-row .sub { display: flex; flex-wrap: wrap; gap: 4px 10px;
+    align-items: center; }
+  .comment-row .sub .spacer { flex: 1 1 auto; }
+
   #toast {
     position: fixed; left: 50%; transform: translateX(-50%);
     bottom: calc(160px + env(safe-area-inset-bottom)); z-index: 20;
@@ -207,6 +233,7 @@
   </div>
   <div class="btn-row" id="bar-status"><span class="label">status</span></div>
   <div class="btn-row" id="bar-intent"><span class="label">intent</span></div>
+  <div class="btn-row" id="bar-comment"><span class="label">note</span></div>
 </div></div>
 <div id="toast"></div>
 
@@ -220,6 +247,16 @@ const STATUS_VALUES = ["raw_ai", "approved", "human"];
 const INTENT_VALUES = ["flexible", "locked", "needs_change"];
 const TOKEN_KEY = "gc_prose_token";
 const AUTOSAVE_MS = 2500;
+
+// WP50: which highlight concern the editor shows. Single-concern modes
+// UNMASK layers the "all" priority hides (authorship shows lavender on
+// locked words too -- spans carry the full author/status/intent triple).
+const VIEW_KEY = "gc_prose_view_mode";
+const VIEW_MODES = [
+  "all", "authorship", "status", "intent", "comments", "none",
+];
+let viewMode = localStorage.getItem(VIEW_KEY) || "all";
+if (!VIEW_MODES.includes(viewMode)) viewMode = "all";
 
 let writesEnabled = false;
 let knowWrites = false;   // spaces fetched at least once this page-load
@@ -343,6 +380,19 @@ const annotationsField = CM.StateField.define({
 });
 
 function spanClass(status, intent, author) {
+  if (viewMode === "none" || viewMode === "comments") return "";
+  if (viewMode === "intent") {
+    if (intent === "locked") return "cm-locked";
+    if (intent === "needs_change") return "cm-needs";
+    return "";
+  }
+  if (viewMode === "status") {
+    return status === "approved" ? "cm-approved" : "";
+  }
+  if (viewMode === "authorship") {
+    return status === "human" || author === "human" ? "cm-ink" : "";
+  }
+  // "all": first-match-wins priority.
   if (intent === "locked") return "cm-locked";
   if (intent === "needs_change") return "cm-needs";
   if (status === "approved") return "cm-approved";
@@ -366,6 +416,21 @@ function buildDecorations(data, state) {
       ranges.push(CM.Decoration.mark({ class: cls }).range(from, to));
     }
   }
+  // Comment underlines stack ON TOP of state backgrounds (WP50).
+  if (viewMode === "all" || viewMode === "comments") {
+    for (const comment of data.comments || []) {
+      if (!comment.anchor) continue;  // detached: panel-only
+      const from = data.map.toU16(comment.anchor.start);
+      let to = data.map.toU16(comment.anchor.end);
+      while (to > from && /\s/.test(state.doc.sliceString(to - 1, to))) to--;
+      if (to > from && to <= state.doc.length) {
+        ranges.push(CM.Decoration.mark({
+          class: comment.state === "addressed"
+            ? "cm-comment cm-comment-addressed" : "cm-comment",
+        }).range(from, to));
+      }
+    }
+  }
   for (const segment of data.segments) {
     if (!segment.blame) continue;
     const from = data.map.toU16(segment.start);
@@ -378,13 +443,62 @@ function buildDecorations(data, state) {
   return CM.Decoration.set(ranges, true);
 }
 
+// ---- the view-mode legend (WP50) ------------------------------------------
+// The legend is the control: one chip per highlight concern; the active
+// chip is lit; switching re-dispatches decorations from the retained
+// payload -- no refetch, and never through the router (the CM view and
+// scroll position must survive).
+
+function renderLegend(legend) {
+  legend.textContent = "";
+  const chip = (mode, build) => {
+    const btn = el("button", "mini" + (viewMode === mode ? " on" : ""));
+    build(btn);
+    btn.addEventListener("click", () => {
+      viewMode = mode;
+      localStorage.setItem(VIEW_KEY, mode);
+      renderLegend(legend);
+      if (doc) {
+        doc.view.dispatch({
+          effects: setAnnotations.of(
+            buildDecorations(doc.data, doc.view.state)),
+        });
+      }
+    });
+    legend.appendChild(btn);
+  };
+  chip("all", (b) => { b.textContent = "all"; });
+  chip("authorship",
+    (b) => b.appendChild(el("mark", "ink-human", "human")));
+  chip("status",
+    (b) => b.appendChild(el("mark", "st-approved", "approved")));
+  chip("intent", (b) => {
+    b.appendChild(el("mark", "st-locked", "locked"));
+    b.appendChild(el("mark", "st-needs", "needs change"));
+  });
+  chip("comments", (b) => {
+    b.appendChild(el("mark", "cmt", "comments"));
+    const count = doc && doc.data.comments ? doc.data.comments.length : 0;
+    if (count) b.appendChild(document.createTextNode(String(count)));
+  });
+  chip("none", (b) => { b.textContent = "none"; });
+  legend.appendChild(el("span", null, writesEnabled
+    ? "type anywhere · select text to mark or comment"
+    : "read-only: set GC_PROSE_TOKEN to enable editing"));
+}
+
 // ---- the action bar (marks over the live selection) -----------------------
 
 let wholeMode = false;
+let composerOpen = false;
+let composerTarget = null;
 
 function closeBar() {
   bar.classList.remove("open");
   document.getElementById("bar-which").textContent = "";
+  composerOpen = false;
+  composerTarget = null;
+  renderCommentRow();
 }
 
 function segmentsU16(data) {
@@ -441,7 +555,164 @@ function renderBarButtons(row, values, kind) {
   }
 }
 
+// ---- the comment composer (WP50) ------------------------------------------
+
+function renderCommentRow() {
+  const row = document.getElementById("bar-comment");
+  for (const old of row.querySelectorAll("button, textarea")) old.remove();
+  const btn = el("button", "", "add comment");
+  btn.addEventListener("click", openComposer);
+  row.appendChild(btn);
+}
+
+function openComposer() {
+  const targets = currentTargets();
+  if (!targets || !doc) return;
+  // A multi-paragraph selection anchors the comment on its FIRST
+  // paragraph (the note reads in context; the text says the rest).
+  const target = targets[0];
+  composerTarget = {
+    hash: target.seg.hash,
+    whole: wholeMode || target.whole,
+    startCp: target.startCp,
+    endCp: target.endCp,
+  };
+  composerOpen = true;
+  const row = document.getElementById("bar-comment");
+  for (const old of row.querySelectorAll("button, textarea")) old.remove();
+  const input = el("textarea");
+  input.placeholder = "note for the assistant…";
+  const post = el("button", "current", "post");
+  post.addEventListener("click", () => {
+    const text = input.value.trim();
+    if (!text) { toast("a comment needs text"); return; }
+    postComment(text).catch(() => toast("comment failed"));
+  });
+  const cancel = el("button", "", "cancel");
+  cancel.addEventListener("click", closeComposer);
+  row.appendChild(input);
+  row.appendChild(post);
+  row.appendChild(cancel);
+  input.focus();
+}
+
+function closeComposer() {
+  composerOpen = false;
+  composerTarget = null;
+  renderCommentRow();
+  updateBar();
+}
+
+async function postComment(text) {
+  if (!doc || !composerTarget) return;
+  try {
+    await ensureSaved();
+  } catch (err) {
+    if (err instanceof StaleWrite) { showConflict(); return; }
+    throw err;
+  }
+  const comment = { hash: composerTarget.hash, text };
+  if (!composerTarget.whole) {
+    comment.start_char = composerTarget.startCp;
+    comment.end_char = composerTarget.endCp;
+  }
+  let fresh;
+  try {
+    fresh = await postWrite("api/prose/comments", {
+      space: doc.space, node: doc.node, base: doc.data.base, comment,
+    });
+  } catch (err) {
+    if (err instanceof StaleWrite) {
+      toast("document changed elsewhere -- refreshing");
+      closeComposer();
+      await refetchDoc();
+      return;
+    }
+    throw err;
+  }
+  if (!fresh) return;
+  composerOpen = false;
+  composerTarget = null;
+  renderCommentRow();
+  applyDocPayload(fresh);
+  toast("comment added");
+}
+
+async function resolveComment(id) {
+  if (!doc) return;
+  try {
+    await ensureSaved();
+  } catch (err) {
+    if (err instanceof StaleWrite) { showConflict(); return; }
+    throw err;
+  }
+  let fresh;
+  try {
+    fresh = await postWrite("api/prose/comments", {
+      space: doc.space, node: doc.node, base: doc.data.base, resolve: id,
+    });
+  } catch (err) {
+    if (err instanceof StaleWrite) {
+      toast("document changed elsewhere -- refreshing");
+      await refetchDoc();
+      return;
+    }
+    throw err;
+  }
+  if (!fresh) return;
+  applyDocPayload(fresh);
+  toast("comment resolved");
+}
+
+function renderComments(panel) {
+  panel.textContent = "";
+  if (!doc) return;
+  const comments = doc.data.comments || [];
+  if (!comments.length) return;
+  panel.appendChild(el("h2", null, "Comments (" + comments.length + ")"));
+  for (const comment of comments) {
+    const row = el("div", "row comment-row");
+    row.dataset.comment = comment.id;
+    const sub = el("div", "sub");
+    sub.appendChild(el("span", "badge " + comment.state, comment.state));
+    const author = comment.by === "human:prose-page" ? "you" : comment.by;
+    sub.appendChild(el("span", null,
+      author + (comment.at ? " · " + fmtTime(comment.at) : "")));
+    if (comment.state === "addressed") {
+      sub.appendChild(el("span", null,
+        "by " + comment.state_by + " -- awaiting your review"));
+    }
+    if (!comment.anchor) {
+      sub.appendChild(el("span", null, "original text was removed"));
+    }
+    sub.appendChild(el("span", "spacer"));
+    if (writesEnabled) {
+      const resolve = el("button", "mini", "resolve");
+      resolve.addEventListener("click", (event) => {
+        event.stopPropagation();
+        resolveComment(comment.id).catch(() => toast("resolve failed"));
+      });
+      sub.appendChild(resolve);
+    }
+    row.appendChild(sub);
+    row.appendChild(el("div", "txt", comment.text));
+    if (comment.anchor) {
+      row.addEventListener("click", () => {
+        const from = doc.data.map.toU16(comment.anchor.start);
+        const to = doc.data.map.toU16(comment.anchor.end);
+        doc.view.dispatch({
+          selection: { anchor: from, head: to },
+          scrollIntoView: true,
+        });
+        doc.view.focus();
+      });
+    }
+    panel.appendChild(row);
+  }
+}
+
 function updateBar() {
+  if (composerOpen) return;  // never rebuild rows under a typing user
   const targets = currentTargets();
   if (!targets) { closeBar(); return; }
   const which = document.getElementById("bar-which");
@@ -459,6 +730,7 @@ function updateBar() {
     document.getElementById("bar-status"), STATUS_VALUES, "status");
   renderBarButtons(
     document.getElementById("bar-intent"), INTENT_VALUES, "intent");
+  renderCommentRow();
   bar.classList.add("open");
 }
 
@@ -644,9 +916,13 @@ function applyDocPayload(fresh, reconcileText) {
   });
   renderTimeline(doc.timeline, fresh, doc.space, doc.node);
   renderSegInfo(doc.segInfo);
+  renderComments(doc.panel);
+  renderLegend(doc.legend);  // the comments chip count tracks the payload
   // An effects-only transaction doesn't fire the selection listener,
   // so the action bar's .current buttons must re-render here or they
-  // show the PRE-mark state forever.
+  // show the PRE-mark state forever. (While the composer is open,
+  // updateBar leaves the rows alone -- a refetch must never destroy a
+  // half-typed comment.)
   updateBar();
 }
 
@@ -698,17 +974,6 @@ async function renderNode(space, node) {
   frag.appendChild(above);
 
   const legend = el("div", "legend");
-  for (const [cls, label] of [["ink-human", "human (typed / marked)"],
-                              ["st-approved", "approved"],
-                              ["st-locked", "locked"],
-                              ["st-needs", "needs change"]]) {
-    const item = el("span");
-    item.appendChild(el("mark", cls, label));
-    legend.appendChild(item);
-  }
-  legend.appendChild(el("span", null, writesEnabled
-    ? "type anywhere · select text to set status / intent"
-    : "read-only: set GC_PROSE_TOKEN to enable editing"));
   frag.appendChild(legend);
 
   const timeline = el("div", "timeline");
@@ -719,6 +984,9 @@ async function renderNode(space, node) {
   const host = el("div");
   host.id = "editor-host";
   frag.appendChild(host);
+  const panel = el("div");
+  panel.id = "comments-panel";
+  frag.appendChild(panel);
 
   const highlight = CM.HighlightStyle.define([
     { tag: CM.tags.heading, class: "tok-heading" },
@@ -741,6 +1009,25 @@ async function renderNode(space, node) {
     }
   });
 
+  // A click on an underlined comment range scrolls its panel row into
+  // view (no tooltip machinery -- nothing here needs a bundle rebuild).
+  const commentClicks = CM.EditorView.domEventHandlers({
+    click: (event, view) => {
+      if (!doc || !(event.target instanceof Element)) return false;
+      if (!event.target.closest(".cm-comment")) return false;
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null) return false;
+      const cp = doc.data.map.toCp(pos);
+      const hit = (doc.data.comments || []).find((c) =>
+        c.anchor && cp >= c.anchor.start && cp <= c.anchor.end);
+      if (!hit) return false;
+      const row = document.querySelector(
+        '[data-comment="' + hit.id + '"]');
+      if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+      return false;  // never consume: the caret still moves
+    },
+  });
+
   const extensions = [
     CM.history(),
     CM.drawSelection(),
@@ -749,6 +1036,7 @@ async function renderNode(space, node) {
     CM.syntaxHighlighting(highlight),
     annotationsField,
     listener,
+    commentClicks,
     CM.keymap.of([
       {
         key: "Mod-s",
@@ -768,7 +1056,7 @@ async function renderNode(space, node) {
   const view = new CM.EditorView({ state, parent: host });
 
   doc = {
-    space, node, data, view, above, timeline, segInfo,
+    space, node, data, view, above, timeline, segInfo, panel, legend,
     dirty: false, saving: false, conflictOpen: false,
     autosaveTimer: null, events: null,
   };
@@ -776,6 +1064,8 @@ async function renderNode(space, node) {
     effects: setAnnotations.of(buildDecorations(data, view.state)),
   });
   renderTimeline(timeline, data, space, node);
+  renderComments(panel);
+  renderLegend(legend);
   doc.events = openEvents(space);
   document.getElementById("head-note").textContent =
     writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
