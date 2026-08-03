@@ -51,6 +51,7 @@ from graph_context.domain.model_choice import model_id
 from graph_context.domain.models import Node
 from graph_context.errors import GraphContextError
 from graph_context.interface.context_block import build_turn_context
+from graph_context.interface.mode_config import slugify
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.services import Services
 from graph_context.interface.tools import is_error_result, resync_out_of_band
@@ -213,6 +214,15 @@ class ConversationMemory:
         self._events.append(("assistant", reply_text))
         self._shrink()
 
+    def remember_assistant(self, text: str) -> None:
+        """One unpaired assistant message -- a harness post the model
+        authored none of (a simple Scheduled Event's verbatim message,
+        ADR 055). Without this the post is invisible to the model live
+        yet appears after a restart (startup seeding replays bot posts)
+        -- memory must match what the chat shows either way."""
+        self._events.append(("assistant", text))
+        self._shrink()
+
     def seed(self, events: Sequence[tuple[str, str]]) -> None:
         """Replace the ring with reconstructed history (startup catch-up).
 
@@ -337,6 +347,12 @@ class Orchestrator:
         """Stamp an event as fired (call BEFORE its turn runs)."""
         await self.services.scheduler.mark_fired(node_id)
 
+    async def note_scheduled_post(self, session_id: str, text: str) -> None:
+        """Remember a simple Scheduled Event's verbatim post (ADR 055)
+        as an assistant message, so the model's next turn knows the
+        reminder went out -- no turn ran, so nothing else records it."""
+        (await self._session(session_id)).memory.remember_assistant(text)
+
     async def rule_tick(self) -> RuleTickReport:
         """One Automation Rule diff-fire pass (WP31, ADR 039). The
         transports' rule loop calls this after a resync, under the
@@ -399,15 +415,41 @@ class Orchestrator:
             assert spec is not None  # the default is always loaded
         return spec
 
+    def _override_spec(self, name: str) -> ModeSpec:
+        """Resolve a per-turn mode pin (ADR 055): a scheduled turn names
+        the mode it runs in; empty means the space's default. Unlike
+        :meth:`_spec`, degrading NEVER touches ``state.mode`` or its
+        persisted mirror -- the pin is this turn's alone."""
+        if name.strip():
+            spec = self.registry.get(slugify(name))
+            if spec is not None:
+                return spec
+            logger.warning(
+                "scheduled mode %r not loaded; firing in default %r",
+                name, self.registry.default,
+            )
+        spec = self.registry.get(self.registry.default)
+        assert spec is not None  # the default is always loaded
+        return spec
+
     async def handle_message(
         self, session_id: str, user_id: str, text: str, origin: str = "",
         sender: str = "", observer: TurnObserver | None = None,
         images: Sequence[ImageAttachment] = (),
+        mode: str | None = None,
     ) -> list[ReplyEvent]:
         """``images`` (WP23) are inbound image attachments riding this
         turn's user message; the driver shows them to the model as native
-        image blocks. Turn-local: conversation memory keeps only text."""
+        image blocks. Turn-local: conversation memory keeps only text.
+
+        ``mode`` (ADR 055) pins THIS turn to a mode: ``None`` (every
+        conversational caller) runs the session's own mode; a string --
+        how scheduled turns always arrive -- runs the named mode, with
+        unknown or empty names degrading to the space default. The pin
+        never switches or persists the session's mode, and a ``/``-command
+        turn ignores it (commands run before mode resolution)."""
         state = await self._session(session_id)
+        override = self._override_spec(mode) if mode is not None else None
         stripped = text.strip()
         # One id per handle_message call ties this turn's diary records --
         # user query, driver decisions, tool calls, final replies -- into
@@ -415,7 +457,8 @@ class Orchestrator:
         turn_id = uuid.uuid4().hex[:12]
         if self.turn_log:
             self.turn_log.user_message(
-                turn_id, session_id, state.mode, user_id, stripped,
+                turn_id, session_id,
+                override.name if override else state.mode, user_id, stripped,
                 sender=sender,
             )
         if is_command(stripped):
@@ -436,7 +479,7 @@ class Orchestrator:
                 )
             return command_events
 
-        spec = self._spec(state)
+        spec = override or self._spec(state)
         # WP23: the outbox is TURN-scoped -- files a crashed earlier turn
         # left behind must not ride out with this one's reply. WP33: same
         # discipline for schema drafts awaiting their confirm messages.

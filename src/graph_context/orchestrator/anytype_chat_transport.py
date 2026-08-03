@@ -756,19 +756,34 @@ class AnytypeChatTurnHandler:
     async def run_scheduled(
         self, chat_id: str, due: DueEvent, reply: TurnReply
     ) -> None:
-        """One due Scheduled Event -> turn -> deliveries.
+        """One due Scheduled Event -> post or turn -> deliveries.
 
         The system-initiated sibling of :meth:`run_turn`: no inbound
         message, so no gate and no cursor -- and no "Processing"
         placeholder either: nobody is waiting on a turn they didn't
         start, so nothing posts until the reply is ready (``deliver``
         without an open placeholder is a plain send). The event is
-        marked fired BEFORE the turn runs (at-most-once -- a crashing
-        turn must not re-fire every tick; its error still reaches the
-        chat through ``reply``), inside the route lock like the turn
-        itself.
+        marked fired BEFORE anything posts (at-most-once -- a crashing
+        fire must not re-fire every tick; its error still reaches the
+        chat through ``reply``), inside the route lock.
+
+        A simple event (ADR 055) skips the model entirely: its stored
+        message posts verbatim -- ``deliver`` routes it through the
+        sent ledger, so the bot never answers its own reminder -- and
+        is then remembered as an assistant message so the model's next
+        turn knows it went out. A prompt event runs a turn ALWAYS
+        mode-pinned: the event's own mode, or the space default when it
+        names none -- never the chat's ambient mode.
         """
         route = self.routes[chat_id]
+        if due.message:
+            async with route.lock:
+                await route.orchestrator.mark_scheduled_fired(due.node_id)
+            await reply.deliver(due.message)
+            await route.orchestrator.note_scheduled_post(
+                f"anytype:{chat_id}", due.message
+            )
+            return
         async with route.lock:
             await route.orchestrator.mark_scheduled_fired(due.node_id)
             events = await route.orchestrator.handle_message(
@@ -777,6 +792,7 @@ class AnytypeChatTurnHandler:
                 text=scheduled_prompt(due.name, due.prompt),
                 # Intent nodes point back at the event node that fired.
                 origin=f"schedule:{due.node_id}",
+                mode=due.mode,
             )
         await self.deliver_events(events, reply, chat_id=chat_id)
 

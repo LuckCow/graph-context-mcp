@@ -36,6 +36,16 @@ DISABLED_MARKER = "off"
 SCHEDULED_TYPE_KEY = "gc_scheduled_event"
 FIELD_SCHEDULE = "gc_schedule"
 FIELD_PROMPT = "gc_schedule_prompt"
+# A "simple" event: this text posts to the chat VERBATIM at fire time --
+# no model turn at all. An event carries prompt OR message, not both
+# (when a human sets both, the message wins -- Scheduler.tick owns that
+# rule).
+FIELD_MESSAGE = "gc_schedule_message"
+# The Activity Mode NAME a fired prompt event's turn runs in. Empty means
+# the space's default mode -- NEVER the chat's ambient mode (ADR 055).
+# Stored as an opaque text label like SessionState.mode; the orchestrator
+# resolves it at fire time and degrades unknown names to the default.
+FIELD_MODE = "gc_schedule_mode"
 FIELD_LAST_FIRED = "gc_last_fired"
 FIELD_STATUS = "gc_schedule_status"
 # The delivery target: which chat's session a fired event speaks into.

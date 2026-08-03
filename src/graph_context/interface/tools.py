@@ -66,6 +66,7 @@ from graph_context.domain.session import SCRATCHPAD_MAX_CHARS
 from graph_context.domain.traversal import ExploreQuery
 from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
+from graph_context.interface.mode_config import slugify
 from graph_context.interface.presenters import Detail
 from graph_context.interface.services import OutboundFile, Services
 from graph_context.interface.tool_args import (
@@ -332,6 +333,13 @@ def _clock_line(scheduler: Scheduler) -> str:
     )
 
 
+def _schedule_excerpt(text: str) -> str:
+    excerpt = text.strip().replace("\n", " ")
+    if len(excerpt) > _PROMPT_EXCERPT_CHARS:
+        excerpt = excerpt[:_PROMPT_EXCERPT_CHARS] + "…"
+    return excerpt
+
+
 @guarded
 async def schedule_tool(
     services: Services,
@@ -339,42 +347,68 @@ async def schedule_tool(
     name: str = "",
     schedule: str = "",
     prompt: str = "",
+    message: str = "",
+    mode: str = "",
     node_id: str = "",
 ) -> str:
     scheduler = services.scheduler
     if action == "set":
+        # Modes are addressed by slug everywhere (registry keys, /mode);
+        # slugify here so "Space Setup" and "space_setup" both land.
+        mode_slug = slugify(mode) if mode.strip() else ""
         node, next_at = await scheduler.set(
-            name, schedule, prompt, services.session_key
+            name, schedule, prompt, services.session_key,
+            message=message, mode=mode_slug,
         )
         await _note_mutation(services)
         when = (
             next_at.isoformat(sep=" ", timespec="minutes")
             if next_at is not None else "never"
         )
+        if message.strip():
+            kind = (
+                "at fire time this message posts to the chat verbatim "
+                "(no LLM turn)"
+            )
+        else:
+            kind = (
+                "at fire time an LLM turn runs the stored prompt in mode: "
+                f"{mode_slug or '(space default)'}"
+            )
         return (
-            f"scheduled {node.name!r} (id={node.id}); next fire: {when}. "
-            f"{_clock_line(scheduler)}. Verify the next-fire time matches "
-            "what the user asked for; reschedule with action='cancel' + "
-            "'set' if not."
+            f"scheduled {node.name!r} (id={node.id}); next fire: {when}; "
+            f"{kind}. {_clock_line(scheduler)}. Verify the next-fire time "
+            "matches what the user asked for; reschedule with "
+            "action='cancel' + 'set' if not."
         )
     if action == "list":
         views = scheduler.events()
         if not views:
             return (
                 "no scheduled events. Create one with action='set' "
-                f"(name, schedule, prompt). {_clock_line(scheduler)}."
+                "(name, schedule, and prompt or message). "
+                f"{_clock_line(scheduler)}."
             )
         lines = [_clock_line(scheduler), f"scheduled events ({len(views)}):"]
         for view in views:
             target = view.session_key or "(default chat)"
+            mode_note = f", mode={view.mode}" if view.mode else ""
             lines.append(
-                f"- {view.node.name} (id={view.node.id}, chat={target}) "
-                f"-- {view.status}"
+                f"- {view.node.name} (id={view.node.id}, chat={target}"
+                f"{mode_note}) -- {view.status}"
             )
-            excerpt = view.prompt.strip().replace("\n", " ")
-            if len(excerpt) > _PROMPT_EXCERPT_CHARS:
-                excerpt = excerpt[:_PROMPT_EXCERPT_CHARS] + "…"
-            lines.append(f"  prompt: {excerpt or '(none: fires with the name)'}")
+            if view.message.strip():
+                lines.append(f"  message: {_schedule_excerpt(view.message)}")
+                if view.prompt.strip():
+                    lines.append(
+                        "  (both Schedule message and Schedule prompt are "
+                        "set; the message wins -- clear one)"
+                    )
+            else:
+                excerpt = _schedule_excerpt(view.prompt)
+                lines.append(
+                    f"  prompt: {excerpt or '(none: fires with the name)'}"
+                )
         return "\n".join(lines)
     if action == "cancel":
         node = await scheduler.cancel(node_id or name)

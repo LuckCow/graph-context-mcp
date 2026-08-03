@@ -24,6 +24,8 @@ class TestScheduledEventBootstrap:
         names = {p["key"]: p["name"] async for p in client.list_properties()}
         assert names[mapping.PROP_SCHEDULE] == "Schedule"
         assert names[mapping.PROP_SCHEDULE_PROMPT] == "Schedule prompt"
+        assert names[mapping.PROP_SCHEDULE_MESSAGE] == "Schedule message"
+        assert names[mapping.PROP_SCHEDULE_MODE] == "Schedule mode"
         assert names[mapping.PROP_SCHEDULE_STATUS] == "Schedule status"
         assert names[mapping.PROP_LAST_FIRED] == "Last fired"
         assert names[mapping.PROP_SESSION_KEY] == "Session key"
@@ -33,6 +35,10 @@ class TestScheduledEventBootstrap:
     ) -> None:
         formats = {p["key"]: p["format"] async for p in client.list_properties()}
         assert formats[mapping.PROP_SCHEDULE_STATUS] == "select"
+        # ADR 055: mode is deliberately TEXT, not select -- mode names
+        # are live space data; pre-seeded options would go stale.
+        assert formats[mapping.PROP_SCHEDULE_MODE] == "text"
+        assert formats[mapping.PROP_SCHEDULE_MESSAGE] == "text"
 
     async def test_the_example_event_is_seeded_and_can_never_fire(
         self, mock, client, repo
@@ -46,6 +52,9 @@ class TestScheduledEventBootstrap:
         assert example.fields.get(mapping.PROP_SCHEDULE_PROMPT)
         body = await repo.fetch_body(example.id)
         assert "Schedule status" in body  # the in-space documentation
+        # ADR 055: the explainer teaches the one-of choice and the mode.
+        assert "Schedule message" in body and "Schedule mode" in body
+        assert "the message wins" in body
 
     async def test_rerunning_bootstrap_does_not_duplicate_the_example(
         self, mock, client, repo

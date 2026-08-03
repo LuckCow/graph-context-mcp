@@ -851,6 +851,112 @@ class TestScheduledTurn:
         stored = repository.graph.node(node.id)
         assert stored.fields.get(scheduling.FIELD_LAST_FIRED)  # at-most-once
 
+    async def test_a_simple_event_posts_verbatim_with_no_model_turn(
+        self,
+    ) -> None:
+        from graph_context.application.scheduler import DueEvent
+        from graph_context.domain import scheduling
+
+        driver = _TranscriptRecordingDriver([])  # any decide would fail
+        handler = _handler(routes={CHAT: _route(driver=driver)})
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax note", prompt="",
+            session_key=f"anytype:{CHAT}",
+            message="Taxes are due April 15.",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        assert recorder.posted == ["Taxes are due April 15."]
+        assert recorder.edited == []
+        assert driver.transcripts == []  # the model never woke
+        assert all(m["id"] in handler.sent for m in recorder.messages)
+        stored = repository.graph.node(node.id)
+        assert stored.fields.get(scheduling.FIELD_LAST_FIRED)
+
+    async def test_a_simple_post_is_remembered_for_the_next_turn(
+        self,
+    ) -> None:
+        # ADR 055: no turn ran, so nothing else records the post -- the
+        # next conversational turn must still see the reminder went out.
+        from graph_context.application.scheduler import DueEvent
+
+        driver = _TranscriptRecordingDriver([LLMTurn(reply="It went out.")])
+        handler = _handler(routes={CHAT: _route(driver=driver)})
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax note", prompt="",
+            session_key=f"anytype:{CHAT}", message="Taxes are due April 15.",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        await handler.routes[CHAT].orchestrator.handle_message(
+            f"anytype:{CHAT}", "member-a", "Did the reminder go out?",
+        )
+        replayed = [
+            e for e in driver.transcripts[0]
+            if e.kind == "assistant" and e.text == "Taxes are due April 15."
+        ]
+        assert len(replayed) == 1
+
+    async def test_a_prompt_turn_is_pinned_to_the_events_mode(self) -> None:
+        from graph_context.application.scheduler import DueEvent
+
+        create = ToolCall("create_node", {
+            "type": "Character", "name": "Mira", "summary": "s",
+        })
+        handler = _handler([
+            LLMTurn(tool_calls=(create,)), LLMTurn(reply="tried"),
+        ])
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder", prompt="p",
+            session_key=f"anytype:{CHAT}",
+            mode="authoring",  # read-only: the pinned binding must run
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        assert not repository.graph.find_by_name("Mira")  # rejected
+        # The pin was this turn's alone: the chat session never switched.
+        orchestrator = handler.routes[CHAT].orchestrator
+        assert orchestrator.mode_of(f"anytype:{CHAT}") == "space_setup"
+
+    async def test_an_unset_mode_fires_in_the_default_not_the_chats_mode(
+        self,
+    ) -> None:
+        from graph_context.application.scheduler import DueEvent
+
+        create = ToolCall("create_node", {
+            "type": "Character", "name": "Mira", "summary": "s",
+        })
+        handler = _handler([
+            LLMTurn(tool_calls=(create,)), LLMTurn(reply="done"),
+        ])
+        repository, node = await self._seed_event(handler)
+        orchestrator = handler.routes[CHAT].orchestrator
+        # The chat sits in read-only authoring; the event names no mode.
+        await orchestrator.handle_message(
+            f"anytype:{CHAT}", "member-a", "/mode authoring",
+        )
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder", prompt="p",
+            session_key=f"anytype:{CHAT}",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        # space_setup (the default) is mutating: the ambient read-only
+        # mode never leaked into the scheduled turn (ADR 055).
+        assert repository.graph.find_by_name("Mira")
+        assert orchestrator.mode_of(f"anytype:{CHAT}") == "authoring"
+
 
 class TestChatTitler:
     """WP21 (ADR 031): the pure titling policy -- untitled test, one

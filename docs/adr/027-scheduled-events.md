@@ -2,7 +2,9 @@
 
 Date: 2026-07-12
 Status: accepted (amended 2026-07-12: human-facing property surface +
-status lifecycle — see "Amendment" below)
+status lifecycle — see "Amendment" below; amended by ADR 055:
+per-event modes + simple no-LLM message events, and scheduled turns
+now fire in the event's/space's mode, never the chat's ambient mode)
 
 ## Context
 

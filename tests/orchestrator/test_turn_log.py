@@ -299,6 +299,32 @@ class TestPipelineTurnLogging:
         assert "create_node" in prompts[0]["tools"]
         assert "create_node" not in prompts[1]["tools"]
 
+    async def test_an_override_turn_relogs_the_prompt_both_ways(
+        self, services: Services, tmp_path
+    ) -> None:
+        """ADR 055: a mode-pinned turn changes the effective prompt for
+        that turn alone -- the diary re-logs on the pin AND on the return
+        to ambient, so it always holds the prompt the next decisions run
+        with. The user record carries the effective mode too."""
+        path = tmp_path / "turns.jsonl"
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="one"), LLMTurn(reply="two"), LLMTurn(reply="three"),
+        ], TurnLog(path, now=lambda: "T0"))
+        await orchestrator.handle_message("s1", "u1", "first")
+        await orchestrator.handle_message(
+            "s1", "u1", "second", mode="authoring",
+        )
+        await orchestrator.handle_message("s1", "u1", "third")
+        entries = _entries(path)
+        prompts = [e for e in entries if e["event"] == "prompt"]
+        assert [p["mode"] for p in prompts] == [
+            "space_setup", "authoring", "space_setup",
+        ]
+        users = [e for e in entries if e["event"] == "user"]
+        assert [u["mode"] for u in users] == [
+            "space_setup", "authoring", "space_setup",
+        ]
+
     async def test_each_session_logs_its_own_prompt(
         self, services: Services, tmp_path
     ) -> None:

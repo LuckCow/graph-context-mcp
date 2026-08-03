@@ -146,6 +146,22 @@ class TestBuildChannelRuntimes:
         assert first.lock is not second.lock
         assert second.orchestrator.services.session.project == "Field"
 
+    async def test_the_scheduler_learns_the_live_mode_vocabulary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """ADR 055: assembly late-binds mode_names (the services.historian
+        pattern), so the schedule tool validates mode names at set time
+        against the LIVE registry -- the bare MCP server never binds it."""
+        monkeypatch.setenv(
+            "GC_CHANNELS_FILE",
+            _write(tmp_path, f'[channels.{CHANNEL_A}]\nspace_id = "a"\n'),
+        )
+        runtimes = await bootstrap.build_channel_runtimes()
+        orchestrator = runtimes.routes[CHANNEL_A].orchestrator
+        names = orchestrator.services.scheduler.mode_names
+        assert names is not None
+        assert list(names()) == orchestrator.registry.names()
+
     async def test_per_channel_profile_selects_that_channels_mode_registry(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

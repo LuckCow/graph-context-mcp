@@ -94,12 +94,13 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
 # the `schedule` tool.
 EXAMPLE_EVENT_NAME = "Example Scheduled Event"
 EXAMPLE_EVENT_SUMMARY = (
-    "Template: fill Schedule and Schedule prompt to make the assistant "
-    "check in on its own; this example never fires (its Schedule is empty)."
+    "Template: fill Schedule plus Schedule message (posted as-is) or "
+    "Schedule prompt (the assistant acts on it); this example never "
+    "fires (its Schedule is empty)."
 )
 EXAMPLE_EVENT_BODY = """\
-A Scheduled Event makes the assistant start a chat turn on its own at a \
-time you choose, following the instructions you store here.
+A Scheduled Event posts a stored message, or makes the assistant start \
+a chat turn on its own, at a time you choose.
 
 Fields:
 
@@ -107,14 +108,22 @@ Fields:
 date-time like 2027-04-08T09:00 (fires once), or a 5-field cron line \
 "minute hour day month weekday" like 0 9 * * 1 (Mondays 09:00; weekday \
 0 and 7 are Sunday).
-- Schedule prompt -- the instructions the assistant receives when it \
-fires. Write them self-contained, e.g. "Remind Nick that taxes are due \
-April 15 and ask whether he has filed."
+- Schedule message -- text posted to the chat exactly as written, with \
+no assistant turn. Use this for reminders where the wording is already \
+known, e.g. "Taxes are due April 15 -- file this week."
+- Schedule prompt -- instructions the assistant follows when it fires. \
+Use this when the fired turn must think or act; write it \
+self-contained, e.g. "Remind Nick that taxes are due April 15 and ask \
+whether he has filed." Fill ONE of message or prompt -- if both are \
+set, the message wins and the prompt is ignored.
+- Schedule mode -- optional, prompt events only: the name of the \
+Activity Mode the fired turn runs in. Empty runs the space's default \
+mode (never the chat's current mode).
 - Schedule status -- Pending events fire; set Completed or Cancelled to \
 stop one, or back to Pending to re-enable it. Empty counts as Pending. \
 The assistant marks a one-shot Completed after it fires.
 - Last fired -- bookkeeping, written by the assistant.
-- Session key -- optional: which chat the fired turn speaks into \
+- Session key -- optional: which chat the fired event speaks into \
 (anytype:<chat id>). Empty delivers to the space's first served chat.
 
 You can also just ask the assistant in chat ("remind me a week before \

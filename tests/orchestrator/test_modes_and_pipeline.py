@@ -846,6 +846,80 @@ def _keyed_orchestrator(
     return orchestrator, store
 
 
+class TestModeOverrideTurn:
+    """ADR 055: ``mode=`` pins ONE turn to a named mode -- scheduled
+    turns always arrive this way -- without ever switching or persisting
+    the session's own mode."""
+
+    async def test_override_turn_runs_the_named_mode_and_leaves_the_session(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="done"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        events = await orchestrator.handle_message(
+            # Display-name spelling: the pin slugifies like /mode does.
+            "s1", "u1", "Add Mira.", mode="World Modeling",
+        )
+        assert events[-1].kind == "reply"
+        # The mutating binding ran even though the session is read-only...
+        assert services.repository.graph.find_by_name("Mira")
+        # ...and the pin never stuck: ambient and persisted mode intact.
+        assert orchestrator.mode_of("s1") == "authoring"
+        assert services.session.mode == "authoring"
+
+    async def test_the_next_ambient_turn_is_back_in_the_sessions_mode(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="pinned"),
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="ambient"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        await orchestrator.handle_message(
+            "s1", "u1", "Add Mira.", mode="world_modeling",
+        )
+        events = await orchestrator.handle_message("s1", "u1", "Again.")
+        errors = [e for e in events if e.kind == "error"]
+        assert errors and "not available in authoring mode" in errors[0].text
+
+    async def test_unknown_and_empty_overrides_degrade_to_the_default(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="a"), LLMTurn(reply="b"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        observer = _RecordingObserver()
+        await orchestrator.handle_message(
+            "s1", "u1", "hi", mode="no_such_mode", observer=observer,
+        )
+        await orchestrator.handle_message(
+            "s1", "u1", "hi again", mode="", observer=observer,
+        )
+        started = [e for e in observer.events if e[0] == "turn_started"]
+        # Never the chat's ambient mode: both degrade to the default.
+        assert [mode for _, mode, _ in started] == [
+            "space_setup", "space_setup",
+        ]
+
+    async def test_the_intent_node_stamps_the_override_mode(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="done"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        await orchestrator.handle_message(
+            "s1", "u1", "Add Mira.", mode="world_modeling",
+        )
+        (intent,) = _intent_nodes(services)
+        assert intent.fields[attribution.FIELD_MODE] == "world_modeling"
+
+
 DOCUMENT_SPEC = ModeSpec(
     name="chapters", goal="Write chapters as nodes.",
     mutating=True, document_type="Chapter",

@@ -14,6 +14,7 @@ import pytest
 
 from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.domain import rules as rules_domain
+from graph_context.domain import scheduling
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
@@ -888,6 +889,79 @@ class TestScheduleTool:
         assert out.startswith("cancelled 'tax reminder'")
         assert "re-enable" in out  # the human's Pending flip is taught
         assert "cancelled" in await tools.schedule_tool(services, action="list")
+
+    async def test_set_with_message_confirms_the_verbatim_no_llm_kind(
+        self,
+    ) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="tax note",
+            schedule="2199-04-08T09:00", message="Taxes are due April 15.",
+        )
+        assert out.startswith("scheduled 'tax note'")
+        assert "verbatim" in out and "no LLM turn" in out
+
+    async def test_set_with_prompt_echoes_the_mode_or_default(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="digest", schedule="0 9 * * 1",
+            prompt="Compile the digest.", mode="Research Mode",
+        )
+        assert "mode: research_mode" in out  # slugified like /mode
+        out = await tools.schedule_tool(
+            services, action="set", name="plain", schedule="0 9 * * 2",
+            prompt="Check in.",
+        )
+        assert "mode: (space default)" in out
+
+    async def test_neither_and_both_errors_teach_the_distinction(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+        )
+        assert out.startswith("ERROR:")
+        assert "'prompt'" in out and "'message'" in out and "verbatim" in out
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+            prompt="p", message="m",
+        )
+        assert out.startswith("ERROR:") and "both -- pick one" in out
+
+    async def test_mode_with_message_is_rejected(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+            message="m", mode="research",
+        )
+        assert out.startswith("ERROR:") and "drop 'mode'" in out
+
+    async def test_list_shows_message_mode_and_the_both_set_warning(
+        self,
+    ) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax note",
+            schedule="2199-04-08T09:00", message="Taxes are due April 15.",
+        )
+        await tools.schedule_tool(
+            services, action="set", name="digest", schedule="0 9 * * 1",
+            prompt="Compile the digest.", mode="research",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "message: Taxes are due April 15." in out
+        assert "mode=research" in out
+        assert "the message wins" not in out
+        # A human stored both in the Anytype UI: the list surfaces D2.
+        node = next(
+            v.node for v in services.scheduler.events()
+            if v.node.name == "digest"
+        )
+        await services.repository.update_node(node.id, fields={
+            **dict(node.fields), scheduling.FIELD_MESSAGE: "Digest day.",
+        })
+        out = await tools.schedule_tool(services, action="list")
+        assert "message: Digest day." in out
+        assert "the message wins -- clear one" in out
 
 
 # -- the automation tool (WP32, ADR 040) -------------------------------------

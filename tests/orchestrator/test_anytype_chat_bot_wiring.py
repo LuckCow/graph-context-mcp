@@ -802,6 +802,48 @@ class TestScheduledEventWatcher:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
 
+    async def test_a_due_message_event_posts_verbatim_with_no_model_turn(
+        self,
+    ) -> None:
+        from graph_context.domain import scheduling
+        from graph_context.orchestrator.anytype_chat_bot import _watch_schedule
+
+        mock = MockAnytype()
+        # ZERO scripted turns: any model turn would raise and error-post.
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        route = handler.routes[chat_id]
+        repository = route.orchestrator.services.repository
+        await repository.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="tax note",
+            summary="s",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2020-01-01T09:00",  # long due
+                scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
+                scheduling.FIELD_SESSION_KEY: f"anytype:{chat_id}",
+            },
+        ))
+        watcher = asyncio.ensure_future(_watch_schedule(
+            handler, chat_client, route, mock.space_id, interval=0.01
+        ))
+        try:
+            async with asyncio.timeout(5):
+                while not any(
+                    m["content"]["text"] == "Taxes are due April 15."
+                    for m in mock.chat_messages(chat_id)
+                ):
+                    await asyncio.sleep(0.01)
+            # A few more ticks must not re-fire the spent one-shot.
+            await asyncio.sleep(0.05)
+            bot_posts = [
+                m["content"]["text"]
+                for m in mock.chat_messages(chat_id)
+                if m["creator"] == mock.api_member_id
+            ]
+            assert bot_posts == ["Taxes are due April 15."]
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
     async def test_a_ui_created_recurring_event_is_armed_without_a_post(
         self,
     ) -> None:

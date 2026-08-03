@@ -376,6 +376,14 @@ async def _assemble_runtime(
         reload_registry=reload_registry, turn_log=turn_log,
         services_for=built.services_for,  # WP8: per-session-key Services
     )
+    # ADR 055: late-bind the schedule tool's mode vocabulary, the
+    # services.historian pattern -- the scheduler is shared by reference
+    # across every derived session, so one bind covers them all. The
+    # closure reads the LIVE registry attribute, so /mode and change-tick
+    # reloads are honored for free. The bare MCP server never binds it:
+    # there `set` stores mode names unchecked and the fire-time
+    # degrade-to-default covers typos.
+    services.scheduler.mode_names = lambda: orchestrator.registry.names()
     return Runtime(
         orchestrator=orchestrator, profile=profile,
         help_line=help_line, teardown=built.teardown,

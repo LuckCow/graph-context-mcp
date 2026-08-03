@@ -2720,6 +2720,41 @@ while typing; nothing ever blanks. Old routes/callables
 
 ---
 
+## WP49 — Scheduled Events: per-event modes + simple messages (ADR 055) — **shipped 2026-08-03**
+
+**Status:** complete. Overhauls ADR 027's firing semantics: a
+Scheduled Event now carries exactly ONE of `gc_schedule_message` (a
+*simple* event — the text posts to the chat VERBATIM at fire time, no
+model turn; `TurnReply.deliver` with no placeholder keeps it in the
+sent ledger, and `Orchestrator.note_scheduled_post` remembers it as an
+assistant message so live memory matches the restart-seeded view) or
+`gc_schedule_prompt` (an LLM turn), the latter optionally pinned to an
+Activity Mode by NAME in `gc_schedule_mode` (text, not select/objects
+— names are live registry data; typos degrade safely). Scheduled
+turns are ALWAYS mode-pinned now: `handle_message` grew
+`mode: str | None = None` (`None` = ambient, every conversational
+caller unchanged; a string = a per-turn pin via the pipeline's
+`_override_spec`, slugified, unknown/empty degrading to the registry
+default, never touching the session's own or persisted mode) and
+`run_scheduled` always passes `mode=due.mode` — a pre-existing event
+with no mode now fires in the SPACE DEFAULT mode, not the chat's
+ambient one (deliberate behavior change). The `schedule` tool's `set`
+takes exactly one of `message`/`prompt` plus optional `mode`
+(rejected with `message`); teaching errors own the distinction, and a
+human storing both in the UI gets message-wins (the rule lives in
+`Scheduler.tick`) with a `list` warning. Set-time mode validation
+rides a late-bound `Scheduler.mode_names` callable (the
+`services.historian` pattern — assembly binds it to the live
+registry; the bare MCP server never does and degrades to fire-time).
+Simple fires mint no intent node and no turn-log records
+(`gc_last_fired` + the bot's log line are the record) — distinct from
+ADR 027's rejected "synthetic chat message", which was a model turn
+dressed as conversation. Two new minted properties ride the existing
+`SCHEDULED_PROPERTIES` derivations (inline mint, retrofit,
+reflection) and the seeded explainer teaches the one-of choice.
+
+---
+
 ## Sequencing
 
 ```

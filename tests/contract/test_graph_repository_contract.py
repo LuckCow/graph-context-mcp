@@ -1199,6 +1199,8 @@ class ScheduledEventContract:
             fields={
                 scheduling.FIELD_SCHEDULE: "2027-04-08T09:00",
                 scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
+                scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
+                scheduling.FIELD_MODE: "research",
                 scheduling.FIELD_STATUS: scheduling.STATUS_PENDING,
                 scheduling.FIELD_SESSION_KEY: "anytype:chat-1",
             },
@@ -1212,6 +1214,10 @@ class ScheduledEventContract:
         assert stored.role is Role.SCHEDULED
         assert stored.fields[scheduling.FIELD_SCHEDULE] == "2027-04-08T09:00"
         assert stored.fields[scheduling.FIELD_PROMPT] == "Remind Nick about taxes."
+        # ADR 055: the simple-message and mode properties are REAL
+        # reflected properties too, same as the rest of the surface.
+        assert stored.fields[scheduling.FIELD_MESSAGE] == "Taxes are due April 15."
+        assert stored.fields[scheduling.FIELD_MODE] == "research"
         assert stored.fields[scheduling.FIELD_SESSION_KEY] == "anytype:chat-1"
         # The status is a SELECT on the Anytype backend: the write
         # auto-creates the option tag (ADR 012) and reads back as its
