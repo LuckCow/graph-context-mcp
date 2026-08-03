@@ -681,6 +681,14 @@ def state_walk(
     )
 
 
+def usable_records(
+    records: Sequence[RevisionRecord],
+) -> tuple[RevisionRecord, ...]:
+    """The records that carry history -- the compaction marker
+    (``KIND_TRUNCATED``) does not."""
+    return tuple(r for r in records if r.kind != KIND_TRUNCATED)
+
+
 def current_hashes(records: Sequence[RevisionRecord]) -> tuple[str, ...]:
     states = state_walk(records)
     return states[-1][1] if states else ()
