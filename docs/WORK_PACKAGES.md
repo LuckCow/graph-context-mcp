@@ -2603,7 +2603,9 @@ per 5-second tick.
 
 ## WP45 — Derived word-level authorship (ADR 051) — **shipped 2026-07-28**
 
-**Status:** complete. `revisions.word_authorship(records)` — a pure,
+**Status:** complete. `revisions.word_token_authors(records)` (shipped
+as `word_authorship`; the span merge moved to the doc-wire consumer
+when ADR 054's document wire landed) — a pure,
 derived view (nothing stored): one pass over `state_walk` carrying a
 per-token author for every hash ever seen; added blocks inherit their
 ancestor's authors on token-equal ranges (`closest` WITHOUT consuming

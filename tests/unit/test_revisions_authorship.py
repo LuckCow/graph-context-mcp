@@ -1,8 +1,13 @@
 """Derived word-level authorship (WP45): who typed each word of every
 current block, walked off the revision log -- display derivation only,
-nothing stored. Pure and fast, like the other revision suites."""
+nothing stored. Pinned through :func:`word_token_authors` (the doc
+wire's surface); the local ``_word_authorship`` helper performs the
+span merge the prose page renders. Pure and fast, like the other
+revision suites."""
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 from graph_context.domain import revisions
 from graph_context.domain.revisions import (
@@ -12,7 +17,7 @@ from graph_context.domain.revisions import (
     current_hashes,
     next_record,
     normalize_block,
-    word_authorship,
+    word_token_authors,
 )
 
 PARA_A = "The city fell quiet before the siege began, every gate barred."
@@ -43,6 +48,30 @@ def _grow(
     ))
 
 
+def _word_authorship(
+    records: Sequence[RevisionRecord],
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """The display merge the prose page performs over
+    :func:`word_token_authors`: per-token authors -> ``(author, text)``
+    spans whose concatenation reproduces the block; word-free blocks
+    stay out (separators share hashes)."""
+    texts = revisions.texts_of(records)
+    spans: dict[str, tuple[tuple[str, str], ...]] = {}
+    for block, authors in word_token_authors(records).items():
+        text = texts.get(block, "")
+        if not revisions.has_words(text):
+            continue
+        tokens = revisions.block_tokens(text)
+        merged: list[tuple[str, str]] = []
+        for author, token in zip(authors, tokens, strict=True):
+            if merged and merged[-1][0] == author:
+                merged[-1] = (author, merged[-1][1] + token)
+            else:
+                merged.append((author, token))
+        spans[block] = tuple(merged)
+    return spans
+
+
 def _text_of(spans: tuple[tuple[str, str], ...]) -> str:
     return "".join(text for _, text in spans)
 
@@ -55,7 +84,7 @@ class TestWordAuthorship:
     def test_a_fresh_block_is_wholly_its_author(self) -> None:
         log: list[RevisionRecord] = []
         _grow(log, [PARA_A])
-        spans = word_authorship(log)[_h(PARA_A)]
+        spans = _word_authorship(log)[_h(PARA_A)]
         assert _authors_of(spans) == {revisions.AUTHOR_MODEL}
         assert _text_of(spans) == normalize_block(PARA_A)
 
@@ -63,7 +92,7 @@ class TestWordAuthorship:
         log: list[RevisionRecord] = []
         _grow(log, [PARA_A])
         _grow(log, [PARA_A_EDIT], author=revisions.AUTHOR_HUMAN)
-        spans = word_authorship(log)[_h(PARA_A_EDIT)]
+        spans = _word_authorship(log)[_h(PARA_A_EDIT)]
         human = "".join(t for a, t in spans if a == revisions.AUTHOR_HUMAN)
         assert human.strip() == "silent"
         assert _text_of(spans) == normalize_block(PARA_A_EDIT)
@@ -73,7 +102,7 @@ class TestWordAuthorship:
         _grow(log, [PARA_A])
         _grow(log, [PARA_A_EDIT], author=revisions.AUTHOR_HUMAN)
         _grow(log, [PARA_A_MODEL])
-        spans = word_authorship(log)[_h(PARA_A_MODEL)]
+        spans = _word_authorship(log)[_h(PARA_A_MODEL)]
         human = "".join(t for a, t in spans if a == revisions.AUTHOR_HUMAN)
         model = "".join(t for a, t in spans if a == revisions.AUTHOR_MODEL)
         assert "silent" in human  # survived the model's pass
@@ -84,7 +113,7 @@ class TestWordAuthorship:
         log: list[RevisionRecord] = []
         _grow(log, [PARA_A, PARA_B])
         _grow(log, [PARA_A_EDIT, PARA_B], author=revisions.AUTHOR_HUMAN)
-        for spans in word_authorship(log).values():
+        for spans in _word_authorship(log).values():
             authors = [a for a, _ in spans]
             assert all(x != y for x, y in zip(authors, authors[1:], strict=False))
 
@@ -96,7 +125,7 @@ class TestWordAuthorship:
         _grow(log, [combined])
         # The human splits ONE model paragraph into two blocks.
         _grow(log, [first, second], author=revisions.AUTHOR_HUMAN)
-        spans = word_authorship(log)
+        spans = _word_authorship(log)
         # Both halves inherit the model's words (no greedy consumption).
         assert revisions.AUTHOR_MODEL in _authors_of(spans[_h(first)])
         assert revisions.AUTHOR_MODEL in _authors_of(spans[_h(second)])
@@ -105,14 +134,14 @@ class TestWordAuthorship:
         log: list[RevisionRecord] = []
         _grow(log, [PARA_A])
         _grow(log, [PARA_A, PARA_B], author=revisions.AUTHOR_HUMAN)
-        assert _authors_of(word_authorship(log)[_h(PARA_B)]) == {
+        assert _authors_of(_word_authorship(log)[_h(PARA_B)]) == {
             revisions.AUTHOR_HUMAN,
         }
 
     def test_short_blocks_stay_out(self) -> None:
         log: list[RevisionRecord] = []
         _grow(log, [PARA_A, "* * *"])
-        assert _h("* * *") not in word_authorship(log)
+        assert _h("* * *") not in _word_authorship(log)
 
     def test_truncated_history_degrades_to_the_keyframe_author(self) -> None:
         log: list[RevisionRecord] = []
@@ -125,7 +154,7 @@ class TestWordAuthorship:
         records = [
             e for e in compacted if isinstance(e, RevisionRecord)
         ]
-        spans = word_authorship(records)[_h(PARA_A_EDIT)]
+        spans = _word_authorship(records)[_h(PARA_A_EDIT)]
         # Pre-truncation lineage is gone: the block reads as wholly the
         # first kept keyframe's author. No crash is the contract.
         assert len(_authors_of(spans)) == 1
@@ -136,6 +165,6 @@ class TestWordAuthorship:
         _grow(log, [PARA_A_EDIT], author=revisions.AUTHOR_HUMAN)
         _grow(log, [PARA_B])                    # the edited block removed
         _grow(log, [PARA_A_EDIT, PARA_B])       # model restores it verbatim
-        spans = word_authorship(log)[_h(PARA_A_EDIT)]
+        spans = _word_authorship(log)[_h(PARA_A_EDIT)]
         human = "".join(t for a, t in spans if a == revisions.AUTHOR_HUMAN)
         assert "silent" in human  # authorship rode the hash, not the walk

@@ -263,7 +263,7 @@ def char_range_to_tokens(text: str, start: int, end: int) -> tuple[int, int]:
         )
     s = e = -1
     cursor = 0
-    for index, token in enumerate(_WORD.findall(text)):
+    for index, token in enumerate(block_tokens(text)):
         token_start, cursor = cursor, cursor + len(token)
         if token_start < end and cursor > start:
             if s < 0:
@@ -283,7 +283,7 @@ def token_range_to_chars(text: str, s: int, e: int) -> tuple[int, int]:
     DISPLAY (the wire's absolute anchors, the context block's quoted
     words). The end trims the last token's trailing whitespace. Raises
     on a range the text doesn't have."""
-    tokens = _WORD.findall(text)
+    tokens = block_tokens(text)
     if not (0 <= s < e <= len(tokens)):
         raise GraphContextError(
             f"token range {s}..{e} is outside this section's "
@@ -354,8 +354,8 @@ def word_diff(old: str, new: str) -> tuple[tuple[str, str], ...]:
     """Word-level spans between two block texts: ``("eq"|"add"|"del",
     text)`` in reading order -- WP43's server-side intra-block diff (the
     page renders spans; no client diff library, ADR 025)."""
-    tokens_old = _WORD.findall(old)
-    tokens_new = _WORD.findall(new)
+    tokens_old = block_tokens(old)
+    tokens_new = block_tokens(new)
     matcher = difflib.SequenceMatcher(
         a=tokens_old, b=tokens_new, autojunk=False
     )
@@ -446,7 +446,6 @@ class CommentEntry:
     by: str      # who wrote it ("human:prose-page", ...)
     start: int = -1  # first token of the anchored range, -1 = whole block
     end: int = -1    # one past the last token, -1 = whole block
-    kind: str = KIND_COMMENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,18 +458,17 @@ class CommentStateEntry:
     value: str   # COMMENT_ADDRESSED | COMMENT_RESOLVED
     at: str      # injected ISO timestamp
     by: str      # who transitioned it ("model", "human:prose-page", ...)
-    kind: str = KIND_COMMENT_STATE
 
 
 LogEntry = RevisionRecord | SectionMark | CommentEntry | CommentStateEntry
 
 
-def comment_id(at: str, by: str, block_hash: str, text: str) -> str:
+def comment_id(at: str, by: str, anchor_hash: str, text: str) -> str:
     """A comment's stable id, clock-free (``at`` is injected like every
     timestamp): identical duplicates collide deliberately -- the
     historian drops them as change-only no-ops."""
     digest = hashlib.sha256(
-        f"{at}|{by}|{block_hash}|{text}".encode()
+        f"{at}|{by}|{anchor_hash}|{text}".encode()
     ).hexdigest()
     return "c" + digest[:8]
 
@@ -906,7 +904,7 @@ def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
 
     def _tokens(block: str) -> list[str]:
         if block not in tokens_of:
-            tokens_of[block] = _WORD.findall(texts.get(block, ""))
+            tokens_of[block] = block_tokens(texts.get(block, ""))
         return tokens_of[block]
 
     statuses: dict[str, list[str]] = {}
@@ -919,9 +917,7 @@ def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
                 continue
             target = (
                 statuses if entry.kind == MARK_STATUS else intents
-            ).get(entry.hash)
-            if target is None:
-                continue
+            )[entry.hash]
             start, end = (
                 (0, len(target)) if entry.start < 0
                 else (max(0, entry.start), min(len(target), entry.end))
@@ -972,9 +968,7 @@ def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
         current = new
     result: dict[str, TokenState] = {}
     for block in set(current or ()):
-        status = statuses.get(block)
-        if status is None:
-            continue
+        status = statuses[block]
         stamp = stamps.get(block, {})
         result[block] = TokenState(
             status=tuple(status),
@@ -1023,7 +1017,7 @@ def locked_runs(
     for block, state in states.items():
         if INTENT_LOCKED not in state.intent:
             continue
-        tokens = _WORD.findall(texts.get(block, ""))
+        tokens = block_tokens(texts.get(block, ""))
         if len(tokens) != len(state.intent):
             continue  # mangled log: no run to demand
         found: list[str] = []
@@ -1063,52 +1057,22 @@ def missing_locked(
     )
 
 
-def word_authorship(
+def word_token_authors(
     records: Sequence[RevisionRecord],
-) -> dict[str, tuple[tuple[str, str], ...]]:
-    """Final-state hash -> ``(author_kind, text)`` word spans over the
-    block's raw text; span concatenation reproduces it (WP45).
-
-    Derived, never stored -- one forward pass over the log carrying a
-    per-token author for EVERY hash ever seen (a removed-then-restored
-    block keeps its authorship; identity is the hash). An added block
+) -> dict[str, tuple[str, ...]]:
+    """Final-state hash -> one author per token (WP45/46) -- derived,
+    never stored: one forward pass over the log carrying a per-token
+    author for EVERY hash ever seen (a removed-then-restored block
+    keeps its authorship; identity is the hash). An added block
     inherits its ancestor's authors on token-equal ranges and takes the
     introducing revision's author elsewhere. Ancestors resolve through
     :func:`closest` WITHOUT consuming matches: a paragraph split in two
     lets BOTH halves inherit the original's words -- authorship is
     lineage, not a one-to-one pairing (``revision_diff``'s display
-    pairing differs deliberately). Word-free blocks stay out (blame's
-    rule: separators share hashes); pre-truncation ancestry degrades
-    to introduced-at-keyframe authorship.
-    """
-    texts = texts_of(records)
-    authors = word_token_authors(records)
-    spans: dict[str, tuple[tuple[str, str], ...]] = {}
-    for block, block_authors in authors.items():
-        text = texts.get(block, "")
-        if not has_words(text):
-            continue
-        tokens = _WORD.findall(text)
-        if len(tokens) != len(block_authors):
-            continue  # unreachable unless the log was hand-mangled
-        merged: list[tuple[str, str]] = []
-        for author, token in zip(block_authors, tokens, strict=True):
-            if merged and merged[-1][0] == author:
-                merged[-1] = (author, merged[-1][1] + token)
-            else:
-                merged.append((author, token))
-        spans[block] = tuple(merged)
-    return spans
-
-
-def word_token_authors(
-    records: Sequence[RevisionRecord],
-) -> dict[str, tuple[str, ...]]:
-    """Final-state hash -> one author per token (WP45/46) -- the
-    token-aligned form :func:`word_authorship` merges for display and
-    the prose bridge joins with token review states. No word-free
-    filter here; callers apply :func:`has_words` where display rules
-    demand it."""
+    pairing differs deliberately). The prose bridge merges these into
+    display spans and joins them with token review states. No
+    word-free filter here; callers apply :func:`has_words` where
+    display rules demand it."""
     texts = texts_of(records)
     token_authors: dict[str, tuple[str, ...]] = {}
     previous: tuple[str, ...] = ()
@@ -1118,10 +1082,10 @@ def word_token_authors(
             if added in token_authors:
                 continue  # restored verbatim: authorship rides the hash
             text = texts.get(added, "")
-            tokens = _WORD.findall(text)
+            tokens = block_tokens(text)
             ancestor = closest(text, removed, texts)
             base = token_authors.get(ancestor, ()) if ancestor else ()
-            old_tokens = _WORD.findall(texts.get(ancestor, "")) if base else []
+            old_tokens = block_tokens(texts.get(ancestor, "")) if base else []
             token_authors[added] = tuple(
                 _inherit(base, old_tokens, tokens, record.author_kind)
             )
@@ -1157,7 +1121,7 @@ def _fold_comments(
 
     def _tokens(block: str) -> list[str]:
         if block not in tokens_of:
-            tokens_of[block] = _WORD.findall(texts.get(block, ""))
+            tokens_of[block] = block_tokens(texts.get(block, ""))
         return tokens_of[block]
 
     def _attach(fold: _CommentFold) -> None:
@@ -1273,7 +1237,7 @@ def comment_states(entries: Sequence[LogEntry]) -> tuple[CommentState, ...]:
         anchor = fold.anchor if fold.attached else ""
         start = end = -1
         if anchor and fold.flags is not None:
-            tokens = _WORD.findall(texts.get(anchor, ""))
+            tokens = block_tokens(texts.get(anchor, ""))
             if len(fold.flags) == len(tokens):
                 start, end = _flag_bounds(fold.flags)
         states.append(CommentState(
