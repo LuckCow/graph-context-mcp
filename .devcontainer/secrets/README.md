@@ -10,6 +10,7 @@ reads keys from these files, never from env vars (env vars leak via
 | `anytype_api_key` | everything that talks to the Anytype API (`ANYTYPE_API_KEY_FILE`) | `docker exec -it graph-context-mcp-anytype anytype auth apikey create "graph-context"` and paste the key here (the sidecar bot account's key — the desktop pairing flow is not involved). |
 | `discord_bot_token` | the Discord transport (`DISCORD_BOT_TOKEN_FILE`) | Discord developer portal → your bot → Reset Token. |
 | `claude_oauth_token` | the Claude Code CLI driver (subscription auth) | `claude setup-token` on a logged-in machine. |
+| `gc_prose_token` | the prose page's write gate (`GC_PROSE_TOKEN_FILE`, ADR 050/054) | Any random string you choose, e.g. `python -c "import secrets; print(secrets.token_urlsafe(24))"`; the `/prose` page asks for it once on the first save. |
 | `anytype_account_key` | nothing at runtime — **disaster-recovery backup** of the sidecar bot account's identity | Written by hand from the output of `anytype auth create graph-context-bot` at sidecar bootstrap (WP14). Losing the sidecar's volumes without this file means losing the bot's identity and re-inviting it to every space. |
 
 Rotation: replace the file content and restart the stack; nothing caches

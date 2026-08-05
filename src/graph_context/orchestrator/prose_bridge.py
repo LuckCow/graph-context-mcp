@@ -22,6 +22,7 @@ repository and historian handles.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 from collections.abc import (
@@ -41,6 +42,8 @@ from graph_context.application.node_historian import (
 from graph_context.domain import revisions
 from graph_context.errors import GraphContextError, StaleSectionMark
 from graph_context.ports.graph_repository import GraphRepository
+
+logger = logging.getLogger(__name__)
 
 CALL_TIMEOUT_SECONDS = 15.0
 
@@ -72,8 +75,9 @@ class ProseSpace:
     set_marks: Callable[
         [str, str, list[dict[str, Any]]], Awaitable[dict[str, Any]]
     ]
-    # WP50 (ADR 056): (node, base, payload) -- comment create/resolve,
-    # one sidecar write; payload carries exactly one of comment/resolve
+    # WP50 (ADR 056): (node, base, payload) -- comment create/resolve/
+    # edit, one sidecar write; payload carries exactly one of
+    # comment/resolve/edit
     set_comment: Callable[
         [str, str, dict[str, Any]], Awaitable[dict[str, Any]]
     ]
@@ -294,7 +298,6 @@ def register_space(
     def _segment_rows(
         node_id: str, body: str,
         offsets: Sequence[tuple[str, int, int]],
-        usable: Sequence[revisions.RevisionRecord],
     ) -> tuple[list[dict[str, Any]], list[list[Any]]]:
         """Per-block segment rows PLUS the merged token spans -- one
         walk, since spans coalesce inside blocks. Span layout is
@@ -303,7 +306,7 @@ def register_space(
         blame = historian.blame(node_id)
         badges = historian.section_states(node_id)
         tokens_state = historian.token_states(node_id)
-        authors = revisions.word_token_authors(usable)
+        authors = historian.word_token_authors(node_id)
         segments: list[dict[str, Any]] = []
         spans: list[list[Any]] = []
         for block_hash, start, end in offsets:
@@ -420,11 +423,18 @@ def register_space(
             for step in revisions.revision_steps(usable)
         ]
 
-    async def _doc_payload(node_id: str) -> dict[str, Any]:
-        body = await repository.fetch_body(node_id)
+    async def _doc_payload(
+        node_id: str, body: str | None = None
+    ) -> dict[str, Any]:
+        """The whole-document wire payload. ``body`` short-circuits the
+        fetch when the caller already holds the current body under the
+        same route-lock hold (marks/comments never change it) -- the
+        page's writes must not pay two remote GETs per gesture."""
+        if body is None:
+            body = await repository.fetch_body(node_id)
         usable = _usable(node_id)
         offsets = revisions.block_offsets(body)
-        segments, spans = _segment_rows(node_id, body, offsets, usable)
+        segments, spans = _segment_rows(node_id, body, offsets)
         return {
             "id": node_id,
             "name": _name_of(node_id),
@@ -459,6 +469,10 @@ def register_space(
             await historian.record_external_revision(
                 node_id, detail=MARK_AUTHOR
             )
+        logger.info(
+            "prose page: saved %r (%s, %d chars)",
+            _name_of(node_id), node_id, len(body),
+        )
         return await _doc_payload(node_id)
 
     async def set_marks(
@@ -490,24 +504,46 @@ def register_space(
             await historian.record_marks(
                 node_id, requests=requests, by=MARK_AUTHOR
             )
-        return await _doc_payload(node_id)
+        logger.info(
+            "prose page: %d mark(s) on %r (%s): %s",
+            len(requests), _name_of(node_id), node_id,
+            ", ".join(sorted({f"{r.kind}={r.value}" for r in requests})),
+        )
+        return await _doc_payload(node_id, body=current)
 
     async def set_comment(
         node_id: str, base: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Comment create/resolve (WP50): one POST, one route-lock hold,
-        one sidecar rewrite. Create takes the anchored block's hash plus
-        optional ``start_char``/``end_char`` selection offsets (the
-        domain's ``char_range_to_tokens`` is the only place they become
-        token indices); resolve takes a comment id. The base token gates
-        both -- a stale page reconciles before it comments."""
+        """Comment create/resolve/edit (WP50; edit per the ADR 056
+        amendment): one POST, one route-lock hold, one sidecar rewrite.
+        Create takes the anchored block's hash plus optional
+        ``start_char``/``end_char`` selection offsets (the domain's
+        ``char_range_to_tokens`` is the only place they become token
+        indices); resolve takes a comment id; edit takes ``{id, text}``
+        and rewrites the note in place (an addressed comment reopens).
+        The base token gates all three -- a stale page reconciles
+        before it comments."""
         async with route_lock:
             current = await _fetch_checked(node_id, base, "retry")
             resolve = payload.get("resolve")
+            edit = payload.get("edit")
             if resolve is not None:
                 await historian.set_comment_state(
                     node_id, comment_id=str(resolve),
                     value=revisions.COMMENT_RESOLVED, by=MARK_AUTHOR,
+                )
+                logger.info(
+                    "prose page: resolved comment %s on %r (%s)",
+                    resolve, _name_of(node_id), node_id,
+                )
+            elif edit is not None:
+                await historian.edit_comment(
+                    node_id, comment_id=str(edit["id"]),
+                    text=str(edit["text"]), by=MARK_AUTHOR,
+                )
+                logger.info(
+                    "prose page: edited comment %s on %r (%s)",
+                    edit["id"], _name_of(node_id), node_id,
                 )
             else:
                 comment = payload["comment"]
@@ -525,7 +561,11 @@ def register_space(
                     text=str(comment["text"]), by=MARK_AUTHOR,
                     start=start, end=end,
                 )
-        return await _doc_payload(node_id)
+                logger.info(
+                    "prose page: new comment on %r (%s), section %s",
+                    _name_of(node_id), node_id, block_hash,
+                )
+        return await _doc_payload(node_id, body=current)
 
     # WP48: every historian write (turn boundary, change tick, page
     # save, marks) bumps the live-update ledger the SSE route polls.

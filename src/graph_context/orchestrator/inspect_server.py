@@ -28,8 +28,9 @@ live turn diary. Routes:
   POST /api/prose/save         -> whole-document save (WP48; base-token
                                   concurrency, 409 on mismatch)
   POST /api/prose/marks        -> batch status/intent marks (WP48)
-  POST /api/prose/comments     -> comment create/resolve (WP50; same
-                                  base-token concurrency as save/marks)
+  POST /api/prose/comments     -> comment create/resolve/edit (WP50;
+                                  same base-token concurrency as
+                                  save/marks)
 
 The prose routes speak to live space runtimes through a ``ProseBridge``
 (``prose_bridge.py``): the bridge is handed over EMPTY before the bots
@@ -41,9 +42,10 @@ The save/marks/comments POSTs are this server's only non-GET routes.
 Read-only-by-construction was a load-bearing safety property, so writes
 are doubly gated: same-origin enforcement (``Sec-Fetch-Site`` when the
 browser sends it, ``Origin``-vs-``Host`` otherwise) refuses drive-by
-requests from other pages, and a shared bearer token (``GC_PROSE_TOKEN``;
-unset = writes disabled, the page is read-only) authenticates the
-human. GETs stay tokenless.
+requests from other pages, and a shared bearer token (``GC_PROSE_TOKEN``,
+or a mounted secret file via ``GC_PROSE_TOKEN_FILE``; neither set =
+writes disabled, the page is read-only) authenticates the human. GETs
+stay tokenless.
 
 The viewer HTML reaches its stream via a RELATIVE ``events`` URL, which
 is what lets the same file serve both the live log (``/logs`` ->
@@ -146,15 +148,30 @@ def viewer_settings() -> tuple[str, int] | None:
 
 
 def prose_token_setting() -> str:
-    """GC_PROSE_TOKEN resolution -> the shared write token, or ``""``.
+    """GC_PROSE_TOKEN / GC_PROSE_TOKEN_FILE resolution -> the shared
+    write token, or ``""``.
 
     Empty/off means the prose page is read-only (marks return 403) --
     the operator consciously enables the server's only write surface.
-    Follows the off-value convention of every other knob."""
+    Follows the off-value convention of every other knob. The file
+    path is the container-friendly source (the compose stack mounts a
+    read-only secret; env vars leak via ``docker inspect`` / ``/proc``);
+    the inline env var is the host-local override and wins when both
+    are set. A configured-but-unreadable file fails loudly -- silently
+    degrading to read-only would mask a misconfiguration."""
     raw = os.environ.get("GC_PROSE_TOKEN", "").strip()
-    if raw.lower() in OFF_VALUES:
+    if raw:
+        return "" if raw.lower() in OFF_VALUES else raw
+    path = os.environ.get("GC_PROSE_TOKEN_FILE", "").strip()
+    if not path:
         return ""
-    return raw
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError as err:
+        raise RuntimeError(
+            f"could not read GC_PROSE_TOKEN_FILE at {path}: {err}"
+        ) from None
 
 
 def eval_root_setting() -> Path | None:
@@ -508,21 +525,29 @@ class Handler(BaseHTTPRequestHandler):
         ))
 
     def _call_comments(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Comment create/resolve (WP50): exactly one of ``comment``
-        (an object: hash, text, optional start_char/end_char pair) or
-        ``resolve`` (a comment id)."""
+        """Comment create/resolve/edit (WP50; edit per the ADR 056
+        amendment): exactly one of ``comment`` (an object: hash, text,
+        optional start_char/end_char pair), ``resolve`` (a comment id),
+        or ``edit`` (an object: id, text)."""
         _require_strings(payload, ("space", "node", "base"))
         comment = payload.get("comment")
         resolve = payload.get("resolve")
-        if (comment is None) == (resolve is None):
+        edit = payload.get("edit")
+        if sum(x is not None for x in (comment, resolve, edit)) != 1:
             raise _BadRequest(
-                "pass exactly one of comment (create) or resolve (an id)"
+                "pass exactly one of comment (create), resolve (an id), "
+                "or edit ({id, text})"
             )
         op: dict[str, Any]
         if resolve is not None:
             if not isinstance(resolve, str) or not resolve:
                 raise _BadRequest("resolve must be a comment id")
             op = {"resolve": resolve}
+        elif edit is not None:
+            if not isinstance(edit, dict):
+                raise _BadRequest("edit must be an object")
+            _require_strings(edit, ("id", "text"))
+            op = {"edit": edit}
         else:
             if not isinstance(comment, dict):
                 raise _BadRequest("comment must be an object")

@@ -1,7 +1,8 @@
-"""Comment domain rules (WP50, ADR 056): the two comment line kinds,
-the comment fold (anchors riding edits, whole-block fallback, detach and
-verbatim re-attach, the addressed/resolved lifecycle), rewrite-on-
-compaction hoisting, and the roll-up interaction. Pure and fast."""
+"""Comment domain rules (WP50, ADR 056): the comment line kinds, the
+comment fold (anchors riding edits, whole-block fallback, detach and
+verbatim re-attach, the addressed/resolved lifecycle, text edits),
+rewrite-on-compaction hoisting, and the roll-up interaction. Pure and
+fast."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import pytest
 
 from graph_context.domain import revisions
 from graph_context.domain.revisions import (
+    CommentEditEntry,
     CommentEntry,
     CommentStateEntry,
     LogEntry,
@@ -201,6 +203,102 @@ class TestCommentFold:
         assert [s.id for s in comment_states(entries)] == [first, second]
 
 
+class TestCommentEdit:
+    def test_an_edit_line_round_trips(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        cid = _comment(entries, PARA_A, "tighten this")
+        entries.append(CommentEditEntry(
+            id=cid, text="tighten the second clause", at="T2", by="u",
+        ))
+        parsed = parse_log(render_log(entries))
+        assert parsed.skipped == 0
+        assert parsed.entries == tuple(entries)
+
+    def test_a_garbled_edit_line_is_skipped_not_fatal(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        rendered = render_log(entries)
+        missing_text = '{"kind":"comment_edit","id":"c1","at":"T","by":"u"}'
+        mangled = rendered.removesuffix("```") + f"{missing_text}\n```"
+        parsed = parse_log(mangled)
+        assert parsed.skipped == 1
+
+    def test_edits_fold_last_wins_keeping_id_anchor_and_stamps(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A, PARA_B])
+        cid = _comment(entries, PARA_B, "count them again", start=0, end=3)
+        entries.append(CommentEditEntry(
+            id=cid, text="first rewording", at="T2", by="u",
+        ))
+        entries.append(CommentEditEntry(
+            id=cid, text="final wording", at="T3", by="u",
+        ))
+        (state,) = comment_states(entries)
+        assert state.id == cid
+        assert state.text == "final wording"
+        assert state.hash == _h(PARA_B)
+        assert (state.start, state.end) == (0, 3)
+        assert state.at == "TC"  # creation stamp survives the edits
+
+    def test_editing_an_addressed_comment_reopens_it(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        cid = _comment(entries, PARA_A, "tighten this")
+        entries.append(CommentStateEntry(
+            id=cid, value="addressed", at="T2", by="model",
+        ))
+        entries.append(CommentEditEntry(
+            id=cid, text="no -- tighten the OPENING", at="T3",
+            by="human:prose-page",
+        ))
+        (state,) = comment_states(entries)
+        assert state.state == "open"
+        assert state.state_by == "human:prose-page"
+        assert state.state_at == "T3"
+
+    def test_editing_an_open_comment_keeps_it_open(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        cid = _comment(entries, PARA_A, "tighten this")
+        entries.append(CommentEditEntry(
+            id=cid, text="tighten the ending", at="T2", by="u",
+        ))
+        (state,) = comment_states(entries)
+        assert state.state == "open"
+
+    def test_an_edit_after_resolved_folds_to_nothing(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        cid = _comment(entries, PARA_A, "tighten this")
+        entries.append(CommentStateEntry(
+            id=cid, value="resolved", at="T2", by="u",
+        ))
+        entries.append(CommentEditEntry(
+            id=cid, text="necromancy", at="T3", by="u",
+        ))
+        assert comment_states(entries) == ()
+
+    def test_an_edit_on_an_unknown_id_folds_to_nothing(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        entries.append(CommentEditEntry(
+            id="cnosuch01", text="ghost", at="T2", by="u",
+        ))
+        assert comment_states(entries) == ()
+
+    def test_an_edit_line_solidifies_the_pending_human_revision(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        cid = _comment(entries, PARA_A, "tighten this")
+        _grow(entries, [PARA_A_EDIT], author=revisions.AUTHOR_HUMAN)
+        assert rollup_base(entries) is not None
+        entries.append(CommentEditEntry(
+            id=cid, text="tighten the ending", at="T2", by="u",
+        ))
+        assert rollup_base(entries) is None
+
+
 class TestCommentCompaction:
     def _grow_until_compactable(
         self, entries: list[LogEntry], cap: int
@@ -250,6 +348,27 @@ class TestCommentCompaction:
         (state,) = comment_states(compacted)
         assert state.state == "addressed"
         assert state.state_by == "model"
+
+    def test_a_dropped_era_edit_bakes_into_the_hoisted_line(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A, PARA_B])
+        cid = _comment(entries, PARA_B, "count them again")
+        entries.append(CommentEditEntry(
+            id=cid, text="count the towers too", at="T2", by="u",
+        ))
+        cap = 4000
+        self._grow_until_compactable(entries, cap)
+        compacted = compact(entries, cap)
+        assert not any(
+            isinstance(e, CommentEditEntry) for e in compacted
+        )
+        (hoisted,) = [
+            e for e in compacted
+            if isinstance(e, CommentEntry) and e.id == cid
+        ]
+        assert hoisted.text == "count the towers too"
+        (state,) = comment_states(compacted)
+        assert state.text == "count the towers too"
 
     def test_a_resolved_comment_drops_with_its_era(self) -> None:
         entries: list[LogEntry] = []

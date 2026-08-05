@@ -71,6 +71,19 @@ class TestMarkSerialization:
 
 
 class TestSectionStatesFold:
+    def test_badges_of_matches_section_states(self) -> None:
+        # badges_of is the extracted badge rule (fold-free); over a
+        # mixed log the two derivations must agree exactly.
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A, PARA_B])
+        _mark(entries, revisions.MARK_STATUS, PARA_A, "approved")
+        _mark(entries, revisions.MARK_INTENT, PARA_B, "locked")
+        _grow(entries, [PARA_A_EDIT, PARA_B, PARA_C],
+              author=revisions.AUTHOR_HUMAN, detail="human")
+        assert revisions.badges_of(
+            revisions.token_states(entries)
+        ) == section_states(entries)
+
     def test_model_blocks_default_to_raw_ai_flexible(self) -> None:
         entries: list[LogEntry] = []
         _grow(entries, [PARA_A, PARA_B])

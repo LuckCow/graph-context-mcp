@@ -87,6 +87,85 @@ _COMMENT_WORDING = _SurfaceWording(
 )
 
 
+class _DerivedViews:
+    """Lazy compute-once folds over one baseline's immutable log.
+
+    The folds (``token_states``/``blame``/``word_token_authors``/
+    ``comment_states``) walk every revision with difflib lineage
+    matching -- ~1s near the log cap -- and the prose page's doc wire
+    reads five of them per payload. Memoizing here makes each fold run
+    ONCE per log state: every write path replaces the whole
+    :class:`_Baseline` via :func:`_state`, so a fresh baseline is a
+    fresh empty memo and invalidation is correct by construction.
+    Cached results are shared between callers -- treat them as frozen.
+    """
+
+    __slots__ = (
+        "_entries", "_records", "_known_texts",
+        "_token", "_badges", "_blame", "_word_authors", "_comments",
+    )
+
+    def __init__(
+        self,
+        entries: tuple[revisions.LogEntry, ...],
+        records: tuple[revisions.RevisionRecord, ...],
+        known_texts: dict[str, str],
+    ) -> None:
+        self._entries = entries
+        self._records = records
+        self._known_texts = known_texts
+        self._token: dict[str, revisions.TokenState] | None = None
+        self._badges: dict[str, revisions.SectionState] | None = None
+        self._blame: dict[str, revisions.BlameEntry] | None = None
+        self._word_authors: dict[str, tuple[str, ...]] | None = None
+        self._comments: tuple[revisions.CommentState, ...] | None = None
+
+    def seed_records_views(self, other: _DerivedViews) -> None:
+        """Carry the records-only folds from a predecessor baseline
+        whose ``records`` compare equal (marks/comments-only writes):
+        ``blame`` and ``word_token_authors`` fold records alone, so
+        their results are unchanged by construction."""
+        self._blame = other._blame
+        self._word_authors = other._word_authors
+
+    def token_states(self) -> dict[str, revisions.TokenState]:
+        if self._token is None:
+            self._token = revisions.token_states(self._entries)
+        return self._token
+
+    def section_states(self) -> dict[str, revisions.SectionState]:
+        if self._badges is None:
+            self._badges = revisions.badges_of(self.token_states())
+        return self._badges
+
+    def blame(self) -> dict[str, revisions.BlameEntry]:
+        if self._blame is None:
+            self._blame = revisions.blame(self._records)
+        return self._blame
+
+    def word_token_authors(self) -> dict[str, tuple[str, ...]]:
+        # Folding all records equals folding the usable view: the log
+        # walk yields no step for the compaction marker.
+        if self._word_authors is None:
+            self._word_authors = revisions.word_token_authors(self._records)
+        return self._word_authors
+
+    def comment_states(self) -> tuple[revisions.CommentState, ...]:
+        if self._comments is None:
+            self._comments = revisions.comment_states(self._entries)
+        return self._comments
+
+    def locked_runs(self) -> dict[str, tuple[str, ...]]:
+        return revisions.locked_runs(self.token_states(), self._known_texts)
+
+    def missing_locked(
+        self, new_body: str
+    ) -> tuple[tuple[str, str], ...]:
+        return revisions.missing_locked(
+            self.token_states(), self._known_texts, new_body
+        )
+
+
 @dataclass(slots=True)
 class _Baseline:
     """One tracked node's in-memory history state."""
@@ -97,22 +176,30 @@ class _Baseline:
     hashes: tuple[str, ...]
     seq: int
     known_texts: dict[str, str]  # texts_of(records): hash -> raw text
+    views: _DerivedViews  # lazy fold memo, dies with the baseline
 
 
 def _state(
-    sidecar_id: NodeId, entries: tuple[revisions.LogEntry, ...]
+    sidecar_id: NodeId,
+    entries: tuple[revisions.LogEntry, ...],
+    previous: _Baseline | None = None,
 ) -> _Baseline:
     records = tuple(
         e for e in entries if isinstance(e, revisions.RevisionRecord)
     )
     usable = revisions.usable_records(records)
+    known_texts = revisions.texts_of(records)
+    views = _DerivedViews(entries, records, known_texts)
+    if previous is not None and previous.records == records:
+        views.seed_records_views(previous.views)
     return _Baseline(
         sidecar_id=sidecar_id,
         entries=entries,
         records=records,
         hashes=revisions.current_hashes(records),
         seq=max((r.seq for r in usable), default=0),
-        known_texts=revisions.texts_of(records),
+        known_texts=known_texts,
+        views=views,
     )
 
 
@@ -368,7 +455,9 @@ class NodeHistorian:
         await self._repository.update_node(
             sidecar_id, body=revisions.render_log(entries)
         )
-        self._baselines[node_id] = _state(sidecar_id, entries)
+        self._baselines[node_id] = _state(
+            sidecar_id, entries, previous=self._baselines.get(node_id)
+        )
         logger.info(log_msg, *log_args)
         self._notify(node_id)
 
@@ -409,7 +498,7 @@ class NodeHistorian:
                 f"no revision history for {node_id!r} yet; marks attach "
                 "to recorded sections only."
             )
-        folded = revisions.token_states(baseline.entries)
+        folded = baseline.views.token_states()
         simulated: dict[tuple[str, str], list[str]] = {}
         for block, state in folded.items():
             simulated[(revisions.MARK_STATUS, block)] = list(state.status)
@@ -460,9 +549,7 @@ class NodeHistorian:
                 "historian: marked %d section(s) on %s",
                 len(marks), node_id,
             )
-        states = revisions.section_states(
-            self._baselines[node_id].entries
-        )
+        states = self._baselines[node_id].views.section_states()
         return {
             request.block_hash: states.get(
                 request.block_hash, revisions.SectionState()
@@ -503,7 +590,7 @@ class NodeHistorian:
         at = self._now()
         cid = revisions.comment_id(at, by, block_hash, cleaned)
         live = {
-            c.id: c for c in revisions.comment_states(baseline.entries)
+            c.id: c for c in baseline.views.comment_states()
         }
         if cid in live:
             return live[cid]  # change-only: no log line, no PATCH
@@ -518,7 +605,8 @@ class NodeHistorian:
             "historian: comment %s on %s", cid, node_id,
         )
         return next(
-            c for c in revisions.comment_states(entries) if c.id == cid
+            c for c in self._baselines[node_id].views.comment_states()
+            if c.id == cid
         )
 
     async def set_comment_state(
@@ -539,7 +627,7 @@ class NodeHistorian:
                 f"{', '.join(sorted(revisions.COMMENT_STATE_VALUES))}."
             )
         live = {
-            c.id: c for c in revisions.comment_states(baseline.entries)
+            c.id: c for c in baseline.views.comment_states()
         }
         target = live.get(comment_id)
         if target is None:
@@ -560,15 +648,61 @@ class NodeHistorian:
             node_id, baseline.sidecar_id, entries,
             "historian: comment %s %s on %s", comment_id, value, node_id,
         )
-        for state in revisions.comment_states(entries):
+        for state in self._baselines[node_id].views.comment_states():
             if state.id == comment_id:
                 return state
         return None  # resolved
 
+    async def edit_comment(
+        self, node_id: NodeId, *, comment_id: str, text: str, by: str,
+    ) -> revisions.CommentState:
+        """Rewrite a live comment's text (ADR 056 amendment): one
+        ``comment_edit`` line, folded last-wins -- id, anchor, and
+        creation stamps stay; an ``addressed`` comment reopens (the
+        model acted on the old wording). Unchanged text is a change-only
+        no-op; the unknown-id error lists the live ids."""
+        baseline = self._baselines.get(node_id)
+        if baseline is None:
+            raise GraphContextError(
+                f"no revision history for {node_id!r} yet."
+            )
+        cleaned = text.strip()
+        if not cleaned:
+            raise GraphContextError("a comment needs text.")
+        if len(cleaned) > revisions.COMMENT_TEXT_CAP:
+            raise GraphContextError(
+                f"comment text is {len(cleaned)} chars; the cap is "
+                f"{revisions.COMMENT_TEXT_CAP}."
+            )
+        live = {
+            c.id: c for c in baseline.views.comment_states()
+        }
+        target = live.get(comment_id)
+        if target is None:
+            listed = ", ".join(f"#{cid}" for cid in live) or "none"
+            raise GraphContextError(
+                f"no live comment {comment_id!r} on "
+                f"{self._name_of(node_id)!r}; live comments: {listed}."
+            )
+        if target.text == cleaned:
+            return target  # change-only: no log line, no PATCH
+        entry = revisions.CommentEditEntry(
+            id=comment_id, text=cleaned, at=self._now(), by=by,
+        )
+        entries = revisions.compact((*baseline.entries, entry))
+        await self._write_log(
+            node_id, baseline.sidecar_id, entries,
+            "historian: comment %s edited on %s", comment_id, node_id,
+        )
+        return next(
+            c for c in self._baselines[node_id].views.comment_states()
+            if c.id == comment_id
+        )
+
     def comments(self, node_id: NodeId) -> tuple[revisions.CommentState, ...]:
         """The node's live comments (open + addressed), current anchors."""
         baseline = self._baselines.get(node_id)
-        return revisions.comment_states(baseline.entries) if baseline else ()
+        return baseline.views.comment_states() if baseline else ()
 
     def _name_of(self, node_id: NodeId) -> str:
         graph = self._repository.graph
@@ -586,7 +720,8 @@ class NodeHistorian:
         return baseline.records if baseline else ()
 
     def blame(self, node_id: NodeId) -> dict[str, revisions.BlameEntry]:
-        return revisions.blame(self.history(node_id))
+        baseline = self._baselines.get(node_id)
+        return baseline.views.blame() if baseline else {}
 
     def entries(self, node_id: NodeId) -> tuple[revisions.LogEntry, ...]:
         baseline = self._baselines.get(node_id)
@@ -596,23 +731,22 @@ class NodeHistorian:
         self, node_id: NodeId
     ) -> dict[str, revisions.SectionState]:
         baseline = self._baselines.get(node_id)
-        return revisions.section_states(baseline.entries) if baseline else {}
+        return baseline.views.section_states() if baseline else {}
 
     def token_states(
         self, node_id: NodeId
     ) -> dict[str, revisions.TokenState]:
         baseline = self._baselines.get(node_id)
-        return revisions.token_states(baseline.entries) if baseline else {}
+        return baseline.views.token_states() if baseline else {}
 
-    @staticmethod
-    def _folded(
-        baseline: _Baseline,
-    ) -> tuple[dict[str, revisions.TokenState], dict[str, str]]:
-        """The ``(token fold, texts)`` pair the locked-run views take."""
-        return (
-            revisions.token_states(baseline.entries),
-            revisions.texts_of(baseline.records),
-        )
+    def word_token_authors(
+        self, node_id: NodeId
+    ) -> dict[str, tuple[str, ...]]:
+        """Final-state hash -> one author per token (WP45/46), memoized
+        on the baseline -- the prose wire's fifth fold, carried across
+        marks/comments-only writes since records don't change."""
+        baseline = self._baselines.get(node_id)
+        return baseline.views.word_token_authors() if baseline else {}
 
     def locked_runs(self, node_id: NodeId) -> dict[str, tuple[str, ...]]:
         """Per block: the locked runs' verbatim text (WP46) -- what the
@@ -620,7 +754,7 @@ class NodeHistorian:
         baseline = self._baselines.get(node_id)
         if baseline is None:
             return {}
-        return revisions.locked_runs(*self._folded(baseline))
+        return baseline.views.locked_runs()
 
     # -- the section guard (WP42) ------------------------------------------
 
@@ -633,7 +767,7 @@ class NodeHistorian:
         baseline = self._baselines.get(node_id)
         if baseline is None:
             return
-        missing = revisions.missing_locked(*self._folded(baseline), new_body)
+        missing = baseline.views.missing_locked(new_body)
         if not missing:
             return
         raise LockedSectionsChanged(

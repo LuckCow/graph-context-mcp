@@ -116,3 +116,33 @@ revision sidecar log (ADR 049's fence):
   boolean flag vectors; the review folds now guard on
   `isinstance(entry, RevisionRecord)` so any future line kind is
   inert by construction.
+
+## Amendment (2026-08-03): comment editing + the desktop layout pass
+
+The page grew a desktop layout, and comments became editable:
+
+- **A third line kind, `comment_edit`** (`{id, text, at, by}`), folds
+  last-wins onto the live comment's TEXT — id, anchor, and creation
+  stamps stay, so the thread keeps its identity (the content-hashed
+  `comment_id` seals the ORIGINAL text; edits never re-key it).
+  Editing an `addressed` comment REOPENS it, stamped with the edit —
+  the model's action answered the old wording, not this one. Unknown
+  ids and resolved comments fold to nothing; an edit line solidifies
+  the WP44 roll-up like every non-record line. Compaction bakes
+  dropped-era edits into the hoisted comment line's rewritten text.
+  `NodeHistorian.edit_comment` follows the mark discipline (validate
+  against the current baseline, change-only no-op on unchanged text,
+  unknown-id error lists the live ids); the wire is a third mutually
+  exclusive `POST /api/prose/comments` operation, `edit: {id, text}`,
+  human-authority like resolve — the model still only addresses.
+- **Desktop layouts** (the mobile page is unchanged below 900px): at
+  ≥900px the action bar docks under the header as a PERSISTENT
+  toolbar — disabled controls when nothing is selected, a fixed-width
+  ellipsized selection readout, and color-only `.current` styling, so
+  the bar never changes shape as the selection does. At ≥1140px the
+  comments panel rides a sticky sidebar beside the editor column;
+  below that it opens as a modal overlay (one panel node reparents
+  between sidebar and modal — listeners survive, nothing renders
+  twice). Inline comment edits keep their draft in JS state keyed by
+  comment id, so SSE refetch re-renders re-seed the textarea — the
+  composer guard's discipline, extended to the panel.

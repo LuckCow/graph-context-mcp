@@ -11,9 +11,9 @@ Run:  GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from graph_context import composition
+from graph_context.logging_setup import configure_logging
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.pipeline import ReplyEvent
 
@@ -24,7 +24,7 @@ def _print_event(event: ReplyEvent) -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     runtime = await bootstrap.build_orchestrator()
     print(
         f"graph-context orchestrator (profile={runtime.profile.name}). "

@@ -28,8 +28,10 @@
     /* room for the fixed action bar on phones */
     padding-bottom: calc(150px + env(safe-area-inset-bottom));
   }
+  /* Header and (on desktop) the action bar share one sticky wrapper. */
+  #chrome { position: sticky; top: 0; z-index: 5; }
   header {
-    position: sticky; top: 0; z-index: 5; background: var(--panel);
+    background: var(--panel);
     border-bottom: 1px solid var(--line); padding: 8px 14px;
     display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
   }
@@ -64,6 +66,11 @@
   .row:hover { text-decoration: none; border-color: var(--accent); }
   .row b { font-weight: 600; }
   .row .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  /* Comments live in a sidebar when there's room (wide media query
+     below); until then the panel stays parked here invisibly and shows
+     through the modal. */
+  .doc-side { display: none; }
 
   .badge {
     font-size: 11px; padding: 1px 8px; border-radius: 20px; font-weight: 600;
@@ -181,8 +188,10 @@
     background: var(--chip); color: var(--ink); cursor: pointer;
     touch-action: manipulation;
   }
-  button.current { border-color: var(--accent); color: var(--accent);
-    font-weight: 600; }
+  /* .current signals with color/border only: a weight change would
+     resize the button and shift the whole row on every selection. */
+  button.current { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
   button.close { background: none; border: none; color: var(--muted);
     min-height: 28px; padding: 2px 8px; }
   button.mini { min-height: 28px; padding: 2px 10px; font-size: 12px; }
@@ -202,17 +211,86 @@
   .comment-row .sub { display: flex; flex-wrap: wrap; gap: 4px 10px;
     align-items: center; }
   .comment-row .sub .spacer { flex: 1 1 auto; }
+  .comment-row textarea { width: 100%; min-height: 56px; margin: 4px 0 0;
+    font: inherit; font-size: 13.5px; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; background: var(--bg);
+    color: var(--ink); resize: vertical; }
 
   #toast {
     position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(160px + env(safe-area-inset-bottom)); z-index: 20;
+    bottom: calc(160px + env(safe-area-inset-bottom)); z-index: 40;
     background: var(--ink); color: var(--bg); font-size: 13px;
     padding: 8px 14px; border-radius: 20px; opacity: 0;
     transition: opacity .25s; pointer-events: none; max-width: 90vw;
   }
   #toast.show { opacity: .95; }
+
+  /* The comments modal: how the panel shows when the sidebar has no
+     room (phones AND mid-width desktop windows). */
+  #comments-modal {
+    position: fixed; inset: 0; z-index: 30; display: none;
+    background: rgba(0, 0, 0, .45);
+    align-items: flex-end; justify-content: center;
+  }
+  #comments-modal.open { display: flex; }
+  #comments-modal .sheet {
+    background: var(--bg); width: 100%; max-width: 640px;
+    max-height: 80vh; overflow-y: auto;
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+    border: 1px solid var(--line); border-radius: 12px 12px 0 0;
+  }
+  #comments-modal .sheet-head { display: flex; align-items: center; }
+  #comments-modal .sheet-head .spacer { flex: 1 1 auto; }
+  #comments-modal h2 { margin-top: 4px; }
+
+  /* Desktop (pointer + keyboard): the action bar docks under the
+     header as a persistent toolbar -- controls stay discoverable,
+     disabled until a selection exists, and the editor never jumps. */
+  @media (min-width: 900px) {
+    body { padding-bottom: 48px; }
+    #bar { position: static; border-top: 0;
+      border-bottom: 1px solid var(--line); padding: 6px 14px; }
+    #bar, #bar.open { display: none; }
+    body.doc-view #bar { display: block; }
+    #bar .inner { display: flex; flex-wrap: wrap; align-items: center;
+      gap: 2px 16px; max-width: 1120px; }
+    /* Fixed-width slot for the selection readout: the text changes as
+       the selection does, and the rest of the toolbar must not shift. */
+    #bar .which { margin: 0; flex: 0 0 250px; }
+    #bar .which #bar-which { flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #bar .which .spacer { display: none; }
+    #bar button.close { display: none; }
+    #bar .btn-row { margin: 0; }
+    /* small basis so the whole toolbar fits one row at ~1200px+; the
+       composer textarea still grows into the available space */
+    #bar #bar-comment { flex: 1 1 120px; }
+    #bar button { min-height: 32px; }
+    #bar textarea { min-height: 32px; flex: 1 1 200px; }
+    #comments-modal { align-items: center; padding: 24px; }
+    #comments-modal .sheet { border-radius: 12px; }
+    #toast { bottom: 30px; }
+  }
+
+  /* Wide desktop: comments ride a sticky sidebar beside the editor
+     (--chrome-h is measured off the sticky header+bar by script). */
+  @media (min-width: 1140px) {
+    main.doc { max-width: 1120px; }
+    .doc-layout { display: grid;
+      grid-template-columns: minmax(0, 760px) 300px;
+      gap: 0 20px; justify-content: center; align-items: start; }
+    .doc-side { display: block; position: sticky;
+      top: calc(var(--chrome-h, 60px) + 14px);
+      max-height: calc(100vh - var(--chrome-h, 60px) - 28px);
+      overflow-y: auto; }
+    .doc-side h2 { margin-top: 0; }
+    /* matches .legend button.mini's specificity, which would otherwise
+       keep the modal opener visible beside the sidebar */
+    .legend button.mini.open-comments { display: none; }
+  }
 </style>
 
+<div id="chrome">
 <header>
   <h1><a href="#/">Prose editor</a></h1>
   <a href="./">inspection</a>
@@ -221,8 +299,6 @@
   <span id="save-state"></span>
   <span class="note" id="head-note"></span>
 </header>
-
-<main id="main"></main>
 
 <div id="bar"><div class="inner">
   <div class="which">
@@ -235,6 +311,17 @@
   <div class="btn-row" id="bar-intent"><span class="label">intent</span></div>
   <div class="btn-row" id="bar-comment"><span class="label">note</span></div>
 </div></div>
+</div>
+
+<main id="main"></main>
+
+<div id="comments-modal"><div class="sheet">
+  <div class="sheet-head">
+    <span class="spacer"></span>
+    <button class="close" id="modal-close">close</button>
+  </div>
+  <div id="modal-body"></div>
+</div></div>
 <div id="toast"></div>
 
 <script type="module">
@@ -243,6 +330,13 @@ import * as CM from "./static/codemirror.bundle.js";
 
 const main = document.getElementById("main");
 const bar = document.getElementById("bar");
+const commentsModal = document.getElementById("comments-modal");
+
+// Desktop breakpoints (mirror the CSS): at mqBar the action bar docks
+// under the header as a persistent toolbar; at mqSide the comments
+// panel rides a sidebar instead of the modal.
+const mqBar = window.matchMedia("(min-width: 900px)");
+const mqSide = window.matchMedia("(min-width: 1140px)");
 const STATUS_VALUES = ["raw_ai", "approved", "human"];
 const INTENT_VALUES = ["flexible", "locked", "needs_change"];
 const TOKEN_KEY = "gc_prose_token";
@@ -266,6 +360,17 @@ let knowWrites = false;   // spaces fetched at least once this page-load
 // the latest server payload (with code-point offsets pre-converted to
 // UTF-16 -- the wire speaks Python code points, CM speaks JS units).
 let doc = null;
+
+// Writes in flight (save/marks/comments all flow through postWrite).
+// While one is pending, SSE version bumps DEFER instead of refetching:
+// the historian bumps the ledger before the POST's payload is built, so
+// the stream announces our own write seconds before the response lands
+// -- refetching then doubles every gesture into POST + full doc GET.
+let writesInFlight = 0;
+let deferredSseVersion = 0;
+// A marks POST in flight disables the action-bar buttons (no stacked
+// conflicting optimistic patches).
+let marksInFlight = false;
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -328,14 +433,20 @@ class StaleWrite extends Error {}
 
 async function postWrite(path, body, retried) {
   const token = localStorage.getItem(TOKEN_KEY) || "";
-  const res = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + token,
-    },
-    body: JSON.stringify(body),
-  });
+  writesInFlight++;
+  let res;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token,
+      },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    writesInFlight--;
+  }
   if (res.status === 401 && !retried) {
     const entered = prompt("Write token (GC_PROSE_TOKEN):");
     if (entered == null) return null;
@@ -464,6 +575,67 @@ function buildDecorations(data, state) {
   return CM.Decoration.set(ranges, true);
 }
 
+// ---- optimistic marks -----------------------------------------------------
+// Patch the retained payload in place and re-dispatch decorations the
+// moment a mark button is clicked -- the highlight must not wait on the
+// POST (route lock + sidecar rewrite + payload folds). The POST's
+// response replaces doc.data wholesale, so any edge rounding here
+// (chars vs the server's token boundaries) self-corrects on reconcile.
+
+function applyMarksLocally(targets, kind, value) {
+  const idx = kind === "status" ? 3 : 4;
+  for (const t of targets) {
+    const whole = wholeMode || t.whole;
+    const lo = whole ? t.seg.start : t.seg.start + t.startCp;
+    const hi = whole ? t.seg.end : t.seg.start + t.endCp;
+    if (hi <= lo) continue;
+    // Split overlapping spans at the boundaries; only the covered
+    // middle takes the new value. Author (index 2) never changes --
+    // marks are review state, not provenance.
+    const patched = [];
+    for (const span of doc.data.spans) {
+      if (span[1] <= lo || span[0] >= hi) { patched.push(span); continue; }
+      if (span[0] < lo) {
+        patched.push([span[0], lo, span[2], span[3], span[4]]);
+      }
+      const mid = [Math.max(span[0], lo), Math.min(span[1], hi),
+        span[2], span[3], span[4]];
+      mid[idx] = value;
+      patched.push(mid);
+      if (span[1] > hi) {
+        patched.push([hi, span[1], span[2], span[3], span[4]]);
+      }
+    }
+    doc.data.spans = patched;
+    // Transient client-side copy of the section_states badge rule
+    // (all-agree status else raw_ai; strictest intent) -- display
+    // only, replaced by the authoritative payload seconds later.
+    const statuses = new Set();
+    const intents = new Set();
+    for (const span of doc.data.spans) {
+      if (span[0] < t.seg.end && span[1] > t.seg.start) {
+        statuses.add(span[3]);
+        intents.add(span[4]);
+      }
+    }
+    if (statuses.size) {
+      t.seg.status = statuses.size === 1
+        ? statuses.values().next().value : "raw_ai";
+      t.seg.intent = intents.has("locked") ? "locked"
+        : intents.has("needs_change") ? "needs_change" : "flexible";
+    } else if (whole) {
+      // Unrecorded block (no spans yet): badge feedback only.
+      if (kind === "status") t.seg.status = value;
+      else t.seg.intent = value;
+    }
+  }
+  doc.view.dispatch({
+    effects: setAnnotations.of(buildDecorations(doc.data, doc.view.state)),
+  });
+  updateBar();
+  renderSegInfo(doc.segInfo);
+}
+
 // ---- the view-mode legend (WP50) ------------------------------------------
 // The legend is the control: one chip per highlight concern; the active
 // chip is lit; switching re-dispatches decorations from the retained
@@ -497,12 +669,20 @@ function renderLegend(legend) {
     b.appendChild(el("mark", "st-locked", "locked"));
     b.appendChild(el("mark", "st-needs", "needs change"));
   });
+  const count = doc && doc.data.comments ? doc.data.comments.length : 0;
   chip("comments", (b) => {
     b.appendChild(el("mark", "cmt", "comments"));
-    const count = doc && doc.data.comments ? doc.data.comments.length : 0;
     if (count) b.appendChild(document.createTextNode(String(count)));
   });
   chip("none", (b) => { b.textContent = "none"; });
+  if (count) {
+    // No sidebar at this width: the modal is the only way to READ the
+    // panel (resolve buttons included), so the opener rides the legend.
+    const opener = el("button", "mini open-comments",
+      "view comments (" + count + ")");
+    opener.addEventListener("click", openCommentsModal);
+    legend.appendChild(opener);
+  }
   legend.appendChild(el("span", null, writesEnabled
     ? "type anywhere · select text to mark or comment"
     : "read-only: set GC_PROSE_TOKEN to enable editing"));
@@ -514,12 +694,50 @@ let wholeMode = false;
 let composerOpen = false;
 let composerTarget = null;
 
+// On desktop the bar is a PERSISTENT toolbar: with no selection it
+// renders disabled instead of hiding, so the controls stay put and the
+// editor never shifts when a selection appears.
+function persistentBar() {
+  return mqBar.matches && !!doc && writesEnabled;
+}
+
 function closeBar() {
-  bar.classList.remove("open");
-  document.getElementById("bar-which").textContent = "";
   composerOpen = false;
   composerTarget = null;
+  if (persistentBar()) { renderIdleBar(); return; }
+  bar.classList.remove("open");
+  document.getElementById("bar-which").textContent = "";
   renderCommentRow();
+}
+
+function renderIdleBar() {
+  document.getElementById("bar-which").textContent = "no selection";
+  const whole = document.getElementById("bar-whole");
+  whole.classList.remove("on");
+  whole.disabled = true;
+  renderBarButtons(
+    document.getElementById("bar-status"), STATUS_VALUES, "status", true);
+  renderBarButtons(
+    document.getElementById("bar-intent"), INTENT_VALUES, "intent", true);
+  renderCommentRow(true);
+  bar.classList.add("open");
+}
+
+// ---- the comments modal (narrow screens, WP50 desktop pass) ---------------
+// One panel node renders the comments; it PARKS in the (hidden) .doc-side
+// aside and reparents into the modal sheet while open -- listeners and
+// scroll targets survive, nothing renders twice.
+
+function openCommentsModal() {
+  if (!doc) return;
+  document.getElementById("modal-body").appendChild(doc.panel);
+  commentsModal.classList.add("open");
+}
+
+function closeCommentsModal() {
+  if (!commentsModal.classList.contains("open")) return;
+  commentsModal.classList.remove("open");
+  if (doc) doc.side.appendChild(doc.panel);
 }
 
 function segmentsU16(data) {
@@ -565,12 +783,13 @@ function selectionAgreedValue(kind) {
   return seen.size === 1 ? seen.values().next().value : null;
 }
 
-function renderBarButtons(row, values, kind) {
+function renderBarButtons(row, values, kind, disabled) {
   for (const old of row.querySelectorAll("button")) old.remove();
-  const agreed = selectionAgreedValue(kind);
+  const agreed = disabled ? null : selectionAgreedValue(kind);
   for (const value of values) {
     const btn = el("button", value === agreed ? "current" : "",
       value.replace("_", " "));
+    btn.disabled = !!disabled || marksInFlight;
     btn.addEventListener("click", () => applyMarks(kind, value));
     row.appendChild(btn);
   }
@@ -578,10 +797,11 @@ function renderBarButtons(row, values, kind) {
 
 // ---- the comment composer (WP50) ------------------------------------------
 
-function renderCommentRow() {
+function renderCommentRow(disabled) {
   const row = document.getElementById("bar-comment");
   for (const old of row.querySelectorAll("button, textarea")) old.remove();
   const btn = el("button", "", "add comment");
+  btn.disabled = !!disabled;
   btn.addEventListener("click", openComposer);
   row.appendChild(btn);
 }
@@ -631,11 +851,12 @@ function closeComposer() {
 // POST must carry the new one. save() itself stays a separate flow:
 // its dirty/in-flight bookkeeping would contort both.
 async function submitWrite(path, buildPayload, { onStale, onFresh,
-    success } = {}) {
+    onError, success } = {}) {
   try {
     await ensureSaved();
   } catch (err) {
     if (err instanceof StaleWrite) { showConflict(); return; }
+    if (onError) await onError();
     throw err;
   }
   let fresh;
@@ -643,14 +864,16 @@ async function submitWrite(path, buildPayload, { onStale, onFresh,
     fresh = await postWrite(path, buildPayload());
   } catch (err) {
     if (err instanceof StaleWrite) {
+      // The refetch below also reverts any optimistic patch.
       toast("document changed elsewhere -- refreshing");
       if (onStale) onStale();
       await refetchDoc();
       return;
     }
+    if (onError) await onError();
     throw err;
   }
-  if (!fresh) return;
+  if (!fresh) { if (onError) await onError(); return; }
   if (onFresh) onFresh();
   applyDocPayload(fresh);
   toast(success);
@@ -688,11 +911,41 @@ async function resolveComment(id) {
     { success: "comment resolved" });
 }
 
+// The open inline comment edit, or null: {id, value}. The draft lives
+// HERE, not in the DOM -- renderComments re-runs on every payload (SSE
+// refetches included) and re-seeds the textarea from it, so a refetch
+// never destroys a half-typed edit (the composer guard's discipline).
+let commentEdit = null;
+
+async function saveCommentEdit(id) {
+  if (!doc || !commentEdit || commentEdit.id !== id) return;
+  const text = commentEdit.value.trim();
+  if (!text) { toast("a comment needs text"); return; }
+  // On a stale base the draft survives the refetch; save again after.
+  await submitWrite("api/prose/comments",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             edit: { id, text } }),
+    {
+      onFresh: () => { commentEdit = null; },
+      success: "comment updated",
+    });
+}
+
+function cancelCommentEdit() {
+  commentEdit = null;
+  if (doc) renderComments(doc.panel);
+}
+
 function renderComments(panel) {
   panel.textContent = "";
   if (!doc) return;
   const comments = doc.data.comments || [];
-  if (!comments.length) return;
+  if (!comments.length) {
+    // Only ever visible in the sidebar (the modal opener needs count>0).
+    panel.appendChild(el("p", "note",
+      "No comments yet — select text and add a note."));
+    return;
+  }
   panel.appendChild(el("h2", null, "Comments (" + comments.length + ")"));
   for (const comment of comments) {
     const row = el("div", "row comment-row");
@@ -710,7 +963,18 @@ function renderComments(panel) {
       sub.appendChild(el("span", null, "original text was removed"));
     }
     sub.appendChild(el("span", "spacer"));
-    if (writesEnabled) {
+    const editing = commentEdit && commentEdit.id === comment.id;
+    if (writesEnabled && !editing) {
+      const edit = el("button", "mini", "edit");
+      edit.addEventListener("click", (event) => {
+        event.stopPropagation();
+        commentEdit = { id: comment.id, value: comment.text };
+        renderComments(panel);
+        const open = panel.querySelector(
+          '[data-comment="' + comment.id + '"] textarea');
+        if (open) open.focus();
+      });
+      sub.appendChild(edit);
       const resolve = el("button", "mini", "resolve");
       resolve.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -719,9 +983,35 @@ function renderComments(panel) {
       sub.appendChild(resolve);
     }
     row.appendChild(sub);
-    row.appendChild(el("div", "txt", comment.text));
+    if (editing) {
+      const input = el("textarea");
+      input.value = commentEdit.value;
+      input.addEventListener("input", () => {
+        commentEdit.value = input.value;
+      });
+      input.addEventListener("click", (event) => event.stopPropagation());
+      const actions = el("div", "btn-row");
+      const save = el("button", "mini current", "save");
+      save.addEventListener("click", (event) => {
+        event.stopPropagation();
+        saveCommentEdit(comment.id).catch(() => toast("edit failed"));
+      });
+      const cancel = el("button", "mini", "cancel");
+      cancel.addEventListener("click", (event) => {
+        event.stopPropagation();
+        cancelCommentEdit();
+      });
+      actions.appendChild(save);
+      actions.appendChild(cancel);
+      row.appendChild(input);
+      row.appendChild(actions);
+    } else {
+      row.appendChild(el("div", "txt", comment.text));
+    }
     if (comment.anchor) {
       row.addEventListener("click", () => {
+        if (commentEdit && commentEdit.id === comment.id) return;
+        closeCommentsModal();  // jumping to the text: get out of its way
         const from = doc.data.map.toU16(comment.anchor.start);
         const to = doc.data.map.toU16(comment.anchor.end);
         doc.view.dispatch({
@@ -749,7 +1039,9 @@ function updateBar() {
     which.textContent = targets.length + " paragraphs" +
       (allWhole ? "" : " · selection");
   }
-  document.getElementById("bar-whole").classList.toggle("on", wholeMode);
+  const whole = document.getElementById("bar-whole");
+  whole.disabled = false;
+  whole.classList.toggle("on", wholeMode);
   renderBarButtons(
     document.getElementById("bar-status"), STATUS_VALUES, "status");
   renderBarButtons(
@@ -760,7 +1052,7 @@ function updateBar() {
 
 async function applyMarks(kind, value) {
   const targets = currentTargets();
-  if (!targets || !doc) return;
+  if (!targets || !doc || marksInFlight) return;
   const buildMarks = () => targets.map((t) => {
     const mark = { hash: t.seg.hash, kind, value };
     if (!wholeMode && !t.whole) {
@@ -769,10 +1061,26 @@ async function applyMarks(kind, value) {
     }
     return mark;
   });
-  await submitWrite("api/prose/marks",
-    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
-             marks: buildMarks() }),
-    { success: kind + " → " + value.replace("_", " ") });
+  // Instant feedback: patch locally before the POST -- unless a save
+  // is pending (its reconcile could shift the offsets under us).
+  const optimistic = !doc.dirty && !doc.saving;
+  marksInFlight = true;
+  if (optimistic) applyMarksLocally(targets, kind, value);
+  try {
+    await submitWrite("api/prose/marks",
+      () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+               marks: buildMarks() }),
+      {
+        success: kind + " → " + value.replace("_", " "),
+        onError: optimistic ? async () => {
+          toast("mark failed -- reverting");
+          await refetchDoc().catch(() => {});
+        } : null,
+      });
+  } finally {
+    marksInFlight = false;
+    updateBar();
+  }
 }
 
 // ---- saving ---------------------------------------------------------------
@@ -929,12 +1237,26 @@ function applyDocPayload(fresh, reconcileText) {
   // updateBar leaves the rows alone -- a refetch must never destroy a
   // half-typed comment.)
   updateBar();
+  // Now that doc.data.version is current, any SSE bump deferred behind
+  // an in-flight write either matched this payload (drop) or came from
+  // a genuinely concurrent bot write (refetch).
+  drainDeferredSse();
 }
 
 async function refetchDoc() {
   if (!doc) return;
   const fresh = await fetchJson(docUrl(doc.space, doc.node));
   applyDocPayload(fresh, true);
+}
+
+function drainDeferredSse() {
+  if (!doc || writesInFlight > 0) return;
+  if (deferredSseVersion > doc.data.version) {
+    deferredSseVersion = 0;
+    refetchDoc().catch(() => {});
+  } else {
+    deferredSseVersion = 0;
+  }
 }
 
 function openEvents(space) {
@@ -945,7 +1267,14 @@ function openEvents(space) {
     let payload;
     try { payload = JSON.parse(event.data); } catch { return; }
     if (payload.node !== doc.node) return;
-    if (payload.version === doc.data.version) return;  // our own write
+    // The ledger only increments, and every write's own POST response
+    // carries a version read AFTER the bump -- so anything <= what we
+    // hold is already applied (monotonic own-write guard).
+    if (payload.version <= doc.data.version) return;
+    if (writesInFlight > 0) {  // our POST's response carries this bump
+      deferredSseVersion = Math.max(deferredSseVersion, payload.version);
+      return;
+    }
     if (doc.dirty || doc.saving) return;  // the save's 409 will surface it
     refetchDoc().catch(() => {});
   };
@@ -954,10 +1283,14 @@ function openEvents(space) {
 
 function closeDoc() {
   if (!doc) return;
+  closeCommentsModal();  // while doc.side still exists to take the panel
+  commentEdit = null;
   clearTimeout(doc.autosaveTimer);
   if (doc.events) doc.events.close();
   doc.view.destroy();
   doc = null;
+  document.body.classList.remove("doc-view");
+  main.classList.remove("doc");
   closeBar();
   saveState("");
 }
@@ -967,27 +1300,36 @@ async function renderNode(space, node) {
   await ensureWriteState();
   const data = await fetchJson(docUrl(space, node));
 
+  // Two-column shell: the editor column, and an aside the comments
+  // panel parks in (a sticky sidebar on wide screens, invisible below
+  // that -- the modal borrows the panel node while open).
   const frag = document.createDocumentFragment();
+  const layout = el("div", "doc-layout");
+  frag.appendChild(layout);
+  const column = el("div");
+  layout.appendChild(column);
   const crumbs = el("div", "crumbs");
   crumbs.appendChild(link("#/", "spaces"));
   crumbs.appendChild(document.createTextNode(" / " + data.name));
-  frag.appendChild(crumbs);
+  column.appendChild(crumbs);
   const above = el("div");
-  frag.appendChild(above);
+  column.appendChild(above);
 
   const legend = el("div", "legend");
-  frag.appendChild(legend);
+  column.appendChild(legend);
 
   const timeline = el("div", "timeline");
-  frag.appendChild(timeline);
+  column.appendChild(timeline);
   const segInfo = el("div");
   segInfo.id = "seg-info";
-  frag.appendChild(segInfo);
+  column.appendChild(segInfo);
   const host = el("div");
   host.id = "editor-host";
-  frag.appendChild(host);
+  column.appendChild(host);
+  const side = el("aside", "doc-side");
+  layout.appendChild(side);
   const panel = el("div");
-  frag.appendChild(panel);
+  side.appendChild(panel);
 
   const highlight = CM.HighlightStyle.define([
     { tag: CM.tags.heading, class: "tok-heading" },
@@ -1022,6 +1364,7 @@ async function renderNode(space, node) {
       const hit = (doc.data.comments || []).find((c) =>
         c.anchor && cp >= c.anchor.start && cp <= c.anchor.end);
       if (!hit) return false;
+      if (!mqSide.matches) openCommentsModal();  // no sidebar: show the panel
       const row = document.querySelector(
         '[data-comment="' + hit.id + '"]');
       if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1054,10 +1397,12 @@ async function renderNode(space, node) {
 
   const state = CM.EditorState.create({ doc: data.body, extensions });
   main.replaceChildren(frag);
+  main.classList.add("doc");
+  document.body.classList.toggle("doc-view", writesEnabled);
   const view = new CM.EditorView({ state, parent: host });
 
   doc = {
-    space, node, data, view, above, timeline, segInfo, panel, legend,
+    space, node, data, view, above, timeline, segInfo, panel, legend, side,
     dirty: false, saving: false, conflictOpen: false,
     autosaveTimer: null, events: null,
   };
@@ -1188,9 +1533,30 @@ document.getElementById("bar-whole").addEventListener("click", () => {
   wholeMode = !wholeMode;
   updateBar();
 });
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeBar();
+document.getElementById("modal-close")
+  .addEventListener("click", closeCommentsModal);
+commentsModal.addEventListener("click", (event) => {
+  if (event.target === commentsModal) closeCommentsModal();
 });
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (commentsModal.classList.contains("open")) closeCommentsModal();
+  else closeBar();
+});
+// Crossing a breakpoint swaps the bar's home (bottom sheet <-> top
+// toolbar) and the panel's home (modal <-> sidebar); re-render so JS
+// state matches what the CSS now shows.
+mqBar.addEventListener("change", () => { if (doc) updateBar(); });
+mqSide.addEventListener("change", () => {
+  if (mqSide.matches) closeCommentsModal();
+});
+// The sticky sidebar sits below the sticky chrome, whose height varies
+// (wrapping header, bar rows appearing): measure it into a CSS var.
+const chrome = document.getElementById("chrome");
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty(
+    "--chrome-h", chrome.offsetHeight + "px");
+}).observe(chrome);
 window.addEventListener("beforeunload", (event) => {
   if (doc && doc.dirty) {
     event.preventDefault();

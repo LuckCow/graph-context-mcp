@@ -575,6 +575,7 @@ class TestProseTokenSetting:
         from graph_context.orchestrator.inspect_server import prose_token_setting
 
         monkeypatch.delenv("GC_PROSE_TOKEN", raising=False)
+        monkeypatch.delenv("GC_PROSE_TOKEN_FILE", raising=False)
         assert prose_token_setting() == ""
 
     def test_off_values_disable_and_tokens_pass_through(
@@ -586,6 +587,32 @@ class TestProseTokenSetting:
         assert prose_token_setting() == ""
         monkeypatch.setenv("GC_PROSE_TOKEN", "  hunter2  ")
         assert prose_token_setting() == "hunter2"
+
+    def test_a_mounted_file_supplies_the_token(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from graph_context.orchestrator.inspect_server import prose_token_setting
+
+        secret = tmp_path / "gc_prose_token"
+        secret.write_text("  from-file  \n")
+        monkeypatch.delenv("GC_PROSE_TOKEN", raising=False)
+        monkeypatch.setenv("GC_PROSE_TOKEN_FILE", str(secret))
+        assert prose_token_setting() == "from-file"
+        # The inline env var is the host-local override and wins.
+        monkeypatch.setenv("GC_PROSE_TOKEN", "inline")
+        assert prose_token_setting() == "inline"
+
+    def test_an_unreadable_configured_file_fails_loudly(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from graph_context.orchestrator.inspect_server import prose_token_setting
+
+        monkeypatch.delenv("GC_PROSE_TOKEN", raising=False)
+        monkeypatch.setenv(
+            "GC_PROSE_TOKEN_FILE", str(tmp_path / "missing")
+        )
+        with pytest.raises(RuntimeError, match="GC_PROSE_TOKEN_FILE"):
+            prose_token_setting()
 
 
 def _post_prose(
@@ -741,8 +768,8 @@ class TestProseMarksRoute:
 
 
 class TestProseCommentsRoute:
-    """WP50 (ADR 056): comment create/resolve behind the same gates as
-    save/marks."""
+    """WP50 (ADR 056, edit per its amendment): comment create/resolve/
+    edit behind the same gates as save/marks."""
 
     def _doc(self, base: str, node_id: str) -> dict:
         return _get_json(f"{base}/api/prose/doc?space=sp1&node={node_id}")
@@ -780,7 +807,30 @@ class TestProseCommentsRoute:
         assert status == 200
         assert after["comments"] == []
 
-    def test_exactly_one_of_comment_or_resolve(self, prose_server) -> None:
+    def test_an_edit_rewrites_the_note_in_place(self, prose_server) -> None:
+        base, node_id = prose_server
+        doc = self._doc(base, node_id)
+        _, fresh = _post_prose(base, "/api/prose/comments", {
+            "space": "sp1", "node": node_id, "base": doc["base"],
+            "comment": {
+                "hash": _prose_hash(PROSE_P1), "text": "why barred?",
+                "start_char": 0, "end_char": 8,
+            },
+        })
+        (comment,) = fresh["comments"]
+        status, after = _post_prose(base, "/api/prose/comments", {
+            "space": "sp1", "node": node_id, "base": fresh["base"],
+            "edit": {"id": comment["id"], "text": "barred by WHOM?"},
+        })
+        assert status == 200
+        (edited,) = after["comments"]
+        assert edited["id"] == comment["id"]
+        assert edited["text"] == "barred by WHOM?"
+        assert edited["anchor"] == comment["anchor"]
+
+    def test_exactly_one_of_comment_resolve_or_edit(
+        self, prose_server
+    ) -> None:
         base, node_id = prose_server
         doc = self._doc(base, node_id)
         common = {"space": "sp1", "node": node_id, "base": doc["base"]}
@@ -790,6 +840,9 @@ class TestProseCommentsRoute:
         assert _post_prose(base, "/api/prose/comments", {
             **common, "resolve": "cid",
             "comment": {"hash": "h", "text": "x"},
+        })[0] == 400
+        assert _post_prose(base, "/api/prose/comments", {
+            **common, "resolve": "cid", "edit": {"id": "cid", "text": "x"},
         })[0] == 400
 
     def test_bad_shapes_are_400(self, prose_server) -> None:
@@ -807,6 +860,9 @@ class TestProseCommentsRoute:
         assert _post_prose(base, "/api/prose/comments", {
             **common, "resolve": "",
         })[0] == 400
+        assert _post_prose(base, "/api/prose/comments", {
+            **common, "edit": {"id": "cid"},
+        })[0] == 400  # no replacement text
 
     def test_a_stale_base_is_409(self, prose_server) -> None:
         base, node_id = prose_server

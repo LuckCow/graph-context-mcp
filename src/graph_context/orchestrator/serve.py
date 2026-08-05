@@ -29,6 +29,7 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from graph_context.logging_setup import configure_logging
 from graph_context.orchestrator import anytype_chat_bot, discord_bot, inspect_server
 from graph_context.orchestrator.prose_bridge import ProseBridge
 from graph_context.orchestrator.turn_log import turn_log_path
@@ -89,7 +90,7 @@ async def run() -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     await run()
 
 

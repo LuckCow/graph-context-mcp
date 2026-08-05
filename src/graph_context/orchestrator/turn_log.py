@@ -62,6 +62,92 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
+# -- console mirror ----------------------------------------------------------
+# Every diary entry also logs one compact console line, so a terminal
+# tail narrates the turn (who wrote, what the model decided, which tools
+# ran, what was replied) without opening the JSONL. Full payloads stay in
+# the file; the bulky once-per-turn model inputs mirror at DEBUG.
+
+_DEBUG_EVENTS = frozenset({"prompt", "context", "llm_prompt"})
+_EXCERPT_LIMIT = 120
+
+
+def _excerpt(text: str, limit: int = _EXCERPT_LIMIT) -> str:
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "\N{HORIZONTAL ELLIPSIS}"
+
+
+def _short_session(key: str) -> str:
+    """`anytype:bafy…<59 chars>` would dominate every line; keep the
+    scheme and enough id tail to tell chats apart."""
+    if len(key) <= 20:
+        return key
+    scheme, _, ident = key.partition(":")
+    return f"{scheme}:\N{HORIZONTAL ELLIPSIS}{ident[-6:]}" if ident else key
+
+
+def console_line(entry: Mapping[str, Any]) -> str:
+    """The entry's one-line console rendering ("" = nothing to say)."""
+    event = str(entry.get("event", ""))
+    prefix = ""
+    if entry.get("session"):
+        mode = str(entry.get("mode", ""))
+        prefix = f"[{_short_session(str(entry['session']))}"
+        prefix += f" {mode}] " if mode else "] "
+    if event == "user":
+        sender = str(entry.get("sender") or entry.get("user") or "user")
+        return f"{prefix}message from {sender}: {_excerpt(entry['text'])!r}"
+    if event == "prompt":
+        return (
+            f"{prefix}prompt refreshed: goal {len(str(entry['goal']))} chars, "
+            f"{len(entry['tools'])} tool(s)"
+        )
+    if event == "context":
+        return f"{prefix}context block: {len(str(entry['text']))} chars"
+    if event == "llm_prompt":
+        return f"{prefix}llm prompt: {len(str(entry['text']))} chars"
+    if event == "llm_turn":
+        pieces = []
+        if entry.get("server_tool_calls"):
+            names = ", ".join(
+                str(call.get("name", "?")) for call in entry["server_tool_calls"]
+            )
+            pieces.append(f"server tools: {names}")
+        if entry.get("tool_calls"):
+            names = ", ".join(
+                str(call.get("name", "?")) for call in entry["tool_calls"]
+            )
+            pieces.append(f"tools: {names}")
+        if entry.get("reply"):
+            pieces.append(f"reply: {_excerpt(entry['reply'])!r}")
+        return f"{prefix}decision \N{RIGHTWARDS ARROW} " + (
+            "; ".join(pieces) if pieces else "(empty)"
+        )
+    if event == "tool_result":
+        result = str(entry.get("result", ""))
+        return (
+            f"{prefix}tool {entry.get('tool', '?')} \N{RIGHTWARDS ARROW} "
+            f"{len(result)} chars: {_excerpt(result, 80)!r}"
+        )
+    if event == "usage":
+        cost = entry.get("total_cost_usd")
+        return (
+            f"usage: {entry.get('input_tokens', 0)} in / "
+            f"{entry.get('output_tokens', 0)} out tokens, "
+            f"{entry.get('duration_ms', 0)} ms"
+            + (f", ${cost:.4f}" if isinstance(cost, (int, float)) else "")
+        )
+    if event == "turn_end":
+        replies = entry.get("replies") or []
+        first = str(replies[0].get("text", "")) if replies else ""
+        return (
+            f"{prefix}turn end: {len(replies)} repl"
+            f"{'y' if len(replies) == 1 else 'ies'}"
+            + (f", first: {_excerpt(first)!r}" if first else "")
+        )
+    return ""
+
+
 class TurnLog:
     """Append-only turn diary with a byte budget (see module docstring)."""
 
@@ -222,6 +308,12 @@ class TurnLog:
         })
 
     def _append(self, entry: Mapping[str, Any]) -> None:
+        if console := console_line(entry):
+            logger.log(
+                logging.DEBUG if entry.get("event") in _DEBUG_EVENTS
+                else logging.INFO,
+                "%s", console,
+            )
         # default=str: tool arguments come from the model and may hold
         # shapes json.dumps does not know; a lossy string beats a lost turn.
         line = json.dumps(

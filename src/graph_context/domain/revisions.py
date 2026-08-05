@@ -77,8 +77,12 @@ MARK_INTENT = "intent"
 # acted on it) -> resolved (the human closed it); transitions are
 # separate append-only ``comment_state`` lines, folded last-wins with
 # ``resolved`` terminal. ``open`` is implicit and never serialized.
+# ``comment_edit`` (ADR 056 amendment) rewrites a live comment's TEXT
+# last-wins, keeping id/anchor/thread; editing an ``addressed`` comment
+# REOPENS it (the model acted on the old wording, not this one).
 KIND_COMMENT = "comment"
 KIND_COMMENT_STATE = "comment_state"
+KIND_COMMENT_EDIT = "comment_edit"
 
 COMMENT_OPEN = "open"
 COMMENT_ADDRESSED = "addressed"
@@ -455,7 +459,24 @@ class CommentStateEntry:
     by: str      # who transitioned it ("model", "human:prose-page", ...)
 
 
-LogEntry = RevisionRecord | SectionMark | CommentEntry | CommentStateEntry
+@dataclass(frozen=True, slots=True)
+class CommentEditEntry:
+    """A comment text rewrite (ADR 056 amendment): folded last-wins
+    onto the live comment's text; id, anchor, and creation stamps stay.
+    Editing an ``addressed`` comment reopens it -- the model's action
+    answered the OLD wording. Unknown ids and resolved comments fold to
+    nothing, like ``comment_state`` lines."""
+
+    id: str      # the comment this rewrites
+    text: str    # the replacement note (<= COMMENT_TEXT_CAP)
+    at: str      # injected ISO timestamp
+    by: str      # who edited ("human:prose-page", ...)
+
+
+LogEntry = (
+    RevisionRecord | SectionMark | CommentEntry | CommentStateEntry
+    | CommentEditEntry
+)
 
 
 def comment_id(at: str, by: str, anchor_hash: str, text: str) -> str:
@@ -746,6 +767,11 @@ def _entry_payload(entry: LogEntry) -> dict[str, Any]:
             "kind": KIND_COMMENT_STATE, "id": entry.id,
             "value": entry.value, "at": entry.at, "by": entry.by,
         }
+    if isinstance(entry, CommentEditEntry):
+        return {
+            "kind": KIND_COMMENT_EDIT, "id": entry.id,
+            "text": entry.text, "at": entry.at, "by": entry.by,
+        }
     return _record_payload(entry)
 
 
@@ -839,6 +865,16 @@ def _parse_entry(line: str) -> LogEntry | None:
             ):
                 return None
             return transition
+        if kind == KIND_COMMENT_EDIT:
+            edit = CommentEditEntry(
+                id=str(payload["id"]),
+                text=str(payload["text"]),
+                at=str(payload["at"]),
+                by=str(payload["by"]),
+            )
+            if not edit.id or not edit.text:
+                return None
+            return edit
         ops = tuple(
             DeltaOp(
                 tag=str(op[0]), i1=int(op[1]), i2=int(op[2]),
@@ -1066,12 +1102,21 @@ def token_states(entries: Sequence[LogEntry]) -> dict[str, TokenState]:
 
 
 def section_states(entries: Sequence[LogEntry]) -> dict[str, SectionState]:
+    """Block-level BADGES over the token fold: :func:`badges_of` of
+    :func:`token_states`. Callers that already hold the token fold
+    should call :func:`badges_of` directly -- it never re-folds."""
+    return badges_of(token_states(entries))
+
+
+def badges_of(
+    states: Mapping[str, TokenState],
+) -> dict[str, SectionState]:
     """Block-level BADGES derived from the token fold (WP46): a block is
     ``approved``/``human`` only when every token agrees (mixed reads
     ``raw_ai`` -- the word-level view shows the split); intent is the
     strictest token's, so one locked word makes the block read locked."""
     derived: dict[str, SectionState] = {}
-    for block, state in token_states(entries).items():
+    for block, state in states.items():
         status = STATUS_RAW_AI
         if state.status and all(s == STATUS_APPROVED for s in state.status):
             status = STATUS_APPROVED
@@ -1184,6 +1229,7 @@ class _CommentFold:
     """One comment's mutable state inside the fold walk (internal)."""
 
     entry: CommentEntry
+    text: str = ""            # current text; edits fold last-wins onto it
     state: str = COMMENT_OPEN
     state_at: str = ""
     state_by: str = ""
@@ -1223,7 +1269,9 @@ def _fold_comments(
         if isinstance(entry, CommentEntry):
             if entry.id in folds:
                 continue  # first line owns the identity
-            fold = _CommentFold(entry=entry, anchor=entry.hash)
+            fold = _CommentFold(
+                entry=entry, text=entry.text, anchor=entry.hash
+            )
             if entry.hash and entry.hash in current:
                 _attach(fold)
             folds[entry.id] = fold
@@ -1235,6 +1283,18 @@ def _fold_comments(
             fold_or_none.state = entry.value
             fold_or_none.state_at = entry.at
             fold_or_none.state_by = entry.by
+            continue
+        if isinstance(entry, CommentEditEntry):
+            fold_or_none = folds.get(entry.id)
+            if fold_or_none is None or fold_or_none.state == COMMENT_RESOLVED:
+                continue  # unknown id, or resolved is terminal
+            fold_or_none.text = entry.text
+            if fold_or_none.state == COMMENT_ADDRESSED:
+                # The model addressed the OLD wording: reopen, stamped
+                # with the edit so the panel says who reopened it.
+                fold_or_none.state = COMMENT_OPEN
+                fold_or_none.state_at = entry.at
+                fold_or_none.state_by = entry.by
             continue
         if step is None:
             continue
@@ -1311,7 +1371,7 @@ def comment_states(entries: Sequence[LogEntry]) -> tuple[CommentState, ...]:
         ):
             start, end = _flag_bounds(fold.flags)
         states.append(CommentState(
-            id=fold.entry.id, text=fold.entry.text, state=fold.state,
+            id=fold.entry.id, text=fold.text, state=fold.state,
             hash=anchor, start=start, end=end,
             at=fold.entry.at, by=fold.entry.by,
             state_at=fold.state_at, state_by=fold.state_by,
@@ -1366,12 +1426,14 @@ def compact(
     dead hashes drop with their era.
 
     Dropped-era COMMENTS (WP50) hoist differently: a live (unresolved)
-    comment's anchor may have migrated during the dropped era, so its
-    line is REWRITTEN -- same id/text/at/by, anchor and range replaced
-    by the fold's state as of the first kept keyframe (last-known
-    anchor kept when detached, so a verbatim restore in the kept era
-    still re-attaches) -- plus one ``addressed`` transition line when
-    set. Resolved comments drop with their era.
+    comment's anchor may have migrated and its text may have been
+    edited during the dropped era, so its line is REWRITTEN -- same
+    id/at/by, anchor, range, and text replaced by the fold's state as
+    of the first kept keyframe (last-known anchor kept when detached,
+    so a verbatim restore in the kept era still re-attaches; dropped
+    ``comment_edit`` lines bake into the rewritten text) -- plus one
+    ``addressed`` transition line when set. Resolved comments drop
+    with their era.
     """
     kept = list(entries)
     if len(render_log(kept)) <= cap:
@@ -1437,8 +1499,10 @@ def compact(
         start, end = (
             _flag_bounds(fold.flags) if fold.flags is not None else (-1, -1)
         )
+        # fold.text bakes any dropped-era edits into the rewritten line
+        # (the edit lines themselves drop with their era).
         hoisted_comments.append(CommentEntry(
-            id=cid, hash=fold.anchor, text=fold.entry.text,
+            id=cid, hash=fold.anchor, text=fold.text,
             at=fold.entry.at, by=fold.entry.by, start=start, end=end,
         ))
         if fold.state == COMMENT_ADDRESSED:

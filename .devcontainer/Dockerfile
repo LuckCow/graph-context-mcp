@@ -49,6 +49,14 @@ deps=list(p.get('dependencies',[])) + list(opt.get('dev',[])) + list(opt.get('or
 subprocess.check_call([sys.executable,'-m','pip','install','--no-cache-dir',*deps]) if deps else None" \
     && rm /tmp/pyproject.toml
 
+# Add playwright in order to validate layouts. The browser binaries must
+# live in a world-readable shared path: this RUN executes as root, and the
+# default location (~/.cache/ms-playwright) would be invisible to the
+# non-root dev user created below. ENV persists so runtime finds them.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pip install playwright && playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
 # Non-root user. May only sudo the firewall script, nothing else.
 RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && useradd --uid ${USER_UID} --gid ${USER_GID} -m -s /bin/bash ${USERNAME} \

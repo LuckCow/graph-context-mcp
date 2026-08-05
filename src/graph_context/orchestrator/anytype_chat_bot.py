@@ -74,6 +74,7 @@ from graph_context.infrastructure.anytype.chat import (
 )
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
+from graph_context.logging_setup import configure_logging
 from graph_context.orchestrator import bootstrap, prose_bridge
 from graph_context.orchestrator.anytype_chat_transport import (
     IMAGE_MEDIA_TYPES,
@@ -704,6 +705,10 @@ async def _fire_scheduled(
     reply = handler.reply(send, edit, send_file)
     try:
         await handler.run_scheduled(chat_id, due, reply)
+        logger.info(
+            "scheduled event %r (%s) delivered to chat %s",
+            due.name, due.node_id, chat_id,
+        )
     except GraphContextError as err:
         await reply.deliver(f"[error] scheduled event {due.name!r}: {err}")
     except Exception:  # a fired event must never take the serve loop down
@@ -1026,7 +1031,7 @@ async def run(prose: ProseBridge | None = None) -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     await run()
 
 

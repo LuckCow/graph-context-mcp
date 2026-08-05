@@ -43,6 +43,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from graph_context import composition
 from graph_context.interface import profiles, tools
 from graph_context.interface.services import Services
+from graph_context.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -316,5 +317,5 @@ async def find_node(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     mcp.run()

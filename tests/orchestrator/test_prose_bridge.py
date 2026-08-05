@@ -248,6 +248,46 @@ class TestDocWire:
         assert fresh["body"][start:end].startswith("The city")
         assert "gate barred" not in fresh["body"][start:end]
 
+    def test_set_marks_fetches_the_body_once(
+        self, world, repo_holder
+    ) -> None:
+        # The write's base-token gate fetch IS the payload's body --
+        # one remote GET per gesture, not two.
+        bridge, node_id, _ = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        repo = repo_holder[0]
+        fetches: list[str] = []
+        original = repo.fetch_body
+
+        async def counting(nid: str) -> str:
+            fetches.append(nid)
+            return await original(nid)
+
+        repo.fetch_body = counting
+        bridge.call("sp1", "set_marks", node_id, doc["base"], [
+            {"hash": _h(P1), "kind": "intent", "value": "locked"},
+        ])
+        assert fetches == [node_id]
+
+    def test_set_comment_fetches_the_body_once(
+        self, world, repo_holder
+    ) -> None:
+        bridge, node_id, _ = world
+        doc = bridge.call("sp1", "doc_view", node_id)
+        repo = repo_holder[0]
+        fetches: list[str] = []
+        original = repo.fetch_body
+
+        async def counting(nid: str) -> str:
+            fetches.append(nid)
+            return await original(nid)
+
+        repo.fetch_body = counting
+        bridge.call("sp1", "set_comment", node_id, doc["base"], {
+            "comment": {"hash": _h(P1), "text": "tighten this"},
+        })
+        assert fetches == [node_id]
+
     def test_every_record_bumps_the_version_ledger(self, world) -> None:
         bridge, node_id, _ = world
         v0 = bridge.version_of("sp1", node_id)

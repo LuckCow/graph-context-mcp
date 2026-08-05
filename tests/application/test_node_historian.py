@@ -776,6 +776,80 @@ class TestComments:
                 value=revisions.COMMENT_ADDRESSED, by="model",
             )
 
+    async def test_an_edit_rewrites_the_text_and_survives_rebuild(
+        self,
+    ) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="gates?", by="u",
+            start=8, end=11,
+        )
+        edited = await world.historian.edit_comment(
+            chapter.id, comment_id=state.id,
+            text="how many gates?", by="human:prose-page",
+        )
+        assert edited.id == state.id
+        assert edited.text == "how many gates?"
+        assert (edited.start, edited.end) == (8, 11)  # anchor untouched
+        fresh = NodeHistorian(world.repo, now=lambda: "T9")
+        await fresh.rebuild()
+        (reloaded,) = fresh.comments(chapter.id)
+        assert reloaded.text == "how many gates?"
+
+    async def test_editing_an_addressed_comment_reopens_it(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="fix the tense", by="u",
+        )
+        await world.historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        edited = await world.historian.edit_comment(
+            chapter.id, comment_id=state.id,
+            text="the PAST tense, throughout", by="human:prose-page",
+        )
+        assert edited.state == revisions.COMMENT_OPEN
+        assert edited.state_by == "human:prose-page"
+
+    async def test_an_unchanged_edit_writes_nothing(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="keep", by="u",
+        )
+        (sidecar,) = world.sidecars()
+        before = await world.repo.fetch_body(sidecar.id)
+        again = await world.historian.edit_comment(
+            chapter.id, comment_id=state.id, text="  keep  ", by="u",
+        )
+        assert again.id == state.id
+        assert await world.repo.fetch_body(sidecar.id) == before
+
+    async def test_an_edit_on_an_unknown_id_lists_the_live_ids(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="x", by="u",
+        )
+        with pytest.raises(GraphContextError, match=state.id):
+            await world.historian.edit_comment(
+                chapter.id, comment_id="cnosuch01", text="y", by="u",
+            )
+
+    async def test_empty_and_capped_edits_are_rejected(self) -> None:
+        world, chapter = await _tracked_chapter()
+        state = await world.historian.record_comment(
+            chapter.id, block_hash=_h(OPENING), text="x", by="u",
+        )
+        with pytest.raises(GraphContextError, match="needs text"):
+            await world.historian.edit_comment(
+                chapter.id, comment_id=state.id, text="   ", by="u",
+            )
+        with pytest.raises(GraphContextError, match="cap"):
+            await world.historian.edit_comment(
+                chapter.id, comment_id=state.id,
+                text="x" * (revisions.COMMENT_TEXT_CAP + 1), by="u",
+            )
+
     async def test_a_comment_solidifies_the_pending_human_rollup(
         self,
     ) -> None:
@@ -793,3 +867,83 @@ class TestComments:
         assert revisions.rollup_base(
             world.historian.entries(chapter.id)
         ) is None
+
+
+class TestDerivedViewCaching:
+    """The prose-latency fix: derived folds memoize on the baseline --
+    one fold per log state however many read sites consume it; a write
+    replaces the baseline (fresh memo); marks-only writes carry the
+    records-only views (blame, word authors) since records are equal."""
+
+    async def test_repeated_reads_fold_once(self, monkeypatch) -> None:
+        world, chapter = await _tracked_chapter()
+        calls = 0
+        original = revisions.token_states
+
+        def spy(entries):
+            nonlocal calls
+            calls += 1
+            return original(entries)
+
+        monkeypatch.setattr(revisions, "token_states", spy)
+        world.historian.token_states(chapter.id)
+        world.historian.token_states(chapter.id)
+        world.historian.section_states(chapter.id)
+        world.historian.locked_runs(chapter.id)
+        world.historian.check_body_update(
+            chapter.id, "\n\n".join([OPENING, MIDDLE])
+        )
+        assert calls == 1
+
+    async def test_a_mark_write_refreshes_the_views(self) -> None:
+        world, chapter = await _tracked_chapter()
+        assert world.historian.section_states(
+            chapter.id
+        )[_h(OPENING)].status == "raw_ai"
+        await world.historian.record_mark(
+            chapter.id, kind="status", block_hash=_h(OPENING),
+            value="approved", by="user",
+        )
+        assert world.historian.section_states(
+            chapter.id
+        )[_h(OPENING)].status == "approved"
+
+    async def test_marks_only_writes_carry_records_views(
+        self, monkeypatch
+    ) -> None:
+        world, chapter = await _tracked_chapter()
+        calls = 0
+        original = revisions.blame
+
+        def spy(records):
+            nonlocal calls
+            calls += 1
+            return original(records)
+
+        monkeypatch.setattr(revisions, "blame", spy)
+        world.historian.blame(chapter.id)
+        await world.historian.record_mark(
+            chapter.id, kind="intent", block_hash=_h(OPENING),
+            value="locked", by="user",
+        )
+        assert world.historian.blame(chapter.id)
+        assert calls == 1
+
+    async def test_a_revision_resets_the_carry(self, monkeypatch) -> None:
+        world, chapter = await _tracked_chapter()
+        calls = 0
+        original = revisions.blame
+
+        def spy(records):
+            nonlocal calls
+            calls += 1
+            return original(records)
+
+        monkeypatch.setattr(revisions, "blame", spy)
+        world.historian.blame(chapter.id)
+        await world.repo.update_node(
+            chapter.id, body="\n\n".join([OPENING, MIDDLE, REVISED])
+        )
+        await world.historian.record_external_revision(chapter.id)
+        assert world.historian.blame(chapter.id)[_h(REVISED)]
+        assert calls == 2

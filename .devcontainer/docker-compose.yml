@@ -79,6 +79,10 @@ services:
       # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
       # account's CLI default; pinned here to Sonnet 5.
       GC_DRIVER_MODEL: "claude-sonnet-5"
+      # Prose-page write token (ADR 050/054): enables saving/marking on
+      # /prose. Same file-not-env-var discipline as the keys above; the
+      # page prompts for the token once and remembers it.
+      GC_PROSE_TOKEN_FILE: "/run/secrets/gc_prose_token"
       # The turn-log viewer must bind all interfaces INSIDE the container:
       # Docker's published-port DNAT delivers host traffic to eth0, not
       # loopback. The host side stays private -- the ports: mapping above
@@ -93,6 +97,7 @@ services:
     secrets:
       - anytype_api_key
       - discord_bot_token
+      - gc_prose_token
 
   # Headless Anytype node (bot account) -- WP14 / ADR 019. Starts with
   # every `up`/rebuild (VS Code included). First-time bootstrap (see
@@ -139,3 +144,5 @@ secrets:
     file: ./secrets/anytype_api_key
   discord_bot_token:
     file: ./secrets/discord_bot_token
+  gc_prose_token:
+    file: ./secrets/gc_prose_token
