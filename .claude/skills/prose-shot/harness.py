@@ -38,6 +38,7 @@ from playwright.sync_api import sync_playwright
 REPO = Path(__file__).resolve().parents[3]
 PAGE = REPO / "src/graph_context/orchestrator/prose.html"
 BUNDLE = REPO / "src/graph_context/orchestrator/static/codemirror.bundle.js"
+NAV = REPO / "src/graph_context/orchestrator/static/nav.js"
 
 PARAS = [
     "The captain stood at the rail and watched the horizon darken.",
@@ -99,6 +100,8 @@ def route_all(page):
         body=PAGE.read_text(), content_type="text/html"))
     page.route("**/static/codemirror.bundle.js", lambda r: r.fulfill(
         body=BUNDLE.read_text(), content_type="application/javascript"))
+    page.route("**/static/nav.js", lambda r: r.fulfill(
+        body=NAV.read_text(), content_type="application/javascript"))
     page.route("**/api/prose/spaces", lambda r: r.fulfill(
         body=json.dumps(SPACES), content_type="application/json"))
     page.route("**/api/prose/doc*", lambda r: r.fulfill(

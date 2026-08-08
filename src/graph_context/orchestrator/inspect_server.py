@@ -18,8 +18,9 @@ live turn diary. Routes:
   GET /api/runs/<id>           -> one run's results.json, normalized
   GET /api/cases/<id>          -> one case's definition + result history
   GET /prose                   -> prose.html (WP43/48: the editor page)
-  GET /static/<name>           -> packaged static assets (the vendored
-                                  CodeMirror bundle; safe_child + 404)
+  GET /static/<name>           -> packaged static assets (the shared
+                                  section nav, the vendored CodeMirror
+                                  bundle; safe_child + 404)
   GET /api/prose/spaces        -> registered spaces + their tracked nodes
   GET /api/prose/doc?space&node -> full raw body + offset segments/spans
   GET /api/prose/events?space  -> SSE: per-node version bumps (live
@@ -51,6 +52,11 @@ The viewer HTML reaches its stream via a RELATIVE ``events`` URL, which
 is what lets the same file serve both the live log (``/logs`` ->
 ``/events``) and any run replay (``/runs/<id>/log`` ->
 ``/runs/<id>/events``) without a line of routing JS.
+
+The pages are independent single files sharing one navigation module
+(``static/nav.js``, which owns the site map); ``PAGES`` below is the
+route table they are served from, so a fourth page is one entry here,
+one entry in that module's ``SECTIONS``, and the file itself.
 
 Stdlib only -- no dependencies. ``/events`` is a long-lived connection, so
 we use ``ThreadingHTTPServer`` (one thread per client) to keep the other
@@ -89,6 +95,19 @@ from graph_context.orchestrator.turn_log import (
 
 POLL_SECONDS = 0.5
 HEARTBEAT_TICKS = 20  # send an SSE comment after this many idle polls (~10s)
+
+HTML_TYPE = "text/html; charset=utf-8"
+# Route -> packaged page. The one place a page's URL is decided; every
+# page also names itself in static/nav.js's SECTIONS so the shared nav
+# can reach it from everywhere else.
+PAGES: dict[str, str] = {
+    "/": "inspect.html",
+    "/index.html": "inspect.html",
+    "/logs": "turn_log_viewer.html",
+    "/prose": "prose.html",
+}
+# Packaged assets under /static/ that must ship with the wheel.
+STATIC_ASSETS = ("nav.js", "codemirror.bundle.js")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -227,15 +246,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # http.server naming
         route = urlparse(self.path).path
-        if route in ("/", "/index.html"):
-            self._serve_file(self.html_dir / "inspect.html",
-                             "text/html; charset=utf-8")
-        elif route == "/logs":
-            self._serve_file(self.html_dir / "turn_log_viewer.html",
-                             "text/html; charset=utf-8")
-        elif route == "/prose":
-            self._serve_file(self.html_dir / "prose.html",
-                             "text/html; charset=utf-8")
+        if route in PAGES:
+            self._serve_file(self.html_dir / PAGES[route], HTML_TYPE)
         elif route.startswith("/static/"):
             self._serve_static(route.removeprefix("/static/"))
         elif route == "/api/prose/spaces":
@@ -302,8 +314,7 @@ class Handler(BaseHTTPRequestHandler):
         if log is None:
             self.send_error(404, "not found")
         elif tail == "log":
-            self._serve_file(self.html_dir / "turn_log_viewer.html",
-                             "text/html; charset=utf-8")
+            self._serve_file(self.html_dir / PAGES["/logs"], HTML_TYPE)
         elif tail == "events":
             self._serve_events(log)
         elif tail == "turns.jsonl":
@@ -671,10 +682,9 @@ def create_server(
     process hosts at most one server -- fine for both entry paths
     (serve and standalone).
     """
-    for page in (
-        "inspect.html", "turn_log_viewer.html", "prose.html",
-        "static/codemirror.bundle.js",
-    ):
+    packaged = [*dict.fromkeys(PAGES.values()),
+                *(f"static/{name}" for name in STATIC_ASSETS)]
+    for page in packaged:
         if not (Handler.html_dir / page).exists():
             raise GraphContextError(f"viewer HTML missing: {Handler.html_dir / page}")
     Handler.log_path = log

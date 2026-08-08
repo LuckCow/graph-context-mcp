@@ -71,3 +71,33 @@ around it, and the per-turn context block (ADR 020). A reviewer judging
   writer/reader contract is pinned by a round-trip test
   (`tests/evals/test_harness_smoke.py`) that scans a real scripted run
   through `eval_index`.
+
+## Amendment (2026-08-08): one shared section nav
+
+Decision 5's "self-contained HTML" gave each page its own hand-written
+header links, and they drifted: the eval dashboard offered only the turn
+log, the viewer only the dashboard, and the prose editor (ADR 050/054)
+was reachable from neither. Since the pages are now a *set* rather than
+one page plus a viewer, the site map moves into a single packaged module
+served off the existing `/static/` route:
+
+- **`static/nav.js` owns the sections.** `SECTIONS` maps
+  key/href/label; each page carries one `<div data-gc-nav="<key>">` and
+  a `<script type="module" src="/static/nav.js">`, and the module
+  renders the brand plus every link with the current one marked
+  `aria-current="page"`. A page with in-page hash routing adds
+  `data-home="#/"` so its own entry stays a hash change rather than a
+  document reload. Adding a fourth page is one `SECTIONS` entry, one
+  `inspect_server.PAGES` entry (the route table the handler and the
+  packaged-file check now both read), and the file.
+- **The `src` is absolute, the styles are not shared.** Absolute because
+  the viewer also serves under `/runs/<id>/log`, where a relative path
+  resolves into the run directory. The palette and base CSS stay inline
+  per page on purpose: the viewer is documented as openable straight
+  off the filesystem, and an external stylesheet would leave that
+  `file://` page unstyled. There the nav module simply does not load and
+  the page renders without nav — the honest outcome, since there is no
+  server to navigate to.
+
+The house style otherwise holds: still stdlib, still no build step, the
+one new asset is first-party and ~90 lines.

@@ -23,6 +23,8 @@ from graph_context.errors import GraphContextError
 from graph_context.orchestrator.inspect_server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    PAGES,
+    STATIC_ASSETS,
     _read_new,
     create_server,
     eval_root_setting,
@@ -312,9 +314,55 @@ class TestPackagedHtml:
         from graph_context.orchestrator import inspect_server
 
         parent = Path(inspect_server.__file__).parent
-        assert (parent / "turn_log_viewer.html").exists()
-        assert (parent / "inspect.html").exists()
-        assert (parent / "prose.html").exists()
+        assert set(PAGES.values()) == {
+            "inspect.html", "turn_log_viewer.html", "prose.html",
+        }
+        for page in PAGES.values():
+            assert (parent / page).exists()
+        for asset in STATIC_ASSETS:
+            assert (parent / "static" / asset).exists()
+
+
+class TestSharedNav:
+    """Every page reaches every other page through one nav module.
+
+    Hand-written per-page header links drifted (the viewer could not
+    reach the prose editor at all), so the site map lives in
+    ``static/nav.js`` and each page only declares which section it IS.
+    """
+
+    def _nav_source(self) -> str:
+        from graph_context.orchestrator import inspect_server
+
+        parent = Path(inspect_server.__file__).parent
+        return (parent / "static" / "nav.js").read_text()
+
+    def test_the_nav_module_maps_every_served_page(self) -> None:
+        source = self._nav_source()
+        for route in ("/", "/logs", "/prose"):
+            assert f'href: "{route}"' in source
+
+    @pytest.mark.parametrize(
+        ("page", "section"),
+        [("inspect.html", "inspection"), ("turn_log_viewer.html", "logs"),
+         ("prose.html", "prose")],
+    )
+    def test_each_page_mounts_the_shared_nav(self, page, section) -> None:
+        from graph_context.orchestrator import inspect_server
+
+        parent = Path(inspect_server.__file__).parent
+        html = (parent / page).read_text()
+        assert f'data-gc-nav="{section}"' in html
+        # ABSOLUTE: the viewer is also served under /runs/<id>/log, where
+        # a relative src would resolve into the run directory and 404.
+        assert 'src="/static/nav.js"' in html
+
+    def test_the_nav_module_serves_as_javascript(self, server) -> None:
+        base, _ = server
+        with urllib.request.urlopen(f"{base}/static/nav.js", timeout=5) as res:
+            assert res.status == 200
+            assert "javascript" in res.headers["Content-Type"]
+            assert b"SECTIONS" in res.read()
 
 
 # -- prose routes (WP43) ------------------------------------------------
