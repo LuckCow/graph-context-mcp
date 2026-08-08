@@ -225,12 +225,14 @@ async def schedule(
     prompt: str = "",
     message: str = "",
     mode: str = "",
+    document_type: str = "",
     node_id: str = "",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.schedule_tool(
         _services(ctx), action=action, name=name, schedule=schedule,
-        prompt=prompt, message=message, mode=mode, node_id=node_id,
+        prompt=prompt, message=message, mode=mode,
+        document_type=document_type, node_id=node_id,
     )
 
 

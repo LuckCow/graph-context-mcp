@@ -927,6 +927,48 @@ class TestScheduledTurn:
         orchestrator = handler.routes[CHAT].orchestrator
         assert orchestrator.mode_of(f"anytype:{CHAT}") == "space_setup"
 
+    async def test_a_prompt_turn_carries_the_events_document_type(
+        self,
+    ) -> None:
+        # ADR 057: the due event's document type reaches the pipeline,
+        # so the turn's node of that type cards on the posted reply.
+        # A real journal (the _route helper wires none) -- attach
+        # stamping reads the turn's mutations from it.
+        from graph_context.application.mutation_journal import MutationJournal
+        from graph_context.application.scheduler import DueEvent
+        from tests.orchestrator.mode_fixtures import fiction_registry
+
+        create = ToolCall("create_node", {
+            "type": "Character", "name": "Weekly Report", "summary": "s",
+        })
+        services = build_services(
+            InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+            SessionState(project="Ashfall"), journal=MutationJournal(),
+        )
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver([
+                LLMTurn(tool_calls=(create,)),
+                LLMTurn(reply="Wrote this week's report."),
+            ]),
+            profile=FICTION, registry=fiction_registry(),
+        )
+        handler = _handler(
+            routes={CHAT: ChannelRoute(orchestrator=orchestrator)}
+        )
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="newsletter", prompt="Compile it.",
+            session_key=f"anytype:{CHAT}", document_type="Character",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        report = repository.graph.find_by_name("Weekly Report")[0]
+        reply_message = recorder.messages[-1]
+        assert report.id in tuple(reply_message["attachments"])
+
     async def test_an_unset_mode_fires_in_the_default_not_the_chats_mode(
         self,
     ) -> None:

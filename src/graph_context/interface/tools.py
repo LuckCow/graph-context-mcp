@@ -349,16 +349,20 @@ async def schedule_tool(
     prompt: str = "",
     message: str = "",
     mode: str = "",
+    document_type: str = "",
     node_id: str = "",
 ) -> str:
     scheduler = services.scheduler
     if action == "set":
         # Modes are addressed by slug everywhere (registry keys, /mode);
         # slugify here so "Space Setup" and "space_setup" both land.
+        # document_type is NOT slugified -- it's a node type name like
+        # "Report", matched against the space's types at fire time.
         mode_slug = slugify(mode) if mode.strip() else ""
         node, next_at = await scheduler.set(
             name, schedule, prompt, services.session_key,
             message=message, mode=mode_slug,
+            document_type=document_type.strip(),
         )
         await _note_mutation(services)
         when = (
@@ -375,6 +379,11 @@ async def schedule_tool(
                 "at fire time an LLM turn runs the stored prompt in mode: "
                 f"{mode_slug or '(space default)'}"
             )
+            if document_type.strip():
+                kind += (
+                    f"; its output lands in a {document_type.strip()!r} "
+                    "object (the chat gets a summary + link)"
+                )
         return (
             f"scheduled {node.name!r} (id={node.id}); next fire: {when}; "
             f"{kind}. {_clock_line(scheduler)}. Verify the next-fire time "
@@ -393,9 +402,13 @@ async def schedule_tool(
         for view in views:
             target = view.session_key or "(default chat)"
             mode_note = f", mode={view.mode}" if view.mode else ""
+            doc_note = (
+                f", document={view.document_type}" if view.document_type
+                else ""
+            )
             lines.append(
                 f"- {view.node.name} (id={view.node.id}, chat={target}"
-                f"{mode_note}) -- {view.status}"
+                f"{mode_note}{doc_note}) -- {view.status}"
             )
             if view.message.strip():
                 lines.append(f"  message: {_schedule_excerpt(view.message)}")

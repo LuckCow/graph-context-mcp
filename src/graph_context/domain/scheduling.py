@@ -46,6 +46,13 @@ FIELD_MESSAGE = "gc_schedule_message"
 # Stored as an opaque text label like SessionState.mode; the orchestrator
 # resolves it at fire time and degrades unknown names to the default.
 FIELD_MODE = "gc_schedule_mode"
+# The node TYPE name a fired prompt event's output lands in (ADR 057):
+# the turn runs under ADR 048's document discipline -- write ONE object
+# of this type, post a summary + link, never the full text. Lenient text
+# like FIELD_MODE: a typo surfaces at fire time as a create_node error
+# the model self-corrects. Prompt events only -- a verbatim message runs
+# no turn, so nothing could write a document.
+FIELD_DOCUMENT_TYPE = "gc_schedule_document_type"
 FIELD_LAST_FIRED = "gc_last_fired"
 FIELD_STATUS = "gc_schedule_status"
 # The delivery target: which chat's session a fired event speaks into.

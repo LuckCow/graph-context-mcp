@@ -119,6 +119,12 @@ set, the message wins and the prompt is ignored.
 - Schedule mode -- optional, prompt events only: the name of the \
 Activity Mode the fired turn runs in. Empty runs the space's default \
 mode (never the chat's current mode).
+- Schedule document type -- optional, prompt events only: a node type \
+name like "Report". The fired turn writes its output into ONE object of \
+that type and posts only a short summary plus the object link -- use it \
+for recurring long-form output (newsletters, digests) that would flood \
+the chat. Needs a mode with the editing tools; empty posts the full \
+reply into the chat as usual.
 - Schedule status -- Pending events fire; set Completed or Cancelled to \
 stop one, or back to Pending to re-enable it. Empty counts as Pending. \
 The assistant marks a one-shot Completed after it fires.

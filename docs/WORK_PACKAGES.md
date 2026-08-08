@@ -2794,6 +2794,33 @@ bundle rebuild.
 
 ---
 
+## WP51 — Scheduled Events: per-schedule document output (ADR 057) — **shipped 2026-08-07**
+
+**Status:** complete. A prompt event may name
+`gc_schedule_document_type` ("Schedule document type"; lenient TEXT
+like `gc_schedule_mode` — type names are live space data, typos
+degrade at fire time as a self-correctable `create_node` error): the
+fired turn runs under ADR 048's document discipline — output into ONE
+node of that type, the chat gets a short summary plus the object card
+instead of a full newsletter-sized post. Mechanically a turn-local
+`ModeSpec` overlay: `DueEvent` carries the type, `run_scheduled`
+passes `handle_message(document_type=…)`, and the pipeline — AFTER
+the ADR 055 mode-pin resolution — does `dataclasses.replace(spec,
+document_type=…, capture=None)` so `DOCUMENT_GUIDANCE`, attach
+stamping, and cards all ride the existing ADR 048 path unchanged
+(`replace` re-runs `__post_init__`; the `mutating` gate and
+`capture=None` keep it valid). A read-only effective mode degrades
+loudly (warning log, turn runs without the override — mutation tools
+are never granted implicitly); the per-schedule type beats a pinned
+document mode's own; message-wins leaves it inert (no turn, no
+document); the `schedule` tool's `set` rejects it with `message`,
+echoes the document target, and `list` renders `document=<type>`. The
+minted property rides the existing `SCHEDULED_PROPERTIES` derivations
+(inline mint, retrofit, reflection) and the seeded explainer teaches
+it.
+
+---
+
 ## Sequencing
 
 ```

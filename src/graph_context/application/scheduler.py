@@ -108,6 +108,7 @@ class ScheduledEventView:
     session_key: str
     message: str = ""  # verbatim no-LLM post (ADR 055)
     mode: str = ""  # Activity Mode name for the fired turn; "" = default
+    document_type: str = ""  # node type the output lands in (ADR 057)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +118,9 @@ class DueEvent:
     Exactly one of ``message``/``prompt`` is populated (ADR 055):
     ``message`` fires as a verbatim harness post with no model turn, so
     ``mode`` rides only on prompt events -- "" pins the fired turn to
-    the space's default mode, never the chat's ambient one.
+    the space's default mode, never the chat's ambient one. So does
+    ``document_type`` (ADR 057): the node type the fired turn's output
+    lands in, "" posts the reply into the chat as usual.
     """
 
     node_id: NodeId
@@ -126,6 +129,7 @@ class DueEvent:
     session_key: str
     message: str = ""
     mode: str = ""
+    document_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,12 +179,16 @@ class Scheduler:
         *,
         message: str = "",
         mode: str = "",
+        document_type: str = "",
     ) -> tuple[Node, datetime | None]:
         """Create a Scheduled Event; returns the node and its next fire time.
 
         Exactly one of ``prompt`` (an LLM turn follows the instructions
         at fire time, optionally pinned to ``mode``) or ``message`` (the
-        text posts to the chat verbatim, no LLM turn) -- ADR 055. A
+        text posts to the chat verbatim, no LLM turn) -- ADR 055.
+        ``document_type`` (ADR 057, prompt events only) names the node
+        type the fired turn's output lands in -- the chat gets a summary
+        plus the object link instead of the full text. A
         one-shot in the past is rejected with the current server time so
         the caller (an LLM doing date math) can self-correct. A recurring
         event is armed immediately -- anchored at creation -- so its first
@@ -189,6 +197,7 @@ class Scheduler:
         if not name.strip():
             raise GraphContextError("a scheduled event needs a non-empty 'name'")
         prompt, message, mode = prompt.strip(), message.strip(), mode.strip()
+        document_type = document_type.strip()
         if not prompt and not message:
             raise GraphContextError(
                 "a scheduled event needs exactly ONE of 'prompt' -- "
@@ -210,6 +219,13 @@ class Scheduler:
                 "'mode' only applies to 'prompt' events; a 'message' posts "
                 "verbatim with no LLM turn, so no mode runs -- drop 'mode' "
                 "or switch to 'prompt'"
+            )
+        if message and document_type:
+            raise GraphContextError(
+                "'document_type' only applies to 'prompt' events; a "
+                "'message' posts verbatim with no LLM turn, so nothing "
+                "writes a document -- drop 'document_type' or switch to "
+                "'prompt'"
             )
         if mode and self.mode_names is not None:
             known = list(self.mode_names())
@@ -237,6 +253,11 @@ class Scheduler:
             fields[scheduling.FIELD_MESSAGE] = message
         if mode:
             fields[scheduling.FIELD_MODE] = mode
+        # No vocabulary check, deliberately (ADR 057): type names are
+        # lenient text like mode names -- a typo surfaces at fire time as
+        # a create_node error the model self-corrects.
+        if document_type:
+            fields[scheduling.FIELD_DOCUMENT_TYPE] = document_type
         if isinstance(schedule, scheduling.Cron):
             fields[scheduling.FIELD_LAST_FIRED] = _stamp(now)  # armed at birth
         node = await self._repository.create_node(NodeDraft(
@@ -271,6 +292,9 @@ class Scheduler:
                 session_key=node.fields.get(scheduling.FIELD_SESSION_KEY, ""),
                 message=node.fields.get(scheduling.FIELD_MESSAGE, ""),
                 mode=node.fields.get(scheduling.FIELD_MODE, "").strip(),
+                document_type=node.fields.get(
+                    scheduling.FIELD_DOCUMENT_TYPE, ""
+                ).strip(),
             )
             for node in self._scheduled_nodes()
         ]
@@ -311,8 +335,9 @@ class Scheduler:
                     # THE one home of the both-set rule (ADR 055): a
                     # stored message wins over a stored prompt -- firing
                     # the human's exact words beats an inert reminder;
-                    # `list` surfaces the conflict. Mode never rides a
-                    # message event (no turn runs).
+                    # `list` surfaces the conflict. Mode and document
+                    # type never ride a message event (no turn runs, so
+                    # nothing could write a document either).
                     fire.append(DueEvent(
                         node_id=node.id,
                         name=node.name,
@@ -328,6 +353,9 @@ class Scheduler:
                     or node.name,
                     session_key=session_key,
                     mode=node.fields.get(scheduling.FIELD_MODE, "").strip(),
+                    document_type=node.fields.get(
+                        scheduling.FIELD_DOCUMENT_TYPE, ""
+                    ).strip(),
                 ))
         return SchedulerTick(fire=tuple(fire), arm=tuple(arm))
 

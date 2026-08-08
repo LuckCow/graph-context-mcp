@@ -147,6 +147,32 @@ class TestSet:
                 message="Taxes are due.", mode="research",
             )
 
+    async def test_document_type_with_message_is_rejected(
+        self, scheduler: Scheduler,
+    ) -> None:
+        with pytest.raises(GraphContextError, match="nothing writes a document"):
+            await scheduler.set(
+                "confused", "2027-01-01T09:00", "", "",
+                message="Taxes are due.", document_type="Report",
+            )
+
+    async def test_a_document_type_is_stored_unchecked_on_prompt_events(
+        self, scheduler: Scheduler, repository: InMemoryGraphRepository,
+    ) -> None:
+        # Lenient text like mode (ADR 057): no type vocabulary at set
+        # time even where modes have one -- a typo surfaces at fire time
+        # as a create_node error the model self-corrects.
+        scheduler.mode_names = lambda: ["assistant", "research"]
+        node, _ = await scheduler.set(
+            "newsletter", "0 9 * * 5", "Compile the weekly digest.", "",
+            mode="research", document_type="Totally Unknown Type",
+        )
+        stored = repository.graph.node(node.id)
+        assert (
+            stored.fields[scheduling.FIELD_DOCUMENT_TYPE]
+            == "Totally Unknown Type"
+        )
+
     async def test_unknown_mode_is_rejected_when_the_vocabulary_is_wired(
         self, scheduler: Scheduler,
     ) -> None:
@@ -292,6 +318,17 @@ class TestTick:
         due = scheduler.tick().fire
         assert due[0].mode == "research" and due[0].message == ""
 
+    async def test_a_prompt_event_carries_its_document_type(
+        self, scheduler: Scheduler, clock: Clock,
+    ) -> None:
+        await scheduler.set(
+            "newsletter", "2027-04-09T09:00", "Compile the digest.", "",
+            document_type="Report",
+        )
+        clock.advance_to("2027-04-09 09:00:00")
+        due = scheduler.tick().fire
+        assert due[0].document_type == "Report"
+
     async def test_the_message_wins_when_a_human_stored_both(
         self, scheduler: Scheduler, repository: InMemoryGraphRepository,
         clock: Clock,
@@ -305,12 +342,14 @@ class TestTick:
                 scheduling.FIELD_PROMPT: "Think hard about taxes.",
                 scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
                 scheduling.FIELD_MODE: "research",
+                scheduling.FIELD_DOCUMENT_TYPE: "Report",
             },
         ))
         clock.advance_to("2026-07-12 17:00:00")
         due = scheduler.tick().fire
         assert due[0].message == "Taxes are due April 15."
         assert due[0].prompt == "" and due[0].mode == ""
+        assert due[0].document_type == ""  # no turn runs, no document
 
     async def test_a_fired_event_with_no_prompt_falls_back_to_its_name(
         self, scheduler: Scheduler, repository: InMemoryGraphRepository,
@@ -409,3 +448,14 @@ class TestCancelAndList:
         assert status["soon"] == "completed (once at 2026-07-12 17:00)"
         assert status["gone"] == "cancelled (once at 2027-05-01 09:00)"
         assert status["broken"].startswith("invalid:")
+
+    async def test_list_views_carry_the_document_type(
+        self, scheduler: Scheduler,
+    ) -> None:
+        await scheduler.set(
+            "newsletter", "0 9 * * 5", "Compile.", "",
+            document_type="Report",
+        )
+        await scheduler.set("plain", "0 9 * * 1", "p", "")
+        docs = {v.node.name: v.document_type for v in scheduler.events()}
+        assert docs == {"newsletter": "Report", "plain": ""}

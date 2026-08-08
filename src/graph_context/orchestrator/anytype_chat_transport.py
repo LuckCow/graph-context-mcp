@@ -773,7 +773,10 @@ class AnytypeChatTurnHandler:
         is then remembered as an assistant message so the model's next
         turn knows it went out. A prompt event runs a turn ALWAYS
         mode-pinned: the event's own mode, or the space default when it
-        names none -- never the chat's ambient mode.
+        names none -- never the chat's ambient mode. An event naming a
+        document type (ADR 057) has that turn write its output into ONE
+        node of the type and card it on the reply instead of posting the
+        full text.
         """
         route = self.routes[chat_id]
         if due.message:
@@ -793,6 +796,7 @@ class AnytypeChatTurnHandler:
                 # Intent nodes point back at the event node that fired.
                 origin=f"schedule:{due.node_id}",
                 mode=due.mode,
+                document_type=due.document_type,
             )
         await self.deliver_events(events, reply, chat_id=chat_id)
 

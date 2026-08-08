@@ -128,9 +128,37 @@
   .cm-content { padding: 16px 18px 40vh; caret-color: var(--ink); }
   .cm-line { padding: 0; }
   .cm-cursor { border-left-color: var(--ink); }
+  /* !important: the bundle's own focused-selection rule is opaque and
+     higher-specificity; translucency is load-bearing once the layer
+     sits over the text (below). The saturate() boost is what keeps a
+     review-state color READABLE through the selection: the state tint
+     under the rect gets more vivid, not painted over. */
   .cm-editor .cm-selectionBackground,
   .cm-editor.cm-focused .cm-selectionBackground {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent)
+      !important;
+    -webkit-backdrop-filter: saturate(2.6);
+    backdrop-filter: saturate(2.6);
+  }
+  @media (prefers-color-scheme: dark) {
+    .cm-editor .cm-selectionBackground,
+    .cm-editor.cm-focused .cm-selectionBackground {
+      background: color-mix(in srgb, var(--accent) 26%, transparent)
+        !important;
+      -webkit-backdrop-filter: saturate(2.6) brightness(1.25);
+      backdrop-filter: saturate(2.6) brightness(1.25);
+    }
+  }
+  /* drawSelection paints the selection BEHIND the text (inline
+     z-index -1), so the opaque review-state backgrounds above swallow
+     it. Lift the layer over the content: the translucent accent tint
+     stacks ON the state color, so a selection across a highlight
+     reads as an accent-shifted version of that highlight instead of
+     vanishing. pointer-events must stay off or the lifted layer would
+     eat taps meant for the editor. */
+  .cm-editor .cm-selectionLayer {
+    z-index: 1 !important;
+    pointer-events: none;
   }
   /* markdown syntax: readable raw source, markup dimmed via lezer tags */
   .tok-heading { font-weight: 700; font-size: 1.25em; }

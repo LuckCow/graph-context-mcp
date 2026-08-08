@@ -26,6 +26,10 @@ class TestScheduledEventBootstrap:
         assert names[mapping.PROP_SCHEDULE_PROMPT] == "Schedule prompt"
         assert names[mapping.PROP_SCHEDULE_MESSAGE] == "Schedule message"
         assert names[mapping.PROP_SCHEDULE_MODE] == "Schedule mode"
+        assert (
+            names[mapping.PROP_SCHEDULE_DOCUMENT_TYPE]
+            == "Schedule document type"
+        )
         assert names[mapping.PROP_SCHEDULE_STATUS] == "Schedule status"
         assert names[mapping.PROP_LAST_FIRED] == "Last fired"
         assert names[mapping.PROP_SESSION_KEY] == "Session key"
@@ -55,6 +59,8 @@ class TestScheduledEventBootstrap:
         # ADR 055: the explainer teaches the one-of choice and the mode.
         assert "Schedule message" in body and "Schedule mode" in body
         assert "the message wins" in body
+        # ADR 057: and the per-schedule document output option.
+        assert "Schedule document type" in body
 
     async def test_rerunning_bootstrap_does_not_duplicate_the_example(
         self, mock, client, repo

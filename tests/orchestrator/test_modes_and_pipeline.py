@@ -984,6 +984,102 @@ class TestDocumentModeCards:
         assert reply.attach == (intent.id,)
 
 
+class TestScheduledDocumentOverride:
+    """ADR 057: a scheduled event's document_type overlays ADR 048's
+    document discipline on that ONE turn's resolved spec -- node + card
+    instead of the full text in chat, whatever mode the turn runs in."""
+
+    async def test_a_document_pin_overlays_the_resolved_mode(self) -> None:
+        # world_modeling mutates but has no document_type of its own;
+        # the pin makes this turn card its Chapter like a document mode.
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One."),
+        ])
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="world_modeling",
+            document_type="Chapter",
+        )
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert chapter.id in reply.attach
+
+    async def test_the_pin_displaces_a_capture_mode_without_error(
+        self,
+    ) -> None:
+        capture_spec = ModeSpec(
+            name="journal", goal="Capture replies.", mutating=True,
+            capture=CapturePolicy(artifact_type="Chapter", min_chars=10),
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One, long enough to capture."),
+        ], extra_specs=(capture_spec,))
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="journal", document_type="Chapter",
+        )
+        assert not [e for e in events if e.kind == "error"]
+        # capture=None for the turn: the model's own Chapter is the only
+        # one -- no artifact node was minted from the reply text.
+        chapters = [
+            n for n in services.repository.graph.nodes()
+            if n.type == "Chapter"
+        ]
+        assert [n.name for n in chapters] == ["Chapter One"]
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert chapters[0].id in reply.attach
+
+    async def test_a_read_only_mode_ignores_the_pin_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(reply="Nothing to write."),
+        ])
+        with caplog.at_level("WARNING"):
+            events = await orchestrator.handle_message(
+                "s1", "u1", "Draft it.", mode="authoring",
+                document_type="Chapter",
+            )
+        assert any("not mutating" in r.message for r in caplog.records)
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert reply.attach == ()  # no override, no document card
+
+    async def test_the_pin_never_persists_on_the_session(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+            LLMTurn(tool_calls=(ToolCall("create_node", {
+                "type": "Chapter", "name": "Chapter Two", "summary": "s",
+            }),)),
+            LLMTurn(reply="Drafted another."),
+        ])
+        await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="world_modeling",
+            document_type="Chapter",
+        )
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Again.", mode="world_modeling",
+        )
+        (second,) = services.repository.graph.find_by_name("Chapter Two")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert second.id not in reply.attach
+
+    async def test_the_pin_overrides_a_document_modes_own_type(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER, CREATE_MIRA)),
+            LLMTurn(reply="Wrote the report."),
+        ], extra_specs=(DOCUMENT_SPEC,))
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="chapters",
+            document_type="Character",
+        )
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (mira,) = services.repository.graph.find_by_name("Mira")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert mira.id in reply.attach
+        assert chapter.id not in reply.attach
+
+
 class TestRevisionRecording:
     """WP41 (ADR 049): the turn boundary records one attributed revision
     per touched tracked node; the change tick records human edits and

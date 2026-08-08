@@ -437,6 +437,7 @@ class Orchestrator:
         sender: str = "", observer: TurnObserver | None = None,
         images: Sequence[ImageAttachment] = (),
         mode: str | None = None,
+        document_type: str = "",
     ) -> list[ReplyEvent]:
         """``images`` (WP23) are inbound image attachments riding this
         turn's user message; the driver shows them to the model as native
@@ -447,7 +448,14 @@ class Orchestrator:
         how scheduled turns always arrive -- runs the named mode, with
         unknown or empty names degrading to the space default. The pin
         never switches or persists the session's mode, and a ``/``-command
-        turn ignores it (commands run before mode resolution)."""
+        turn ignores it (commands run before mode resolution).
+
+        ``document_type`` (ADR 057, scheduled callers only) overlays ADR
+        048's document discipline on THIS turn's resolved spec: the
+        output lands in ONE node of that type, the chat gets a summary
+        plus the object card. Turn-local like the mode pin; requires a
+        mutating mode -- a read-only one degrades loudly and runs
+        unchanged."""
         state = await self._session(session_id)
         override = self._override_spec(mode) if mode is not None else None
         stripped = text.strip()
@@ -480,6 +488,22 @@ class Orchestrator:
             return command_events
 
         spec = override or self._spec(state)
+        if document_type.strip():
+            if spec.mutating:
+                # ADR 057: overlay the schedule's document discipline on
+                # this turn's resolved spec; capture=None keeps ModeSpec's
+                # document/capture mutual exclusion valid (replace re-runs
+                # __post_init__). Per-schedule type beats a document
+                # mode's own.
+                spec = dataclasses.replace(
+                    spec, document_type=document_type.strip(), capture=None
+                )
+            else:
+                logger.warning(
+                    "scheduled document_type %r ignored: mode %r is not "
+                    "mutating; the turn runs without the document override",
+                    document_type, spec.name,
+                )
         # WP23: the outbox is TURN-scoped -- files a crashed earlier turn
         # left behind must not ride out with this one's reply. WP33: same
         # discipline for schema drafts awaiting their confirm messages.

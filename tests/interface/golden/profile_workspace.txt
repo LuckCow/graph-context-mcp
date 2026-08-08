@@ -299,12 +299,21 @@ Actions:
                         the job, e.g. a web-search mode for a newsletter
                         digest). Omitted = the space's DEFAULT mode --
                         never the chat's current mode.
+            document_type -- optional, prompt events only: a node type
+                        name (e.g. "Report"). The fired turn writes its
+                        output into ONE object of that type and posts a
+                        short summary + link instead of the full text --
+                        use it for recurring long-form output
+                        (newsletters, digests) that would flood the
+                        chat. Needs a mode with the editing tools; on a
+                        read-only mode it is ignored.
             The response echoes the computed next-fire time and the
             current server time -- CHECK the math against what the user
             asked for ("a week before April 15" -> April 8).
   list   -- every scheduled event: id, schedule and next fire, target
-            chat, mode, message or prompt, status. Also shows the
-            current server time -- call this when you need today's date.
+            chat, mode, document type, message or prompt, status. Also
+            shows the current server time -- call this when you need
+            today's date.
   cancel -- stop one; node_id is the id shown by list, or the exact
             event name. Sets its "Schedule status" to Cancelled; the
             object and its schedule stay in Anytype, and the user can
@@ -313,7 +322,8 @@ Actions:
 A recurring event fires at most once per occurrence; occurrences missed
 while the system was down collapse into ONE late fire. Events live as
 "Scheduled Event" objects in Anytype (fields: Schedule, Schedule
-message, Schedule prompt, Schedule mode, Schedule status, Last fired),
+message, Schedule prompt, Schedule mode, Schedule document type,
+Schedule status, Last fired),
 so the user can view, edit, or create them there too -- an empty status
 counts as Pending, and a fired one-shot is marked Completed
 automatically.

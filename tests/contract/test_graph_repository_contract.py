@@ -1201,6 +1201,7 @@ class ScheduledEventContract:
                 scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
                 scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
                 scheduling.FIELD_MODE: "research",
+                scheduling.FIELD_DOCUMENT_TYPE: "Report",
                 scheduling.FIELD_STATUS: scheduling.STATUS_PENDING,
                 scheduling.FIELD_SESSION_KEY: "anytype:chat-1",
             },
@@ -1218,6 +1219,8 @@ class ScheduledEventContract:
         # reflected properties too, same as the rest of the surface.
         assert stored.fields[scheduling.FIELD_MESSAGE] == "Taxes are due April 15."
         assert stored.fields[scheduling.FIELD_MODE] == "research"
+        # ADR 057: the document-type property reflects the same way.
+        assert stored.fields[scheduling.FIELD_DOCUMENT_TYPE] == "Report"
         assert stored.fields[scheduling.FIELD_SESSION_KEY] == "anytype:chat-1"
         # The status is a SELECT on the Anytype backend: the write
         # auto-creates the option tag (ADR 012) and reads back as its

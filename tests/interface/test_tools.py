@@ -914,6 +914,35 @@ class TestScheduleTool:
         )
         assert "mode: (space default)" in out
 
+    async def test_set_with_document_type_echoes_the_document_target(
+        self,
+    ) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="newsletter", schedule="0 9 * * 5",
+            prompt="Compile the weekly digest.", document_type="Report",
+        )
+        assert "output lands in a 'Report' object" in out
+        assert "summary + link" in out
+
+    async def test_list_shows_the_document_type(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="newsletter", schedule="0 9 * * 5",
+            prompt="Compile.", document_type="Report",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "document=Report" in out
+
+    async def test_document_type_with_message_is_rejected(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+            message="m", document_type="Report",
+        )
+        assert out.startswith("ERROR:")
+        assert "nothing writes a document" in out
+
     async def test_neither_and_both_errors_teach_the_distinction(self) -> None:
         services = self._services()
         out = await tools.schedule_tool(

@@ -281,6 +281,7 @@ PROP_SCHEDULE = scheduling.FIELD_SCHEDULE
 PROP_SCHEDULE_PROMPT = scheduling.FIELD_PROMPT
 PROP_SCHEDULE_MESSAGE = scheduling.FIELD_MESSAGE
 PROP_SCHEDULE_MODE = scheduling.FIELD_MODE
+PROP_SCHEDULE_DOCUMENT_TYPE = scheduling.FIELD_DOCUMENT_TYPE
 PROP_LAST_FIRED = scheduling.FIELD_LAST_FIRED
 PROP_SCHEDULE_STATUS = scheduling.FIELD_STATUS
 SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
@@ -290,6 +291,8 @@ SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     # Deliberately text, not select (ADR 055): mode names are live space
     # data the registry owns -- pre-seeded options would go stale.
     PROP_SCHEDULE_MODE: "text",
+    # Same rationale (ADR 057): node type names are live space data.
+    PROP_SCHEDULE_DOCUMENT_TYPE: "text",
     PROP_SCHEDULE_STATUS: "select",
     PROP_LAST_FIRED: "text",
 }
@@ -336,6 +339,7 @@ PROPERTY_DISPLAY_NAMES: dict[str, str] = {
     PROP_SCHEDULE_PROMPT: "Schedule prompt",
     PROP_SCHEDULE_MESSAGE: "Schedule message",
     PROP_SCHEDULE_MODE: "Schedule mode",
+    PROP_SCHEDULE_DOCUMENT_TYPE: "Schedule document type",
     PROP_SCHEDULE_STATUS: "Schedule status",
     PROP_LAST_FIRED: "Last fired",
     PROP_SESSION_KEY: "Session key",
