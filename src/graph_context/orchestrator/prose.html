@@ -12,6 +12,8 @@
     --add-bg: #e7f5ef; --del-bg: #fdecea;
     --ink-bg: #ede7fb;  /* human-typed words: lavender, distinct from
                            the green/amber/red state highlights */
+    --ink-fg: #6d4fc2;  /* the lavender layer's solid bar colour (--ink is
+                           body text, unrelated despite the name) */
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -21,7 +23,7 @@
       --warn: #e0b24d; --warn-bg: #363018;
       --info: #67cfe8; --info-bg: #12313d;
       --add-bg: #17342a; --del-bg: #3a1f1c;
-      --ink-bg: #2b2343;
+      --ink-bg: #2b2343; --ink-fg: #a78bfa;
     }
   }
   * { box-sizing: border-box; }
@@ -45,6 +47,18 @@
   #save-state { font-size: 12px; color: var(--muted); white-space: nowrap; }
   #save-state.dirty { color: var(--warn); }
   #save-state.err { color: var(--err); }
+  /* The layer legend rides the frozen chrome so the toggles stay reachable
+     from anywhere in a long document -- and collapses from the header
+     button, because a wrapped row of seven chips is real estate a phone
+     needs back once the reader knows the colours. Both the bar and its
+     opener only exist with a document open. */
+  #legend-bar {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 5px 14px;
+  }
+  #legend-bar, #legend-toggle { display: none; }
+  body.has-doc #legend-toggle { display: inline-flex; }
+  body.has-doc.legend-open #legend-bar { display: block; }
   main { padding: 14px; max-width: 760px; margin: 0 auto; }
   h2 { font-size: 15px; margin: 18px 2px 8px; }
   a { color: var(--accent); text-decoration: none; }
@@ -88,32 +102,51 @@
   .badge.open { background: var(--warn-bg); color: var(--warn); }
   .badge.addressed { background: var(--ok-bg); color: var(--ok); }
 
-  /* The legend IS the view-mode control (WP50): one chip per highlight
-     concern, the active chip lit, swatches double as samples. */
-  .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 8px 2px;
+  /* The legend IS the layer control (ADR 056 amendment): one chip per
+     highlight layer, independently on/off, the swatch doubling as the
+     sample. Swatch classes are derived from the JS layer key, so the
+     editor's .cm-fill-<key> and the legend's .sw-<key> stay one
+     vocabulary. */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 0 auto;
+    max-width: 1120px;
     color: var(--muted); font-size: 12px; align-items: center; }
-  .legend mark { border-radius: 3px; color: inherit; }
-  .legend mark.st-approved { background: var(--ok-bg); }
-  .legend mark.st-locked { background: var(--err-bg); }
-  .legend mark.st-needs { background: var(--warn-bg); }
-  .legend mark.st-minor { background: var(--info-bg); }
-  .legend mark.ink-human { background: var(--ink-bg); }
-  .legend mark.cmt { background: none;
-    border-bottom: 2px dotted var(--accent); }
+  .legend mark.sw { border-radius: 3px; color: inherit;
+    padding: 0 4px; border: 1px solid transparent; }
+  .legend mark.sw-locked { --sw: var(--err); background: var(--err-bg); }
+  .legend mark.sw-needs_change { --sw: var(--warn);
+    background: var(--warn-bg); }
+  .legend mark.sw-minor_revisions { --sw: var(--info);
+    background: var(--info-bg); }
+  .legend mark.sw-approved { --sw: var(--ok); background: var(--ok-bg); }
+  .legend mark.sw-human { --sw: var(--ink-fg); background: var(--ink-bg); }
+  .legend mark.sw-comments { --sw: var(--accent); background: none;
+    border-bottom: 2px dotted var(--accent); border-radius: 0; }
+  .legend mark.sw-blame { --sw: var(--accent); background: none;
+    box-shadow: inset 3px 0 var(--accent); }
+  /* Off reads as "this colour exists but isn't painted": the fill drops
+     out, its outline in the layer's own colour is what remains. */
+  .legend button.mini.off mark.sw { background: none; box-shadow: none;
+    border-style: dashed; border-color: var(--sw, currentColor); }
+  .legend button.mini.off { opacity: .6; }
   .legend button.mini { display: inline-flex; gap: 5px; align-items: center;
     color: var(--muted); }
   .legend button.mini.on { color: var(--accent); }
+  /* Phones pay a whole wrapped line for the affordance hint, on the one
+     layout where the frozen bar's height hurts most -- and where a
+     selection pops the action sheet by itself. */
+  @media (max-width: 899px) { .legend .hint { display: none; } }
 
-  .timeline { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
-  .timeline a {
-    font-size: 12px; padding: 3px 9px; border-radius: 16px;
-    background: var(--chip); color: var(--muted); white-space: nowrap;
-    border: 1px solid var(--line); min-height: 28px;
-    display: inline-flex; align-items: center;
+  /* Revision history is ONE dropdown, not a chip per revision: the strip
+     grew without bound and pushed the editor off the first screen on any
+     document with real history. */
+  .revs { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    margin: 8px 0 12px; }
+  .revs select {
+    font: inherit; font-size: 12.5px; min-height: 32px; max-width: 100%;
+    padding: 4px 8px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--chip); color: var(--ink); cursor: pointer;
   }
-  .timeline a.model { color: var(--accent); }
-  .timeline a.human { color: var(--ok); }
-  .timeline a:hover { text-decoration: none; border-color: var(--accent); }
+  .revs .last { font-size: 12px; color: var(--muted); }
 
   /* One slim strip: the paragraph under the caret (blame + badges). */
   #seg-info {
@@ -175,14 +208,25 @@
   }
   .tok-meta { color: var(--muted); }
   .tok-link, .tok-url { color: var(--accent); }
-  /* review-state highlights: one background per word run, priority
-     locked > needs_change > minor_revisions > approved > human-typed
-     (ADR 053 amendment) */
-  .cm-ink { background: var(--ink-bg); border-radius: 3px; }
-  .cm-approved { background: var(--ok-bg); border-radius: 3px; }
-  .cm-needs { background: var(--warn-bg); border-radius: 3px; }
-  .cm-minor { background: var(--info-bg); border-radius: 3px; }
-  .cm-locked { background: var(--err-bg); border-radius: 3px; }
+  /* Review-state highlights: one mark per word run carrying EVERY layer
+     that applies (ADR 056 amendment). The loudest enabled layer paints
+     the background -- priority locked > needs_change > minor_revisions >
+     approved > human-typed (ADR 053 amendment) -- and each remaining
+     layer stacks a solid bar under the word via --hl-bars, composed in
+     buildDecorations. box-shadow, not border-bottom: an outer shadow is
+     clipped outside the border box (so it reads as a clean stripe) and
+     costs no layout, so marking text never jostles the line height.
+     box-decoration-break is load-bearing: a run that WRAPS is one
+     fragmented inline box, and the default `slice` draws the shadow
+     once around the unfragmented box, so the bars land under a single
+     line at the full run's width. `clone` gives every line its own. */
+  .cm-hl { border-radius: 3px; box-shadow: var(--hl-bars, none);
+    -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+  .cm-fill-human { background: var(--ink-bg); }
+  .cm-fill-approved { background: var(--ok-bg); }
+  .cm-fill-needs_change { background: var(--warn-bg); }
+  .cm-fill-minor_revisions { background: var(--info-bg); }
+  .cm-fill-locked { background: var(--err-bg); }
   /* blame tick: first line of each paragraph, no layout shift */
   .cm-blame-model { box-shadow: inset 3px 0 var(--accent); }
   .cm-blame-human { box-shadow: inset 3px 0 var(--ok); }
@@ -329,6 +373,8 @@
 <header>
   <div data-gc-nav="prose" data-home="#/"></div>
   <span class="spacer"></span>
+  <button class="mini" id="legend-toggle" aria-expanded="true"
+    aria-controls="legend-bar">highlights</button>
   <span id="save-state"></span>
   <span class="note" id="head-note"></span>
 </header>
@@ -344,6 +390,8 @@
   <div class="btn-row" id="bar-intent"><span class="label">intent</span></div>
   <div class="btn-row" id="bar-comment"><span class="label">note</span></div>
 </div></div>
+
+<div id="legend-bar"><div class="legend" id="legend"></div></div>
 </div>
 <script type="module" src="/static/nav.js"></script>
 
@@ -382,15 +430,38 @@ const INTENT_BADGE_ORDER = ["locked", "needs_change", "minor_revisions"];
 const TOKEN_KEY = "gc_prose_token";
 const AUTOSAVE_MS = 2500;
 
-// WP50: which highlight concern the editor shows. Single-concern modes
-// UNMASK layers the "all" priority hides (authorship shows lavender on
-// locked words too -- spans carry the full author/status/intent triple).
-const VIEW_KEY = "gc_prose_view_mode";
-const VIEW_MODES = [
-  "all", "authorship", "status", "intent", "comments", "none",
+// Which highlight layers the editor paints (ADR 056 amendment, replacing
+// WP50's six exclusive view modes). Every layer toggles independently and
+// a word shows ALL of its enabled layers at once -- spans carry the full
+// author/status/intent triple, so priority no longer has to mask.
+// The order IS the fill priority: the first enabled layer a span matches
+// paints its background, the rest stack as bars beneath the word.
+const LAYER_KEY = "gc_prose_layers";
+const LAYERS = [
+  "locked", "needs_change", "minor_revisions", "approved", "human",
+  "comments", "blame",
 ];
-let viewMode = localStorage.getItem(VIEW_KEY) || "all";
-if (!VIEW_MODES.includes(viewMode)) viewMode = "all";
+const LAYER_LABEL = {
+  locked: "locked", needs_change: "needs change",
+  minor_revisions: "minor", approved: "approved", human: "human-typed",
+  comments: "comments", blame: "blame",
+};
+// Solid bar colour per text layer (the paler --*-bg tints are the fills).
+// comments/blame draw their own marks and never stack as bars.
+const BAR_COLOR = {
+  locked: "var(--err)", needs_change: "var(--warn)",
+  minor_revisions: "var(--info)", approved: "var(--ok)",
+  human: "var(--ink-fg)",
+};
+// Absent key = never chosen = every layer on; "" = every layer off.
+const storedLayers = localStorage.getItem(LAYER_KEY);
+const layersOn = new Set(storedLayers == null
+  ? LAYERS
+  : storedLayers.split(",").filter((k) => LAYERS.includes(k)));
+// Whether the frozen legend bar itself is expanded (default yes -- the
+// colours have to be discoverable before they can be dismissed).
+const LEGEND_KEY = "gc_prose_legend_open";
+let legendOpen = localStorage.getItem(LEGEND_KEY) !== "0";
 
 let writesEnabled = false;
 let knowWrites = false;   // spaces fetched at least once this page-load
@@ -545,30 +616,39 @@ const annotationsField = CM.StateField.define({
   provide: (field) => CM.EditorView.decorations.from(field),
 });
 
-function spanClass(status, intent, author) {
-  if (viewMode === "none" || viewMode === "comments") return "";
-  if (viewMode === "intent") {
-    if (intent === "locked") return "cm-locked";
-    if (intent === "needs_change") return "cm-needs";
-    if (intent === "minor_revisions") return "cm-minor";
-    return "";
+// The one toggle-aware seam: every text layer a span carries, in fill
+// priority order, minus the ones the reader switched off. Intent is
+// single-valued, so a span yields at most three (intent + approved +
+// human) -- one fill and up to two bars.
+function spanLayers(status, intent, author) {
+  const layers = [];
+  // "flexible" says nothing, so it has no colour and no toggle.
+  if (intent !== "flexible" && layersOn.has(intent)) layers.push(intent);
+  if (status === "approved" && layersOn.has("approved")) {
+    layers.push("approved");
   }
-  if (viewMode === "status") {
-    return status === "approved" ? "cm-approved" : "";
-  }
-  if (viewMode === "authorship") {
-    return status === "human" || author === "human" ? "cm-ink" : "";
-  }
-  // "all": first-match-wins priority.
-  if (intent === "locked") return "cm-locked";
-  if (intent === "needs_change") return "cm-needs";
-  if (intent === "minor_revisions") return "cm-minor";
-  if (status === "approved") return "cm-approved";
   // Lavender covers both human PROVENANCE: authorship (typed by the
   // human) and a human status mark. raw_ai stays unhighlighted -- its
   // meaning is "unreviewed model text", the page's neutral state.
-  if (status === "human" || author === "human") return "cm-ink";
-  return "";
+  if ((status === "human" || author === "human") && layersOn.has("human")) {
+    layers.push("human");
+  }
+  return layers;
+}
+
+// Loudest layer fills, the rest stack as 3px bars below the word. The
+// bars ride a custom property so one CSS rule composes any combination.
+function spanMark(layers) {
+  const spec = { class: "cm-hl cm-fill-" + layers[0] };
+  if (layers.length > 1) {
+    // 2px each: at most two stack, and 4px is what fits in the editor's
+    // half-leading -- deeper bars land under the NEXT line's fill, which
+    // paints over them.
+    const bars = layers.slice(1).map(
+      (key, i) => "0 " + (i + 1) * 2 + "px 0 0 " + BAR_COLOR[key]);
+    spec.attributes = { style: "--hl-bars:" + bars.join(",") };
+  }
+  return CM.Decoration.mark(spec);
 }
 
 // trim a range's trailing whitespace out of the highlight
@@ -582,16 +662,16 @@ function buildDecorations(data, state) {
   // span layout (prose_bridge._segment_rows, positional):
   // [start, end, author, status, intent]
   for (const span of data.spans) {
-    const cls = spanClass(span[3], span[4], span[2]);
-    if (!cls) continue;
+    const layers = spanLayers(span[3], span[4], span[2]);
+    if (!layers.length) continue;
     const from = data.map.toU16(span[0]);
     const to = trimTrailingWs(state, from, data.map.toU16(span[1]));
     if (to > from && to <= state.doc.length) {
-      ranges.push(CM.Decoration.mark({ class: cls }).range(from, to));
+      ranges.push(spanMark(layers).range(from, to));
     }
   }
   // Comment underlines stack ON TOP of state backgrounds (WP50).
-  if (viewMode === "all" || viewMode === "comments") {
+  if (layersOn.has("comments")) {
     for (const comment of data.comments || []) {
       if (!comment.anchor) continue;  // detached: panel-only
       const from = data.map.toU16(comment.anchor.start);
@@ -605,14 +685,16 @@ function buildDecorations(data, state) {
       }
     }
   }
-  for (const segment of data.segments) {
-    if (!segment.blame) continue;
-    const from = data.map.toU16(segment.start);
-    if (from > state.doc.length) continue;
-    const line = state.doc.lineAt(from);
-    ranges.push(CM.Decoration.line({
-      class: "cm-blame-" + segment.blame.author,
-    }).range(line.from));
+  if (layersOn.has("blame")) {
+    for (const segment of data.segments) {
+      if (!segment.blame) continue;
+      const from = data.map.toU16(segment.start);
+      if (from > state.doc.length) continue;
+      const line = state.doc.lineAt(from);
+      ranges.push(CM.Decoration.line({
+        class: "cm-blame-" + segment.blame.author,
+      }).range(line.from));
+    }
   }
   return CM.Decoration.set(ranges, true);
 }
@@ -678,46 +760,58 @@ function applyMarksLocally(targets, kind, value) {
   renderSegInfo(doc.segInfo);
 }
 
-// ---- the view-mode legend (WP50) ------------------------------------------
-// The legend is the control: one chip per highlight concern; the active
-// chip is lit; switching re-dispatches decorations from the retained
-// payload -- no refetch, and never through the router (the CM view and
-// scroll position must survive).
+// ---- the layer legend (ADR 056 amendment) ---------------------------------
+// The legend is the control: one chip per highlight layer, each an
+// independent toggle; flipping one re-dispatches decorations from the
+// retained payload -- no refetch, and never through the router (the CM
+// view and scroll position must survive).
+
+function renderLegendToggle() {
+  const btn = document.getElementById("legend-toggle");
+  btn.classList.toggle("on", legendOpen);
+  btn.setAttribute("aria-expanded", legendOpen ? "true" : "false");
+  btn.title = (legendOpen ? "hide" : "show") + " the highlight toggles";
+  document.body.classList.toggle("legend-open", legendOpen);
+}
+
+function repaintLayers() {
+  localStorage.setItem(LAYER_KEY, [...layersOn].join(","));
+  if (!doc) return;
+  renderLegend(doc.legend);
+  doc.view.dispatch({
+    effects: setAnnotations.of(buildDecorations(doc.data, doc.view.state)),
+  });
+}
 
 function renderLegend(legend) {
   legend.textContent = "";
-  const chip = (mode, build) => {
-    const btn = el("button", "mini" + (viewMode === mode ? " on" : ""));
-    build(btn);
+  const count = doc && doc.data.comments ? doc.data.comments.length : 0;
+  for (const key of LAYERS) {
+    const on = layersOn.has(key);
+    const btn = el("button", "mini " + (on ? "on" : "off"));
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.title = (on ? "hide " : "show ") + LAYER_LABEL[key] + " highlights";
+    btn.appendChild(el("mark", "sw sw-" + key, LAYER_LABEL[key]));
+    if (key === "comments" && count) {
+      btn.appendChild(document.createTextNode(String(count)));
+    }
     btn.addEventListener("click", () => {
-      viewMode = mode;
-      localStorage.setItem(VIEW_KEY, mode);
-      renderLegend(legend);
-      if (doc) {
-        doc.view.dispatch({
-          effects: setAnnotations.of(
-            buildDecorations(doc.data, doc.view.state)),
-        });
-      }
+      if (on) layersOn.delete(key); else layersOn.add(key);
+      repaintLayers();
+    });
+    legend.appendChild(btn);
+  }
+  const bulk = (label, next) => {
+    const btn = el("button", "mini", label);
+    btn.addEventListener("click", () => {
+      layersOn.clear();
+      for (const key of next) layersOn.add(key);
+      repaintLayers();
     });
     legend.appendChild(btn);
   };
-  chip("all", (b) => { b.textContent = "all"; });
-  chip("authorship",
-    (b) => b.appendChild(el("mark", "ink-human", "human")));
-  chip("status",
-    (b) => b.appendChild(el("mark", "st-approved", "approved")));
-  chip("intent", (b) => {
-    b.appendChild(el("mark", "st-locked", "locked"));
-    b.appendChild(el("mark", "st-needs", "needs change"));
-    b.appendChild(el("mark", "st-minor", "minor"));
-  });
-  const count = doc && doc.data.comments ? doc.data.comments.length : 0;
-  chip("comments", (b) => {
-    b.appendChild(el("mark", "cmt", "comments"));
-    if (count) b.appendChild(document.createTextNode(String(count)));
-  });
-  chip("none", (b) => { b.textContent = "none"; });
+  bulk("all", LAYERS);
+  bulk("none", []);
   if (count) {
     // No sidebar at this width: the modal is the only way to READ the
     // panel (resolve buttons included), so the opener rides the legend.
@@ -726,9 +820,12 @@ function renderLegend(legend) {
     opener.addEventListener("click", openCommentsModal);
     legend.appendChild(opener);
   }
-  legend.appendChild(el("span", null, writesEnabled
-    ? "type anywhere · select text to mark or comment"
-    : "read-only: set GC_PROSE_TOKEN to enable editing"));
+  // The read-only case is the header note's job; repeating it here would
+  // cost the frozen bar a whole wrapped line on a phone.
+  if (writesEnabled) {
+    legend.appendChild(
+      el("span", "hint", "type anywhere · select text to mark or comment"));
+  }
 }
 
 // ---- the action bar (marks over the live selection) -----------------------
@@ -1225,16 +1322,37 @@ function minimalChange(oldText, newText) {
   return { from: start, to: endOld, insert: newText.slice(start, endNew) };
 }
 
-function renderTimeline(strip, data, space, node) {
+// One dropdown for the whole history, newest first: picking a revision
+// routes to its diff, exactly as the per-revision chips did.
+function renderRevisions(strip, data, space, node) {
   strip.textContent = "";
-  for (const rev of data.revisions) {
-    const chip = link("#/node/" + encodeURIComponent(space) + "/" +
-      encodeURIComponent(node) + "/rev/" + rev.seq,
-      "r" + rev.seq + " " + rev.author + " +" + rev.added +
-      " −" + rev.removed, rev.author);
-    chip.title = rev.detail + " · " + fmtTime(rev.at);
-    strip.appendChild(chip);
+  const revs = data.revisions;
+  if (!revs.length) {
+    strip.appendChild(el("span", "last", "no revisions recorded yet"));
+    return;
   }
+  const select = el("select");
+  select.title = "open a revision diff";
+  const head = el("option", null, revs.length + " revision" +
+    (revs.length === 1 ? "" : "s") + " · pick one to diff");
+  head.value = "";
+  select.appendChild(head);
+  for (let i = revs.length - 1; i >= 0; i--) {
+    const rev = revs[i];
+    const option = el("option", null, "r" + rev.seq + " · " + rev.detail +
+      " · +" + rev.added + " −" + rev.removed + " · " + fmtTime(rev.at));
+    option.value = String(rev.seq);
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => {
+    if (!select.value) return;
+    location.hash = "#/node/" + encodeURIComponent(space) + "/" +
+      encodeURIComponent(node) + "/rev/" + select.value;
+  });
+  strip.appendChild(select);
+  const last = revs[revs.length - 1];
+  strip.appendChild(el("span", "last",
+    "last " + last.author + " · " + fmtTime(last.at)));
 }
 
 function renderSegInfo(info) {
@@ -1270,7 +1388,7 @@ function applyDocPayload(fresh, reconcileText) {
   doc.view.dispatch({
     effects: setAnnotations.of(buildDecorations(fresh, doc.view.state)),
   });
-  renderTimeline(doc.timeline, fresh, doc.space, doc.node);
+  renderRevisions(doc.revs, fresh, doc.space, doc.node);
   renderSegInfo(doc.segInfo);
   renderComments(doc.panel);
   renderLegend(doc.legend);  // the comments chip count tracks the payload
@@ -1331,8 +1449,9 @@ function closeDoc() {
   clearTimeout(doc.autosaveTimer);
   if (doc.events) doc.events.close();
   doc.view.destroy();
+  doc.legend.textContent = "";
   doc = null;
-  document.body.classList.remove("doc-view");
+  document.body.classList.remove("doc-view", "has-doc");
   main.classList.remove("doc");
   closeBar();
   saveState("");
@@ -1358,11 +1477,12 @@ async function renderNode(space, node) {
   const above = el("div");
   column.appendChild(above);
 
-  const legend = el("div", "legend");
-  column.appendChild(legend);
+  // The legend lives in the frozen chrome, not the column -- the toggles
+  // stay reachable however far the reader has scrolled.
+  const legend = document.getElementById("legend");
 
-  const timeline = el("div", "timeline");
-  column.appendChild(timeline);
+  const revs = el("div", "revs");
+  column.appendChild(revs);
   const segInfo = el("div");
   segInfo.id = "seg-info";
   column.appendChild(segInfo);
@@ -1454,12 +1574,14 @@ async function renderNode(space, node) {
   const view = new CM.EditorView({ state, parent: host });
 
   doc = {
-    space, node, data, view, above, timeline, segInfo, panel, legend, side,
+    space, node, data, view, above, revs, segInfo, panel, legend, side,
     dirty: false, saving: false, conflictOpen: false,
     autosaveTimer: null, events: null,
   };
+  document.body.classList.add("has-doc");
+  renderLegendToggle();
   // The initial render is the payload funnel too (it attaches the
-  // offset map, dispatches decorations, renders timeline / comments /
+  // offset map, dispatches decorations, renders revisions / comments /
   // legend / seg-info) -- one render path, first paint included.
   applyDocPayload(data);
   doc.events = openEvents(space);
@@ -1581,6 +1703,11 @@ document.getElementById("bar-close").addEventListener("click", () => {
   }
   closeBar();
 });
+document.getElementById("legend-toggle").addEventListener("click", () => {
+  legendOpen = !legendOpen;
+  localStorage.setItem(LEGEND_KEY, legendOpen ? "1" : "0");
+  renderLegendToggle();
+});
 document.getElementById("bar-whole").addEventListener("click", () => {
   wholeMode = !wholeMode;
   updateBar();
@@ -1620,6 +1747,7 @@ document.addEventListener("visibilitychange", () => {
     save().catch(() => {});
   }
 });
+renderLegendToggle();
 window.addEventListener("hashchange", () => {
   const leave = () => route();
   if (doc && doc.dirty) { ensureSaved().catch(() => {}).then(leave); }

@@ -2760,13 +2760,13 @@ reflection) and the seeded explainer teaches the one-of choice.
 ## WP50 — Prose editor: highlight view modes + comments (ADR 056) — **shipped 2026-08-03**
 
 **Status:** complete. Two prose-page enhancements. **View modes**
-(frontend-only): the legend became the control — six chips (`all ·
-authorship · status · intent · comments · none`, persisted in
-`localStorage`) where single-concern modes UNMASK layers the `all`
-priority hides (authorship lavender shows on locked words; spans carry
-the full triple, `spanClass` is the one mode-aware seam); switching
-re-dispatches decorations from the retained payload, never through the
-router. **Comments**: human-authored notes on selections, stored as two
+(frontend-only; superseded by the layer toggles below): the legend
+became the control — six chips (`all · authorship · status · intent ·
+comments · none`, persisted in `localStorage`) where single-concern
+modes UNMASK layers the `all` priority hides (authorship lavender shows
+on locked words; spans carry the full triple, `spanClass` is the one
+mode-aware seam); switching re-dispatches decorations from the retained
+payload, never through the router. **Comments**: human-authored notes on selections, stored as two
 new line kinds in the SAME sidecar log (`comment` with the ranged-mark
 anchor shape, `comment_state` transitions folded last-wins with
 `resolved` terminal; `open` implicit; clock-free content-hash ids).
@@ -2791,6 +2791,27 @@ and the composer guard keeps SSE refetches from destroying a
 half-typed note. `_inherit` went generic; the review folds guard on
 `isinstance(RevisionRecord)` so future line kinds are inert. No
 bundle rebuild.
+
+**Independent layer toggles landed 2026-08-08** (ADR 056 amendment):
+the six exclusive view modes are retired — `all` masked and the
+single-concern modes hid two axes to show one, so reading a word's full
+state meant cycling chips. Seven layers (`locked · needs_change ·
+minor_revisions · approved · human · comments · blame`, blame now
+toggleable too) each flip independently, persisted as a comma-joined
+enabled list under `gc_prose_layers` (absent = all on, `""` = all off;
+no migration from `gc_prose_view_mode`), with `all`/`none` shortcut
+buttons and off chips keeping a dashed swatch outline in the layer's
+own colour. `spanClass` became `spanLayers` (the ordered *enabled*
+layers a span matches) + `spanMark`: the first layer paints the
+background fill on the surviving ADR 053 ladder, each remaining layer
+stacks a 3px solid bar via a `--hl-bars` custom property one `.cm-hl`
+rule composes — `box-shadow`, so bars are clipped outside the border
+box and cost no layout (marking never jostles line heights). At most
+one fill + two bars (intent is single-valued); a single-layer word is
+pixel-identical to before. Editor and legend class names now both
+derive from the layer key (`.cm-fill-<key>` / `.legend mark.sw-<key>`),
+replacing two hand-synced class sets, pinned by
+`TestProseHighlightLayers`. Frontend-only, no wire change.
 
 ---
 

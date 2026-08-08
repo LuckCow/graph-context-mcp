@@ -146,3 +146,72 @@ The page grew a desktop layout, and comments became editable:
   twice). Inline comment edits keep their draft in JS state keyed by
   comment id, so SSE refetch re-renders re-seed the textarea — the
   composer guard's discipline, extended to the panel.
+
+## Amendment (2026-08-08): independent layer toggles, overlap made visible
+
+The six exclusive view modes above are **retired**. Dogfooding found
+both ends unusable while editing: `all` still masked (its priority
+ladder answers "the loudest thing about this word", never "is this
+approved *and* locked *and* mine?"), and the single-concern modes
+answered one axis at the price of hiding the other two, so reading the
+full state of a word meant cycling chips. Unmasking-by-mode traded one
+kind of blindness for another; nothing showed the layers *together*.
+
+- **Every layer toggles independently.** Seven keys —
+  `locked · needs_change · minor_revisions · approved · human ·
+  comments · blame` — each on/off, persisted in `localStorage` as a
+  comma-joined enabled list under `gc_prose_layers` (absent key = all
+  on, `""` = all off; WP50's `gc_prose_view_mode` is not migrated). The
+  legend stays the control and grows `all` / `none` shortcut buttons;
+  an off chip keeps its swatch as a dashed outline in the layer's own
+  colour, so the legend still reads as a colour key. Blame line ticks
+  became a toggle too — the earlier "on in every mode" carve-out was a
+  consequence of mode exclusivity, not a decision.
+- **A word shows every layer it carries.** `spanClass` (one class per
+  span) becomes `spanLayers` — the ordered list of *enabled* layers a
+  span matches — plus `spanMark`, which renders it: the first layer
+  paints the background fill (the ADR 053 priority ladder survives
+  intact, now applied to the enabled subset), and each remaining layer
+  stacks a 3px solid bar under the word through a `--hl-bars` custom
+  property that one `.cm-hl` rule composes. Intent is single-valued, so
+  a span carries at most three text layers → one fill and up to two
+  bars, and a single-layer word looks exactly as it did before.
+- **Bars are `box-shadow`, not `border-bottom`.** An outer shadow is
+  clipped to outside the border box (a clean stripe, never a wash over
+  the word) and costs no layout, so marking text cannot jostle line
+  heights. The class vocabulary is now derived from the layer key on
+  both sides — `.cm-fill-<key>` in the editor, `.legend mark.sw-<key>`
+  in the legend — replacing the two hand-synced class sets, and a test
+  pins the correspondence.
+
+Unchanged: spans still carry the full `(author, status, intent)` triple
+and comment underlines still stack on top of state backgrounds; toggling
+re-dispatches decorations from the retained payload — no refetch, never
+through the router. Frontend-only, no wire change.
+
+## Amendment (2026-08-08): the chrome above the manuscript
+
+Both controls above the editor grew without bound as a document aged;
+the manuscript is what the page is for, so both were condensed.
+
+- **The legend moved into the frozen chrome**, below the header (and,
+  on desktop, below the docked action bar), where it stays reachable
+  however far the reader has scrolled — previously it scrolled away
+  with the column, so changing a layer meant scrolling back up. The bar
+  itself is **collapsible** from a `highlights` header button
+  (`gc_prose_legend_open`, default open — the colours have to be
+  discoverable before they can be dismissed), because seven chips wrap
+  to three lines on a phone. The legend node is now static page
+  furniture rather than per-render markup: it only shows with a
+  document open (`body.has-doc`) and empties on `closeDoc`. The
+  affordance hint stays desktop-only, and the read-only variant is
+  gone — the header note already carries it.
+- **Revision history is one dropdown**, newest first, replacing the
+  chip-per-revision strip: the strip grew unbounded and pushed the
+  editor off the first screen on any document with real history.
+  Picking a revision routes to its diff exactly as the chips did; the
+  closed control reads `N revisions · pick one to diff` beside a
+  `last <author> · <when>` note, and each option carries the detail and
+  `+added −removed` counts the chip titles used to hide.
+
+Frontend-only, no wire change: the `revisions` payload is untouched.

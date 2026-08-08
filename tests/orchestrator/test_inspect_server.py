@@ -395,6 +395,54 @@ class TestProseEditorInput:
         assert attribute not in self._content_attributes()
 
 
+class TestProseHighlightLayers:
+    """One layer vocabulary across JS and CSS (ADR 056 amendment).
+
+    The legend swatches and the editor's fills used to be two hand-synced
+    class sets; now both derive their class names from the JS ``LAYERS``
+    keys, which is exactly the kind of coupling that drifts silently.
+    """
+
+    TEXT_LAYERS = ("locked", "needs_change", "minor_revisions", "approved",
+                   "human")
+
+    def _page(self) -> str:
+        from graph_context.orchestrator import inspect_server
+
+        return (Path(inspect_server.__file__).parent / "prose.html").read_text()
+
+    def _layer_keys(self) -> list[str]:
+        found = re.search(r"const LAYERS = \[(.*?)\];", self._page(), re.S)
+        assert found, "expected a LAYERS array"
+        return re.findall(r'"([a-z_]+)"', found.group(1))
+
+    def test_the_layer_set_is_the_seven_toggles(self) -> None:
+        assert self._layer_keys() == [
+            *self.TEXT_LAYERS, "comments", "blame",
+        ]
+
+    def test_toggles_persist_under_their_own_key(self) -> None:
+        # WP50's gc_prose_view_mode held an exclusive mode name; a page
+        # reading it as a layer list would leave every highlight off.
+        page = self._page()
+        assert 'const LAYER_KEY = "gc_prose_layers";' in page
+        assert "gc_prose_view_mode" not in page
+
+    def test_every_layer_has_a_legend_swatch(self) -> None:
+        page = self._page()
+        for key in self._layer_keys():
+            assert f".legend mark.sw-{key} " in page
+
+    def test_every_text_layer_has_a_fill_and_a_bar_colour(self) -> None:
+        # comments/blame draw their own marks and never fill or stack.
+        page = self._page()
+        bars = re.search(r"const BAR_COLOR = \{(.*?)\};", page, re.S)
+        assert bars
+        for key in self.TEXT_LAYERS:
+            assert f".cm-fill-{key} " in page
+            assert f"{key}:" in bars.group(1)
+
+
 # -- prose routes (WP43) ------------------------------------------------
 
 PROSE_P1 = "The city fell quiet before the siege began, every gate barred."
