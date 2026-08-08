@@ -20,10 +20,15 @@ PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python <skill-dir>/harness.py \
 - `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` is load-bearing: chromium is
   preinstalled there in the devcontainer image, and the egress firewall
   blocks `playwright install` downloads.
-- The stock harness renders one doc with all four review states (plain /
-  needs_change / approved / locked paragraphs), drags a keyboard
+- The stock harness renders one doc with every review state (plain /
+  needs_change / approved / locked / minor_revisions paragraphs), drags a keyboard
   selection from plain text into the needs_change paragraph, and writes
   `selection_light.png` / `selection_dark.png`.
+- It also asserts the content DOM's input attributes (`spellcheck` on,
+  `autocorrect`/`autocapitalize` off — ADR 054's amendment) and exits
+  non-zero if they drift. That guards a CodeMirror bundle upgrade
+  changing how `contentAttributes` merges over its hardcoded defaults,
+  which no source-level test can see.
 
 Then READ the PNGs (the Read tool renders images) and actually look at
 them — that is the verification, not the script exiting 0. Check both

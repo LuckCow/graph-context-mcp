@@ -138,6 +138,33 @@ class TestSectionStatesFold:
         assert state.status == "raw_ai"
         assert state.intent == "needs_change"
 
+    def test_minor_revisions_intent_folds_like_any_other(self) -> None:
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A, PARA_B])
+        _mark(entries, revisions.MARK_INTENT, PARA_A, "minor_revisions")
+        assert section_states(entries)[_h(PARA_A)].intent == "minor_revisions"
+
+    def test_a_louder_intent_wins_the_block_badge(self) -> None:
+        # Mixed token intents badge as the loudest instruction:
+        # locked > needs_change > minor_revisions > flexible.
+        entries: list[LogEntry] = []
+        _grow(entries, [PARA_A])
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_INTENT, hash=_h(PARA_A),
+            value="minor_revisions", at="TM", by="user", start=0, end=3,
+        ))
+        assert section_states(entries)[_h(PARA_A)].intent == "minor_revisions"
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_INTENT, hash=_h(PARA_A),
+            value="needs_change", at="TM", by="user", start=4, end=6,
+        ))
+        assert section_states(entries)[_h(PARA_A)].intent == "needs_change"
+        entries.append(revisions.SectionMark(
+            kind=revisions.MARK_INTENT, hash=_h(PARA_A),
+            value="locked", at="TM", by="user", start=7, end=9,
+        ))
+        assert section_states(entries)[_h(PARA_A)].intent == "locked"
+
     def test_a_mark_on_a_dead_or_unknown_hash_folds_to_nothing(self) -> None:
         entries: list[LogEntry] = []
         _grow(entries, [PARA_A, PARA_B])

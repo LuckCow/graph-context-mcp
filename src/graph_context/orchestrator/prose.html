@@ -7,6 +7,8 @@
     --line: #e3e7ee; --chip: #eef1f6; --accent: #2f6feb; --err: #c1352b;
     --err-bg: #fdecea; --code: #f3f4f7; --ok: #12855b; --ok-bg: #e7f5ef;
     --warn: #8a5b00; --warn-bg: #fdf3e0;
+    --info: #0b6a86; --info-bg: #dcf0f8;  /* minor revisions: cyan, kept
+                           clear of the green/amber/red state hues */
     --add-bg: #e7f5ef; --del-bg: #fdecea;
     --ink-bg: #ede7fb;  /* human-typed words: lavender, distinct from
                            the green/amber/red state highlights */
@@ -17,6 +19,7 @@
       --line: #2c323c; --chip: #262c35; --accent: #5b9bff; --err: #ff8a80;
       --err-bg: #3a1f1c; --code: #12151a; --ok: #4bd6a0; --ok-bg: #17342a;
       --warn: #e0b24d; --warn-bg: #363018;
+      --info: #67cfe8; --info-bg: #12313d;
       --add-bg: #17342a; --del-bg: #3a1f1c;
       --ink-bg: #2b2343;
     }
@@ -81,6 +84,7 @@
   .badge.human { background: var(--chip); color: var(--accent); }
   .badge.locked { background: var(--err-bg); color: var(--err); }
   .badge.needs_change { background: var(--warn-bg); color: var(--warn); }
+  .badge.minor_revisions { background: var(--info-bg); color: var(--info); }
   .badge.open { background: var(--warn-bg); color: var(--warn); }
   .badge.addressed { background: var(--ok-bg); color: var(--ok); }
 
@@ -92,6 +96,7 @@
   .legend mark.st-approved { background: var(--ok-bg); }
   .legend mark.st-locked { background: var(--err-bg); }
   .legend mark.st-needs { background: var(--warn-bg); }
+  .legend mark.st-minor { background: var(--info-bg); }
   .legend mark.ink-human { background: var(--ink-bg); }
   .legend mark.cmt { background: none;
     border-bottom: 2px dotted var(--accent); }
@@ -171,10 +176,12 @@
   .tok-meta { color: var(--muted); }
   .tok-link, .tok-url { color: var(--accent); }
   /* review-state highlights: one background per word run, priority
-     locked > needs_change > approved > human-typed (ADR 053 amendment) */
+     locked > needs_change > minor_revisions > approved > human-typed
+     (ADR 053 amendment) */
   .cm-ink { background: var(--ink-bg); border-radius: 3px; }
   .cm-approved { background: var(--ok-bg); border-radius: 3px; }
   .cm-needs { background: var(--warn-bg); border-radius: 3px; }
+  .cm-minor { background: var(--info-bg); border-radius: 3px; }
   .cm-locked { background: var(--err-bg); border-radius: 3px; }
   /* blame tick: first line of each paragraph, no layout shift */
   .cm-blame-model { box-shadow: inset 3px 0 var(--accent); }
@@ -365,7 +372,13 @@ const commentsModal = document.getElementById("comments-modal");
 const mqBar = window.matchMedia("(min-width: 900px)");
 const mqSide = window.matchMedia("(min-width: 1140px)");
 const STATUS_VALUES = ["raw_ai", "approved", "human"];
-const INTENT_VALUES = ["flexible", "locked", "needs_change"];
+// escalating instruction: say nothing → polish → rework → hands off
+const INTENT_VALUES = [
+  "flexible", "minor_revisions", "needs_change", "locked",
+];
+// mirrors revisions._INTENT_BADGE_ORDER: which token intent a mixed
+// block badges as (loudest wins; "flexible" is the fallback).
+const INTENT_BADGE_ORDER = ["locked", "needs_change", "minor_revisions"];
 const TOKEN_KEY = "gc_prose_token";
 const AUTOSAVE_MS = 2500;
 
@@ -537,6 +550,7 @@ function spanClass(status, intent, author) {
   if (viewMode === "intent") {
     if (intent === "locked") return "cm-locked";
     if (intent === "needs_change") return "cm-needs";
+    if (intent === "minor_revisions") return "cm-minor";
     return "";
   }
   if (viewMode === "status") {
@@ -548,6 +562,7 @@ function spanClass(status, intent, author) {
   // "all": first-match-wins priority.
   if (intent === "locked") return "cm-locked";
   if (intent === "needs_change") return "cm-needs";
+  if (intent === "minor_revisions") return "cm-minor";
   if (status === "approved") return "cm-approved";
   // Lavender covers both human PROVENANCE: authorship (typed by the
   // human) and a human status mark. raw_ai stays unhighlighted -- its
@@ -635,7 +650,7 @@ function applyMarksLocally(targets, kind, value) {
     }
     doc.data.spans = patched;
     // Transient client-side copy of the section_states badge rule
-    // (all-agree status else raw_ai; strictest intent) -- display
+    // (all-agree status else raw_ai; loudest intent) -- display
     // only, replaced by the authoritative payload seconds later.
     const statuses = new Set();
     const intents = new Set();
@@ -648,8 +663,8 @@ function applyMarksLocally(targets, kind, value) {
     if (statuses.size) {
       t.seg.status = statuses.size === 1
         ? statuses.values().next().value : "raw_ai";
-      t.seg.intent = intents.has("locked") ? "locked"
-        : intents.has("needs_change") ? "needs_change" : "flexible";
+      t.seg.intent = INTENT_BADGE_ORDER.find((i) => intents.has(i))
+        || "flexible";
     } else if (whole) {
       // Unrecorded block (no spans yet): badge feedback only.
       if (kind === "status") t.seg.status = value;
@@ -695,6 +710,7 @@ function renderLegend(legend) {
   chip("intent", (b) => {
     b.appendChild(el("mark", "st-locked", "locked"));
     b.appendChild(el("mark", "st-needs", "needs change"));
+    b.appendChild(el("mark", "st-minor", "minor"));
   });
   const count = doc && doc.data.comments ? doc.data.comments.length : 0;
   chip("comments", (b) => {
@@ -1403,6 +1419,15 @@ async function renderNode(space, node) {
     CM.history(),
     CM.drawSelection(),
     CM.EditorView.lineWrapping,
+    // Overrides CodeMirror's hardcoded spellcheck="false" on the content
+    // DOM (contentAttributes merges over its defaults). Squiggles only:
+    // autocorrect/autocapitalize stay off because they REWRITE the buffer
+    // silently, and every such rewrite would ride markDirty -> autosave
+    // into the sidecar log as a real human revision -- on invented names,
+    // most of all. Advisory marking suits tracked revisions; substitution
+    // does not. Read-only needs no guard: editable.of(false) below sets
+    // contenteditable="false", which browsers never spellcheck.
+    CM.EditorView.contentAttributes.of({ spellcheck: "true" }),
     CM.markdown(),
     CM.syntaxHighlighting(highlight),
     annotationsField,

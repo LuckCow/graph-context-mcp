@@ -150,3 +150,51 @@ take theirs; no three-way merge. Dirty-state indicator, Ctrl-S,
   log; block hashes stay the log alphabet, offsets stay derived.
 * **Three-way merge on conflict** — one human, turn-based writes; the
   banner's overwrite/discard covers the real cases.
+
+## Amendment (2026-08-08): native spellcheck on, rewriting aids off
+
+CodeMirror deliberately disables the browser's own spellchecker — its
+`updateAttrs()` hardcodes `spellcheck="false"`, `autocorrect="off"`,
+`autocapitalize="off"` onto the content DOM — so the editor shipped with
+no spelling feedback at all. That hardcoded object is the *base* of a
+merge with the `EditorView.contentAttributes` facet, though, so a facet
+value wins:
+
+```js
+CM.EditorView.contentAttributes.of({ spellcheck: "true" })
+```
+
+That one extension is the whole change. `EditorView` was already exported
+by `scripts/vendor/codemirror/entry.mjs` and `contentAttributes` survives
+minification as a reachable static, so **no bundle rebuild, no new export,
+and no new dependency** — the vendoring rule above is untouched. Spelling
+uses the browser's local dictionary, so right-click suggestions and "add
+to dictionary" work offline, which matters behind the egress firewall.
+
+**`autocorrect` and `autocapitalize` stay off, deliberately.** Squiggles
+are advisory; those two *substitute text silently*. A substitution enters
+the buffer as an ordinary transaction, so it would ride `markDirty()` into
+the 2.5s autosave and land in the sidecar log as a genuine human revision
+(ADR 049/051) — on invented character and place names, most of all, which
+is exactly what they would "fix". Advisory marking composes with tracked
+revisions; silent rewriting does not. The page is mobile-first and this
+costs phone ergonomics; that is the price of a trustworthy revision log.
+
+Read-only mode needs no guard: `EditorView.editable.of(false)` already
+sets `contenteditable="false"`, which browsers never spellcheck. Two
+consequences are accepted rather than solved — the checker sees RAW
+markdown, so it squiggles fence contents and URLs, and invented names must
+be added to the browser's dictionary by hand; and `.cm-comment`'s dotted
+underline shares the band with the squiggle, which reads acceptably
+because comments are sparse and the two differ in colour and waviness.
+
+The upgrade path, if that noise ever justifies its cost: `@codemirror/lint`
+plus a dictionary engine (`nspell`/`typo-js`), which could skip code fences
+via the markdown syntax tree and seed a custom dictionary from the graph's
+own node names. It needs a bundle rebuild, new `entry.mjs` exports, and a
+~1MB dictionary asset — deferred until the cheap version proves inadequate.
+
+Pinned twice: `tests/orchestrator/test_inspect_server.py` asserts the
+attribute object at the source level, and the `prose-shot` harness asserts
+the resolved attributes on the live content DOM, which is what would catch
+a future bundle changing the facet merge.

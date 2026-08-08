@@ -132,8 +132,9 @@ def _body_lines(
 ) -> list[str]:
     """A FULL entry's body. Tracked nodes (WP42) render per section with
     the hash anchor `edit_document` speaks -- plus the section's intent
-    when a human set one (locked/needs_change are instructions to the
-    model; the default flexible says nothing). Untracked nodes keep the
+    when a human set one (locked/minor_revisions/needs_change are
+    instructions to the model, spelled out in the `edit_document` tool
+    doc; the default flexible says nothing). Untracked nodes keep the
     single-line rendering byte-identical."""
     historian = services.historian
     if historian is None or not historian.is_tracked(node_id):

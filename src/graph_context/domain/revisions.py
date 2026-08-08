@@ -98,7 +98,19 @@ STATUS_VALUES = frozenset({STATUS_RAW_AI, STATUS_APPROVED, STATUS_HUMAN})
 INTENT_LOCKED = "locked"
 INTENT_FLEXIBLE = "flexible"
 INTENT_NEEDS_CHANGE = "needs_change"
-INTENT_VALUES = frozenset({INTENT_LOCKED, INTENT_FLEXIBLE, INTENT_NEEDS_CHANGE})
+# Keep the content, improve the craft: sentence structure, organization,
+# word choice -- staying as close to the original meaning as possible.
+# Between locked (touch nothing) and needs_change (rewrite this).
+INTENT_MINOR_REVISIONS = "minor_revisions"
+INTENT_VALUES = frozenset({
+    INTENT_LOCKED, INTENT_FLEXIBLE, INTENT_NEEDS_CHANGE,
+    INTENT_MINOR_REVISIONS,
+})
+# Which token intent a mixed block BADGES as: the loudest instruction
+# wins, ``flexible`` (the default, saying nothing) is the fallback.
+_INTENT_BADGE_ORDER = (
+    INTENT_LOCKED, INTENT_NEEDS_CHANGE, INTENT_MINOR_REVISIONS,
+)
 
 # edit_body's only non-hash anchor: insert_after "top" prepends.
 ANCHOR_TOP = "top"
@@ -493,8 +505,9 @@ def comment_id(at: str, by: str, anchor_hash: str, text: str) -> str:
 class SectionState:
     """One block's review state as a BADGE (WP42): derived from the
     per-token fold since WP46 -- ``approved``/``human`` only when every
-    token agrees, mixed blocks read ``raw_ai``; intent is the strictest
-    token's (`locked` > `needs_change` > `flexible`)."""
+    token agrees, mixed blocks read ``raw_ai``; intent is the loudest
+    token's (`locked` > `needs_change` > `minor_revisions` >
+    `flexible`)."""
 
     status: str = STATUS_RAW_AI
     intent: str = INTENT_FLEXIBLE
@@ -1114,7 +1127,7 @@ def badges_of(
     """Block-level BADGES derived from the token fold (WP46): a block is
     ``approved``/``human`` only when every token agrees (mixed reads
     ``raw_ai`` -- the word-level view shows the split); intent is the
-    strictest token's, so one locked word makes the block read locked."""
+    loudest token's, so one locked word makes the block read locked."""
     derived: dict[str, SectionState] = {}
     for block, state in states.items():
         status = STATUS_RAW_AI
@@ -1122,12 +1135,11 @@ def badges_of(
             status = STATUS_APPROVED
         elif state.status and all(s == STATUS_HUMAN for s in state.status):
             status = STATUS_HUMAN
-        if INTENT_LOCKED in state.intent:
-            intent = INTENT_LOCKED
-        elif INTENT_NEEDS_CHANGE in state.intent:
-            intent = INTENT_NEEDS_CHANGE
-        else:
-            intent = INTENT_FLEXIBLE
+        intent = INTENT_FLEXIBLE
+        for candidate in _INTENT_BADGE_ORDER:
+            if candidate in state.intent:
+                intent = candidate
+                break
         derived[block] = SectionState(
             status=status, intent=intent,
             status_at=state.status_at, status_by=state.status_by,

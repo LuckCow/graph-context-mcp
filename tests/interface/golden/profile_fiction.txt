@@ -468,10 +468,16 @@ prefix of the hash.
 
 Prefer this over update_node for targeted revisions -- untouched
 sections survive verbatim by construction (update_node's `description`
-stays right for full rewrites). Sections the user LOCKED
-(intent=locked) cannot be changed or deleted; if a change is needed
-there, ask the user to unlock the section. The summary staleness rule
-applies: pass `summary` when the change is meaningful.
+stays right for full rewrites). The summary staleness rule applies:
+pass `summary` when the change is meaningful.
+
+The section's `intent` is the user's standing instruction for that text:
+`locked` -- cannot be changed or deleted; if a change is needed there,
+ask the user to unlock the section. `minor_revisions` -- keep the
+content and stay as close to the original intent as possible; improve
+only sentence structure, organization, and word choice. `needs_change`
+-- the user wants this text reworked. `flexible` (the default) says
+nothing.
 
 The user leaves COMMENTS on document text (shown as `comment #id` lines
 in the sections listing and the context block, anchored to the words

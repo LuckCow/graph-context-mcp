@@ -10,6 +10,7 @@ raw socket because urllib normalizes ``..`` away before sending.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import threading
 import time
@@ -365,6 +366,35 @@ class TestSharedNav:
             assert b"SECTIONS" in res.read()
 
 
+class TestProseEditorInput:
+    """The editor's browser-input attributes (ADR 054 amendment).
+
+    CodeMirror hardcodes ``spellcheck="false"`` on its content DOM, so
+    the page's ``contentAttributes`` value is the only thing that turns
+    native spellcheck back on. Asserted against the attribute OBJECT, not
+    the file text -- the surrounding comment names the attributes it
+    deliberately leaves out.
+    """
+
+    def _content_attributes(self) -> str:
+        from graph_context.orchestrator import inspect_server
+
+        page = (Path(inspect_server.__file__).parent / "prose.html").read_text()
+        found = re.findall(r"contentAttributes\.of\(\{([^}]*)\}\)", page)
+        assert len(found) == 1, "expected exactly one contentAttributes value"
+        return found[0]
+
+    def test_native_spellcheck_is_turned_back_on(self) -> None:
+        assert 'spellcheck: "true"' in self._content_attributes()
+
+    @pytest.mark.parametrize("attribute", ["autocorrect", "autocapitalize"])
+    def test_rewriting_input_aids_stay_off(self, attribute) -> None:
+        # The pin that matters: these SUBSTITUTE text instead of marking
+        # it, so each correction would ride markDirty -> autosave into the
+        # sidecar log as a genuine human revision (ADR 049/051).
+        assert attribute not in self._content_attributes()
+
+
 # -- prose routes (WP43) ------------------------------------------------
 
 PROSE_P1 = "The city fell quiet before the siege began, every gate barred."
@@ -543,6 +573,16 @@ class TestProseWrites:
         assert status == 200
         segments = {s["hash"]: s for s in result["segments"]}
         assert segments[_prose_hash(PROSE_P1)]["intent"] == "locked"
+
+    def test_minor_revisions_is_a_first_class_intent(self, prose_server) -> None:
+        base, node_id = prose_server
+        status, result = _post_mark(
+            base, _mark_payload(node_id, base=_live_base(base, node_id),
+                                value="minor_revisions"),
+        )
+        assert status == 200
+        segments = {s["hash"]: s for s in result["segments"]}
+        assert segments[_prose_hash(PROSE_P1)]["intent"] == "minor_revisions"
 
     def test_missing_or_wrong_token_is_401(self, prose_server) -> None:
         base, node_id = prose_server

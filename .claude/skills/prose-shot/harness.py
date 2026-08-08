@@ -2,10 +2,10 @@
 
 Loads the REAL page + vendored CodeMirror bundle with every network
 request mocked via page.route — no inspection server, no Anytype, no
-historian. Renders one tracked doc with all four review states (plain /
-needs_change / approved / locked), drags a keyboard selection from plain
-text into the needs_change paragraph, and screenshots the editor in
-light and dark color schemes.
+historian. Renders one tracked doc with every review state (plain /
+needs_change / approved / locked / minor_revisions), drags a keyboard
+selection from plain text into the needs_change paragraph, and
+screenshots the editor in light and dark color schemes.
 
 Run (chromium is preinstalled in the devcontainer image; the egress
 firewall blocks fresh downloads, so the env var is load-bearing):
@@ -24,7 +24,7 @@ Wire shapes (mirrors orchestrator/prose_bridge.py):
     segments: [{hash, start, end, status, intent, blame|null}]
     spans:    positional [start, end, author, status, intent]
       author: model|human   status: raw_ai|approved|human
-      intent: flexible|needs_change|locked
+      intent: flexible|needs_change|minor_revisions|locked
     offsets are CODE POINTS over body — ASCII bodies keep them equal
     to both Python and UTF-16 indices, so stick to ASCII fixtures.
   GET api/prose/events -> abort() is fine; EventSource retries quietly.
@@ -48,13 +48,16 @@ PARAS = [
     "the rising wind.",
     "Below decks, the cook lashed his pots to the beams and said "
     "nothing at all.",
+    "The rain arrived all at once, the way it always does out here, "
+    "and the deck went slick under it.",
 ]
-# (author, status, intent) per paragraph: plain, amber, green, red
+# (author, status, intent) per paragraph: plain, amber, green, red, cyan
 STATES = [
     ("model", "raw_ai", "flexible"),
     ("model", "raw_ai", "needs_change"),
     ("model", "approved", "flexible"),
     ("model", "approved", "locked"),
+    ("model", "raw_ai", "minor_revisions"),
 ]
 BODY = "\n\n".join(PARAS)
 
@@ -129,8 +132,25 @@ def shoot(browser, scheme, out_dir):
     page.wait_for_timeout(300)
     path = out_dir / f"selection_{scheme}.png"
     page.locator("#editor-host").screenshot(path=str(path))
+    check_input_attrs(page)
     ctx.close()
     return path
+
+
+def check_input_attrs(page):
+    """Pin the browser-input attributes on the live content DOM.
+
+    CodeMirror hardcodes spellcheck="false" and only merges the page's
+    contentAttributes facet over it, so this survives a bundle UPGRADE
+    changing that merge -- which the source-level pytest pin cannot see.
+    Headless Chromium ships no dictionary, so the squiggles never render
+    in the screenshots; the attribute is the check.
+    """
+    want = {"spellcheck": "true", "autocorrect": "off",
+            "autocapitalize": "off"}
+    got = {name: page.get_attribute(".cm-content", name) for name in want}
+    if got != want:
+        raise SystemExit(f"content-DOM input attributes drifted: {got}")
 
 
 def main():

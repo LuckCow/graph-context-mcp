@@ -123,3 +123,25 @@ deliberately an ops concern; nothing in the code assumes it.
 - **Normalized historical text:** the log stores normalized block text,
   so diffs and guard excerpts show headings flattened; the page says so
   on the diff view. Current-body views always use raw text.
+
+## Amendment (2026-08-08): the `minor_revisions` intent
+
+The intent vocabulary gains a fourth value between "touch nothing" and
+"rewrite this": `minor_revisions` — KEEP the content and stay as close
+to the original intent as possible, improving only sentence structure,
+organization, and word choice. It is a plain vocabulary addition: a
+`domain/revisions.py` constant in `INTENT_VALUES`, so the historian's
+mark validation, the sidecar log, the fold, the page's action bar, and
+the section badges carry it with no new mechanism, and it is *not*
+enforced (unlike `locked` it binds no writer — it is an instruction to
+the model, spelled out once in the `edit_document` tool doc alongside
+the other three).
+
+Mixed-token blocks badge as the LOUDEST intent, an order now named
+once (`revisions._INTENT_BADGE_ORDER`, mirrored by the page's optimistic
+patch): `locked > needs_change > minor_revisions > flexible`. A block
+where the human wants some words reworked and others merely polished
+reads `needs_change` — the stronger call to action surfaces; the
+word-level view shows the split. The page paints it cyan (`--info-bg`),
+kept clear of the red/amber/green/lavender state hues, at the matching
+priority in both `all` and `intent` view modes (ADR 056).
