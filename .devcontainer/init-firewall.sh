@@ -19,6 +19,45 @@ IFS=$'\n\t'
 # egress policy is written for THIS user, and verified as it (see the bottom).
 WORKLOAD_USER="${WORKLOAD_USER:-dev}"
 
+# Runs a command as the workload user when we hold root (this script is invoked
+# through sudo). Load-bearing since the Tailscale exemption below: root is no
+# longer subject to the egress policy, so verifying as root would test the
+# wrong subject -- and would report "lockdown failed" precisely when the
+# exemption is working. Before that exemption existed, root and the workload
+# user were equivalent here, which is how the checks came to run as root.
+as_workload() {
+    if [ "$(id -u)" = "0" ]; then
+        runuser -u "$WORKLOAD_USER" -- "$@"
+    else
+        "$@"
+    fi
+}
+
+# tailscaled reaches its control plane and DERP relays BY UID, not by
+# destination: the relay set is large and changes, so a destination allowlist
+# would strand the node at the worst possible moment -- when the tailnet is the
+# only way in. Both stacks: controlplane.tailscale.com resolves to IPv6 here,
+# and the IPv6 policy is deny-all.
+#
+# The cost, accepted deliberately: ANY root process bypasses the egress policy.
+# gc-serve.sh already refuses to start the orchestrator as root for exactly
+# this reason, and the workload user's sudo is scoped to this script and
+# start-tailscale.sh.
+#
+# Needs the kernel's xt_owner match. Without it the container is simply locked
+# down and the tailnet does not come up -- a warning, never a failed boot.
+#   $1 = iptables | ip6tables
+exempt_tailscaled() {
+    local cmd="$1"
+    if "$cmd" -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null; then
+        echo "[firewall] ${cmd}: uid 0 exempt (tailscaled control plane + DERP)"
+    else
+        echo "[firewall] WARNING: ${cmd} lacks '-m owner' -- tailscaled cannot reach" >&2
+        echo "[firewall]          its control plane, so the tailnet will not come up." >&2
+    fi
+}
+
+
 echo "[firewall] flushing existing rules..."
 
 # Docker's embedded DNS (127.0.0.11) depends on NAT rules that Docker installs
@@ -168,6 +207,7 @@ if command -v ip6tables >/dev/null && ip6tables -L >/dev/null 2>&1; then
     ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     ip6tables -A INPUT  -p tcp --dport 8000 -j ACCEPT
     ip6tables -A INPUT  -p tcp --dport 8765 -j ACCEPT
+    exempt_tailscaled ip6tables
     ip6tables -A OUTPUT -j REJECT --reject-with adm-prohibited 2>/dev/null \
         || ip6tables -A OUTPUT -j DROP
     echo "[firewall] IPv6 locked down."
@@ -190,16 +230,24 @@ iptables -A INPUT -p tcp --dport 8765 -j ACCEPT
 # Allowlisted destinations
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 
+iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
+
+exempt_tailscaled iptables                               # ← new
+
+# Reject (not drop) everything else so failures are immediate, not hangs.
+iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+
 # Reject (not drop) everything else so failures are immediate, not hangs.
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 # --- Verify -------------------------------------------------------------------
 echo "[firewall] verifying..."
-if curl --connect-timeout 5 -s https://example.com >/dev/null 2>&1; then
+if as_workload curl --connect-timeout 5 -s https://example.com >/dev/null 2>&1; then
+
     echo "[firewall] ERROR: example.com is reachable — lockdown failed" >&2
     exit 1
 fi
-if ! curl --connect-timeout 5 -s https://api.github.com/zen >/dev/null 2>&1; then
+if ! as_workload curl --connect-timeout 5 -s https://api.github.com/zen >/dev/null 2>&1; then
     echo "[firewall] ERROR: api.github.com is NOT reachable — allowlist broken" >&2
     exit 1
 fi

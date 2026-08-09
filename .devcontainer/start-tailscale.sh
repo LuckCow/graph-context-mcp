@@ -13,6 +13,13 @@
 # warns and exits 0. A container whose tailnet failed to come up is one you can
 # still reach another way to fix it; a container that exits on a stale auth key
 # is one you cannot reach at all.
+#
+# That promise covers HANGS too, and only since a live incident: `tailscale up`
+# blocks indefinitely when the control plane is unreachable or the key wants
+# interactive auth, and this script is chained AHEAD of `gc-serve boot` -- so a
+# wedged `up` means the orchestrator never starts at all. Every call that talks
+# to the network is wrapped in a timeout for that reason. Bounded failure beats
+# an unbounded wait for a feature the container does not need to function.
 
 set -uo pipefail
 
@@ -31,6 +38,8 @@ SERVE_PORT="${TS_SERVE_PORT:-8765}"
 # Deployment-specific `tailscale up` flags, e.g. --advertise-tags=tag:vps,
 # --ssh, --advertise-exit-node. Word-split deliberately.
 read -ra UP_EXTRA <<< "${TS_UP_EXTRA_ARGS:-}"
+# Ceiling for every network-touching tailscale call (see the header note).
+NET_TIMEOUT="${TS_NET_TIMEOUT:-45}"
 
 say()  { echo "[tailscale] $*"; }
 warn() { echo "[tailscale] $*" >&2; }
@@ -84,20 +93,21 @@ fi
 # /etc/resolv.conf and clobber Docker's embedded resolver at 127.0.0.11, which
 # init-firewall.sh goes out of its way to preserve and which is how `anytype`
 # and every other compose sibling resolves.
-if ! tailscale --socket="$SOCKET" up \
+if ! timeout "$NET_TIMEOUT" tailscale --socket="$SOCKET" up \
         --authkey="file:${AUTHKEY_FILE}" \
         --hostname="$NODE_HOSTNAME" \
         --operator="$CLI_OPERATOR" \
         --accept-dns=false \
         --accept-routes=false \
         "${UP_EXTRA[@]}"; then
-    warn "ERROR: 'tailscale up' failed -- the node is not on the tailnet."
-    warn "       Check the auth key (expired? already used? wrong tailnet?) and"
-    warn "       that init-firewall.sh logged its tailscale egress rule."
+    warn "ERROR: 'tailscale up' failed or hung past ${NET_TIMEOUT}s -- the node"
+    warn "       is not on the tailnet. Check the auth key (expired? already"
+    warn "       used? wrong tailnet?) and that init-firewall.sh logged its"
+    warn "       tailscale egress rule. Boot continues without the tailnet."
     exit 0
 fi
 
-say "up as $(tailscale --socket="$SOCKET" status --self --peers=false 2>/dev/null | head -1)"
+say "up as $(timeout 10 tailscale --socket="$SOCKET" status --self --peers=false 2>/dev/null | head -1)"
 
 case "${SERVE_PORT,,}" in
     ""|0|off|false|no)
@@ -111,7 +121,7 @@ esac
 # tailnet (admin console -> DNS); without them this is the one thing here that
 # legitimately fails, so it degrades to a note rather than a silent no-op.
 # `serve` config persists in the state file, so re-running is idempotent.
-if tailscale --socket="$SOCKET" serve --bg "$SERVE_PORT"; then
+if timeout "$NET_TIMEOUT" tailscale --socket="$SOCKET" serve --bg "$SERVE_PORT"; then
     say "serving :${SERVE_PORT} at https://${NODE_HOSTNAME}.<your-tailnet>.ts.net/"
 else
     warn "NOTE: 'tailscale serve' failed -- enable MagicDNS and HTTPS certificates"

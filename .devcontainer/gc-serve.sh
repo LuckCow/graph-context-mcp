@@ -20,26 +20,73 @@ set -uo pipefail
 APP_DIR="${GC_APP_DIR:-/workspaces/graph-context-mcp}"
 LOG_FILE="${GC_SERVE_LOG:-${APP_DIR}/logs/serve.log}"
 PID_FILE="${GC_SERVE_PIDFILE:-/tmp/gc-serve.pid}"
+LOCK_FILE="${GC_SERVE_LOCKFILE:-/tmp/gc-serve.lock}"
 STOP_GRACE_SECONDS=10
 
 say()  { echo "[gc-serve] $*"; }
 warn() { echo "[gc-serve] $*" >&2; }
 
-# Echoes the live pid, or returns 1. A pid file whose process is gone is stale,
-# not running -- containers restart and pids do not survive.
-running_pid() {
-    local pid
-    [ -f "$PID_FILE" ] || return 1
-    pid="$(cat "$PID_FILE" 2>/dev/null)"
-    [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-    echo "$pid"
+# ANCHORED on purpose: an unanchored match also hits every shell whose command
+# line merely mentions the module (a `grep`, an editor, this script's own
+# caller), and `stop` would kill that bystander.
+SERVE_CMD_RE='^python -m graph_context\.orchestrator\.serve'
+
+# True when $1 is a live process that IS the orchestrator. Both callers below
+# need this: a pid file can name a RECYCLED pid, and pgrep only proposes
+# candidates -- /proc is what settles it. One rule, one home: nothing else in
+# this script decides what counts as "the server".
+is_serve_pid() {
+    local cmd
+    [ -n "${1:-}" ] || return 1
+    kill -0 "$1" 2>/dev/null || return 1
+    cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)"
+    [[ "$cmd" =~ $SERVE_CMD_RE ]]
 }
 
-do_start() {
+# Echoes the live pid, or returns 1. The pid file is a CACHE, not the truth: a
+# pid whose process is gone is stale (containers restart and pids do not
+# survive), and a lost start race can delete the file of a server that is still
+# running. So fall back to the process table -- status, stop and start then all
+# agree with reality, and an orphaned server is adoptable rather than immortal.
+running_pid() {
     local pid
+    if [ -f "$PID_FILE" ]; then
+        pid="$(cat "$PID_FILE" 2>/dev/null)"
+        if is_serve_pid "$pid"; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    for pid in $(pgrep -u "$(id -u)" -f "$SERVE_CMD_RE" 2>/dev/null); do
+        if is_serve_pid "$pid"; then
+            echo "$pid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# `boot` runs from BOTH the compose command and devcontainer's
+# postStartCommand, so two starts race on a rebuild. Serializing them makes
+# the second find the first's pid file and no-op, instead of spawning a
+# duplicate that dies on the inspection server's port -- and whose cleanup
+# then deleted the WINNER's pid file, leaving a healthy server that `status`
+# reported as down and `stop` could not reach. Degrades to an unlocked start
+# if flock is unavailable: a boot that runs is worth more than a tidy one.
+do_start() {
+    # -w: a lock we cannot take in 30s must never hang container boot -- fall
+    # through and let the running_pid check do the unsynchronized guarding.
+    ( flock -w 30 9; start_locked ) 9>"$LOCK_FILE"
+}
+
+start_locked() {
+    local pid child
     if pid="$(running_pid)"; then
         say "already running (pid ${pid})"
+        # Re-adopt: the file is missing whenever the process came from a
+        # start whose pid file was lost. Writing it back makes the cheap
+        # path (the file) true again for the next caller.
+        echo "$pid" > "$PID_FILE"
         return 0
     fi
 
@@ -53,20 +100,33 @@ do_start() {
     mkdir -p "$(dirname "$LOG_FILE")"
 
     say "starting: python -m graph_context.orchestrator.serve"
-    nohup python -m graph_context.orchestrator.serve >>"$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
+    # 9>&- : the server must NOT inherit the start lock. It would hold it for
+    # its entire life, and every later `start` -- including the next boot's
+    # second caller -- would block instead of reporting "already running".
+    nohup python -m graph_context.orchestrator.serve >>"$LOG_FILE" 2>&1 9>&- &
+    child=$!
 
     # A config error (bad spaces.toml, missing key, port in use) kills the
     # process in the first second or two. Surface it here instead of leaving a
-    # stale pid file and a container that looks healthy.
+    # stale pid file and a container that looks healthy. Check OUR child, not
+    # running_pid: its process-table fallback would report someone else's
+    # healthy server as proof that this start succeeded.
+    #
+    # The pid file is written AFTER that check, never before: a start that
+    # writes it up front clobbers the entry of a server that is already
+    # running, and then deletes it on the way out -- which is exactly how a
+    # healthy orchestrator ended up with no pid file, invisible to `stop`.
+    # A failed start now leaves the file untouched, so there is nothing to
+    # undo. For the two seconds before it lands, running_pid's process-table
+    # fallback still finds the server.
     sleep 2
-    if ! pid="$(running_pid)"; then
+    if ! kill -0 "$child" 2>/dev/null; then
         warn "ERROR: exited immediately. Last 20 lines of ${LOG_FILE}:"
         tail -n 20 "$LOG_FILE" >&2
-        rm -f "$PID_FILE"
         return 1
     fi
-    say "running (pid ${pid}) -- logs: ${LOG_FILE}"
+    echo "$child" > "$PID_FILE"
+    say "running (pid ${child}) -- logs: ${LOG_FILE}"
 }
 
 do_stop() {
