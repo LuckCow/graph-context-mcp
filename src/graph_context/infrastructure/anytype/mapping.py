@@ -302,7 +302,10 @@ SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # on rule nodes, never on ordinary nodes. The keys live in the domain
 # (rules.py) -- these are the adapter-local aliases. The engine owns
 # gc_rule_last_fired / gc_rule_last_error / the Error status; everything
-# else is human-authored in the Anytype editor.
+# else is human-authored in the Anytype editor -- except
+# gc_rule_run_now (WP52, ADR 058), the one SHARED-ownership field: a
+# human ticks it to request a run, the engine unticks it as it claims
+# the request.
 PROP_RULE_TARGET_TYPE = rules.FIELD_TARGET_TYPE
 PROP_RULE_WATCH_PROPERTY = rules.FIELD_WATCH_PROPERTY
 PROP_RULE_CONDITION = rules.FIELD_CONDITION
@@ -312,6 +315,7 @@ PROP_RULE_ACTION_VALUE = rules.FIELD_ACTION_VALUE
 PROP_RULE_STATUS = rules.FIELD_STATUS
 PROP_RULE_LAST_FIRED = rules.FIELD_LAST_FIRED
 PROP_RULE_LAST_ERROR = rules.FIELD_LAST_ERROR
+PROP_RULE_RUN_NOW = rules.FIELD_RUN_NOW
 RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_RULE_TARGET_TYPE: "text",
     PROP_RULE_WATCH_PROPERTY: "text",
@@ -322,6 +326,7 @@ RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_RULE_STATUS: "select",
     PROP_RULE_LAST_FIRED: "text",  # deliberately text, like gc_last_fired
     PROP_RULE_LAST_ERROR: "text",
+    PROP_RULE_RUN_NOW: "checkbox",
 }
 
 # Human-facing display names for minted properties (people create and
@@ -364,6 +369,7 @@ PROPERTY_DISPLAY_NAMES: dict[str, str] = {
     PROP_RULE_STATUS: "Rule status",
     PROP_RULE_LAST_FIRED: "Rule last fired",
     PROP_RULE_LAST_ERROR: "Rule last error",
+    PROP_RULE_RUN_NOW: "Rule run now",
 }
 
 # gc_ keys that DO surface in Node.fields and match as fields keys,

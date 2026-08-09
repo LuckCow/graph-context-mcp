@@ -490,6 +490,48 @@ class TestChangeWatcher:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
 
+    async def test_ticking_run_now_fires_the_rule_through_the_watcher(
+        self,
+    ) -> None:
+        """WP52 (ADR 058): the human's whole gesture is one checkbox in
+        the Anytype UI -- no chat, no model turn."""
+        from graph_context.domain import rules
+
+        route, repository = self._route()
+        rule = await repository.create_node(NodeDraft(
+            type="gc_rule", name="dinner picker", summary="s",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_CONDITION: "Manual",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Pick",
+                rules.FIELD_ACTION_VALUE: "tonight",
+            },
+        ))
+        task = await repository.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            assert "Pick" not in repository.graph.node(task.id).fields
+            await repository.update_node(rule.id, fields={
+                **repository.graph.node(rule.id).fields,
+                rules.FIELD_RUN_NOW: "true",
+            })
+            async with asyncio.timeout(5):
+                while "Pick" not in repository.graph.node(task.id).fields:
+                    await asyncio.sleep(0.01)
+            # The box clears itself, so the rule does not run forever.
+            async with asyncio.timeout(5):
+                while repository.graph.node(rule.id).fields.get(
+                    rules.FIELD_RUN_NOW
+                ) != "false":
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
     async def test_a_crashing_tick_never_takes_the_watcher_down(self) -> None:
         route, repository = self._route()
         calls = {"count": 0}

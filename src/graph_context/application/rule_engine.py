@@ -90,6 +90,9 @@ class RuleFiring:
     node_id: NodeId
     node_name: str
     action: str
+    # ADR 058: a human asked for this fire (the run-now checkbox or the
+    # /run command) rather than a transition causing it.
+    manual: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +114,29 @@ class RuleTickReport:
     fired: tuple[RuleFiring, ...] = ()
     errors: tuple[RuleProblem, ...] = ()
     healed: tuple[NodeId, ...] = ()
+
+
+def describe_firing(firing: RuleFiring) -> str:
+    """One fire, in a line. Shared by the /run reply and the bot's rule
+    log so a human sees the same sentence in both places (ADR 058)."""
+    how = "ran" if firing.manual else "fired"
+    return (
+        f"{how} {firing.rule_name!r} on {firing.node_name!r} "
+        f"({firing.action})"
+    )
+
+
+def describe_problem(problem: RuleProblem) -> str:
+    return f"{problem.rule_name!r}: {problem.message}"
+
+
+def describe_report(report: RuleTickReport) -> list[str]:
+    """A tick or manual run as human-readable lines, most important
+    first. Empty when nothing happened -- callers say so in their own
+    words, since "no rules matched" and "nothing to do" differ."""
+    lines = [describe_firing(f) for f in report.fired]
+    lines.extend(describe_problem(p) for p in report.errors)
+    return lines
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +164,13 @@ class _BoundRule:
     # ADR 042: the watch resolved to a store-clock built-in
     # (rules.BUILTIN_WATCH_MODIFIED) -- read Node.modified_at, not fields.
     builtin_watch: bool = False
+
+    @property
+    def watches(self) -> bool:
+        """Whether this rule has anything to diff (ADR 058): a manual
+        rule may name no watch property, so it is baselined by nothing
+        and planned by nothing."""
+        return bool(self.builtin_watch or self.read_key.strip())
 
 
 class RuleEngine:
@@ -171,12 +204,32 @@ class RuleEngine:
         self._scripts: dict[NodeId, tuple[str, str]] = {}
 
     async def run_tick(self) -> RuleTickReport:
-        """One diff-fire-rebaseline pass over the shared index."""
+        """One diff-fire-rebaseline pass over the shared index.
+
+        Two plan sources feed one execution: transitions since the last
+        baseline, and the manual runs humans requested by ticking
+        ``gc_rule_run_now`` (ADR 058). They merge here rather than in a
+        second listener so a rule that both transitioned and was
+        hand-requested still books and rebaselines exactly once.
+        """
         bound, broken = self._load_rules()
         bound, broken = await self._attach_scripts(bound, broken)
         self._note_overlaps(bound)
-        prior = self._snapshot
-        plans = self._plan(bound, prior)
+        requested, refused = await self._claim_manual_requests(bound, broken)
+        plans = self._plan(bound, self._snapshot) + requested
+        fired, failures = await self._apply(plans)
+        report = await self._write_bookkeeping(bound, broken, fired, failures)
+        if refused:
+            report = replace(report, errors=report.errors + tuple(refused))
+        self._rebaseline(bound)
+        return report
+
+    async def _apply(
+        self, plans: list[tuple[_BoundRule, Node, str, str]]
+    ) -> tuple[list[RuleFiring], dict[NodeId, str]]:
+        """Execute planned fires, folding action failures into per-rule
+        messages. A failed action is recorded, never retried -- the
+        transition (or the manual request) is consumed either way."""
         fired: list[RuleFiring] = []
         failures: dict[NodeId, str] = {}
         for rule, obj, before, after in plans:
@@ -191,12 +244,19 @@ class RuleEngine:
                 node_id=obj.id,
                 node_name=obj.name,
                 action=rule.config.action,
+                manual=rule.config.condition == rules.CONDITION_MANUAL,
             ))
-        report = await self._write_bookkeeping(bound, broken, fired, failures)
-        # Rebaseline from the POST-action index: the engine's own writes
-        # are folded in before the next diff, so they never fire rules.
+        return fired, failures
+
+    def _rebaseline(self, bound: list[_BoundRule]) -> None:
+        """Rebuild the baseline from the POST-action index over EVERY
+        bound rule -- ADR 039's load-bearing invariant. The engine's own
+        writes are folded in before the next diff, so they can never
+        read as transitions: rules never trigger rules, and no cascade
+        or loop is possible. Manual runs (ADR 058) obey it too, which is
+        why they rebaseline the full set and not just the rule that ran.
+        """
         self._snapshot = self._collect(bound)
-        return report
 
     # -- the automation tool's backend (WP32, ADR 040) ---------------------
 
@@ -204,7 +264,7 @@ class RuleEngine:
         self,
         name: str,
         target_type: str,
-        watch_property: str,
+        watch_property: str = "",  # optional for a manual rule (ADR 058)
         condition: str = "",
         action: str = "",
         action_property: str = "",
@@ -316,6 +376,157 @@ class RuleEngine:
         await self._write_rule_fields(node, changes)
         self._journal.modified(node.id)
         return self._repository.graph.node(node.id)
+
+    # -- manual runs (WP52, ADR 058) ---------------------------------------
+
+    async def run_now(
+        self, identifier: str, trigger: str = ""
+    ) -> RuleTickReport:
+        """Fire ONE rule immediately, because a human asked -- the /run
+        command's backend. No transition is required and the condition
+        is not consulted: an explicit request IS the trigger.
+
+        The trigger object is ``trigger`` (id or exact name among the
+        target type's objects) or the first of that type, exactly as a
+        dry run picks one. Everything else -- the sandbox, effect
+        validation, bookkeeping, the rebaseline -- is the tick's own
+        machinery, so a manual fire inherits its guarantees rather than
+        re-implementing them.
+        """
+        node = self._find(identifier)
+        if rules.is_paused(node.fields.get(rules.FIELD_STATUS, "")):
+            # Paused means off, for every trigger. Raising (rather than
+            # reporting) lets /run render it as an error and the
+            # checkbox path record it -- one refusal, two consumers.
+            raise GraphContextError(
+                f"rule {node.name!r} is paused; resume it first "
+                "(automation action='resume', or set 'Rule status' to "
+                "Active on the rule object in Anytype)"
+            )
+        bound, broken = self._load_rules()
+        bound, broken = await self._attach_scripts(bound, broken)
+        rule = next((r for r in bound if r.node.id == node.id), None)
+        if rule is None:
+            raise GraphContextError(self._why_unrunnable(node, broken))
+        obj = self._resolve_trigger(rule, trigger)
+        before, after = self._synthesize_transition(rule, obj)
+        fired, failures = await self._apply([(rule, obj, before, after)])
+        # Bookkeeping is scoped to the ONE rule the user named, so /run
+        # never rewrites another rule's error/heal state; the rebaseline
+        # below is deliberately NOT -- see _rebaseline.
+        report = await self._write_bookkeeping([rule], [], fired, failures)
+        self._rebaseline(bound)
+        return report
+
+    def _why_unrunnable(
+        self, node: Node, broken: list[tuple[Node, str]]
+    ) -> str:
+        """Why a rule that exists did not bind -- the stored parse or
+        script-attach error, so /run explains itself the same way the
+        rule object's own 'Rule last error' does."""
+        for candidate, message in broken:
+            if candidate.id == node.id:
+                return f"rule {node.name!r} cannot run: {message}"
+        # Not broken and not bound: the unconfigured template. Let the
+        # domain say what is missing rather than guessing.
+        try:
+            rules.parse_rule_fields(node.fields)
+        except GraphContextError as err:
+            return f"rule {node.name!r} cannot run: {err}"
+        return f"rule {node.name!r} cannot run: its configuration is incomplete"
+
+    async def _claim_manual_requests(
+        self,
+        bound: list[_BoundRule],
+        broken: list[tuple[Node, str]],
+    ) -> tuple[list[tuple[_BoundRule, Node, str, str]], list[RuleProblem]]:
+        """Turn ticked ``gc_rule_run_now`` boxes into planned fires.
+
+        Every rule node is scanned, not just the bound ones -- a human
+        can tick the box on a paused, broken, or half-configured rule,
+        and each deserves an answer in ``gc_rule_last_error``.
+
+        The box is UNTICKED BEFORE the rule runs, the scheduler's
+        mark-fired-before-firing discipline: the request is claimed at
+        most once, so a crashing action cannot re-fire forever. A failed
+        claim leaves the box ticked and skips the fire, which is why
+        this cannot go through the error-swallowing
+        ``_write_rule_fields``.
+        """
+        by_id = {rule.node.id: rule for rule in bound}
+        plans: list[tuple[_BoundRule, Node, str, str]] = []
+        refused: list[RuleProblem] = []
+        for node in sorted(
+            self._rule_nodes(), key=lambda n: (n.name.casefold(), n.id)
+        ):
+            requested = self._field_of(node.fields, rules.FIELD_RUN_NOW)
+            if requested.strip().lower() != "true":
+                continue
+            if not await self._release_request(node):
+                continue
+            paused = rules.is_paused(node.fields.get(rules.FIELD_STATUS, ""))
+            rule = by_id.get(node.id)
+            if paused:
+                await self._refuse(node, refused, (
+                    f"rule {node.name!r} is paused; resume it before "
+                    "running it by hand"
+                ), touch_status=False)
+                continue
+            if rule is None:
+                await self._refuse(
+                    node, refused, self._why_unrunnable(node, broken),
+                )
+                continue
+            try:
+                obj = self._resolve_trigger(rule, "")
+            except GraphContextError as err:
+                await self._refuse(node, refused, str(err))
+                continue
+            before, after = self._synthesize_transition(rule, obj)
+            plans.append((rule, obj, before, after))
+        return plans, refused
+
+    async def _release_request(self, node: Node) -> bool:
+        """Untick one run-now box, claiming the request. False when the
+        write failed -- the box stays ticked and the next tick retries,
+        which is safer than firing on a request we could not consume."""
+        try:
+            fresh = self._repository.graph.node(node.id)
+            merged = {
+                **dict(fresh.fields), rules.FIELD_RUN_NOW: "false",
+            }
+            await self._repository.update_node(fresh.id, fields=merged)
+        except GraphContextError as err:
+            logger.warning(
+                "could not claim the manual run of rule %s: %s", node.id, err
+            )
+            return False
+        return True
+
+    async def _refuse(
+        self,
+        node: Node,
+        refused: list[RuleProblem],
+        message: str,
+        touch_status: bool = True,
+    ) -> None:
+        """Record why a claimed manual request could not run.
+
+        ``touch_status`` is False for a PAUSED rule: writing Error there
+        would make ``is_paused`` false, the rule would be scanned next
+        tick and self-heal to Active -- so ticking a box would silently
+        resume a rule the human switched off.
+        """
+        text = _truncate(message)
+        changes = {rules.FIELD_LAST_ERROR: text}
+        if touch_status and node.fields.get(
+            rules.FIELD_STATUS, ""
+        ).strip() != rules.STATUS_ERROR:
+            changes[rules.FIELD_STATUS] = rules.STATUS_ERROR
+        await self._write_rule_fields(node, changes)
+        refused.append(RuleProblem(
+            rule_id=node.id, rule_name=node.name, message=text,
+        ))
 
     async def dry_run(
         self,
@@ -482,6 +693,15 @@ class RuleEngine:
     def _synthesize_transition(
         self, rule: _BoundRule, obj: Node
     ) -> tuple[str, str]:
+        """The (before, after) a fire runs under. For every automatic
+        condition this is a SYNTHESIS -- the transition the condition
+        describes, for a dry run that never happened. For ``manual``
+        it is the plain truth: no transition occurred, so the script
+        sees the current value on both sides. That is what lets a real
+        manual fire and a dry run share this whole prelude."""
+        if rule.config.condition == rules.CONDITION_MANUAL:
+            current = self._watched_value(rule, obj) if rule.watches else ""
+            return current, current
         if rule.builtin_watch:
             # Two distinct stamps: any edit bumps the store clock.
             return "(an earlier stamp)", obj.modified_at or _stamp(self._now())
@@ -552,10 +772,14 @@ class RuleEngine:
             return f"invalid: {err}"
 
     def _config_line(self, config: rules.RuleConfig) -> str:
-        line = (
-            f"when {config.watch_property!r} on {config.target_type!r} "
-            f"{config.condition} -> {config.action}"
-        )
+        if config.condition == rules.CONDITION_MANUAL:
+            # No watch to name: say what it DOES take to run it.
+            line = f"manual run only on {config.target_type!r} -> {config.action}"
+        else:
+            line = (
+                f"when {config.watch_property!r} on {config.target_type!r} "
+                f"{config.condition} -> {config.action}"
+            )
         if config.action in (rules.ACTION_SET_NOW, rules.ACTION_SET_VALUE):
             line += f" {config.action_property!r}"
         if config.action == rules.ACTION_SET_VALUE:
@@ -720,6 +944,14 @@ class RuleEngine:
         'changed' only (a timestamp has no true/false).
         -> (read key, format or "", is-builtin)."""
         identifier = config.watch_property
+        if not identifier.strip():
+            # A manual rule watches nothing (ADR 058). Trusting
+            # parse_rule_fields -- which is where "only manual may omit
+            # it" lives -- keeps that rule in one place; without this,
+            # resolving "" against a KNOWN catalog type raises, so the
+            # config would break on every real space while passing on
+            # the memory backend.
+            return "", "", False
         builtin = rules.builtin_watch_for(identifier)
         if specs is not None and self._spec_match(specs, identifier) is not None:
             key, fmt = self._resolve_property(
@@ -790,8 +1022,15 @@ class RuleEngine:
         per pair so a human expecting a cascade learns why it stays
         quiet. Informational, never an error."""
         for watcher in bound:
+            if not watcher.watches:
+                continue  # a manual rule watches nothing (ADR 058)
             for writer in bound:
                 if writer.node.id == watcher.node.id:
+                    continue
+                if not writer.action_key.strip():
+                    # A script rule has no fixed write target; without
+                    # this, two script rules' empty keys would compare
+                    # equal and log a cascade that cannot exist.
                     continue
                 pair = (writer.node.id, watcher.node.id)
                 if pair in self._noted_overlaps:
@@ -828,6 +1067,8 @@ class RuleEngine:
             return []
         plans: list[tuple[_BoundRule, Node, str, str]] = []
         for rule in bound:
+            if not rule.watches:
+                continue  # a manual rule: nothing to diff (ADR 058)
             matches: list[tuple[_BoundRule, Node, str, str]] = []
             for obj in sorted(self._targets(rule), key=lambda n: n.id):
                 before = prior.get(obj.id, {}).get(rule.read_key)
@@ -857,6 +1098,8 @@ class RuleEngine:
         """Current watched values off the live index (the new baseline)."""
         snapshot: dict[NodeId, dict[str, str]] = {}
         for rule in bound:
+            if not rule.watches:
+                continue  # a manual rule baselines nothing (ADR 058)
             for obj in self._targets(rule):
                 snapshot.setdefault(obj.id, {})[rule.read_key] = (
                     self._watched_value(rule, obj)
@@ -1072,8 +1315,14 @@ class RuleEngine:
         self, node: Node, changes: dict[str, str]
     ) -> None:
         try:
-            merged = {**dict(node.fields), **changes}
-            await self._repository.update_node(node.id, fields=merged)
+            # Re-read before merging, like _write_field: ``node`` is the
+            # snapshot _load_rules took at the top of the tick, and the
+            # tick may have written the rule since -- the run-now claim
+            # (ADR 058) does exactly that, so merging the stale map here
+            # would re-tick the box and the rule would fire forever.
+            fresh = self._repository.graph.node(node.id)
+            merged = {**dict(fresh.fields), **changes}
+            await self._repository.update_node(fresh.id, fields=merged)
         except GraphContextError as err:
             # Bookkeeping must never take the tick down; the state is
             # re-derived next tick anyway.

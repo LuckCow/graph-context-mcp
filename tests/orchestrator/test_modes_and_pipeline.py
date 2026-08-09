@@ -14,7 +14,7 @@ import pytest
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.node_historian import NodeHistorian
-from graph_context.domain import attribution, revisions
+from graph_context.domain import attribution, revisions, rules
 from graph_context.domain.models import NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
@@ -48,6 +48,7 @@ from graph_context.orchestrator.pipeline import (
     LAST_TURN_WARNING,
     ConversationMemory,
     Orchestrator,
+    is_command,
     sender_attributed,
 )
 from tests.orchestrator.mode_fixtures import fiction_registry
@@ -2041,3 +2042,146 @@ class TestOutboundFileEvents:
         orchestrator = _orchestrator(services, [LLMTurn(reply="fresh turn")])
         events = await orchestrator.handle_message("s1", "u1", "hi")
         assert [e.kind for e in events] == ["reply"]
+
+
+class TestRunCommand:
+    """WP52 (ADR 058): /run fires an Automation Rule with no model turn."""
+
+    @staticmethod
+    def _vocabulary() -> dict[str, str]:
+        return {
+            rules.FIELD_TARGET_TYPE: "Character",
+            rules.FIELD_CONDITION: "Manual",
+            rules.FIELD_ACTION: "Set property value",
+            rules.FIELD_ACTION_PROPERTY: "Mood",
+            rules.FIELD_ACTION_VALUE: "restless",
+        }
+
+    async def _seed(self, services: Services, name: str, **overrides: str):
+        return await services.repository.create_node(NodeDraft(
+            type="gc_rule", name=name, summary="an automation",
+            fields={**self._vocabulary(), **overrides},
+        ))
+
+    def test_the_command_vocabulary_is_exact_or_space_prefixed(self) -> None:
+        assert is_command("/run")
+        assert is_command("/run dinner picker")
+        assert is_command("  /run x  ")
+        assert not is_command("/runner up")
+        assert not is_command("run the picker")
+
+    async def test_it_fires_the_rule_without_calling_the_driver(
+        self, services: Services
+    ) -> None:
+        await self._seed(services, "dinner picker")
+        mira = await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        # An EMPTY script: any decide() would exhaust it and blow up.
+        orchestrator = _orchestrator(services, [])
+
+        events = await orchestrator.handle_message("s1", "u1", "/run dinner picker")
+
+        assert [e.kind for e in events] == ["notice"]
+        assert "dinner picker" in events[0].text
+        assert services.repository.graph.node(mira.id).fields["Mood"] == "restless"
+
+    async def test_it_records_no_intent_node(self, services: Services) -> None:
+        await self._seed(services, "dinner picker")
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+        before = {n.id for n in services.repository.graph.nodes()}
+
+        await orchestrator.handle_message("s1", "u1", "/run dinner picker")
+
+        after = {n.id for n in services.repository.graph.nodes()}
+        assert after == before  # no turn ran, so no intent node
+
+    async def test_bare_run_lists_the_rules_and_the_usage(
+        self, services: Services
+    ) -> None:
+        await self._seed(services, "dinner picker")
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run")
+        assert events[0].kind == "notice"
+        assert "usage: /run <rule name>" in events[0].text
+        assert "dinner picker" in events[0].text
+
+    async def test_bare_run_says_so_when_there_are_no_rules(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run")
+        assert events[0].kind == "notice"
+        assert "no automation rules" in events[0].text
+
+    async def test_an_unknown_rule_is_an_error_event_not_a_crash(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run nope")
+        assert [e.kind for e in events] == ["error"]
+
+    async def test_a_paused_rule_refuses(self, services: Services) -> None:
+        await self._seed(
+            services, "dinner picker", **{rules.FIELD_STATUS: rules.STATUS_PAUSED},
+        )
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run dinner picker")
+        assert [e.kind for e in events] == ["error"]
+        assert "paused" in events[0].text
+
+    async def test_on_names_the_trigger_object(self, services: Services) -> None:
+        await self._seed(services, "dinner picker")
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Aran", summary="First by id.",
+        ))
+        mira = await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+
+        await orchestrator.handle_message("s1", "u1", "/run dinner picker on Mira")
+
+        assert services.repository.graph.node(mira.id).fields["Mood"] == "restless"
+
+    async def test_a_rule_whose_name_contains_on_still_resolves_bare(
+        self, services: Services
+    ) -> None:
+        # The bare name is tried FIRST, so " on " inside a rule name is
+        # never mistaken for the trigger separator.
+        await self._seed(services, "turn on lights")
+        mira = await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+
+        events = await orchestrator.handle_message("s1", "u1", "/run turn on lights")
+
+        assert [e.kind for e in events] == ["notice"]
+        assert services.repository.graph.node(mira.id).fields["Mood"] == "restless"
+
+    async def test_every_session_shares_one_engine(
+        self, services: Services
+    ) -> None:
+        # The baseline is per SPACE, so /run from any chat must reach the
+        # same engine -- observable through the shared last-fired stamp.
+        rule = await self._seed(services, "dinner picker")
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+
+        await orchestrator.handle_message("chat-one", "u1", "/run dinner picker")
+        stamped = services.repository.graph.node(rule.id).fields[
+            rules.FIELD_LAST_FIRED
+        ]
+        await orchestrator.handle_message("chat-two", "u1", "/run dinner picker")
+
+        assert stamped  # the first run booked on the shared engine
+        assert orchestrator.services.rules is services.rules

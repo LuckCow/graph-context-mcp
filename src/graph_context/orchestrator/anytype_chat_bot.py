@@ -64,6 +64,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from graph_context import composition
+from graph_context.application.rule_engine import describe_firing, describe_problem
 from graph_context.application.scheduler import DueEvent
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import (
@@ -840,17 +841,12 @@ def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
 
     async def rules(_changed: frozenset[str]) -> None:
         report = await route.orchestrator.rule_tick()
+        # The shared renderers (ADR 058) so a fire reads the same here
+        # as in the /run reply the user sees.
         for firing in report.fired:
-            logger.info(
-                "rule %r fired %r on %r (%s)",
-                firing.rule_name, firing.action, firing.node_name,
-                firing.node_id,
-            )
+            logger.info("%s [%s]", describe_firing(firing), firing.node_id)
         for problem in report.errors:
-            logger.warning(
-                "rule %r (%s) recorded an error: %s",
-                problem.rule_name, problem.rule_id, problem.message,
-            )
+            logger.warning("rule error -- %s", describe_problem(problem))
         for node_id in report.healed:
             logger.info("rule %s healed: config parses again", node_id)
 

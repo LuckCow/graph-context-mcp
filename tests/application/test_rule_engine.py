@@ -844,3 +844,323 @@ class TestBuiltinModifiedWatch:
             task.id, fields={"Modified date": "today"}
         )
         assert len((await engine.run_tick()).fired) == 1
+
+
+def manual_draft(name: str = "dinner picker", **overrides: str) -> NodeDraft:
+    """A manual rule: no watch property, nothing triggers it but a
+    human (WP52, ADR 058)."""
+    return rule_draft(name, **{
+        rules.FIELD_WATCH_PROPERTY: "",
+        rules.FIELD_CONDITION: "Manual",
+        rules.FIELD_ACTION: "Set property value",
+        rules.FIELD_ACTION_PROPERTY: "Pick",
+        rules.FIELD_ACTION_VALUE: "tonight",
+        **overrides,
+    })
+
+
+class TestManualRulesNeverAutoFire:
+    """ADR 058: a manual rule is inert until a human asks."""
+
+    async def test_no_transition_ever_fires_a_manual_rule(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(manual_draft())
+        task = await repository.create_node(task_draft("ship it"))
+        await engine.run_tick()
+        for value in ("true", "", "true", "false"):
+            await repository.update_node(task.id, fields={"Done": value})
+            assert (await engine.run_tick()).fired == ()
+        assert "Pick" not in repository.graph.node(task.id).fields
+
+    async def test_a_manual_rule_does_not_break_a_real_space_catalog(
+        self, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        # The empty watch property must resolve against a KNOWN type
+        # without raising -- the memory backend has no catalog, so this
+        # regression only shows once a type is declared.
+        await repository.create_type("Task")
+        rule = await repository.create_node(manual_draft())
+        await repository.create_node(task_draft("ship it"))
+        engine = RuleEngine(repository, now=clock)
+        report = await engine.run_tick()
+        assert report.errors == ()
+        stored = repository.graph.node(rule.id)
+        assert stored.fields.get(rules.FIELD_STATUS, "") != rules.STATUS_ERROR
+
+    async def test_two_manual_script_rules_log_no_cascade_warning(
+        self, repository: RecordingRepository, clock: Clock, caplog,
+    ) -> None:
+        # Both have an empty read key AND an empty action key; without
+        # the guard those compare equal and fake a write/watch overlap.
+        runner = FakeScriptRunner()
+        engine = RuleEngine(repository, now=clock, script_runner=runner)
+        for name in ("picker a", "picker b"):
+            await repository.create_node(manual_draft(name, **{
+                rules.FIELD_ACTION: "Run script",
+                rules.FIELD_ACTION_PROPERTY: "",
+                rules.FIELD_ACTION_VALUE: "",
+            }))
+        await repository.create_node(task_draft("ship it"))
+        with caplog.at_level("INFO"):
+            await engine.run_tick()
+        assert "will not cascade" not in caplog.text
+
+
+class TestRunNow:
+    """The /run backend: fire one rule because a human asked."""
+
+    async def test_it_applies_the_action_and_stamps_last_fired(
+        self, engine: RuleEngine, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        rule = await repository.create_node(manual_draft())
+        task = await repository.create_node(task_draft("ship it"))
+        clock.advance_to("2026-07-19 10:00:05")
+
+        report = await engine.run_now("dinner picker")
+
+        assert [(f.rule_id, f.node_id) for f in report.fired] == [(rule.id, task.id)]
+        assert report.fired[0].manual is True
+        assert repository.graph.node(task.id).fields["Pick"] == "tonight"
+        assert repository.graph.node(rule.id).fields[rules.FIELD_LAST_FIRED] == (
+            "2026-07-19 10:00:05"
+        )
+
+    async def test_it_ignores_the_condition_on_an_ordinary_rule(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        # A 'changed to true' rule run by hand fires against the
+        # synthesized transition: the request IS the trigger.
+        await repository.create_node(rule_draft())
+        task = await repository.create_node(task_draft("ship it"))
+        report = await engine.run_now("stamp completion")
+        assert len(report.fired) == 1
+        assert "Completion date" in repository.graph.node(task.id).fields
+
+    async def test_a_named_trigger_picks_the_object(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(manual_draft())
+        await repository.create_node(task_draft("first"))
+        second = await repository.create_node(task_draft("second"))
+        report = await engine.run_now("dinner picker", "second")
+        assert report.fired[0].node_id == second.id
+        assert repository.graph.node(second.id).fields["Pick"] == "tonight"
+
+    async def test_a_paused_rule_refuses_and_writes_nothing(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(manual_draft(**{
+            rules.FIELD_STATUS: rules.STATUS_PAUSED,
+        }))
+        task = await repository.create_node(task_draft("ship it"))
+        repository.updated.clear()
+
+        with pytest.raises(GraphContextError) as err:
+            await engine.run_now("dinner picker")
+
+        assert "paused" in str(err.value)
+        assert repository.updated == []
+        assert "Pick" not in repository.graph.node(task.id).fields
+
+    async def test_an_unknown_rule_raises(self, engine: RuleEngine) -> None:
+        with pytest.raises(GraphContextError):
+            await engine.run_now("no such rule")
+
+    async def test_a_broken_rule_explains_itself(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(manual_draft(**{
+            rules.FIELD_ACTION_PROPERTY: "",  # set-value needs one
+        }))
+        with pytest.raises(GraphContextError) as err:
+            await engine.run_now("dinner picker")
+        assert "Rule action property" in str(err.value)
+
+    async def test_a_script_rule_without_a_runner_refuses(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        await repository.create_node(manual_draft(**{
+            rules.FIELD_ACTION: "Run script",
+            rules.FIELD_ACTION_PROPERTY: "",
+            rules.FIELD_ACTION_VALUE: "",
+        }))
+        await repository.create_node(task_draft("ship it"))
+        with pytest.raises(GraphContextError) as err:
+            await engine.run_now("dinner picker")
+        assert "script runner" in str(err.value)
+
+    async def test_a_manual_script_sees_a_no_op_transition(
+        self, repository: RecordingRepository, clock: Clock,
+    ) -> None:
+        runner = FakeScriptRunner()
+        engine = RuleEngine(repository, now=clock, script_runner=runner)
+        rule = await repository.create_node(manual_draft(**{
+            rules.FIELD_ACTION: "Run script",
+            rules.FIELD_ACTION_PROPERTY: "",
+            rules.FIELD_ACTION_VALUE: "",
+        }))
+        await repository.update_node(rule.id, body="```python\nlog('hi')\n```")
+        await repository.create_node(task_draft("ship it"))
+
+        await engine.run_now("dinner picker")
+
+        _, payload = runner.calls[0]
+        # Nothing changed, and the script is told so honestly.
+        assert payload["before"] == payload["after"] == ""
+
+    async def test_its_writes_never_fire_another_rule(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        # The cascade shape: a second rule watches what the manual one
+        # writes. run_now rebaselines the FULL set, so it stays quiet.
+        await repository.create_node(manual_draft())
+        await repository.create_node(rule_draft("cascade probe", **{
+            rules.FIELD_WATCH_PROPERTY: "Pick",
+            rules.FIELD_CONDITION: "Changed",
+            rules.FIELD_ACTION: "Set property value",
+            rules.FIELD_ACTION_PROPERTY: "Flag",
+            rules.FIELD_ACTION_VALUE: "seen",
+        }))
+        task = await repository.create_node(task_draft("ship it"))
+        await engine.run_tick()
+
+        await engine.run_now("dinner picker")
+
+        assert (await engine.run_tick()).fired == ()
+        assert "Flag" not in repository.graph.node(task.id).fields
+
+    async def test_it_arms_a_virgin_engine_without_replaying_the_past(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        # No tick has run, so there is no baseline. run_now installs one
+        # from the POST-action index: the pre-existing 'true' is
+        # absorbed (never replayed as a transition), while a LATER flip
+        # still fires normally.
+        await repository.create_node(manual_draft())
+        await repository.create_node(rule_draft())
+        done = await repository.create_node(task_draft("already done", Done="true"))
+
+        await engine.run_now("dinner picker")
+
+        assert (await engine.run_tick()).fired == ()
+        assert "Completion date" not in repository.graph.node(done.id).fields
+        # A LATER real transition still fires: the engine is armed, it
+        # just refused to replay history it never observed changing.
+        await repository.update_node(done.id, fields={"Done": "", "Pick": "tonight"})
+        assert (await engine.run_tick()).fired == ()
+        await repository.update_node(done.id, fields={"Done": "true", "Pick": "tonight"})
+        assert len((await engine.run_tick()).fired) == 1
+
+
+class TestRunNowCheckbox:
+    """The Anytype-UI gesture: tick 'Rule run now', the engine claims it."""
+
+    async def test_a_ticked_box_fires_once_and_clears(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        rule = await repository.create_node(manual_draft())
+        task = await repository.create_node(task_draft("ship it"))
+        await engine.run_tick()
+        await repository.update_node(rule.id, fields={
+            **repository.graph.node(rule.id).fields,
+            rules.FIELD_RUN_NOW: "true",
+        })
+
+        report = await engine.run_tick()
+
+        assert [f.node_id for f in report.fired] == [task.id]
+        assert report.fired[0].manual is True
+        assert repository.graph.node(task.id).fields["Pick"] == "tonight"
+        # The claim survives the same tick's bookkeeping write -- if it
+        # did not, the rule would re-fire every tick, forever.
+        assert repository.graph.node(rule.id).fields[rules.FIELD_RUN_NOW] == "false"
+        assert (await engine.run_tick()).fired == ()
+
+    async def test_ticking_it_again_runs_it_again(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        rule = await repository.create_node(manual_draft())
+        await repository.create_node(task_draft("ship it"))
+        await engine.run_tick()
+        for _ in range(2):
+            await repository.update_node(rule.id, fields={
+                **repository.graph.node(rule.id).fields,
+                rules.FIELD_RUN_NOW: "true",
+            })
+            assert len((await engine.run_tick()).fired) == 1
+
+    async def test_a_paused_rule_refuses_without_being_resumed(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        rule = await repository.create_node(manual_draft(**{
+            rules.FIELD_STATUS: rules.STATUS_PAUSED,
+            rules.FIELD_RUN_NOW: "true",
+        }))
+        task = await repository.create_node(task_draft("ship it"))
+
+        report = await engine.run_tick()
+
+        assert report.fired == ()
+        assert "Pick" not in repository.graph.node(task.id).fields
+        stored = repository.graph.node(rule.id)
+        assert stored.fields[rules.FIELD_RUN_NOW] == "false"  # claimed
+        assert "paused" in stored.fields[rules.FIELD_LAST_ERROR]
+        # Error would un-pause it on the next tick's self-heal.
+        assert stored.fields[rules.FIELD_STATUS] == rules.STATUS_PAUSED
+        assert [p.rule_id for p in report.errors] == [rule.id]
+
+    async def test_a_ticked_template_refuses_without_crashing(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        explainer = await repository.create_node(NodeDraft(
+            type="gc_rule", name="Example Automation Rule", summary="a template",
+            fields={rules.FIELD_RUN_NOW: "true"},
+        ))
+        report = await engine.run_tick()
+        assert report.fired == ()
+        stored = repository.graph.node(explainer.id)
+        assert stored.fields[rules.FIELD_RUN_NOW] == "false"
+        assert stored.fields[rules.FIELD_LAST_ERROR]
+
+    async def test_a_rule_with_no_objects_to_run_against_refuses(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        rule = await repository.create_node(manual_draft(**{
+            rules.FIELD_RUN_NOW: "true",
+        }))
+        report = await engine.run_tick()
+        assert report.fired == ()
+        assert [p.rule_id for p in report.errors] == [rule.id]
+        assert "no objects of type" in (
+            repository.graph.node(rule.id).fields[rules.FIELD_LAST_ERROR]
+        )
+
+    async def test_a_failed_claim_does_not_fire(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        rule = await repository.create_node(manual_draft(**{
+            rules.FIELD_RUN_NOW: "true",
+        }))
+        task = await repository.create_node(task_draft("ship it"))
+        repository.fail_for.add(rule.id)
+
+        report = await engine.run_tick()
+
+        assert report.fired == ()
+        assert "Pick" not in repository.graph.node(task.id).fields
+        # Still ticked: the next tick retries rather than dropping it.
+        assert repository.graph.node(rule.id).fields[rules.FIELD_RUN_NOW] == "true"
+
+    async def test_a_ticked_ordinary_rule_runs_too(
+        self, engine: RuleEngine, repository: RecordingRepository,
+    ) -> None:
+        # Manual triggering is not limited to manual rules.
+        rule = await repository.create_node(rule_draft(**{
+            rules.FIELD_RUN_NOW: "true",
+        }))
+        task = await repository.create_node(task_draft("ship it"))
+        report = await engine.run_tick()
+        assert [f.node_id for f in report.fired] == [task.id]
+        assert "Completion date" in repository.graph.node(task.id).fields
+        assert repository.graph.node(rule.id).fields[rules.FIELD_RUN_NOW] == "false"

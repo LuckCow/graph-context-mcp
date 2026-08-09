@@ -335,13 +335,14 @@ class TestProcessingPlaceholder:
         assert "sent-1" in sent  # error posts feed echo suppression too
 
     async def test_command_turns_skip_the_placeholder(self) -> None:
-        # /clear (and /mode) are answered instantly by the pipeline; a
-        # placeholder would only add a notification, so the output posts
-        # alone, fresh.
-        recorder = await _run(_handler(), _message(text="/clear"))
-        assert PROCESSING_NOTICE not in recorder.posted
-        assert recorder.edited == []
-        assert len(recorder.messages) == 1
+        # /clear (and /mode, /run) are answered instantly by the
+        # pipeline; a placeholder would only add a notification, so the
+        # output posts alone, fresh.
+        for text in ("/clear", "/run dinner picker"):
+            recorder = await _run(_handler(), _message(text=text))
+            assert PROCESSING_NOTICE not in recorder.posted
+            assert recorder.edited == []
+            assert len(recorder.messages) == 1
 
     async def test_an_eventless_turn_does_not_strand_the_placeholder(
         self,

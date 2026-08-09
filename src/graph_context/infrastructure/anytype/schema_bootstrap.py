@@ -156,8 +156,10 @@ Fields:
 - Rule watch property -- the property whose change triggers the rule, \
 by its display name, e.g. Done. Checkbox and select properties work \
 best; a text property saves as you type, so "Changed" can fire on a \
-half-typed value.
-- Rule condition -- Changed to true, Changed to false, or Changed.
+half-typed value. Leave it empty for a Manual rule.
+- Rule condition -- Changed to true, Changed to false, Changed, or \
+Manual. A Manual rule never runs by itself: it runs only when you tick \
+Rule run now, or send /run <rule name> in a chat.
 - Rule action -- what happens:
   - Set property to now writes the current date-time into the Rule \
 action property (e.g. Completion date). A date-format property gets \
@@ -172,6 +174,10 @@ Recipe 3) in a sandbox.
 - Rule status -- Active rules run; set Paused to switch one off. Empty \
 counts as Active. The assistant sets Error (with Rule last error) when \
 a rule is misconfigured, and flips it back to Active once it is fixed.
+- Rule run now -- tick this box to run the rule once, right now. The \
+assistant unticks it as it starts (within a few seconds), so ticking \
+it again runs it again. Works on any rule; a Paused rule refuses and \
+says so in Rule last error.
 - Rule last fired / Rule last error -- bookkeeping, written by the \
 assistant.
 
@@ -195,7 +201,16 @@ if project:
     log(f"{len(open_tasks)} open tasks")
 ```
 
-The script sees: trigger (the changed object as a dict), before/after \
+Recipe 4 -- a formula you run on demand: target type Restaurant, Rule \
+watch property empty, condition Manual, action Run script, with the \
+formula in this page's body. Nothing triggers it automatically -- run \
+it by ticking Rule run now, or by sending /run <rule name> in a chat. \
+Use this for anything you want computed when you ask rather than when \
+something changes.
+
+The script sees: trigger (the changed object as a dict -- for a Manual \
+rule, the first object of the target type unless you name one), \
+before/after \
 (the watched value around the change; empty means unset), now (the \
 current local date-time as text -- use it instead of the clock), \
 objects(type=None), find(name, type=None), field(obj, prop), \

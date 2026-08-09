@@ -2842,6 +2842,66 @@ it.
 
 ---
 
+## WP52 — Manual rule runs (ADR 058) — **shipped 2026-08-08**
+
+**Status:** complete. An Automation Rule can now be run on demand, with
+no LLM turn — the motivating case being a Dinner Picker mode whose
+`run script` rule holds the formula that picks the next spot. Before
+this, firing such a rule meant faking a property change or spending a
+model turn on work the sandbox already does deterministically.
+
+* **The `manual` condition** (`domain/rules.py`): a fourth token whose
+  `condition_met` is False for every before/after pair — one line in
+  the domain IS "never fires on its own", so the engine's planner
+  carries no second copy of the rule. It is the only condition for
+  which `parse_rule_fields` relaxes the watch-property requirement (a
+  target type is still required — a fire needs a trigger object), and
+  the missing-watch error now points at it.
+* **Two surfaces, one entry point.** `/run <rule>` joins `/mode` and
+  `/clear` in `pipeline.is_command` + its dispatch, short-circuiting
+  before the driver: no model turn, no intent node, and Anytype /
+  Discord / CLI get it for free. Bare `/run` lists the rules and the
+  usage (names are exact-match); `/run <rule> on <object>` names the
+  trigger, with the bare name tried FIRST so "Turn on lights" still
+  resolves. The `gc_rule_run_now` checkbox ("Rule run now") is the
+  Anytype-UI gesture — the tenth `gc_rule_*` property and the first
+  with shared ownership: the human ticks, the engine unticks.
+* **`RuleEngine.run_now` + `_claim_manual_requests`**: `/run` calls the
+  former, the checkbox becomes a plan source inside `run_tick`. Neither
+  consults the condition — the request IS the trigger, so an ordinary
+  reactive rule can be run by hand too. The scan lives inside the tick
+  rather than in a second ADR 044 listener so a rule that both
+  transitioned and was hand-requested books and rebaselines once.
+* **Invariants inherited, not re-argued.** The box is unticked BEFORE
+  the run (the scheduler's at-most-once discipline; a failed claim
+  leaves it ticked and skips the fire, so it cannot go through the
+  error-swallowing `_write_rule_fields`); every path ends at the
+  extracted `_rebaseline(bound)` over the FULL bound set, so manual
+  writes can never read as transitions. `run_now`'s *bookkeeping* is
+  scoped to the one rule — the asymmetry is deliberate and commented.
+* **Paused refuses loudly**, writing only `gc_rule_last_error` and
+  never the Error status: `is_paused("Error")` is False, so an Error
+  write would self-heal the rule to Active on the next tick — ticking
+  a box would silently resume a rule the human switched off.
+* **No `automation action="run"`.** The tool surface is unchanged; the
+  doc names the two human gestures and tells the model it has no
+  action for this, or it invents one and claims it fired the rule.
+* **Two bugs found on the way in.** `_write_rule_fields` merged over
+  the fields snapshot taken at the top of the tick while its sibling
+  `_write_field` re-reads — nothing exercised the difference until the
+  run-now claim, which the same tick's `gc_rule_last_fired` write would
+  have undone, firing the rule forever. And `_note_overlaps` compared
+  two manual script rules' empty keys as equal, logging a cascade that
+  cannot exist. Both fixed, both pinned.
+* **`_resolve_watch` short-circuits** on an empty watch property:
+  resolving `""` against a KNOWN catalog type raises, so a manual rule
+  would have passed on the memory backend and broken on every real
+  space. Pinned at the adapter layer, and live-certified — the E2E case
+  confirms the checkbox mints/retrofits as a real checkbox and that
+  writing `"false"` actually clears it.
+
+---
+
 ## Sequencing
 
 ```

@@ -7,6 +7,10 @@ diffing successive index states — this module only answers the pure
 questions: does this fields map parse into a rule, and does this
 before/after pair satisfy this condition?
 
+The ``manual`` condition (ADR 058) is the exception that proves the
+shape: it is satisfied by no transition at all, so such a rule runs
+only when a human asks for it and needs no watch property.
+
 Vocabulary values arrive as human-facing select options ("Changed to
 true") and are normalized to canonical word tokens for comparison; the
 adapter's checkbox convention (an unticked box is ABSENT from
@@ -36,6 +40,10 @@ FIELD_ACTION_VALUE = "gc_rule_action_value"
 FIELD_STATUS = "gc_rule_status"
 FIELD_LAST_FIRED = "gc_rule_last_fired"
 FIELD_LAST_ERROR = "gc_rule_last_error"
+# WP52 (ADR 058): the manual-run request checkbox. The only field of
+# this surface with SHARED ownership -- a human ticks it in the Anytype
+# UI, the engine unticks it as it claims the request.
+FIELD_RUN_NOW = "gc_rule_run_now"
 
 # The lifecycle select (human-visible as "Rule status"). Active rules
 # are scanned and fired; Paused is the human's off-switch; Error is
@@ -53,10 +61,16 @@ _PAUSED_STATUSES = frozenset({"paused", "disabled", "off", "cancelled"})
 CONDITION_CHANGED_TO_TRUE = "changed to true"
 CONDITION_CHANGED_TO_FALSE = "changed to false"
 CONDITION_CHANGED = "changed"
+# WP52 (ADR 058): the no-trigger condition. No before/after pair ever
+# satisfies it (see condition_met), so a manual rule never fires on its
+# own -- it runs only when a human asks, and its watch property is
+# optional because there is nothing to watch.
+CONDITION_MANUAL = "manual"
 CONDITIONS = (
     CONDITION_CHANGED_TO_TRUE,
     CONDITION_CHANGED_TO_FALSE,
     CONDITION_CHANGED,
+    CONDITION_MANUAL,
 )
 
 ACTION_SET_NOW = "set property to now"
@@ -149,12 +163,6 @@ def parse_rule_fields(fields: Mapping[str, str]) -> RuleConfig:
             "the rule needs a 'Rule target type': the object type it "
             "watches (e.g. 'Task')"
         )
-    watch_property = fields.get(FIELD_WATCH_PROPERTY, "").strip()
-    if not watch_property:
-        raise SchemaViolation(
-            "the rule needs a 'Rule watch property': the property whose "
-            "changes trigger it (e.g. 'Done')"
-        )
     action = normalize_choice(fields.get(FIELD_ACTION, ""))
     if not action:
         raise SchemaViolation(
@@ -185,6 +193,16 @@ def parse_rule_fields(fields: Mapping[str, str]) -> RuleConfig:
         raise SchemaViolation(
             f"unknown rule condition {fields.get(FIELD_CONDITION, '')!r}; "
             f"use one of {_CONDITION_WORDS}"
+        )
+    # The condition decides whether a watch property is needed, so it is
+    # resolved first (ADR 058): a manual rule watches nothing.
+    watch_property = fields.get(FIELD_WATCH_PROPERTY, "").strip()
+    if not watch_property and condition != CONDITION_MANUAL:
+        raise SchemaViolation(
+            "the rule needs a 'Rule watch property': the property whose "
+            "changes trigger it (e.g. 'Done') -- or set 'Rule condition' "
+            f"to {CONDITION_MANUAL!r} if this rule should only run when "
+            "you ask for it"
         )
     action_property = fields.get(FIELD_ACTION_PROPERTY, "").strip()
     if action == ACTION_UNCHECK_OTHERS:
@@ -257,7 +275,14 @@ def condition_met(condition: str, before: str, after: str) -> bool:
     condition? ``before``/``after`` are normalized field strings; a
     checkbox that was never ticked reads as ``""`` on the Anytype
     backend and ``"false"`` on the fake, so truthiness — not string
-    identity — decides the to-true/to-false conditions."""
+    identity — decides the to-true/to-false conditions.
+
+    ``manual`` (ADR 058) is satisfied by NO transition — that is the
+    whole of "never fires on its own", and it lives here rather than in
+    the engine's planner so every caller inherits it.
+    """
+    if condition == CONDITION_MANUAL:
+        return False
     if condition == CONDITION_CHANGED_TO_TRUE:
         return _truthy(after) and not _truthy(before)
     if condition == CONDITION_CHANGED_TO_FALSE:

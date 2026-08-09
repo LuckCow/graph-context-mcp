@@ -124,6 +124,64 @@ class TestParseRuleFields:
         assert rules.CONDITION_CHANGED_TO_TRUE in str(err.value)
 
 
+class TestManualCondition:
+    """WP52 (ADR 058): the run-only-when-asked condition."""
+
+    def test_a_manual_rule_parses_without_a_watch_property(self) -> None:
+        config = rules.parse_rule_fields(fields(**{
+            rules.FIELD_WATCH_PROPERTY: "",
+            rules.FIELD_CONDITION: "Manual",
+            rules.FIELD_ACTION: "Run script",
+            rules.FIELD_ACTION_PROPERTY: "",
+        }))
+        assert config.condition == rules.CONDITION_MANUAL
+        assert config.watch_property == ""
+        assert config.target_type == "Task"  # still required
+
+    def test_a_manual_rule_may_still_name_a_watch_property(self) -> None:
+        # Harmless: nothing diffs it, but a human switching a live rule
+        # to Manual should not have to blank the field first.
+        config = rules.parse_rule_fields(fields(**{
+            rules.FIELD_CONDITION: "Manual",
+        }))
+        assert config.watch_property == "Done"
+
+    def test_the_missing_watch_error_points_at_manual(self) -> None:
+        with pytest.raises(SchemaViolation) as err:
+            rules.parse_rule_fields(fields(**{rules.FIELD_WATCH_PROPERTY: ""}))
+        message = str(err.value)
+        assert "Rule watch property" in message
+        assert rules.CONDITION_MANUAL in message
+
+    def test_the_seeded_select_option_round_trips(self) -> None:
+        assert rules.normalize_choice("Manual") == rules.CONDITION_MANUAL
+
+    def test_manual_still_needs_a_target_type(self) -> None:
+        with pytest.raises(SchemaViolation) as err:
+            rules.parse_rule_fields(fields(**{
+                rules.FIELD_TARGET_TYPE: "",
+                rules.FIELD_WATCH_PROPERTY: "",
+                rules.FIELD_CONDITION: "Manual",
+            }))
+        assert "Rule target type" in str(err.value)
+
+    def test_a_manual_rule_is_not_an_unconfigured_template(self) -> None:
+        # is_unconfigured wants NEITHER half; a manual rule always has a
+        # target type, so it is never skipped as the seeded explainer.
+        assert not rules.is_unconfigured({
+            rules.FIELD_TARGET_TYPE: "Task",
+            rules.FIELD_CONDITION: "Manual",
+        })
+
+    def test_manual_contradicts_uncheck_others(self) -> None:
+        with pytest.raises(SchemaViolation) as err:
+            rules.parse_rule_fields(fields(**{
+                rules.FIELD_ACTION: "Uncheck others of type",
+                rules.FIELD_CONDITION: "Manual",
+            }))
+        assert rules.CONDITION_CHANGED_TO_TRUE in str(err.value)
+
+
 class TestRunScriptParsing:
     """WP32 (ADR 040): the script action's parse rules."""
 
@@ -225,6 +283,18 @@ class TestConditionMet:
     ])
     def test_changed_compares_values(self, before: str, after: str, expected: bool) -> None:
         assert rules.condition_met(rules.CONDITION_CHANGED, before, after) is expected
+
+    @pytest.mark.parametrize(("before", "after"), [
+        ("", "true"),
+        ("true", ""),
+        ("Todo", "Doing"),
+        ("Doing", "Doing"),
+        ("", ""),
+    ])
+    def test_manual_is_satisfied_by_no_transition(self, before: str, after: str) -> None:
+        # ADR 058: "never fires on its own" lives HERE, not in the
+        # engine's planner -- every caller inherits it.
+        assert rules.condition_met(rules.CONDITION_MANUAL, before, after) is False
 
 
 class TestBuiltinWatchables:

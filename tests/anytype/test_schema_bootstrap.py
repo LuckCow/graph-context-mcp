@@ -91,15 +91,24 @@ class TestAutomationRuleBootstrap:
             mapping.PROP_RULE_STATUS: "Rule status",
             mapping.PROP_RULE_LAST_FIRED: "Rule last fired",
             mapping.PROP_RULE_LAST_ERROR: "Rule last error",
+            mapping.PROP_RULE_RUN_NOW: "Rule run now",
         }.items():
             assert names[key] == display
+
+    async def test_run_now_mints_as_a_checkbox(self, mock, client, repo) -> None:
+        # WP52 (ADR 058): the human's manual-run gesture is a tickable
+        # box in the editor, so the format is load-bearing.
+        by_key = {p["key"]: p async for p in client.list_properties()}
+        assert by_key[mapping.PROP_RULE_RUN_NOW]["format"] == "checkbox"
 
     async def test_the_vocabulary_selects_have_seeded_options(
         self, mock, client, repo
     ) -> None:
         by_key = {p["key"]: p async for p in client.list_properties()}
         for key, expected in {
-            mapping.PROP_RULE_CONDITION: {"Changed to true", "Changed to false", "Changed"},
+            mapping.PROP_RULE_CONDITION: {
+                "Changed to true", "Changed to false", "Changed", "Manual",
+            },
             mapping.PROP_RULE_ACTION: {
                 "Set property to now", "Set property value", "Uncheck others of type",
             },
@@ -123,6 +132,8 @@ class TestAutomationRuleBootstrap:
         body = await repo.fetch_body(example.id)
         assert "Rule target type" in body  # the in-space documentation
         assert "Uncheck others of type" in body
+        assert "Rule run now" in body  # ADR 058's manual-run gesture
+        assert "/run <rule name>" in body
 
     async def test_rerunning_bootstrap_does_not_duplicate_the_example(
         self, mock, client, repo
@@ -134,3 +145,42 @@ class TestAutomationRuleBootstrap:
             if n.type_key == RULE_TYPE_KEY and n.name == EXAMPLE_RULE_NAME
         ]
         assert len(examples) == 1
+
+
+class TestRunNowRetrofit:
+    """WP52 (ADR 058): the upgraded-space story. A space bootstrapped
+    before Rule run now existed gains it on the next startup -- no
+    migration, because ensure_schema retrofits missing properties onto
+    an existing type (quirk A11: full list resent + the additions)."""
+
+    async def test_an_existing_rule_type_gains_run_now(
+        self, mock, client, repo
+    ) -> None:
+        pre_wp52 = {
+            key: fmt for key, fmt in mapping.RULE_PROPERTIES.items()
+            if key != mapping.PROP_RULE_RUN_NOW
+        }
+        rule_type = {t["key"]: t async for t in client.list_types()}[RULE_TYPE_KEY]
+        await client.update_type(str(rule_type["id"]), {
+            "properties": [
+                {"key": key, "name": key, "format": fmt}
+                for key, fmt in pre_wp52.items()
+            ],
+        })
+
+        await ensure_schema(client)
+
+        retrofitted = {t["key"]: t async for t in client.list_types()}[RULE_TYPE_KEY]
+        attached = {e["key"] for e in retrofitted.get("properties", [])}
+        assert mapping.PROP_RULE_RUN_NOW in attached
+        assert set(pre_wp52) <= attached  # nothing lost
+
+    async def test_an_existing_condition_property_gains_the_manual_option(
+        self, mock, client, repo
+    ) -> None:
+        # _seed_select_options runs on EVERY startup, find-or-create, so
+        # spaces that predate the token get it without a migration.
+        by_key = {p["key"]: p async for p in client.list_properties()}
+        condition = by_key[mapping.PROP_RULE_CONDITION]
+        options = {t["name"] async for t in client.list_tags(str(condition["id"]))}
+        assert "Manual" in options

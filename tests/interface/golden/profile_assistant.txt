@@ -350,7 +350,10 @@ Tool actions:
 
 condition -- the rule watches TRANSITIONS, not states:
   "changed to true" / "changed to false" (checkbox flips), "changed"
-  (any value change).
+  (any value change), or "manual" -- the rule NEVER fires on its own and
+  runs only when the user asks for it. Use "manual" for a formula or a
+  picker: something to compute on demand rather than in reaction to an
+  edit. watch_property is optional (and ignored) for a manual rule.
 
 watch_property -- a property attached to the target TYPE (the error
   lists them; a property created with create_missing_properties scope
@@ -392,6 +395,12 @@ Rules fire only on changes the system OBSERVES while running (nothing
 retroactive), rules never trigger other rules, and a broken rule shows
 status Error + "Rule last error" on its object -- it heals on its own
 once fixed.
+
+Running a rule on demand is the USER's gesture, not yours: they send
+"/run <rule name>" in the chat, or tick "Rule run now" on the rule
+object in Anytype. You have NO action for this -- do not claim you ran
+a rule. If they ask you to run one, tell them the two ways, or offer
+action="test" for a dry run that changes nothing.
 
 ### send_file
 Send a FILE to the user, attached to your reply in this chat (use it

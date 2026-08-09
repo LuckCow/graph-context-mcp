@@ -10,8 +10,10 @@
 
   "remoteUser": "dev",
 
-  // Idempotent: re-applies the same rules if VS Code (re)starts the container itself.
-  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
+  // Idempotent, and identical to the compose command's boot sequence: re-applies
+  // the firewall rules, re-joins the tailnet, and starts the orchestrator if it
+  // is not already up, when VS Code (re)starts the container itself.
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && sudo /usr/local/bin/start-tailscale.sh && gc-serve boot",
 
   // Forwarded to the host when attached via VS Code: 8000 = MCP server,
   // 8765 = turn-log viewer (orchestrator serve).

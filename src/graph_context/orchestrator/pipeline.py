@@ -29,6 +29,11 @@ the other half -- a bounded per-session ring of prior user/assistant
 messages replayed ahead of the block, cleared by the ``/clear`` command
 (handled here, like ``/mode``, so every transport gets it). Transports
 can prime the ring after a restart via :meth:`Orchestrator.seed_memory`.
+
+``/run <rule>`` (WP52, ADR 058) is the third command: it fires one
+Automation Rule immediately and returns what happened. Like the other
+two it short-circuits before the driver, so a deterministic automation
+-- a formula, a picker -- costs no model turn at all.
 """
 
 from __future__ import annotations
@@ -45,11 +50,11 @@ from typing import Protocol
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
 from graph_context.application.mutation_journal import MutationRecord
 from graph_context.application.node_historian import NodeHistorian
-from graph_context.application.rule_engine import RuleTickReport
+from graph_context.application.rule_engine import RuleTickReport, describe_report
 from graph_context.application.scheduler import SchedulerTick
 from graph_context.domain.model_choice import model_id
 from graph_context.domain.models import Node
-from graph_context.errors import GraphContextError
+from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface.context_block import build_turn_context
 from graph_context.interface.mode_config import slugify
 from graph_context.interface.profiles import DomainProfile, ModeSpec
@@ -130,7 +135,8 @@ class TurnObserver(Protocol):
     alone interprets the levels). Contract: implementations MUST NOT raise
     -- delivery failures degrade internally (the TurnLog posture: a
     diagnostic never takes a turn down). Command turns (``/mode``,
-    ``/clear``) return before ``turn_started``, so they never stream.
+    ``/clear``, ``/run``) return before ``turn_started``, so they never
+    stream.
     """
 
     async def turn_started(self, mode: str, detail: str) -> None: ...
@@ -175,7 +181,8 @@ def sender_attributed(text: str, sender: str) -> str:
 
 def is_command(text: str) -> bool:
     """Whether ``handle_message`` answers this text instantly -- a
-    ``/``-command handled before the model runs (``/mode``, ``/clear``).
+    ``/``-command handled before the model runs (``/mode``, ``/clear``,
+    ``/run``).
 
     Transports use this to skip work-in-progress affordances (the
     Anytype "Processing…" placeholder): a command's output arrives at
@@ -183,7 +190,14 @@ def is_command(text: str) -> bool:
     vocabulary lives here, next to the dispatch that implements it.
     """
     stripped = text.strip()
-    return stripped.startswith("/mode") or stripped == "/clear"
+    return (
+        stripped.startswith("/mode")
+        or stripped == "/clear"
+        # Exact-or-space-prefixed, so a future "/runsomething" is a
+        # message to the model rather than a mangled rule name.
+        or stripped == "/run"
+        or stripped.startswith("/run ")
+    )
 
 
 DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
@@ -360,6 +374,16 @@ class Orchestrator:
         rules belong to the space, not to any one session."""
         return await self.services.rules.run_tick()
 
+    async def run_rule(
+        self, identifier: str, trigger: str = ""
+    ) -> RuleTickReport:
+        """Fire ONE Automation Rule on demand (WP52, ADR 058) -- the
+        /run command's seam, and the way a transport or test reaches a
+        manual run without going through chat text. The shared bundle,
+        like ``rule_tick``: one engine per space, so its baseline stays
+        coherent no matter which session asked."""
+        return await self.services.rules.run_now(identifier, trigger)
+
     async def history_tick(self, changed: frozenset[str]) -> None:
         """Record human revisions for changed tracked nodes (WP41, ADR
         049). The change-tick listener calls this after its resync under
@@ -472,6 +496,8 @@ class Orchestrator:
         if is_command(stripped):
             if stripped.startswith("/mode"):
                 command_events = await self._switch_mode(state, stripped)
+            elif stripped.startswith("/run"):
+                command_events = await self._run_rule(stripped)
             else:  # /clear
                 state.memory.clear()
                 command_events = [ReplyEvent(
@@ -904,6 +930,62 @@ class Orchestrator:
         ))
         events.extend(await self._persist_mode(state))
         return events
+
+    async def _run_rule(self, command: str) -> list[ReplyEvent]:
+        """``/run <rule>`` -- fire an Automation Rule now, no model turn
+        (WP52, ADR 058).
+
+        Bare ``/run`` lists what there is to run, mirroring bare
+        ``/mode``: rule names are exact-match, so discovery has to be
+        one command away. ``/run <rule> on <object>`` names the trigger
+        object; the bare name is tried FIRST, so a rule actually called
+        "Turn on lights" still resolves.
+        """
+        argument = command.removeprefix("/run").strip()
+        if not argument:
+            views = self.services.rules.views()
+            if not views:
+                return [ReplyEvent(
+                    "no automation rules exist yet. Create one in Anytype "
+                    "(an Automation Rule object) or ask for one.",
+                    kind="notice",
+                )]
+            listing = "\n".join(
+                f"- {view.node.name} -- {view.summary} ({view.status})"
+                for view in views
+            )
+            return [ReplyEvent(
+                f"usage: /run <rule name>\n{listing}", kind="notice",
+            )]
+        try:
+            report = await self._fire_rule(argument)
+        except GraphContextError as err:
+            return [ReplyEvent(str(err), kind="error")]
+        lines = describe_report(report)
+        return [ReplyEvent(
+            "\n".join(lines) if lines else "the rule ran; nothing to change.",
+            kind="notice",
+        )]
+
+    async def _fire_rule(self, argument: str) -> RuleTickReport:
+        """Resolve ``<rule>`` / ``<rule> on <object>`` and fire it.
+
+        The index is resynced first: an explicit command should run
+        against what the user can SEE, and the change tick only refreshes
+        every few seconds. A failed resync degrades -- running against a
+        slightly stale index beats refusing.
+        """
+        try:
+            await self.resync_graph()
+        except GraphContextError as err:
+            logger.warning("could not resync before /run: %s", err)
+        try:
+            return await self.run_rule(argument)
+        except NodeNotFound:
+            if " on " not in argument:
+                raise
+            rule, _, trigger = argument.rpartition(" on ")
+            return await self.run_rule(rule.strip(), trigger.strip())
 
     async def _persist_mode(self, state: _SessionState) -> list[ReplyEvent]:
         """Mirror the switched mode into the session snapshot so it

@@ -1171,6 +1171,34 @@ class TestAutomationTool:
         assert "stamp completion" in out and "active" in out
         assert "when 'Done' on 'Task'" in out
 
+    async def test_a_manual_rule_is_creatable_without_a_watch_property(
+        self,
+    ) -> None:
+        # WP52 (ADR 058): the model AUTHORS run-on-demand rules; it just
+        # cannot fire them.
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="dinner picker",
+            target_type="Task", condition="manual",
+            rule_action="set property value", action_property="Pick",
+            action_value="tonight",
+        )
+        assert out.startswith("created automation rule 'dinner picker'")
+        listing = await tools.automation_tool(services, action="list")
+        assert "manual run only on 'Task'" in listing
+
+    async def test_there_is_no_run_action(self) -> None:
+        # The absence IS the design: firing a rule is the user's
+        # gesture (/run, or the Rule run now checkbox), never a tool
+        # call. The error must not invent one.
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="run", rule="stamp completion",
+        )
+        assert out.startswith("ERROR:")
+        assert "create, update, list, pause, resume, test" in out
+
     async def test_empty_list_guides_creation(self) -> None:
         out = await tools.automation_tool(self._services(), action="list")
         assert "no automation rules" in out and "action='create'" in out

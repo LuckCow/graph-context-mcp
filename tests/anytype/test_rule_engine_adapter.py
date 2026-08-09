@@ -243,3 +243,102 @@ class TestUncheckOthers:
         assert (await stored_properties(client, alpha.id))["default_flag"] is False
         assert (await stored_properties(client, beta.id))["default_flag"] is True
         assert (await engine.run_tick()).fired == ()  # the dust settles
+
+
+class TestManualRuns:
+    """WP52 (ADR 058) over the real adapter: the human's gesture is a
+    checkbox ticked in the Anytype UI, and the claim must survive the
+    round trip through real property entries."""
+
+    async def test_a_manual_rule_binds_against_a_real_catalog_type(
+        self, mock, client, repo, clock
+    ) -> None:
+        # An empty watch property resolves against a KNOWN type. The
+        # memory backend has no catalog, so only this layer catches it.
+        await seed_task_type(client, repo)
+        rule = await repo.create_node(NodeDraft(
+            type="Automation Rule", name="dinner picker",
+            summary="pick tonight's spot",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_CONDITION: "Manual",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Completion date",
+                rules.FIELD_ACTION_VALUE: "tonight",
+            },
+        ))
+        await repo.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        engine = RuleEngine(repo, now=clock)
+
+        report = await engine.run_tick()
+
+        assert report.errors == ()
+        stored = await stored_properties(client, rule.id)
+        assert not stored.get(mapping.PROP_RULE_LAST_ERROR)
+
+    async def test_ticking_run_now_in_the_ui_runs_the_rule_and_clears_the_box(
+        self, mock, client, repo, clock
+    ) -> None:
+        await seed_task_type(client, repo)
+        rule = await repo.create_node(NodeDraft(
+            type="Automation Rule", name="dinner picker",
+            summary="pick tonight's spot",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_CONDITION: "Manual",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Completion date",
+                rules.FIELD_ACTION_VALUE: "tonight",
+            },
+        ))
+        task = await repo.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        engine = RuleEngine(repo, now=clock)
+        await engine.run_tick()
+
+        # The human ticks "Rule run now" on the rule page.
+        mock.edit_object_directly(rule.id, set_property=mapping.property_entry(
+            mapping.PROP_RULE_RUN_NOW, "checkbox", True,
+        ))
+        assert rule.id in await repo.resync()
+        report = await engine.run_tick()
+
+        assert [f.node_id for f in report.fired] == [task.id]
+        assert (await stored_properties(client, task.id))["completion_date"] == (
+            "tonight"
+        )
+        # Claimed in the STORE, not just the index -- otherwise the next
+        # resync would hand the request straight back.
+        stored_rule = await stored_properties(client, rule.id)
+        assert stored_rule[mapping.PROP_RULE_RUN_NOW] is False
+        assert (await engine.run_tick()).fired == ()
+
+    async def test_run_now_fires_a_rule_by_name(
+        self, mock, client, repo, clock
+    ) -> None:
+        await seed_task_type(client, repo)
+        await repo.create_node(NodeDraft(
+            type="Automation Rule", name="dinner picker",
+            summary="pick tonight's spot",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_CONDITION: "Manual",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Completion date",
+                rules.FIELD_ACTION_VALUE: "tonight",
+            },
+        ))
+        task = await repo.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        engine = RuleEngine(repo, now=clock)
+
+        report = await engine.run_now("dinner picker")
+
+        assert [f.node_id for f in report.fired] == [task.id]
+        assert (await stored_properties(client, task.id))["completion_date"] == (
+            "tonight"
+        )
