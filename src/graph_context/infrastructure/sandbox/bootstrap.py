@@ -37,6 +37,11 @@ The script author's API (globals available to the script):
   RuntimeError. The last write to the same (object, property) wins.
 - ``log(msg)`` -- record a line for the bot's log (``print`` output is
   discarded -- stdout belongs to the effects protocol).
+
+The assistant-tool names an LLM author reaches for by muscle memory
+(``update_node`` & co) are bound as DECOYS that raise a teaching error
+naming the real API -- a bare NameError teaches nothing (errors are
+prompts, applied inside the sandbox).
 """
 
 from __future__ import annotations
@@ -52,6 +57,11 @@ _MAX_LOGS = 50
 _LOG_CHARS = 200
 _PRINT_CAP = 64 * 1024  # script print() output beyond this is dropped
 _SCRIPT_FILENAME = "<rule script>"
+
+# The assistant's own graph tools, which an LLM script author is prone
+# to call inside a script. Bound as decoys so the failure names the
+# real API instead of a bare NameError.
+_TOOL_DECOYS = ("create_node", "update_node", "get_node", "find_node", "explore")
 
 
 def execute(payload: dict[str, Any]) -> dict[str, Any]:
@@ -150,6 +160,18 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         if len(logs) < _MAX_LOGS:
             logs.append(str(msg)[:_LOG_CHARS])
 
+    def decoy(name: str) -> Any:
+        def refuse(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(
+                f"{name}() is an assistant tool, not part of the "
+                "rule-script API. Read with objects()/find()/field()/"
+                "neighbors(); write ONLY via set(obj_or_id, property, "
+                "value) to a scalar property that already exists on the "
+                "target's type. An object's summary, description, and "
+                "body are not script-writable."
+            )
+        return refuse
+
     trigger = by_id.get(str(payload.get("trigger", "")), {})
     script_globals: dict[str, Any] = {
         "__name__": "__rule_script__",
@@ -164,6 +186,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
         "neighbors": neighbors,
         "set": set,
         "log": log,
+        **{name: decoy(name) for name in _TOOL_DECOYS},
     }
     code = compile(payload.get("script", ""), _SCRIPT_FILENAME, "exec")
     exec(code, script_globals)  # noqa: S102 -- the sandbox's entire point

@@ -69,7 +69,9 @@ async def test_a_fresh_space_is_seeded_with_the_corpus_and_explainer(
     assert await seed_activity_modes(anytype_client, FICTION_PAYLOADS) is True
     payloads = await AnytypeModeStore(anytype_client).load()
     names = {p["name"] for p in payloads}
-    assert names == {"World Modeling", "Authoring", EXAMPLE_MODE_NAME}
+    assert names == {
+        "Space Setup", "World Modeling", "Authoring", EXAMPLE_MODE_NAME,
+    }
     authoring = next(p for p in payloads if p["name"] == "Authoring")
     assert authoring["capture"] == {
         "artifact_type": "gc_prose",
@@ -84,7 +86,7 @@ async def test_the_marked_default_is_linked_on_the_space_context(
 ) -> None:
     await seed_activity_modes(anytype_client, ASSISTANT_PAYLOADS)
     registry = await _loaded_registry(anytype_client)
-    assert registry.default == "organizing"  # marked, NOT alphabetical
+    assert registry.default == "space_setup"  # marked, NOT alphabetical
 
 
 async def test_round_trip_matches_the_directly_built_registry(
@@ -98,7 +100,7 @@ async def test_round_trip_matches_the_directly_built_registry(
     seeded = await _loaded_registry(anytype_client)
     direct = load_registry(in_space=FICTION_PAYLOADS, space_context=[{
         "name": "Space Context", "origin": "test",
-        "default_mode_ids": ["seed:world_modeling"],
+        "default_mode_ids": ["seed:space_setup"],
     }])
     for name, spec in direct.specs.items():
         assert seeded.specs[name] == spec
@@ -114,7 +116,8 @@ async def test_driver_options_round_trip_through_the_seeder(
     the numbers and domain text ride real properties."""
     payloads = seed_payloads(parse_seed_modes(
         '[modes.tuned]\ngoal = "Think hard."\nthinking = "xhigh"\n'
-        'max_tokens = 32000\nweb_search = true\nweb_search_max_uses = 3\n'
+        'max_tokens = 32000\nturn_limit = 6\nweb_search = true\n'
+        'web_search_max_uses = 3\n'
         'web_search_allowed_domains = ["example.com", "b.example"]\n',
         "test corpus",
     ))
@@ -123,8 +126,25 @@ async def test_driver_options_round_trip_through_the_seeder(
     spec = seeded.specs["tuned"]
     assert spec.thinking == "xhigh"
     assert spec.max_tokens == 32000
+    assert spec.turn_limit == 6
     assert spec.web_search_max_uses == 3
     assert spec.web_search_allowed_domains == ("example.com", "b.example")
+
+
+async def test_reply_card_toggles_round_trip_through_the_seeder(
+    anytype_client: AnytypeClient,
+) -> None:
+    """ADR 046: a seed pre-filling the card-hiding checkboxes mints an
+    object the store reads back to the same spec the memory path builds."""
+    payloads = seed_payloads(parse_seed_modes(
+        '[modes.discreet]\ngoal = "Work quietly."\n'
+        'hide_intent_card = true\nhide_node_cards = true\n',
+        "test corpus",
+    ))
+    await seed_activity_modes(anytype_client, payloads)
+    spec = (await _loaded_registry(anytype_client)).specs["discreet"]
+    assert spec.hide_intent_card is True
+    assert spec.hide_node_cards is True
 
 
 async def test_a_second_run_is_a_no_op(anytype_client: AnytypeClient) -> None:

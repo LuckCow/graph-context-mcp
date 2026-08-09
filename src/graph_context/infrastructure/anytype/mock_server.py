@@ -76,6 +76,7 @@ import json
 import mimetypes
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from itertools import count
 from typing import Any
 
@@ -587,6 +588,9 @@ class MockAnytype:
             error = self._resolve_select_values(body.get("properties", []))
             if error is not None:
                 return error
+            error = self._resolve_date_values(body.get("properties", []))
+            if error is not None:
+                return error
             # template_id (spiked): the template supplies default property
             # values + a scaffold body server-side; the request's properties
             # override defaults per key, and the request body is appended below
@@ -683,6 +687,9 @@ class MockAnytype:
                         "object": "error", "status": 400,
                     })
             error = self._resolve_select_values(body.get("properties", []))
+            if error is not None:
+                return error
+            error = self._resolve_date_values(body.get("properties", []))
             if error is not None:
                 return error
             if "name" in body:
@@ -813,7 +820,26 @@ class MockAnytype:
 
     def _handle_chats(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
-            return self._paginated(list(self._chats.values()), request.url.params)
+            # C13: the listing carries the server-maintained
+            # last_message_date property (generic object shape), absent
+            # until the chat has a message. The stamp derives from the
+            # newest message's created_at tick, so recency order matches
+            # message order -- exactly the guarantee live provides.
+            listing = []
+            for chat_id, chat in self._chats.items():
+                entry = dict(chat)
+                messages = self._chat_messages.get(chat_id) or []
+                if messages:
+                    tick = int(messages[-1]["created_at"])
+                    entry["properties"] = [{
+                        "object": "property",
+                        "key": "last_message_date",
+                        "name": "Last message date",
+                        "format": "date",
+                        "date": f"2026-01-01T00:00:00.{tick:06d}Z",
+                    }]
+                listing.append(entry)
+            return self._paginated(listing, request.url.params)
         if request.method == "POST":
             body = json.loads(request.content)
             chat_id = self.seed_chat(str(body.get("name", "")))
@@ -1001,6 +1027,9 @@ class MockAnytype:
         # creates them as space properties (live-confirmed 2026-07-06). The
         # type's own ``properties`` carry the property ids, exactly like the
         # live GET /types response (the templates spike reads them).
+        conflict = self._reuse_conflict(body.get("properties", []), on_type=())
+        if conflict is not None:
+            return conflict
         for entry in body.get("properties", []):
             self._properties.setdefault(
                 entry["key"], {"id": self._new_id(), **entry}
@@ -1013,6 +1042,31 @@ class MockAnytype:
             "id": self._new_id(), **body, "properties": type_properties,
         }
         return httpx.Response(201, json={"type": self._types[body["key"]]})
+
+    def _reuse_conflict(
+        self,
+        entries: list[dict[str, Any]],
+        on_type: tuple[str, ...],
+    ) -> httpx.Response | None:
+        """Quirk A11 (amended 2026-07-19): a type POST/PATCH entry naming
+        an ``objects``-format space property NOT already on the type 400s
+        "already exists" unless the entry carries the property's ``id``;
+        scalars attach by key alone (id also fine). Pinned so the adapter
+        never regresses to key-only reuse of relations."""
+        for entry in entries:
+            existing = self._properties.get(entry.get("key", ""))
+            if (
+                existing is not None
+                and existing.get("format") == "objects"
+                and entry.get("key") not in on_type
+                and entry.get("id") != existing.get("id")
+            ):
+                return self._error(
+                    400, "bad_request",
+                    f"bad input: property key \"{entry.get('key')}\" "
+                    "already exists",
+                )
+        return None
 
     def _handle_type(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         """Single type by object ID: GET, and PATCH with quirk A11 --
@@ -1035,6 +1089,12 @@ class MockAnytype:
             if field in body:
                 entry[field] = body[field]
         if "properties" in body:
+            on_type = tuple(
+                p.get("key", "") for p in entry.get("properties", [])
+            )
+            conflict = self._reuse_conflict(body["properties"], on_type=on_type)
+            if conflict is not None:
+                return conflict
             for prop in body["properties"]:
                 self._properties.setdefault(
                     prop["key"], {"id": self._new_id(), **prop}
@@ -1049,6 +1109,14 @@ class MockAnytype:
         if request.method == "GET":
             return self._paginated(list(self._properties.values()), request.url.params)
         body = json.loads(request.content)
+        if body.get("key") in self._properties:
+            # Quirk A14 (live-confirmed 2026-07-19): duplicate keys 400;
+            # a duplicate NAME on a fresh key is fine, and DELETE frees
+            # the key for re-creation.
+            return self._error(
+                400, "bad_request",
+                f"bad input: property key \"{body['key']}\" already exists",
+            )
         self._properties[body["key"]] = {"id": self._new_id(), **body}
         if self.property_settle_patches > 0 and body.get("format") == "objects":
             # Only ``objects``-format relations have the settle window. A
@@ -1170,6 +1238,45 @@ class MockAnytype:
                 entry["multi_select"] = resolved
         return None
 
+    def _resolve_date_values(
+        self, entries: list[dict[str, Any]]
+    ) -> httpx.Response | None:
+        """Validate + normalize date-format entries in a write.
+
+        Live behavior (WP31 R2 probe, 2026-07-19): a date property
+        accepts a bare date or an RFC 3339 timestamp WITH a timezone; a
+        naive timestamp 400s the whole request. Stored values read back
+        as the UTC instant -- a bare date becomes ``T00:00:00Z``
+        (midnight **UTC**, the quirk that makes bare dates display a day
+        early in any zone west of Greenwich)."""
+        for entry in entries:
+            if entry.get("format") != "date":
+                continue
+            raw = entry.get("date")
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return self._error(
+                    400, "bad_request",
+                    f'bad input: invalid date value for '
+                    f'"{entry.get("key")}": {raw}',
+                )
+            bare_date = raw == moment.date().isoformat()
+            if moment.tzinfo is None and not bare_date:
+                return self._error(
+                    400, "bad_request",
+                    f'bad input: date value for "{entry.get("key")}" must '
+                    f'be a bare date or carry a timezone: {raw}',
+                )
+            instant = (
+                moment.replace(tzinfo=UTC) if bare_date
+                else moment.astimezone(UTC)
+            )
+            entry["date"] = instant.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return None
+
     # -- helpers ---------------------------------------------------------------
 
     def _passes_filter(self, obj: dict[str, Any], filt: dict[str, Any]) -> bool:
@@ -1239,8 +1346,10 @@ class MockAnytype:
         return f"2026-01-01T00:00:00.{next(self._clock):06d}Z"
 
     @staticmethod
-    def _error(status: int, code: str) -> httpx.Response:
+    def _error(
+        status: int, code: str, message: str | None = None
+    ) -> httpx.Response:
         return httpx.Response(status, json={
-            "code": code, "message": code.replace("_", " "), "object": "error",
-            "status": status,
+            "code": code, "message": message or code.replace("_", " "),
+            "object": "error", "status": status,
         })

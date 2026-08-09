@@ -9,6 +9,7 @@ When live-server access exists, add a third subclass gated behind
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -18,11 +19,13 @@ from graph_context.domain.models import (
     FieldSpec,
     LinkSpec,
     NodeDraft,
+    PropertyDeclaration,
     PropertyDraft,
 )
 from graph_context.domain.query import NodeQuery, Op, Predicate, run_query
 from graph_context.domain.schema import Role
 from graph_context.errors import (
+    GraphContextError,
     NodeNotFound,
     SchemaChangeConflict,
     UnknownFieldKey,
@@ -54,21 +57,25 @@ class GraphRepositoryContract:
         assert node.id
         assert repo.graph.node(node.id).name == "Mira"
 
-    async def test_composite_create_writes_outgoing_and_incoming_links(self, repo):
+    async def test_composite_create_writes_links_on_the_new_node(self, repo):
+        # Links live on their SOURCE (ADR 042 retired incoming links): a
+        # composite create's edges all run from the created node outward.
         mira = await repo.create_node(CHAR)
-        place = await repo.create_node(
-            PLACE, links=[LinkSpec("located_at", other=mira.id, outgoing=False)]
-        )
-        # incoming: mira -located_at-> place
-        assert {n.id for _, n in repo.graph.neighbors(mira.id)} == {place.id}
+        place = await repo.create_node(PLACE)
         sword = await repo.create_node(
             NodeDraft("Item", name="Ashbrand", summary="A blade."),
         )
         faction = await repo.create_node(
             NodeDraft("Organization", name="Emberguard", summary="Defenders."),
-            links=[LinkSpec("possesses", other=sword.id, outgoing=True)],
+            links=[
+                LinkSpec("possesses", other=sword.id),
+                LinkSpec("located_at", other=place.id),
+                LinkSpec("member_of", other=mira.id),
+            ],
         )
-        assert {n.id for _, n in repo.graph.neighbors(faction.id)} == {sword.id}
+        assert {n.id for _, n in repo.graph.neighbors(faction.id)} == {
+            sword.id, place.id, mira.id,
+        }
 
     async def test_create_with_missing_link_target_rolls_back(self, repo):
         before = repo.graph.node_count()
@@ -101,6 +108,37 @@ class GraphRepositoryContract:
         await repo.update_node(node.id, body="Leads the survivors now.")
         assert (await repo.fetch_body(node.id)).strip() == "Leads the survivors now."
 
+    async def test_fenced_jsonl_body_round_trips_intact(self, repo):
+        """ADR 049's load-bearing storage assumption: the revision
+        historian keeps its log as JSON lines inside one fence in a
+        sidecar body. The store may normalize prose, but fence CONTENTS
+        must survive create -> fetch_body byte-usable (parsed back as
+        JSON) -- the ``ANYTYPE_E2E=1`` run of this test is the live
+        spike (docs/spikes/node-history-body.md)."""
+        lines = [
+            json.dumps(
+                {"seq": i, "at": f"T{i}", "kind": "delta",
+                 "ops": [["equal", 0, 3]],
+                 "new_blocks": {"abc123": 'text with "quotes" & *marks*'}},
+                sort_keys=True, separators=(",", ":"),
+            )
+            for i in range(3)
+        ]
+        body = "A header sentence.\n\n```\n" + "\n".join(lines) + "\n```"
+        node = await repo.create_node(
+            NodeDraft("Character", name="Log", summary="Sidecar-shaped.",
+                      body=body),
+        )
+        fetched = await repo.fetch_body(node.id)
+        in_fence, parsed = False, []
+        for line in fetched.splitlines():
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+            elif in_fence and line.strip():
+                parsed.append(json.loads(line))
+        assert [json.dumps(p, sort_keys=True, separators=(",", ":"))
+                for p in parsed] == lines
+
     async def test_update_without_body_leaves_body_alone(self, repo):
         node = await repo.create_node(
             NodeDraft("Character", name="Mira", summary="Engineer.",
@@ -129,6 +167,27 @@ class GraphRepositoryContract:
         await repo.remove_link(edge)
         assert list(repo.graph.edges(mira.id)) == []
 
+    async def test_update_bumps_modified_at(self, repo):
+        """The store clock ticks on every write (ADR 042): the rule
+        engine's built-in watch and ranking recency both read it.
+        ``>=`` not ``>``: the LIVE clock has second resolution, so
+        back-to-back writes may share a stamp -- the built-in watch
+        targets human-timescale edits, which never do."""
+        node = await repo.create_node(CHAR)
+        assert node.modified_at
+        updated = await repo.update_node(node.id, summary="Fresh.")
+        assert updated.modified_at >= node.modified_at
+
+    async def test_link_writes_refresh_the_source_modified_at(self, repo):
+        mira = await repo.create_node(CHAR)
+        place = await repo.create_node(PLACE)
+        before = repo.graph.node(mira.id).modified_at
+        edge = await repo.add_link(mira.id, LinkSpec("located_at", other=place.id))
+        after_add = repo.graph.node(mira.id).modified_at
+        assert after_add and after_add >= before
+        await repo.remove_link(edge)
+        assert repo.graph.node(mira.id).modified_at >= after_add
+
     async def test_fields_round_trip(self, repo):
         # "fuel" is not a property anywhere; the declaration mints it as a
         # real one (ADR 023). In the live run this exercises scalar
@@ -136,7 +195,7 @@ class GraphRepositoryContract:
         node = await repo.create_node(
             NodeDraft("Technology", name="Ashforge", summary="A forge.",
                       fields={"fuel": "bonemeal"}),
-            create_missing_fields={"fuel": "text"},
+            create_missing={"fuel": PropertyDeclaration("fuel", "text")},
         )
         assert repo.graph.node(node.id).fields == {"fuel": "bonemeal"}
 
@@ -150,7 +209,7 @@ class GraphRepositoryContract:
         ticked = await repo.create_node(
             NodeDraft("Item", name="Ticked", summary="s.",
                       fields={"done": "true"}),
-            create_missing_fields={"done": "checkbox"},
+            create_missing={"done": PropertyDeclaration("done", "checkbox")},
         )
         unticked = await repo.create_node(
             NodeDraft("Item", name="Unticked", summary="s.")
@@ -258,10 +317,14 @@ class TemplateContract:
 
 
 class FieldCatalogContract:
-    """ADR 023: story-node ``fields`` keys resolve against the space's
-    scalar properties identically in every implementation. Seeded with
-    "Due date" (date), "Status" (select: To Do, In Progress), and an
-    "Assignee" objects-format RELATION (an edge, never a fields key)."""
+    """ADR 023/047: story-node ``fields`` keys resolve against the target
+    TYPE's attached properties identically in every implementation.
+    Seeded on ``Item`` with "Due date" (date), "Status" (select: To Do,
+    In Progress), an "Assignee" objects-format RELATION (an edge, never a
+    fields key), and the attached "Linked Projects" relation; the space
+    additionally holds UNATTACHED vocabulary -- the "Linked Project"
+    relation (the ADR 047 incident's near-namesake), a "Priority" number
+    -- and the seeded ``gc_edge_knows`` starter relation."""
 
     async def test_relation_label_for_matches_key_and_display_name(
         self, catalog_repo
@@ -271,15 +334,44 @@ class FieldCatalogContract:
         match exactly like fields-key resolution: key or display name,
         case-insensitive."""
         for spelling in ("assignee", "Assignee", "ASSIGNEE"):
-            label = catalog_repo.relation_label_for(spelling)
+            label = catalog_repo.relation_label_for(spelling, on_type="Item")
             assert label is not None and label.lower() == "assignee"
 
     async def test_relation_label_for_is_none_for_scalars_and_unknowns(
         self, catalog_repo
     ):
-        assert catalog_repo.relation_label_for("Due date") is None
-        assert catalog_repo.relation_label_for("due_date") is None
-        assert catalog_repo.relation_label_for("nonesuch") is None
+        assert catalog_repo.relation_label_for("Due date", on_type="Item") is None
+        assert catalog_repo.relation_label_for("due_date", on_type="Item") is None
+        assert catalog_repo.relation_label_for("nonesuch", on_type="Item") is None
+
+    async def test_relation_label_for_is_none_for_unattached_space_relations(
+        self, catalog_repo
+    ):
+        """ADR 047, the incident: the unattached near-namesake must NOT
+        resolve bare -- only the type's own relation does."""
+        assert (
+            catalog_repo.relation_label_for("Linked Project", on_type="Item")
+            is None
+        )
+        assert (
+            catalog_repo.relation_label_for("Linked Projects", on_type="Item")
+            is not None
+        )
+
+    async def test_relation_label_for_requires_exactly_one_scope(
+        self, catalog_repo
+    ):
+        """An unscoped call must be impossible -- space-wide bare
+        resolution is the bug ADR 047 removes."""
+        with pytest.raises(ValueError):
+            catalog_repo.relation_label_for("Assignee")
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Scoped", summary="s.")
+        )
+        with pytest.raises(ValueError):
+            catalog_repo.relation_label_for(
+                "Assignee", on_type="Item", on_node=node.id
+            )
 
     async def test_relation_named_as_a_field_redirects_to_links(
         self, catalog_repo
@@ -294,18 +386,20 @@ class FieldCatalogContract:
                           fields={"Assignee": "Nick"})
             )
         message = str(err.value)
-        assert "RELATION" in message and "'edge_type'" in message
-        assert "create_missing_fields" not in message
+        assert "RELATION" in message and "properties=" in message
+        assert "create_missing" not in message
 
     async def test_a_relation_key_cannot_be_shadowed_by_declaration(
         self, catalog_repo
     ):
-        """create_missing_fields must not mint a scalar over a relation."""
+        """A declaration must not mint a scalar over a relation."""
         with pytest.raises(UnknownFieldKey):
             await catalog_repo.create_node(
                 NodeDraft("Item", name="Ship it", summary="s.",
                           fields={"Assignee": "Nick"}),
-                create_missing_fields={"Assignee": "text"},
+                create_missing={
+                    "Assignee": PropertyDeclaration("Assignee", "text")
+                },
             )
 
     async def test_unknown_link_label_errors_with_existing_relations(
@@ -324,7 +418,7 @@ class FieldCatalogContract:
                 links=[LinkSpec(edge_type="assigned_to", other=target.id)],
             )
         message = str(err.value)
-        assert "create_missing_relations" in message
+        assert "create_missing_properties" in message
         assert "assignee" in message.lower()
         with pytest.raises(NodeNotFound):
             catalog_repo.graph.resolve("Ship it")
@@ -344,30 +438,46 @@ class FieldCatalogContract:
             # Both spellings canonicalize to the SAME relation.
             assert edge.type.lower() == "assignee"
 
-    async def test_create_missing_relations_mints_a_reusable_relation(
+    async def test_a_minted_relation_needs_redeclaring_on_another_object(
         self, catalog_repo
     ):
+        """ADR 047 flip of the old mints-a-reusable-relation pin: a
+        declaration mints SPACE-level vocabulary attached to no type, so
+        a different object cannot use it bare -- the same declaration
+        REUSES it (attach, never a twin)."""
         target = await catalog_repo.create_node(
             NodeDraft("Item", name="Nick", summary="s.")
         )
         first = await catalog_repo.create_node(
             NodeDraft("Item", name="Ship it", summary="s."),
             links=[LinkSpec(edge_type="approved_by", other=target.id)],
-            create_missing_relations=True,
+            create_missing={
+                "approved_by": PropertyDeclaration("approved_by", "objects")
+            },
         )
         assert any(
             e.type.lower() == "approved_by"
             for e in catalog_repo.graph.edges(first.id, Direction.OUT)
         )
-        # Now part of the space's vocabulary: reusable without the opt-in.
+        with pytest.raises(UnknownRelationLabel):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Land it", summary="s."),
+                links=[LinkSpec(edge_type="approved_by", other=target.id)],
+            )
+        labels_before = catalog_repo.known_edge_labels()
         second = await catalog_repo.create_node(
             NodeDraft("Item", name="Land it", summary="s."),
             links=[LinkSpec(edge_type="approved_by", other=target.id)],
+            create_missing={
+                "approved_by": PropertyDeclaration("approved_by", "objects")
+            },
         )
         assert any(
             e.type.lower() == "approved_by"
             for e in catalog_repo.graph.edges(second.id, Direction.OUT)
         )
+        # The redeclaration reused the existing relation: no new vocabulary.
+        assert catalog_repo.known_edge_labels() == labels_before
 
     async def test_relations_stay_out_of_the_fields_catalog(
         self, catalog_repo
@@ -387,7 +497,7 @@ class FieldCatalogContract:
             )
         message = str(err.value)
         assert "Due date" in message and "(date)" in message
-        assert "create_missing_fields" in message
+        assert "create_missing_properties" in message
 
     async def test_unmatched_key_on_update_errors_with_guidance(self, catalog_repo):
         node = await catalog_repo.create_node(
@@ -402,21 +512,246 @@ class FieldCatalogContract:
                       fields={"Due date": "2026-08-01"})
         )
         # Read-back is under the property's raw key, both backends alike.
-        assert catalog_repo.graph.node(node.id).fields["due_date"] == "2026-08-01"
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == (
+            "2026-08-01T00:00:00Z"  # live reads a bare date back as midnight UTC
+        )
 
-    async def test_declared_key_mints_a_reusable_property(self, catalog_repo):
+    async def test_an_offset_date_value_reads_back_as_the_utc_instant(
+        self, catalog_repo
+    ):
+        """A15/R2: an RFC 3339 stamp WITH a timezone is accepted and
+        reads back normalized to UTC -- local midnight keeps its
+        calendar date (the rule engine's set-property-to-now shape)."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Due date": "2026-08-01T00:00:00-04:00"})
+        )
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == (
+            "2026-08-01T04:00:00Z"
+        )
+
+    async def test_a_naive_timestamp_date_value_errors_with_the_fix(
+        self, catalog_repo
+    ):
+        """A15/R2: the live store 400s naive timestamps on date
+        properties; both backends must reject them BEFORE the wire with
+        the self-correcting spelling hint instead."""
+        with pytest.raises(GraphContextError, match="timezone"):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Due date": "2026-08-01 10:00:00"})
+            )
+
+    async def test_declared_key_matching_an_existing_property_reuses_it(
+        self, catalog_repo
+    ):
+        """The de38192f56dc fix (ADR 042/D7): declaring a key that already
+        matches a same-format space property is a harmless reuse -- the
+        write lands; never a duplicate mint, never an opaque store error."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Due date": "2026-08-01"}),
+            create_missing={
+                "Due date": PropertyDeclaration("Due date", "date")
+            },
+        )
+        assert catalog_repo.graph.node(node.id).fields["due_date"] == (
+            "2026-08-01T00:00:00Z"  # live reads a bare date back as midnight UTC
+        )
+
+    async def test_declared_format_mismatch_conflicts_loudly(
+        self, catalog_repo
+    ):
+        """A12: the existing property's format wins; a mismatched
+        declaration must stop the write with a self-correcting error."""
+        with pytest.raises(SchemaChangeConflict, match="immutable"):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Due date": "soon"}),
+                create_missing={
+                    "Due date": PropertyDeclaration("Due date", "text")
+                },
+            )
+
+    async def test_a_minted_property_is_not_bare_usable_on_another_object(
+        self, catalog_repo
+    ):
+        """ADR 047 flip of the old mints-a-reusable-property pin: the mint
+        is space-level, attached to no type -- another object needs the
+        same declaration, which reuses the property instead of minting a
+        twin."""
         first = await catalog_repo.create_node(
             NodeDraft("Item", name="Ship it", summary="s.",
                       fields={"effort": "3"}),
-            create_missing_fields={"effort": "number"},
+            create_missing={"effort": PropertyDeclaration("effort", "number")},
         )
         assert first.fields["effort"] == "3"
-        # Now part of the space's vocabulary: reusable without the opt-in.
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Land it", summary="s.",
+                          fields={"effort": "5"})
+            )
         second = await catalog_repo.create_node(
             NodeDraft("Item", name="Land it", summary="s.",
-                      fields={"effort": "5"})
+                      fields={"effort": "5"}),
+            create_missing={"effort": PropertyDeclaration("effort", "number")},
         )
         assert second.fields["effort"] == "5"
+
+    async def test_an_unattached_space_property_does_not_resolve_bare(
+        self, catalog_repo
+    ):
+        """ADR 047, the incident shape: space vocabulary no type claims
+        must not resolve bare -- and the composite create rolls back."""
+        with pytest.raises(UnknownFieldKey) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Priority": "3"})
+            )
+        assert "NOT attached" in str(err.value)
+        with pytest.raises(NodeNotFound):
+            catalog_repo.graph.resolve("Ship it")
+
+    async def test_an_unattached_space_relation_does_not_resolve_bare(
+        self, catalog_repo
+    ):
+        """The exact incident: 'Linked Project' exists in the space but
+        not on the type -- a bare link must error while the type's own
+        'Linked Projects' keeps working."""
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Thesis Revisions", summary="s.")
+        )
+        with pytest.raises(UnknownRelationLabel):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Fix margins", summary="s."),
+                links=[LinkSpec(edge_type="Linked Project", other=target.id)],
+            )
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Fix margins", summary="s."),
+            links=[LinkSpec(edge_type="Linked Projects", other=target.id)],
+        )
+        edge = next(iter(catalog_repo.graph.edges(node.id, Direction.OUT)))
+        assert edge.type.lower().replace(" ", "_") == "linked_projects"
+
+    async def test_unattached_key_error_teaches_the_attach_path(
+        self, catalog_repo
+    ):
+        """The error is a prompt: it names the exact space match, its
+        format, and the create_missing_properties reuse-attach gesture."""
+        with pytest.raises(UnknownFieldKey) as err:
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Ship it", summary="s.",
+                          fields={"Linked Project": "Thesis"})
+            )
+        message = str(err.value)
+        assert "Linked Project" in message and "NOT attached" in message
+        assert "create_missing_properties" in message
+        assert "objects" in message
+
+    async def test_declaring_an_unattached_relation_reuses_it_without_minting(
+        self, catalog_repo
+    ):
+        """The deliberate attach path: a declaration naming the existing
+        unattached relation links through IT -- no twin joins the
+        vocabulary."""
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Thesis Revisions", summary="s.")
+        )
+        labels_before = catalog_repo.known_edge_labels()
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Fix margins", summary="s."),
+            links=[LinkSpec(edge_type="Linked Project", other=target.id)],
+            create_missing={
+                "Linked Project": PropertyDeclaration(
+                    "Linked Project", "objects"
+                )
+            },
+        )
+        edge = next(iter(catalog_repo.graph.edges(node.id, Direction.OUT)))
+        assert edge.type.lower().replace(" ", "_") == "linked_project"
+        assert catalog_repo.known_edge_labels() == labels_before
+
+    async def test_update_keeps_this_objects_local_properties_editable(
+        self, catalog_repo
+    ):
+        """ADR 047 rule 2: an instance-attached (local) property stays
+        editable on ITS object without redeclaring."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Priority": "3"}),
+            create_missing={
+                "Priority": PropertyDeclaration("Priority", "number")
+            },
+        )
+        updated = await catalog_repo.update_node(
+            node.id, fields={"Priority": "5"}
+        )
+        assert updated.fields["priority"] == "5"
+
+    async def test_another_objects_local_property_does_not_leak(
+        self, catalog_repo
+    ):
+        """ADR 047 rule 2, the other half: one object's local property
+        grants nothing to its neighbors."""
+        await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.",
+                      fields={"Priority": "3"}),
+            create_missing={
+                "Priority": PropertyDeclaration("Priority", "number")
+            },
+        )
+        other = await catalog_repo.create_node(
+            NodeDraft("Item", name="Land it", summary="s.")
+        )
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.update_node(other.id, fields={"Priority": "1"})
+
+    async def test_add_link_resolves_against_the_nodes_type_and_instance(
+        self, catalog_repo
+    ):
+        """add_link admits the anchor's own relations (instance scope) but
+        not another object's."""
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Thesis Revisions", summary="s.")
+        )
+        second_target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Side Project", summary="s.")
+        )
+        holder = await catalog_repo.create_node(
+            NodeDraft("Item", name="Fix margins", summary="s."),
+            links=[LinkSpec(edge_type="Linked Project", other=target.id)],
+            create_missing={
+                "Linked Project": PropertyDeclaration(
+                    "Linked Project", "objects"
+                )
+            },
+        )
+        await catalog_repo.add_link(
+            holder.id, LinkSpec(edge_type="Linked Project", other=second_target.id)
+        )
+        assert len(list(catalog_repo.graph.edges(holder.id, Direction.OUT))) == 2
+        fresh = await catalog_repo.create_node(
+            NodeDraft("Item", name="Other task", summary="s.")
+        )
+        with pytest.raises(UnknownRelationLabel):
+            await catalog_repo.add_link(
+                fresh.id, LinkSpec(edge_type="Linked Project", other=target.id)
+            )
+
+    async def test_seeded_edge_vocabulary_stays_bare_usable(
+        self, catalog_repo
+    ):
+        """The ``gc_edge_*`` starter relations are deliberately type-less
+        and exempt from type scoping (ADR 047 user decision)."""
+        target = await catalog_repo.create_node(
+            NodeDraft("Item", name="Nick", summary="s.")
+        )
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s."),
+            links=[LinkSpec(edge_type="knows", other=target.id)],
+        )
+        edge = next(iter(catalog_repo.graph.edges(node.id, Direction.OUT)))
+        assert "knows" in edge.type.lower()
 
     async def test_catalog_is_exposed_for_guidance(self, catalog_repo):
         catalog = catalog_repo.field_catalog()
@@ -436,6 +771,24 @@ class FieldCatalogContract:
         )
         stored = catalog_repo.graph.node(node.id).fields
         assert stored[attribution.FIELD_USER_ID] == "u-1"
+
+    async def test_attribution_stamps_resolve_bare_on_native_types(
+        self, catalog_repo
+    ):
+        """The turn-a0d7b7350c34 regression: a capture whose artifact
+        type is NATIVE (ADR 015) still stamps the recorder's attribution
+        keys -- bot-owned space vocabulary, exempt from type scoping like
+        the ``gc_edge_*`` starter relations, with no declaration and no
+        model in the loop to self-correct."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Tournament Morning", summary="A chapter.",
+                      fields={attribution.FIELD_GENERATED_AT:
+                              "2026-07-26T22:24:43+00:00"})
+        )
+        stored = catalog_repo.graph.node(node.id).fields
+        assert stored[attribution.FIELD_GENERATED_AT] == (
+            "2026-07-26T22:24:43+00:00"
+        )
 
     async def test_infra_unmatched_field_errors_like_any_other(self, catalog_repo):
         with pytest.raises(UnknownFieldKey):
@@ -487,12 +840,26 @@ class TestAnytypeRoleOverrides(RoleOverrideContract):
 class TestInMemoryFieldCatalog(FieldCatalogContract):
     @pytest.fixture
     def catalog_repo(self):
-        return InMemoryGraphRepository(field_catalog=[
-            FieldSpec(name="Due date", format="date", key="due_date"),
-            FieldSpec(name="Status", format="select", key="status",
-                      options=("To Do", "In Progress")),
-            FieldSpec(name="Assignee", format="objects", key="assignee"),
-        ])
+        return InMemoryGraphRepository(
+            field_catalog=[
+                FieldSpec(name="Due date", format="date", key="due_date"),
+                FieldSpec(name="Status", format="select", key="status",
+                          options=("To Do", "In Progress")),
+                FieldSpec(name="Assignee", format="objects", key="assignee"),
+                # The ADR 047 incident pair: the attached relation and its
+                # unattached near-namesake, plus an unattached scalar.
+                FieldSpec(name="Linked Projects", format="objects",
+                          key="linked_projects"),
+                FieldSpec(name="Linked Project", format="objects",
+                          key="linked_project"),
+                FieldSpec(name="Priority", format="number", key="priority"),
+                # Seeded starter vocabulary: bare-usable everywhere.
+                FieldSpec(name="knows", format="objects", key="gc_edge_knows"),
+            ],
+            attachments={
+                "Item": ("Due date", "Status", "Assignee", "Linked Projects"),
+            },
+        )
 
 
 class TestAnytypeFieldCatalog(FieldCatalogContract):
@@ -514,8 +881,28 @@ class TestAnytypeFieldCatalog(FieldCatalogContract):
         await client.create_property(
             {"key": "assignee", "name": "Assignee", "format": "objects"}
         )
+        # The ADR 047 incident pair (attached below) + an unattached scalar.
+        await client.create_property(
+            {"key": "linked_projects", "name": "Linked Projects",
+             "format": "objects"}
+        )
+        await client.create_property(
+            {"key": "linked_project", "name": "Linked Project",
+             "format": "objects"}
+        )
+        await client.create_property(
+            {"key": "priority", "name": "Priority", "format": "number"}
+        )
         repository = AnytypeGraphRepository(client)
         await repository.hydrate()
+        # Attach the bare-usable vocabulary to Item through the WP33 port
+        # surface -- the same reuse-attach path a confirmed proposal takes.
+        await repository.add_type_properties("Item", (
+            PropertyDraft(name="Due date", format="date"),
+            PropertyDraft(name="Status", format="select"),
+            PropertyDraft(name="Assignee", format="objects"),
+            PropertyDraft(name="Linked Projects", format="objects"),
+        ))
         yield repository
         await client.aclose()
 
@@ -595,6 +982,59 @@ class SchemaChangeContract:
                 properties=(PropertyDraft(name="Assignee", format="text"),),
             )
 
+    async def test_objects_draft_attaches_the_existing_relation(
+        self, schema_repo
+    ):
+        """ADR 042: an objects draft naming the seeded "Assignee" relation
+        is a reuse-attach, not a conflict -- and the label keeps resolving
+        for links afterwards. (On the Anytype path this exercises the A11
+        amendment: the reuse entry must carry the property id or the
+        type PATCH 400s "already exists".)"""
+        await schema_repo.create_type(
+            "Faction",
+            properties=(PropertyDraft(name="Assignee", format="objects"),),
+        )
+        assert (
+            schema_repo.relation_label_for("Assignee", on_type="Faction")
+            is not None
+        )
+
+    async def test_objects_draft_extends_an_existing_type(self, schema_repo):
+        await schema_repo.create_type("Faction")
+        await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Assignee", format="objects"),)
+        )
+        assert (
+            schema_repo.relation_label_for("Assignee", on_type="Faction")
+            is not None
+        )
+
+    async def test_a_minted_property_is_not_bare_usable_until_attached(
+        self, schema_repo
+    ):
+        """ADR 047 requirement 4: a scope='type' mint creates the space
+        property immediately, but until the drafted proposal is applied
+        (``add_type_properties``) other objects cannot use it bare; the
+        apply makes it bare-usable with no resync."""
+        await schema_repo.create_node(
+            NodeDraft("Item", name="One", summary="s.",
+                      fields={"effort": "3"}),
+            create_missing={"effort": PropertyDeclaration("effort", "number")},
+        )
+        with pytest.raises(UnknownFieldKey):
+            await schema_repo.create_node(
+                NodeDraft("Item", name="Two", summary="s.",
+                          fields={"effort": "5"})
+            )
+        await schema_repo.add_type_properties(
+            "Item", (PropertyDraft(name="effort", format="number"),)
+        )
+        node = await schema_repo.create_node(
+            NodeDraft("Item", name="Three", summary="s.",
+                      fields={"effort": "5"})
+        )
+        assert node.fields["effort"] == "5"
+
     async def test_readding_an_attached_property_is_a_noop(self, schema_repo):
         """Retry safety: a confirmed proposal applied twice changes nothing."""
         await schema_repo.create_type(
@@ -619,11 +1059,17 @@ class SchemaChangeContract:
 class TestInMemorySchemaChanges(SchemaChangeContract):
     @pytest.fixture
     def schema_repo(self):
-        return InMemoryGraphRepository(field_catalog=[
-            FieldSpec(name="Status", format="select", key="status",
-                      options=("To Do", "In Progress")),
-            FieldSpec(name="Assignee", format="objects", key="assignee"),
-        ])
+        # attachments={} turns on ADR 047 type scoping with nothing
+        # attached yet -- exactly the adapter's posture, where the seeded
+        # properties are space-level until a schema change attaches them.
+        return InMemoryGraphRepository(
+            field_catalog=[
+                FieldSpec(name="Status", format="select", key="status",
+                          options=("To Do", "In Progress")),
+                FieldSpec(name="Assignee", format="objects", key="assignee"),
+            ],
+            attachments={},
+        )
 
 
 class TestAnytypeSchemaChanges(SchemaChangeContract):
@@ -696,6 +1142,9 @@ class TestAnytypeMembers(MembersContract):
         )
         repository = AnytypeGraphRepository(client)
         await repository.hydrate()
+        await repository.add_type_properties(
+            "Item", (PropertyDraft(name="Assignee", format="objects"),)
+        )
         yield repository
         await client.aclose()
 
@@ -729,6 +1178,9 @@ class TestAnytypeTemplates(TemplateContract):
         )
         repository = AnytypeGraphRepository(client)
         await repository.hydrate()
+        await repository.add_type_properties(
+            "Item", (PropertyDraft(name="status", format="select"),)
+        )
         yield repository
         await client.aclose()
 
@@ -747,6 +1199,9 @@ class ScheduledEventContract:
             fields={
                 scheduling.FIELD_SCHEDULE: "2027-04-08T09:00",
                 scheduling.FIELD_PROMPT: "Remind Nick about taxes.",
+                scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
+                scheduling.FIELD_MODE: "research",
+                scheduling.FIELD_DOCUMENT_TYPE: "Report",
                 scheduling.FIELD_STATUS: scheduling.STATUS_PENDING,
                 scheduling.FIELD_SESSION_KEY: "anytype:chat-1",
             },
@@ -760,6 +1215,12 @@ class ScheduledEventContract:
         assert stored.role is Role.SCHEDULED
         assert stored.fields[scheduling.FIELD_SCHEDULE] == "2027-04-08T09:00"
         assert stored.fields[scheduling.FIELD_PROMPT] == "Remind Nick about taxes."
+        # ADR 055: the simple-message and mode properties are REAL
+        # reflected properties too, same as the rest of the surface.
+        assert stored.fields[scheduling.FIELD_MESSAGE] == "Taxes are due April 15."
+        assert stored.fields[scheduling.FIELD_MODE] == "research"
+        # ADR 057: the document-type property reflects the same way.
+        assert stored.fields[scheduling.FIELD_DOCUMENT_TYPE] == "Report"
         assert stored.fields[scheduling.FIELD_SESSION_KEY] == "anytype:chat-1"
         # The status is a SELECT on the Anytype backend: the write
         # auto-creates the option tag (ADR 012) and reads back as its
@@ -829,3 +1290,70 @@ class TestAnytypeScheduledEvents(ScheduledEventContract):
         assert properties[scheduling.FIELD_SCHEDULE]["text"] == "2027-04-08T09:00"
         assert properties[scheduling.FIELD_STATUS]["format"] == "select"
         assert "gc_fields" not in properties  # nothing fell through
+
+
+class MetaInspectionContract:
+    """ADR 045: the catalog surfaces hide infra types unless the caller's
+    privilege includes the role, and a privileged mode-object write
+    round-trips its ``gc_mode_*`` config through ``Node.fields``."""
+
+    MODE_NAMES = {"activity mode", "activitymode"}
+
+    async def test_known_node_types_admits_modes_only_with_privilege(
+        self, repo
+    ):
+        assert not {
+            t.lower() for t in repo.known_node_types()
+        } & self.MODE_NAMES
+        privileged = {
+            t.lower()
+            for t in repo.known_node_types(frozenset({Role.MODE}))
+        }
+        assert privileged & self.MODE_NAMES
+
+    async def test_field_catalog_admits_the_mode_type_only_with_privilege(
+        self, repo
+    ):
+        assert not {
+            name.lower() for name in repo.field_catalog()
+        } & self.MODE_NAMES
+        privileged = {
+            name.lower()
+            for name in repo.field_catalog(frozenset({Role.MODE}))
+        }
+        assert privileged & self.MODE_NAMES
+
+    async def test_mode_object_config_reflects_into_fields(self, repo):
+        node = await repo.create_node(NodeDraft(
+            type="Activity Mode", name="Recipe Mode",
+            summary="Cooks recipes.",
+            fields={"gc_mode_mutating": "true"},
+        ))
+        stored = repo.graph.node(node.id)
+        assert stored.role is Role.MODE
+        assert stored.fields["gc_mode_mutating"] == "true"
+
+
+class TestInMemoryMetaInspection(MetaInspectionContract):
+    @pytest.fixture
+    def repo(self):
+        # Catalog mode: the fake's field_catalog is keyed by its known
+        # type names, which is where the privilege parameter bites (the
+        # open-vocabulary mode has no catalog to filter at all).
+        return InMemoryGraphRepository(field_catalog=[
+            FieldSpec(name="Rank", format="text", key="rank"),
+        ])
+
+
+class TestAnytypeMetaInspection(MetaInspectionContract):
+    @pytest.fixture
+    async def repo(self):
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        client = AnytypeClient(config, transport=mock.transport)
+        await ensure_schema(client)
+        await seed_native_types(client)
+        repository = AnytypeGraphRepository(client)
+        await repository.hydrate()
+        yield repository
+        await client.aclose()

@@ -229,7 +229,7 @@ class TestPipelineTurnLogging:
             "user", "prompt", "llm_prompt", "llm_turn", "tool_result",
             "llm_turn", "turn_end",
         ]
-        assert all(e["mode"] == "world_modeling" for e in entries)
+        assert all(e["mode"] == "space_setup" for e in entries)
         assert entries[0]["text"] == "Add Mira."
         assert entries[1]["goal"]  # the mode's system-prompt fragment
         assert entries[1]["system_prompt"]  # what the driver actually sends
@@ -254,7 +254,7 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         user, end = _entries(path)
         assert user["event"] == "user" and user["text"] == "/mode authoring"
-        assert user["mode"] == "world_modeling"  # the mode the command found
+        assert user["mode"] == "space_setup"  # the mode the command found
         assert end["event"] == "turn_end"
         assert end["mode"] == "authoring"  # the mode the session is in now
         assert "authoring" in end["replies"][0]["text"]
@@ -293,11 +293,37 @@ class TestPipelineTurnLogging:
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         await orchestrator.handle_message("s1", "u1", "third")
         prompts = [e for e in _entries(path) if e["event"] == "prompt"]
-        assert [p["mode"] for p in prompts] == ["world_modeling", "authoring"]
+        assert [p["mode"] for p in prompts] == ["space_setup", "authoring"]
         # The authoring binding drops the mutation tools; the logged tool
         # surface is the one the boundary will actually enforce.
         assert "create_node" in prompts[0]["tools"]
         assert "create_node" not in prompts[1]["tools"]
+
+    async def test_an_override_turn_relogs_the_prompt_both_ways(
+        self, services: Services, tmp_path
+    ) -> None:
+        """ADR 055: a mode-pinned turn changes the effective prompt for
+        that turn alone -- the diary re-logs on the pin AND on the return
+        to ambient, so it always holds the prompt the next decisions run
+        with. The user record carries the effective mode too."""
+        path = tmp_path / "turns.jsonl"
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="one"), LLMTurn(reply="two"), LLMTurn(reply="three"),
+        ], TurnLog(path, now=lambda: "T0"))
+        await orchestrator.handle_message("s1", "u1", "first")
+        await orchestrator.handle_message(
+            "s1", "u1", "second", mode="authoring",
+        )
+        await orchestrator.handle_message("s1", "u1", "third")
+        entries = _entries(path)
+        prompts = [e for e in entries if e["event"] == "prompt"]
+        assert [p["mode"] for p in prompts] == [
+            "space_setup", "authoring", "space_setup",
+        ]
+        users = [e for e in entries if e["event"] == "user"]
+        assert [u["mode"] for u in users] == [
+            "space_setup", "authoring", "space_setup",
+        ]
 
     async def test_each_session_logs_its_own_prompt(
         self, services: Services, tmp_path

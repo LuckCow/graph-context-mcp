@@ -3,7 +3,7 @@ custom-relation and inline-link reads."""
 
 import pytest
 
-from graph_context.domain.models import LinkSpec, NodeDraft
+from graph_context.domain.models import LinkSpec, NodeDraft, PropertyDeclaration
 from graph_context.errors import UnknownNodeType, UnknownRelationLabel
 from graph_context.infrastructure.anytype import mapping
 from graph_context.infrastructure.anytype.config import AnytypeApiError
@@ -49,7 +49,7 @@ class TestRelationReuseAndApproval:
         greg = await repo.create_node(
             NodeDraft("Character", name="Greg", summary="Worker."),
             links=[LinkSpec("boss", other=boss.id)],
-            create_missing_relations=True,
+            create_missing={"boss": PropertyDeclaration("boss", "objects")},
         )
         edges = list(repo.graph.edges(greg.id))
         assert [(e.type, e.target) for e in edges] == [("boss", boss.id)]
@@ -83,7 +83,9 @@ class TestFreshRelationSettleWindow:
         node = await repository.create_node(
             NodeDraft("Character", name="Mary", summary="Marketer."),
             links=[LinkSpec("inspired_by", other=target.id)],
-            create_missing_relations=True,
+            create_missing={
+                "inspired_by": PropertyDeclaration("inspired_by", "objects")
+            },
         )
         edges = [(e.type, e.target) for e in repository.graph.edges(node.id)]
         assert ("inspired_by", target.id) in edges
@@ -102,7 +104,9 @@ class TestFreshRelationSettleWindow:
             await repository.create_node(
                 NodeDraft("Character", name="Mary", summary="Marketer."),
                 links=[LinkSpec("inspired_by", other=target.id)],
-                create_missing_relations=True,
+                create_missing={
+                    "inspired_by": PropertyDeclaration("inspired_by", "objects")
+                },
             )
         assert repository.graph.node_count() == before  # rolled back
 

@@ -72,10 +72,27 @@ class AnytypeModeStore:
             # goal prompt's edges are never meaningful.
             "goal": mapping.body_of(obj).strip(),
             "mutating": bool(props.get(mapping.PROP_MODE_MUTATING)),
+            "meta_inspection": bool(props.get(mapping.PROP_MODE_META)),
             "web_search": bool(props.get(mapping.PROP_MODE_WEB_SEARCH)),
+            # ADR 046: reply-card visibility checkboxes, same rule as
+            # the binding checkboxes -- unticked/absent reads False.
+            "hide_intent_card": bool(
+                props.get(mapping.PROP_MODE_HIDE_INTENT_CARD)
+            ),
+            "hide_node_cards": bool(
+                props.get(mapping.PROP_MODE_HIDE_NODE_CARDS)
+            ),
             "capture": capture,
             "origin": f"{name or '(unnamed)'} ({obj.get('id', '?')})",
         }
+        # ADR 048: the document-mode surface -- presence enables, like
+        # capture; the loader validates (requires mutating, excludes
+        # capture) naming this object.
+        document_type = str(
+            props.get(mapping.PROP_MODE_DOCUMENT_TYPE) or ""
+        ).strip()
+        if document_type:
+            payload["document_type"] = document_type
         # A select: the value is a tag envelope, normalized to the option's
         # display name. Empty means "not set" -- the loader applies the
         # default; a set value is validated there (lowercased, so the
@@ -103,6 +120,9 @@ class AnytypeModeStore:
         max_tokens = props.get(mapping.PROP_MODE_MAX_TOKENS)
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        turn_limit = props.get(mapping.PROP_MODE_TURN_LIMIT)
+        if turn_limit:
+            payload["turn_limit"] = turn_limit
         max_uses = props.get(mapping.PROP_MODE_SEARCH_MAX_USES)
         if max_uses:
             payload["web_search_max_uses"] = max_uses

@@ -53,14 +53,19 @@ Representation (v2, space-reflecting):
   e.g. a template's property widgets) this is why the connections footer
   is suppressed on types whose template carries a body scaffold (ADR 013
   amendment; ``AnytypeGraphRepository._writes_footer``).
-* **A11 (spike_type_update, 2026-07-15):** ``PATCH /types/{id}`` with a
-  ``properties`` list REPLACES the type's human-managed fields wholesale
-  (an omitted ``gc_`` entry is stripped; server-owned entries like
-  ``tag``/``backlinks`` survive omission, and resending them verbatim is
-  harmless). Entries naming not-yet-minted OR already-minted space
-  properties both attach cleanly; omitting ``properties`` altogether
-  leaves the fields untouched. This is how ``ensure_schema`` retrofits
-  newly-added infra fields onto types that predate them (WP19's
+* **A11 (spike_type_update, 2026-07-15; amended 2026-07-19):** ``PATCH
+  /types/{id}`` with a ``properties`` list REPLACES the type's
+  human-managed fields wholesale (an omitted ``gc_`` entry is stripped;
+  server-owned entries like ``tag``/``backlinks`` survive omission, and
+  resending them verbatim is harmless). Entries naming not-yet-minted
+  space properties attach cleanly, ``objects`` format included (WP34
+  spike). An already-minted space property attaches by key alone when
+  scalar, but an ``objects``-format one 400s "property key already
+  exists" unless the entry also carries the property's ``id`` -- and the
+  id-carrying form works for every format, so reuse entries always
+  include it. Omitting ``properties`` altogether leaves the fields
+  untouched. This is how ``ensure_schema`` retrofits newly-added infra
+  fields onto types that predate them (WP19's
   ``gc_mode_activity_detail``): fetch, resend everything, append the
   missing entries.
 * **A12 (live-confirmed 2026-07-15):** a property's FORMAT is immutable
@@ -75,6 +80,21 @@ Representation (v2, space-reflecting):
   create ``body`` or PATCH ``markdown`` reads back as a bare ```` ``` ````
   fence on the markdown export. Why ``rules.extract_script`` (WP32)
   accepts untagged fences; the mock strips tags at every markdown write.
+* **A14 (WP34 spike, 2026-07-19):** ``POST /properties`` with an
+  existing key 400s ``property key "…" already exists`` (same name on a
+  fresh key is fine; DELETE then re-create of the same key is fine). The
+  server also normalises requested keys -- letter/digit boundaries gain
+  underscores (``wp34`` -> ``wp_34``) -- so the RESPONSE key, not the
+  requested one, is authoritative for registration.
+* **A15 (R2 probe + dogfooding, 2026-07-19):** ``date``-format
+  properties accept a bare date or an RFC 3339 stamp WITH a timezone,
+  400 naive timestamps, and read every value back as the UTC instant
+  (``...T00:00:00Z``). A bare date is stored as midnight **UTC**, which
+  clients render in the viewer's zone -- a day early anywhere west of
+  Greenwich. So all date writes are canonicalized client-side
+  (``domain.fields.normalize_date``, used by the field and timeline
+  paths), and zone-aware writers (the rule engine's set-property-to-now)
+  send local midnight with its explicit offset to pin the calendar day.
 
 SPIKE-CONFIRMED against a live server (API 2025-11-08): see git history. The
 A1-A5 relation/PATCH assumptions are unchanged; A6 ("bodies are write-once")
@@ -97,7 +117,14 @@ import zlib
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from graph_context.domain import attribution, rules, scheduling
+from graph_context.domain import (
+    activity,
+    attribution,
+    revisions,
+    rules,
+    scheduling,
+)
+from graph_context.domain import fields as domain_fields
 from graph_context.domain.activity import ACTIVITY_DETAIL_LEVELS
 from graph_context.domain.model_choice import MODEL_CHOICES
 from graph_context.domain.models import Edge, Node, NodeDraft, NodeId
@@ -146,34 +173,29 @@ ATTRIBUTION_PROPERTIES: dict[str, str] = dict(attribution.ATTRIBUTION_FIELDS)
 # Activity Mode config objects (ADR 015 amendment): the human-editable
 # fields of a gc_activity_mode object. Kept OUT of SCALAR_PROPERTIES --
 # these live only on mode objects, never on ordinary nodes. The goal is
-# the object BODY (read via body_of), so it needs no property.
-PROP_MODE_MUTATING = "gc_mode_mutating"
-PROP_MODE_ACTIVITY_DETAIL = "gc_mode_activity_detail"  # WP19, ADR 029
-PROP_MODE_WEB_SEARCH = "gc_mode_web_search"  # WP20, ADR 030
-PROP_MODE_MODEL = "gc_mode_model"  # ADR 033
-PROP_MODE_THINKING = "gc_mode_thinking"  # ADR 037
-PROP_MODE_MAX_TOKENS = "gc_mode_max_tokens"  # ADR 037
-PROP_MODE_SEARCH_MAX_USES = "gc_mode_search_max_uses"  # ADR 037
-PROP_MODE_SEARCH_ALLOWED = "gc_mode_search_allowed_domains"  # ADR 037
-PROP_MODE_SEARCH_BLOCKED = "gc_mode_search_blocked_domains"  # ADR 037
-PROP_CAPTURE_TYPE = "gc_capture_type"
-PROP_CAPTURE_REFERENCES = "gc_capture_references"
-PROP_CAPTURE_MIN_CHARS = "gc_capture_min_chars"
+# the object BODY (read via body_of), so it needs no property. The keys
+# live in the domain since ADR 045 (activity.MODE_CONFIG_FIELDS -- they
+# reflect, so both backends need one spelling); these are the
+# adapter-local aliases.
+PROP_MODE_MUTATING = activity.FIELD_MUTATING
+PROP_MODE_META = activity.FIELD_META_INSPECTION  # ADR 045
+PROP_MODE_ACTIVITY_DETAIL = activity.FIELD_ACTIVITY_DETAIL  # WP19, ADR 029
+PROP_MODE_HIDE_INTENT_CARD = activity.FIELD_HIDE_INTENT_CARD  # ADR 046
+PROP_MODE_HIDE_NODE_CARDS = activity.FIELD_HIDE_NODE_CARDS  # ADR 046
+PROP_MODE_WEB_SEARCH = activity.FIELD_WEB_SEARCH  # WP20, ADR 030
+PROP_MODE_MODEL = activity.FIELD_MODEL  # ADR 033
+PROP_MODE_THINKING = activity.FIELD_THINKING  # ADR 037
+PROP_MODE_MAX_TOKENS = activity.FIELD_MAX_TOKENS  # ADR 037
+PROP_MODE_TURN_LIMIT = activity.FIELD_TURN_LIMIT
+PROP_MODE_SEARCH_MAX_USES = activity.FIELD_SEARCH_MAX_USES  # ADR 037
+PROP_MODE_SEARCH_ALLOWED = activity.FIELD_SEARCH_ALLOWED  # ADR 037
+PROP_MODE_SEARCH_BLOCKED = activity.FIELD_SEARCH_BLOCKED  # ADR 037
+PROP_CAPTURE_TYPE = activity.FIELD_CAPTURE_TYPE
+PROP_CAPTURE_REFERENCES = activity.FIELD_CAPTURE_REFERENCES
+PROP_CAPTURE_MIN_CHARS = activity.FIELD_CAPTURE_MIN_CHARS
+PROP_MODE_DOCUMENT_TYPE = activity.FIELD_DOCUMENT_TYPE  # ADR 048
 
-MODE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
-    PROP_MODE_MUTATING: "checkbox",
-    PROP_MODE_ACTIVITY_DETAIL: "select",
-    PROP_MODE_WEB_SEARCH: "checkbox",
-    PROP_MODE_MODEL: "select",
-    PROP_MODE_THINKING: "select",
-    PROP_MODE_MAX_TOKENS: "number",
-    PROP_MODE_SEARCH_MAX_USES: "number",
-    PROP_MODE_SEARCH_ALLOWED: "text",
-    PROP_MODE_SEARCH_BLOCKED: "text",
-    PROP_CAPTURE_TYPE: "text",
-    PROP_CAPTURE_REFERENCES: "text",
-    PROP_CAPTURE_MIN_CHARS: "number",
-}
+MODE_PROPERTIES: dict[str, str] = dict(activity.MODE_CONFIG_FIELDS)
 
 # Select-format infra properties whose options bootstrap PRE-SEEDS, so the
 # human picks from a dropdown instead of typing the enum (WP19 amendment).
@@ -210,8 +232,13 @@ SELECT_OPTIONS: dict[str, tuple[str, ...]] = {
 # and never surfaces as reusable edge vocabulary: it is server config,
 # not story structure.
 PROP_DEFAULT_MODE = "gc_default_mode"
+# ADR 049: the tracked-types list joins the Space Context surface -- a
+# text property (comma/newline-separated type names) humans edit; the
+# historian reads it off the index by role each change tick.
+PROP_TRACKED_TYPES = revisions.FIELD_TRACKED_TYPES
 SPACE_CONTEXT_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints
     PROP_DEFAULT_MODE: "objects",
+    **revisions.TRACKED_TYPES_FIELDS,
 }
 
 # Session discriminator (WP8, ADR 021): every gc_session_context node
@@ -223,6 +250,14 @@ PROP_SESSION_KEY = "gc_session_key"
 SESSION_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_SESSION_KEY: "text",
 }
+
+# Revision-history sidecars (WP41, ADR 049): each gc_node_history object
+# names the tracked node it shadows via this text discriminator (the
+# gc_session_key pattern -- never an ``objects`` relation, so the link
+# neither reflects as an edge nor grows a connections footer). Keys live
+# in the domain (revisions.py); this is the adapter-local alias.
+PROP_HISTORY_OF = revisions.FIELD_HISTORY_OF
+HISTORY_PROPERTIES: dict[str, str] = dict(revisions.HISTORY_FIELDS)
 
 # The session snapshot slot (ADR 028, superseding the gc_fields blob for
 # ADR 021's per-chat state): server-managed JSON on the SessionContext
@@ -244,11 +279,20 @@ SESSION_STATE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints
 # adapter-local aliases.
 PROP_SCHEDULE = scheduling.FIELD_SCHEDULE
 PROP_SCHEDULE_PROMPT = scheduling.FIELD_PROMPT
+PROP_SCHEDULE_MESSAGE = scheduling.FIELD_MESSAGE
+PROP_SCHEDULE_MODE = scheduling.FIELD_MODE
+PROP_SCHEDULE_DOCUMENT_TYPE = scheduling.FIELD_DOCUMENT_TYPE
 PROP_LAST_FIRED = scheduling.FIELD_LAST_FIRED
 PROP_SCHEDULE_STATUS = scheduling.FIELD_STATUS
 SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_SCHEDULE: "text",
     PROP_SCHEDULE_PROMPT: "text",
+    PROP_SCHEDULE_MESSAGE: "text",
+    # Deliberately text, not select (ADR 055): mode names are live space
+    # data the registry owns -- pre-seeded options would go stale.
+    PROP_SCHEDULE_MODE: "text",
+    # Same rationale (ADR 057): node type names are live space data.
+    PROP_SCHEDULE_DOCUMENT_TYPE: "text",
     PROP_SCHEDULE_STATUS: "select",
     PROP_LAST_FIRED: "text",
 }
@@ -258,7 +302,10 @@ SCHEDULED_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # on rule nodes, never on ordinary nodes. The keys live in the domain
 # (rules.py) -- these are the adapter-local aliases. The engine owns
 # gc_rule_last_fired / gc_rule_last_error / the Error status; everything
-# else is human-authored in the Anytype editor.
+# else is human-authored in the Anytype editor -- except
+# gc_rule_run_now (WP52, ADR 058), the one SHARED-ownership field: a
+# human ticks it to request a run, the engine unticks it as it claims
+# the request.
 PROP_RULE_TARGET_TYPE = rules.FIELD_TARGET_TYPE
 PROP_RULE_WATCH_PROPERTY = rules.FIELD_WATCH_PROPERTY
 PROP_RULE_CONDITION = rules.FIELD_CONDITION
@@ -268,6 +315,7 @@ PROP_RULE_ACTION_VALUE = rules.FIELD_ACTION_VALUE
 PROP_RULE_STATUS = rules.FIELD_STATUS
 PROP_RULE_LAST_FIRED = rules.FIELD_LAST_FIRED
 PROP_RULE_LAST_ERROR = rules.FIELD_LAST_ERROR
+PROP_RULE_RUN_NOW = rules.FIELD_RUN_NOW
 RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_RULE_TARGET_TYPE: "text",
     PROP_RULE_WATCH_PROPERTY: "text",
@@ -278,6 +326,7 @@ RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
     PROP_RULE_STATUS: "select",
     PROP_RULE_LAST_FIRED: "text",  # deliberately text, like gc_last_fired
     PROP_RULE_LAST_ERROR: "text",
+    PROP_RULE_RUN_NOW: "checkbox",
 }
 
 # Human-facing display names for minted properties (people create and
@@ -289,8 +338,13 @@ RULE_PROPERTIES: dict[str, str] = {  # key -> format; bootstrap mints these
 # "Status". Properties absent here mint under their raw key, as before.
 PROPERTY_DISPLAY_NAMES: dict[str, str] = {
     PROP_DEFAULT_MODE: "Default mode",
+    PROP_TRACKED_TYPES: "Tracked types",
+    PROP_HISTORY_OF: "History of",
     PROP_SCHEDULE: "Schedule",
     PROP_SCHEDULE_PROMPT: "Schedule prompt",
+    PROP_SCHEDULE_MESSAGE: "Schedule message",
+    PROP_SCHEDULE_MODE: "Schedule mode",
+    PROP_SCHEDULE_DOCUMENT_TYPE: "Schedule document type",
     PROP_SCHEDULE_STATUS: "Schedule status",
     PROP_LAST_FIRED: "Last fired",
     PROP_SESSION_KEY: "Session key",
@@ -315,6 +369,7 @@ PROPERTY_DISPLAY_NAMES: dict[str, str] = {
     PROP_RULE_STATUS: "Rule status",
     PROP_RULE_LAST_FIRED: "Rule last fired",
     PROP_RULE_LAST_ERROR: "Rule last error",
+    PROP_RULE_RUN_NOW: "Rule run now",
 }
 
 # gc_ keys that DO surface in Node.fields and match as fields keys,
@@ -329,6 +384,17 @@ GC_REFLECTED_FIELD_KEYS: frozenset[str] = (
     | frozenset(ATTRIBUTION_PROPERTIES)
     # The Automation Rule surface is human-facing too (WP31, ADR 039).
     | frozenset(RULE_PROPERTIES)
+    # ADR 045: the mode config surface reflects so a meta-inspection mode
+    # can read a mode object's settings via get_node and write them via
+    # the properties dict. These keys only ever live on Activity Mode
+    # objects, which stay invisible to unprivileged modes -- reflecting
+    # them globally leaks nothing.
+    | frozenset(MODE_PROPERTIES)
+    # ADR 049: the historian reads the tracked-types list and each
+    # sidecar's discriminator off the INDEX (Node.fields), the
+    # rule-engine pattern -- both live only on infra-role objects.
+    | frozenset(HISTORY_PROPERTIES)
+    | frozenset(revisions.TRACKED_TYPES_FIELDS)
 )
 
 # Anytype's generic inline-link relation: an object's outbound ``anytype://``
@@ -338,9 +404,10 @@ GENERIC_LINK_KEY = "links"
 # -- native scalar reflection (ADR 012) -----------------------------------
 
 # Property formats that surface in Node.fields (and are writable through
-# the ``fields`` parameter). ``objects`` is edges; everything else scalar.
-# Since ADR 023 the vocabulary is domain-owned (the LLM declares one of
-# these in create_missing_fields); this alias keeps the adapter-local name.
+# the scalar half of ``properties``). ``objects`` is edges; everything
+# else scalar. Since ADR 023 the vocabulary is domain-owned (the LLM
+# declares one in create_missing_properties, ADR 042); this alias keeps
+# the adapter-local name.
 REFLECTED_FIELD_FORMATS: frozenset[str] = FIELD_FORMATS
 
 # System properties that would be pure context-window noise if reflected.
@@ -400,6 +467,16 @@ def property_entry(key: str, fmt: str, value: Any) -> dict[str, Any]:
     return {"key": key, "format": fmt, _VALUE_FIELD[fmt]: value}
 
 
+def _timeline_entry(timeline: tuple[str, str], value: Any) -> dict[str, Any]:
+    key, fmt = timeline
+    if fmt == "date":
+        # A date-axis story_time is a date write like any other: the
+        # shared rule errors with the fix instead of the server's opaque
+        # 400 on naive/garbage values (R2), and sends the aware UTC form.
+        value = domain_fields.normalize_date(key, str(value))
+    return property_entry(key, fmt, value)
+
+
 def to_create_payload(
     draft: NodeDraft,
     *,
@@ -435,7 +512,7 @@ def to_create_payload(
         *native_properties,
     ]
     if draft.story_time is not None:
-        properties.append(property_entry(timeline[0], timeline[1], draft.story_time))
+        properties.append(_timeline_entry(timeline, draft.story_time))
     payload: dict[str, Any] = {
         "name": draft.name,
         "type_key": type_key,
@@ -475,7 +552,7 @@ def to_update_payload(
     if summary_stale is not None:
         properties.append(property_entry(PROP_SUMMARY_STALE, "checkbox", summary_stale))
     if story_time is not None:
-        properties.append(property_entry(timeline[0], timeline[1], story_time))
+        properties.append(_timeline_entry(timeline, story_time))
     payload: dict[str, Any] = {}
     if name is not None:
         payload["name"] = name

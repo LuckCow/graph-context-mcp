@@ -138,3 +138,67 @@ class TestRelations:
         assert {"knows", "boss", "triggered_by"} <= labels
         assert "backlinks" not in labels
         assert "summary" not in labels  # not an objects relation
+
+
+class TestTypeScopedMatchers:
+    """ADR 047: the bare-resolution universe for writes is the type's own
+    attached properties; the space-wide pair stays the reuse universe."""
+
+    def _registry(self) -> SpaceRegistry:
+        return SpaceRegistry(
+            types_by_key={
+                "task": TypeInfo(
+                    "task", "Task",
+                    properties=(
+                        PropertyInfo("due_date", "Due date", "date"),
+                        PropertyInfo(
+                            "linked_projects", "Linked Projects", "objects"
+                        ),
+                        PropertyInfo("backlinks", "Backlinks", "objects"),
+                    ),
+                ),
+            },
+            properties_by_key={
+                "due_date": PropertyInfo("due_date", "Due date", "date"),
+                "priority": PropertyInfo("priority", "Priority", "number"),
+                "linked_projects": PropertyInfo(
+                    "linked_projects", "Linked Projects", "objects"
+                ),
+                "linked_project": PropertyInfo(
+                    "linked_project", "Linked Project", "objects"
+                ),
+            },
+        )
+
+    def test_attached_property_matches_key_and_display_name(self) -> None:
+        reg = self._registry()
+        for spelling in ("due_date", "Due date", "DUE DATE"):
+            info = reg.attached_property("task", spelling)
+            assert info is not None and info.key == "due_date"
+
+    def test_attached_property_misses_unattached_space_properties(self) -> None:
+        reg = self._registry()
+        assert reg.attached_property("task", "Priority") is None
+        assert reg.field_property("Priority") is not None  # reuse universe
+
+    def test_attached_property_of_unknown_type_matches_nothing(self) -> None:
+        assert self._registry().attached_property("nope", "Due date") is None
+
+    def test_attached_relation_key_matches_the_types_relations(self) -> None:
+        reg = self._registry()
+        for spelling in ("linked_projects", "Linked Projects"):
+            assert reg.attached_relation_key("task", spelling) == "linked_projects"
+
+    def test_attached_relation_key_misses_the_unattached_namesake(self) -> None:
+        """The incident: 'Linked Project' exists space-wide but not on
+        Task -- attached resolution must miss it while the space-wide
+        reuse matcher still finds it."""
+        reg = self._registry()
+        assert reg.attached_relation_key("task", "Linked Project") is None
+        assert reg.key_for_label("Linked Project") == "linked_project"
+
+    def test_attached_relations_honor_the_system_denylist(self) -> None:
+        reg = self._registry()
+        keys = {p.key for p in reg.attached_relations("task")}
+        assert keys == {"linked_projects"}  # backlinks stays hidden
+        assert reg.attached_relation_key("task", "Backlinks") is None

@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from graph_context.domain import attribution
-from graph_context.domain.models import NodeDraft
+from graph_context.domain.models import NodeDraft, PropertyDeclaration, PropertyDraft
 from graph_context.errors import GraphContextError, UnknownFieldKey
 from graph_context.infrastructure.anytype.client import AnytypeClient
 from graph_context.infrastructure.anytype.config import AnytypeConfig
@@ -138,11 +138,11 @@ async def test_human_select_edit_reaches_fields_on_resync(
 
 
 class TestFieldWriteRouting:
-    """ADR 012/023/028 write side: `fields` keys matching native properties
-    write those properties (select values resolved-or-created as tags
-    BEFORE the object write); every write is native-only -- an unmatched
-    key errors unless declared via create_missing_fields, and no gc_fields
-    blob is written at all."""
+    """ADR 012/023/028 write side: `fields` keys matching the type's
+    native properties (ADR 047) write those properties (select values
+    resolved-or-created as tags BEFORE the object write); every write is
+    native-only -- an unmatched key errors unless declared via
+    create_missing_properties, and no gc_fields blob is written at all."""
 
     async def _seed_role_property(self, client: AnytypeClient) -> str:
         prop = await client.create_property(
@@ -151,12 +151,25 @@ class TestFieldWriteRouting:
         await client.create_tag(prop["id"], {"name": "Everyperson", "color": "blue"})
         return str(prop["id"])
 
+    @staticmethod
+    async def _attach(
+        repo: AnytypeGraphRepository, *drafts: PropertyDraft
+    ) -> None:
+        """Attach seeded space properties to the Character type (ADR 047:
+        bare writes resolve against the type's own vocabulary)."""
+        await repo.add_type_properties("Character", drafts)
+
     async def test_create_writes_natives_and_no_blob(
         self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
     ) -> None:
         await self._seed_role_property(client)
         await client.create_property({"key": "notes", "name": "Notes", "format": "text"})
         await repo.hydrate()  # registry must know the new properties
+        await self._attach(
+            repo,
+            PropertyDraft(name="Role", format="select"),
+            PropertyDraft(name="Notes", format="text"),
+        )
         node = await repo.create_node(NodeDraft(
             "Character", name="Autumn", summary="Worker.",
             fields={"role": "everyperson", "notes": "arc 1"},
@@ -180,7 +193,7 @@ class TestFieldWriteRouting:
         message = str(err.value)
         assert "'quirk'" in message
         assert "Role (select)" in message
-        assert "create_missing_fields" in message
+        assert "create_missing_properties" in message
         assert "date" in message  # the format menu is echoed
 
     async def test_error_lists_type_properties_with_select_options(
@@ -214,7 +227,7 @@ class TestFieldWriteRouting:
         assert "Properties on Task: Due date (date), Status (select: To Do)" in message
         await client.aclose()
 
-    async def test_create_missing_fields_mints_a_reusable_native_property(
+    async def test_declared_property_mints_a_reusable_native_property(
         self, repo: AnytypeGraphRepository, mock: MockAnytype, client: AnytypeClient
     ) -> None:
         await repo.hydrate()
@@ -223,16 +236,20 @@ class TestFieldWriteRouting:
                 "Character", name="Autumn", summary="Worker.",
                 fields={"quirk": "hums"},
             ),
-            create_missing_fields={"quirk": "text"},
+            create_missing={"quirk": PropertyDeclaration("quirk", "text")},
         )
         stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
         assert stored["quirk"]["text"] == "hums"
         assert "gc_fields" not in stored
-        # The property now exists in the space: the next write reuses it
-        # without the opt-in.
-        second = await repo.create_node(NodeDraft(
-            "Character", name="Renata", summary="Exec.", fields={"quirk": "whistles"},
-        ))
+        # ADR 047: the mint is space-level, attached to no type -- the
+        # next object redeclares, which REUSES the property (no twin).
+        second = await repo.create_node(
+            NodeDraft(
+                "Character", name="Renata", summary="Exec.",
+                fields={"quirk": "whistles"},
+            ),
+            create_missing={"quirk": PropertyDeclaration("quirk", "text")},
+        )
         assert second.fields["quirk"] == "whistles"
 
     async def test_update_writes_natives_and_ignores_stray_blob(
@@ -244,6 +261,7 @@ class TestFieldWriteRouting:
             _entry("gc_fields", "text", '{"quirk": "hums"}'),
         ])
         await repo.hydrate()
+        await self._attach(repo, PropertyDraft(name="Role", format="select"))
         updated = await repo.update_node(node_id, fields={"role": "Everyperson"})
         stored = {p["key"]: p for p in mock.object(node_id)["properties"]}
         assert stored["role"]["select"]["name"] == "Everyperson"
@@ -300,6 +318,7 @@ class TestFieldWriteRouting:
     ) -> None:
         prop_id = await self._seed_role_property(client)
         await repo.hydrate()
+        await self._attach(repo, PropertyDraft(name="Role", format="select"))
         node = await repo.create_node(NodeDraft(
             "Character", name="Renata", summary="Exec.", fields={"role": "Antagonist"},
         ))
@@ -314,6 +333,7 @@ class TestFieldWriteRouting:
             {"key": "themes", "name": "Themes", "format": "multi_select"}
         )
         await repo.hydrate()
+        await self._attach(repo, PropertyDraft(name="Themes", format="multi_select"))
         node = await repo.create_node(NodeDraft(
             "Character", name="Autumn", summary="Worker.",
             fields={"themes": "Dark, Hopeful"},
@@ -330,6 +350,11 @@ class TestFieldWriteRouting:
             {"key": "verified", "name": "Verified", "format": "checkbox"}
         )
         await repo.hydrate()
+        await self._attach(
+            repo,
+            PropertyDraft(name="Word count", format="number"),
+            PropertyDraft(name="Verified", format="checkbox"),
+        )
         with pytest.raises(GraphContextError, match="number"):
             await repo.create_node(NodeDraft(
                 "Character", name="A", summary="s", fields={"wordcount": "lots"},
@@ -347,6 +372,9 @@ class TestFieldWriteRouting:
              "format": "text"}
         )
         await repo.hydrate()
+        await self._attach(
+            repo, PropertyDraft(name="Real life inspiration", format="text")
+        )
         node = await repo.create_node(NodeDraft(
             "Character", name="Mary", summary="Marketer.",
             fields={"Real life inspiration": "rental family services"},
@@ -371,6 +399,9 @@ async def test_fresh_tag_settle_window_is_retried() -> None:
 
     repo = AnytypeGraphRepository(client, sleep=instant)
     await repo.hydrate()
+    await repo.add_type_properties(
+        "Character", (PropertyDraft(name="Role", format="select"),)
+    )
     node = await repo.create_node(NodeDraft(
         "Character", name="Autumn", summary="Worker.", fields={"role": "Antagonist"},
     ))

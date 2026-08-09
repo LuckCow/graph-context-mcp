@@ -8,6 +8,7 @@ the live bot has: transport clients and repository clients are separate.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -25,12 +26,15 @@ from graph_context.interface.services import build_services
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.anytype_chat_bot import (
     _catch_up,
+    _change_listeners,
+    _change_tick_seconds,
     _maybe_turn,
-    _rule_tick_seconds,
     _serve_chat,
+    _SpaceStreams,
+    _stream_cap,
+    _watch_changes,
     _watch_chats,
     _watch_graph,
-    _watch_rules,
 )
 from graph_context.orchestrator.anytype_chat_transport import (
     AnytypeChatTurnHandler,
@@ -279,6 +283,132 @@ class TestLiveDiscovery:
             pass
 
 
+class TestStreamRoster:
+    """WP35 (ADR 043) end-to-end over MockAnytype: capped streams, wake
+    on activity, and the stream-less startup catch-up for hibernated
+    chats' offline backlog (ADR 019 must survive the cap)."""
+
+    def _two_chat_space(
+        self, turns: list[LLMTurn]
+    ) -> tuple[MockAnytype, AnytypeChatClient, bootstrap.SpaceRuntimes,
+               AnytypeChatTurnHandler, SpaceBinding, str, str]:
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id)
+        chat_client = AnytypeChatClient(
+            AnytypeClient(config, transport=mock.transport)
+        )
+        binding = SpaceBinding(space_id=mock.space_id, profile=FICTION)
+        route = ChannelRoute(orchestrator=Orchestrator(
+            services=build_services(
+                InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+                SessionState(project="Ashfall"),
+            ),
+            driver=ScriptedDriver(turns),
+            profile=FICTION, registry=fiction_registry(),
+        ))
+        runtimes = bootstrap.SpaceRuntimes(
+            routes={}, spaces={}, descriptions={}, help_line="",
+            teardown=[], space_routes={mock.space_id: route},
+            space_bindings={mock.space_id: binding},
+            session_labels={mock.space_id: {}},
+        )
+        handler = AnytypeChatTurnHandler(
+            routes=runtimes.routes, spaces=runtimes.spaces
+        )
+        chat_a = mock.seed_chat("Plot")
+        chat_b = mock.seed_chat("Characters")
+        for chat_id in (chat_a, chat_b):
+            bootstrap.register_chat(runtimes, mock.space_id, chat_id, "")
+        return mock, chat_client, runtimes, handler, binding, chat_a, chat_b
+
+    def _bot_replies(self, mock: MockAnytype, chat_id: str) -> list[str]:
+        return [
+            m["content"]["text"]
+            for m in mock.chat_messages(chat_id)
+            if m["creator"] == mock.api_member_id
+        ]
+
+    async def test_a_message_wakes_a_hibernated_chat(self) -> None:
+        """The headline WP35 behavior: with the cap holding one stream on
+        the active chat, a message into the hibernated one starts its
+        stream within a tick (catch-up answers the message) and the
+        displaced idle chat hibernates."""
+        mock, chat_client, runtimes, handler, binding, chat_a, chat_b = (
+            self._two_chat_space([LLMTurn(reply="good morning")])
+        )
+        handler.cursor.begin(chat_b)  # served before: not first-run
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                streams = _SpaceStreams(cap=1)
+                streams.tasks[chat_a] = tg.create_task(_serve_chat(
+                    handler, chat_client, chat_a, handler.cursor,
+                    busy=streams.busy,
+                ))
+                tg.create_task(_watch_chats(
+                    handler, chat_client, binding, runtimes, tg,
+                    interval=0.02, streams=streams,
+                ))
+                await asyncio.sleep(0.05)  # A streaming, B hibernated
+                mock.post_chat_message_directly(chat_b, "human", "hello?")
+                async with asyncio.timeout(5):
+                    while self._bot_replies(mock, chat_b) != ["good morning"]:
+                        await asyncio.sleep(0.01)
+                    # The wake displaced the idle chat: one stream lives.
+                    while set(streams.tasks) != {chat_b}:
+                        await asyncio.sleep(0.01)
+                raise _Done
+        except* _Done:
+            pass
+
+    async def test_startup_backlog_is_answered_without_a_stream(self) -> None:
+        """A chat hibernated at startup still gets its offline messages
+        answered (ADR 019): the watcher owes it one stream-less catch-up
+        before its first tick."""
+        mock, chat_client, runtimes, handler, binding, _, chat_b = (
+            self._two_chat_space([LLMTurn(reply="caught up")])
+        )
+        handler.cursor.begin(chat_b)
+        mock.post_chat_message_directly(chat_b, "human", "sent while down")
+
+        class _Done(Exception):
+            pass
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                streams = _SpaceStreams(cap=1, catch_up={chat_b})
+                tg.create_task(_watch_chats(
+                    handler, chat_client, binding, runtimes, tg,
+                    interval=0.02, streams=streams,
+                ))
+                async with asyncio.timeout(5):
+                    while self._bot_replies(mock, chat_b) != ["caught up"]:
+                        await asyncio.sleep(0.01)
+                assert not streams.catch_up  # the debt is paid once
+                raise _Done
+        except* _Done:
+            pass
+
+    def test_stream_cap_parses_and_disables(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("GC_CHAT_STREAM_CAP", raising=False)
+        assert _stream_cap() == 20
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "off")
+        assert _stream_cap() is None
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "3")
+        assert _stream_cap() == 3
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "many")
+        with pytest.raises(GraphContextError):
+            _stream_cap()
+        monkeypatch.setenv("GC_CHAT_STREAM_CAP", "-1")
+        with pytest.raises(GraphContextError):
+            _stream_cap()
+
+
 class TestPeriodicGraphResync:
     async def test_out_of_band_edits_reach_the_index_without_a_turn(
         self,
@@ -308,17 +438,27 @@ class TestPeriodicGraphResync:
             await asyncio.gather(watcher, return_exceptions=True)
 
 
-class TestRuleWatcher:
-    """ADR 039: the fourth watcher resyncs, diffs, and fires rules."""
+class TestChangeWatcher:
+    """ADR 044: one tick resyncs, then the ordered listeners react --
+    rules fire (ADR 039) and the mode registry auto-refreshes."""
 
-    def _route(self) -> tuple[ChannelRoute, InMemoryGraphRepository]:
+    def _route(
+        self, reload_registry=None,
+    ) -> tuple[ChannelRoute, InMemoryGraphRepository]:
         repository = InMemoryGraphRepository()
         route = ChannelRoute(orchestrator=Orchestrator(
             services=build_services(repository, SessionState(project="Todo")),
             driver=ScriptedDriver([]),
             profile=FICTION, registry=fiction_registry(),
+            reload_registry=reload_registry,
         ))
         return route, repository
+
+    def _watch(self, route: ChannelRoute) -> asyncio.Future:
+        return asyncio.ensure_future(_watch_changes(
+            route, "space-1", interval=0.01,
+            listeners=_change_listeners(route),
+        ))
 
     async def test_a_ui_checkbox_flip_fires_the_rule_through_the_watcher(
         self,
@@ -339,14 +479,54 @@ class TestRuleWatcher:
         task = await repository.create_node(NodeDraft(
             type="Task", name="ship it", summary="a task",
         ))
-        watcher = asyncio.ensure_future(
-            _watch_rules(route, "space-1", interval=0.01)
-        )
+        watcher = self._watch(route)
         try:
             await asyncio.sleep(0.05)  # let the baseline tick land
             await repository.update_node(task.id, fields={"Done": "true"})
             async with asyncio.timeout(5):
                 while "Completion date" not in repository.graph.node(task.id).fields:
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_ticking_run_now_fires_the_rule_through_the_watcher(
+        self,
+    ) -> None:
+        """WP52 (ADR 058): the human's whole gesture is one checkbox in
+        the Anytype UI -- no chat, no model turn."""
+        from graph_context.domain import rules
+
+        route, repository = self._route()
+        rule = await repository.create_node(NodeDraft(
+            type="gc_rule", name="dinner picker", summary="s",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Task",
+                rules.FIELD_CONDITION: "Manual",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Pick",
+                rules.FIELD_ACTION_VALUE: "tonight",
+            },
+        ))
+        task = await repository.create_node(NodeDraft(
+            type="Task", name="ship it", summary="a task",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            assert "Pick" not in repository.graph.node(task.id).fields
+            await repository.update_node(rule.id, fields={
+                **repository.graph.node(rule.id).fields,
+                rules.FIELD_RUN_NOW: "true",
+            })
+            async with asyncio.timeout(5):
+                while "Pick" not in repository.graph.node(task.id).fields:
+                    await asyncio.sleep(0.01)
+            # The box clears itself, so the rule does not run forever.
+            async with asyncio.timeout(5):
+                while repository.graph.node(rule.id).fields.get(
+                    rules.FIELD_RUN_NOW
+                ) != "false":
                     await asyncio.sleep(0.01)
         finally:
             watcher.cancel()
@@ -365,9 +545,7 @@ class TestRuleWatcher:
             return await original()
 
         engine.run_tick = flaky  # type: ignore[method-assign]
-        watcher = asyncio.ensure_future(
-            _watch_rules(route, "space-1", interval=0.01)
-        )
+        watcher = self._watch(route)
         try:
             async with asyncio.timeout(5):
                 while calls["count"] < 3:  # kept ticking past the failure
@@ -376,18 +554,144 @@ class TestRuleWatcher:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
 
-    def test_rule_tick_interval_parses_and_disables(
+    async def test_a_mode_object_edit_in_the_ui_reloads_the_registry(
+        self,
+    ) -> None:
+        """ADR 044: edit an Activity Mode object in Anytype and the new
+        spec is live within a tick -- no /mode command, no restart. The
+        first tick only seeds the baseline (nothing reloads on startup)."""
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            return fiction_registry({
+                "id": "obj-1", "name": "Faithful Scribe",
+                "goal": "Record only what the user states.",
+                "mutating": True, "capture": None,
+                "origin": "'Faithful Scribe' (obj-1)",
+            })
+
+        route, repository = self._route(reload_registry=reload)
+        mode = await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            assert reloads["count"] == 0  # startup state never reloads
+            await repository.update_node(mode.id, summary="edited in the UI")
+            async with asyncio.timeout(5):
+                while route.orchestrator.registry.get("faithful_scribe") is None:
+                    await asyncio.sleep(0.01)
+            assert reloads["count"] == 1
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_relinking_the_default_mode_reloads_the_registry(
+        self,
+    ) -> None:
+        """ADR 034 + 044: relink gc_default_mode on the Space Context in
+        the UI and new chats pick the new default within a tick."""
+
+        async def reload():
+            return dataclasses.replace(fiction_registry(), default="authoring")
+
+        route, repository = self._route(reload_registry=reload)
+        context = await repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="s",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # baseline tick
+            assert route.orchestrator.registry.default == "space_setup"
+            await repository.update_node(context.id, summary="relinked")
+            async with asyncio.timeout(5):
+                while route.orchestrator.registry.default != "authoring":
+                    await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_failed_mode_reload_keeps_the_last_good_registry(
+        self,
+    ) -> None:
+        """A broken edit degrades once (last good registry kept) and the
+        watcher waits for the NEXT edit instead of retrying every tick."""
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            raise GraphContextError(
+                "Activity Mode 'Broken' (obj-9): the goal is empty"
+            )
+
+        route, repository = self._route(reload_registry=reload)
+        before = route.orchestrator.registry
+        mode = await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # baseline tick
+            await repository.update_node(mode.id, summary="a broken edit")
+            async with asyncio.timeout(5):
+                while reloads["count"] < 1:
+                    await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)  # several more ticks pass...
+            assert reloads["count"] == 1  # ...without a retry storm
+            assert route.orchestrator.registry is before
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_a_crashing_listener_does_not_starve_the_next_listener(
+        self,
+    ) -> None:
+        route, _repository = self._route()
+        ran = asyncio.Event()
+
+        async def bad(_changed: frozenset[str]) -> None:
+            raise RuntimeError("boom")
+
+        async def good(_changed: frozenset[str]) -> None:
+            ran.set()
+
+        watcher = asyncio.ensure_future(_watch_changes(
+            route, "space-1", interval=0.01,
+            listeners=[("bad", bad), ("good", good)],
+        ))
+        try:
+            async with asyncio.timeout(5):
+                await ran.wait()  # same tick as bad's crash
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    def test_change_tick_interval_parses_and_disables(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.delenv("GC_CHANGE_TICK_SECONDS", raising=False)
         monkeypatch.delenv("GC_RULE_TICK_SECONDS", raising=False)
-        assert _rule_tick_seconds() == 5
-        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "off")
-        assert _rule_tick_seconds() is None
-        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "2.5")
-        assert _rule_tick_seconds() == 2.5
-        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "soon")
+        assert _change_tick_seconds() == 5
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "off")
+        assert _change_tick_seconds() is None
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "2.5")
+        assert _change_tick_seconds() == 2.5
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "soon")
         with pytest.raises(GraphContextError):
-            _rule_tick_seconds()
+            _change_tick_seconds()
+
+    def test_the_old_rule_tick_env_var_still_works_as_an_alias(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pre-ADR-044 deployments set GC_RULE_TICK_SECONDS; honor it
+        until the new name is set, which then wins."""
+        monkeypatch.delenv("GC_CHANGE_TICK_SECONDS", raising=False)
+        monkeypatch.setenv("GC_RULE_TICK_SECONDS", "7")
+        assert _change_tick_seconds() == 7.0
+        monkeypatch.setenv("GC_CHANGE_TICK_SECONDS", "3")
+        assert _change_tick_seconds() == 3.0
 
 
 class TestServeLoop:
@@ -540,6 +844,48 @@ class TestScheduledEventWatcher:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
 
+    async def test_a_due_message_event_posts_verbatim_with_no_model_turn(
+        self,
+    ) -> None:
+        from graph_context.domain import scheduling
+        from graph_context.orchestrator.anytype_chat_bot import _watch_schedule
+
+        mock = MockAnytype()
+        # ZERO scripted turns: any model turn would raise and error-post.
+        chat_client, chat_id, handler = _wired_chat(mock, [], ChatCursor())
+        route = handler.routes[chat_id]
+        repository = route.orchestrator.services.repository
+        await repository.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="tax note",
+            summary="s",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2020-01-01T09:00",  # long due
+                scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
+                scheduling.FIELD_SESSION_KEY: f"anytype:{chat_id}",
+            },
+        ))
+        watcher = asyncio.ensure_future(_watch_schedule(
+            handler, chat_client, route, mock.space_id, interval=0.01
+        ))
+        try:
+            async with asyncio.timeout(5):
+                while not any(
+                    m["content"]["text"] == "Taxes are due April 15."
+                    for m in mock.chat_messages(chat_id)
+                ):
+                    await asyncio.sleep(0.01)
+            # A few more ticks must not re-fire the spent one-shot.
+            await asyncio.sleep(0.05)
+            bot_posts = [
+                m["content"]["text"]
+                for m in mock.chat_messages(chat_id)
+                if m["creator"] == mock.api_member_id
+            ]
+            assert bot_posts == ["Taxes are due April 15."]
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
     async def test_a_ui_created_recurring_event_is_armed_without_a_post(
         self,
     ) -> None:
@@ -600,7 +946,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("how do siege engines work?"), chat_client, titler,
         )
-        names = dict(await chat_client.list_chats())
+        names = {c.id: c.name for c in await chat_client.list_chats()}
         assert names[chat_id] == "Siege Engines 101"  # sanitized
         assert titler.names[chat_id] == "Siege Engines 101"
 
@@ -621,7 +967,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("q2", "!!b"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == "First Title"
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == "First Title"
 
     async def test_a_humans_title_is_never_overwritten(self) -> None:
         mock = MockAnytype()
@@ -634,7 +980,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("hello"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == "Trip planning"
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == "Trip planning"
 
     async def test_commands_never_trigger_titling(self) -> None:
         mock = MockAnytype()
@@ -646,7 +992,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("/mode"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == ""
         assert titler.needs_title(chat_id)  # the attempt was not consumed
 
     async def test_a_failed_turn_defers_the_attempt(self) -> None:
@@ -667,7 +1013,7 @@ class TestAutoTitling:
             handler, mock.space_id, chat_id,
             self._message("hello"), chat_client, titler,
         )
-        assert dict(await chat_client.list_chats())[chat_id] == ""
+        assert {c.id: c.name for c in await chat_client.list_chats()}[chat_id] == ""
         assert titler.needs_title(chat_id)  # retry on the next exchange
 
     async def test_a_failing_rename_never_fails_the_turn(self) -> None:

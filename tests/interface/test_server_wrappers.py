@@ -22,6 +22,12 @@ import pytest
 from graph_context.interface import server, tools
 from graph_context.interface.profiles import TOOL_NAMES
 
+# ADR 042: the write tools keep the RETIRED params as explicit
+# implementation-only arguments (an old-shape call gets a self-correcting
+# redirect instead of an opaque error). They are deliberately absent from
+# the MCP wrappers -- the schema must not advertise them.
+_RETIRED_IMPL_ONLY = frozenset(tools._RETIRED_WRITE_PARAMS)
+
 
 def _api_params(fn: object, skip_first: str) -> list[tuple[str, object, str]]:
     signature = inspect.signature(fn)  # type: ignore[arg-type]
@@ -32,6 +38,7 @@ def _api_params(fn: object, skip_first: str) -> list[tuple[str, object, str]]:
     return [
         (p.name, p.default, " ".join(str(p.annotation).split()))
         for p in params[1:]
+        if p.name not in _RETIRED_IMPL_ONLY
     ]
 
 
@@ -44,3 +51,14 @@ def test_wrapper_signature_matches_the_implementation(tool_name: str) -> None:
         "FastMCP silently drops undeclared arguments, so update the "
         "wrapper whenever the tool implementation's surface changes"
     )
+
+
+def test_wrappers_never_advertise_retired_params() -> None:
+    for tool_name in ("create_node", "update_node"):
+        wrapper_params = {
+            p.name
+            for p in inspect.signature(
+                getattr(server, tool_name)
+            ).parameters.values()
+        }
+        assert not wrapper_params & _RETIRED_IMPL_ONLY

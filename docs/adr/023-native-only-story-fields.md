@@ -1,6 +1,8 @@
 # ADR 023: Story-node fields are native-only; gc_fields is infra-only
 
-**Status:** Accepted (2026-07-10) — amends ADR 012's write-side routing
+**Status:** Accepted (2026-07-10) — amends ADR 012's write-side routing;
+amended by ADR 047 (the bare write-match universe is the TYPE's attached
+properties, not the whole space)
 
 ## Context
 

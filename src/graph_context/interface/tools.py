@@ -45,9 +45,11 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
+from graph_context.application.document_editor import DocumentEditor
+from graph_context.application.node_writer import WriteOutcome
 from graph_context.application.scheduler import Scheduler
 from graph_context.application.schema_proposals import SchemaProposal
-from graph_context.domain import schema
+from graph_context.domain import revisions, rules, schema
 from graph_context.domain.models import (
     Edge,
     Node,
@@ -64,6 +66,7 @@ from graph_context.domain.session import SCRATCHPAD_MAX_CHARS
 from graph_context.domain.traversal import ExploreQuery
 from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface import presenters
+from graph_context.interface.mode_config import slugify
 from graph_context.interface.presenters import Detail
 from graph_context.interface.services import OutboundFile, Services
 from graph_context.interface.tool_args import (
@@ -71,12 +74,11 @@ from graph_context.interface.tool_args import (
     _node_type_set,
     _parse_detail,
     _parse_edge_type,
-    _parse_field_declarations,
-    _parse_fields_and_links,
     _parse_hold_detail,
     _parse_node_type,
     _parse_order_by,
     _parse_predicates,
+    _parse_properties,
     _resolve,
     _validate_query_type,
 )
@@ -229,7 +231,10 @@ async def context_tool(
         # keys. Empty graph -> guidance, not an error (a fresh session
         # should get something actionable).
         return presenters.render_overview(
-            build_overview(graph), services.repository.field_catalog()
+            build_overview(graph),
+            services.repository.field_catalog(
+                include_roles=services.visible_infra_roles
+            ),
         )
     if action == "resync":
         changed = await resync_out_of_band(services)
@@ -328,6 +333,13 @@ def _clock_line(scheduler: Scheduler) -> str:
     )
 
 
+def _schedule_excerpt(text: str) -> str:
+    excerpt = text.strip().replace("\n", " ")
+    if len(excerpt) > _PROMPT_EXCERPT_CHARS:
+        excerpt = excerpt[:_PROMPT_EXCERPT_CHARS] + "…"
+    return excerpt
+
+
 @guarded
 async def schedule_tool(
     services: Services,
@@ -335,42 +347,81 @@ async def schedule_tool(
     name: str = "",
     schedule: str = "",
     prompt: str = "",
+    message: str = "",
+    mode: str = "",
+    document_type: str = "",
     node_id: str = "",
 ) -> str:
     scheduler = services.scheduler
     if action == "set":
+        # Modes are addressed by slug everywhere (registry keys, /mode);
+        # slugify here so "Space Setup" and "space_setup" both land.
+        # document_type is NOT slugified -- it's a node type name like
+        # "Report", matched against the space's types at fire time.
+        mode_slug = slugify(mode) if mode.strip() else ""
         node, next_at = await scheduler.set(
-            name, schedule, prompt, services.session_key
+            name, schedule, prompt, services.session_key,
+            message=message, mode=mode_slug,
+            document_type=document_type.strip(),
         )
         await _note_mutation(services)
         when = (
             next_at.isoformat(sep=" ", timespec="minutes")
             if next_at is not None else "never"
         )
+        if message.strip():
+            kind = (
+                "at fire time this message posts to the chat verbatim "
+                "(no LLM turn)"
+            )
+        else:
+            kind = (
+                "at fire time an LLM turn runs the stored prompt in mode: "
+                f"{mode_slug or '(space default)'}"
+            )
+            if document_type.strip():
+                kind += (
+                    f"; its output lands in a {document_type.strip()!r} "
+                    "object (the chat gets a summary + link)"
+                )
         return (
-            f"scheduled {node.name!r} (id={node.id}); next fire: {when}. "
-            f"{_clock_line(scheduler)}. Verify the next-fire time matches "
-            "what the user asked for; reschedule with action='cancel' + "
-            "'set' if not."
+            f"scheduled {node.name!r} (id={node.id}); next fire: {when}; "
+            f"{kind}. {_clock_line(scheduler)}. Verify the next-fire time "
+            "matches what the user asked for; reschedule with "
+            "action='cancel' + 'set' if not."
         )
     if action == "list":
         views = scheduler.events()
         if not views:
             return (
                 "no scheduled events. Create one with action='set' "
-                f"(name, schedule, prompt). {_clock_line(scheduler)}."
+                "(name, schedule, and prompt or message). "
+                f"{_clock_line(scheduler)}."
             )
         lines = [_clock_line(scheduler), f"scheduled events ({len(views)}):"]
         for view in views:
             target = view.session_key or "(default chat)"
-            lines.append(
-                f"- {view.node.name} (id={view.node.id}, chat={target}) "
-                f"-- {view.status}"
+            mode_note = f", mode={view.mode}" if view.mode else ""
+            doc_note = (
+                f", document={view.document_type}" if view.document_type
+                else ""
             )
-            excerpt = view.prompt.strip().replace("\n", " ")
-            if len(excerpt) > _PROMPT_EXCERPT_CHARS:
-                excerpt = excerpt[:_PROMPT_EXCERPT_CHARS] + "…"
-            lines.append(f"  prompt: {excerpt or '(none: fires with the name)'}")
+            lines.append(
+                f"- {view.node.name} (id={view.node.id}, chat={target}"
+                f"{mode_note}{doc_note}) -- {view.status}"
+            )
+            if view.message.strip():
+                lines.append(f"  message: {_schedule_excerpt(view.message)}")
+                if view.prompt.strip():
+                    lines.append(
+                        "  (both Schedule message and Schedule prompt are "
+                        "set; the message wins -- clear one)"
+                    )
+            else:
+                excerpt = _schedule_excerpt(view.prompt)
+                lines.append(
+                    f"  prompt: {excerpt or '(none: fires with the name)'}"
+                )
         return "\n".join(lines)
     if action == "cancel":
         node = await scheduler.cancel(node_id or name)
@@ -384,6 +435,25 @@ async def schedule_tool(
     raise GraphContextError(
         f"unknown action {action!r}; allowed: set, list, cancel"
     )
+
+
+async def _script_auto_test(services: Services, node: Node) -> str:
+    """A just-saved 'run script' rule is dry-run immediately, so the
+    authoring turn sees a script failure NOW instead of on the first
+    live fire (built-in actions are fully validated at bind time, so
+    only scripts need this). The rule is saved either way: a failing
+    auto-test reports, it never rolls back."""
+    if rules.parse_rule_fields(node.fields).action != rules.ACTION_RUN_SCRIPT:
+        return ""
+    try:
+        report = await services.rules.dry_run(identifier=node.id)
+    except GraphContextError as err:
+        return (
+            f"\nauto-test FAILED: {err}\nThe rule IS saved; if that is a "
+            "script error, fix it with action='update' (script=...) "
+            "before it fires live, then re-test with action='test'."
+        )
+    return f"\nauto-test of the saved script:\n{report}"
 
 
 @guarded
@@ -414,6 +484,7 @@ async def automation_tool(
             "runs on its own a few seconds after a matching change, "
             "while the assistant is serving this space. Check on it "
             "with action='list'; simulate it with action='test'."
+            + await _script_auto_test(services, node)
         )
     if action == "update":
         node = await engine.update(
@@ -427,6 +498,7 @@ async def automation_tool(
         return (
             f"updated automation rule {node.name!r} (id={node.id}). "
             "Simulate it with action='test' to confirm the new behavior."
+            + await _script_auto_test(services, node)
         )
     if action == "list":
         views = engine.views()
@@ -615,6 +687,34 @@ async def send_file_tool(
     )
 
 
+_RETIRED_WRITE_PARAMS = {
+    "fields": "pass the values inside properties={...}",
+    "links": "pass relation values inside properties={'<relation>': "
+             "'<node id or name>'}",
+    "add_links": "pass relation values inside properties={'<relation>': "
+                 "'<node id or name>'} (they ADD to existing links)",
+    "create_missing_relations": "declare the label in "
+        "create_missing_properties={'<label>': {'format': 'objects', "
+        "'scope': 'instance'|'type'}}",
+    "create_missing_fields": "declare the key in "
+        "create_missing_properties={'<key>': '<format>'} (or "
+        "{'format': ..., 'scope': 'instance'|'type'})",
+}
+
+
+def _reject_retired_params(supplied: dict[str, Any]) -> None:
+    """ADR 042 replaced the fields/links surface; a replayed transcript
+    or an old habit gets a self-correcting redirect, never an opaque
+    internal error."""
+    used = {k: v for k, v in supplied.items() if v is not None}
+    if not used:
+        return
+    notes = "; ".join(
+        f"'{key}' was replaced -- {_RETIRED_WRITE_PARAMS[key]}" for key in used
+    )
+    raise GraphContextError(notes)
+
+
 @guarded
 async def create_node_tool(
     services: Services,
@@ -623,14 +723,24 @@ async def create_node_tool(
     summary: str,
     description: str = "",
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     icon: str = "",
-    create_missing_relations: bool = False,
+    create_missing_properties: dict[str, Any] | None = None,
+    # Retired params (ADR 042): explicit so an old-shape call gets a
+    # redirect instead of guarded's opaque internal error.
+    fields: dict[str, Any] | None = None,
+    links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool | None = None,
     create_missing_fields: dict[str, str] | None = None,
 ) -> str:
-    fields, parsed_links, declarations = await _parse_fields_and_links(
-        services, fields, links, _parse_field_declarations(create_missing_fields)
+    _reject_retired_params({
+        "fields": fields, "links": links,
+        "create_missing_relations": create_missing_relations,
+        "create_missing_fields": create_missing_fields,
+    })
+    scalars, parsed_links, declarations = await _parse_properties(
+        services, properties, create_missing_properties,
+        on_type=_parse_node_type(type),
     )
     draft = NodeDraft(
         type=_parse_node_type(type),
@@ -639,18 +749,19 @@ async def create_node_tool(
         # Tool-surface "description" = the node's body (ADR 010).
         body=description,
         story_time=story_time,
-        fields=fields or {},
+        fields=scalars,
         icon=icon.strip(),
     )
-    node = await services.writer.create_node(
-        draft,
-        parsed_links,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=declarations,
+    outcome = await services.writer.create_node(
+        draft, parsed_links, declarations=declarations,
+        admitted_infra_roles=services.visible_infra_roles,
     )
     await _note_mutation(services)
-    view = await services.reader.get_node(node.id)
-    return f"created:\n{presenters.render_node_view(view)}"
+    view = await services.reader.get_node(outcome.node.id)
+    return (
+        f"created:\n{presenters.render_node_view(view)}"
+        f"{_render_write_outcome_notes(outcome)}"
+    )
 
 
 @guarded
@@ -661,12 +772,21 @@ async def update_node_tool(
     summary: str | None = None,
     description: str | None = None,
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    add_links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
-    create_missing_relations: bool = False,
+    create_missing_properties: dict[str, Any] | None = None,
+    # Retired params (ADR 042): explicit so an old-shape call gets a
+    # redirect instead of guarded's opaque internal error.
+    fields: dict[str, Any] | None = None,
+    add_links: list[dict[str, Any]] | None = None,
+    create_missing_relations: bool | None = None,
     create_missing_fields: dict[str, str] | None = None,
 ) -> str:
+    _reject_retired_params({
+        "fields": fields, "add_links": add_links,
+        "create_missing_relations": create_missing_relations,
+        "create_missing_fields": create_missing_fields,
+    })
     node_id = await _resolve(services, node_id)
     removals = [
         Edge(
@@ -677,22 +797,23 @@ async def update_node_tool(
         )
         for i in remove_links or []
     ]
-    fields, parsed_add_links, declarations = await _parse_fields_and_links(
-        services, fields, add_links, _parse_field_declarations(create_missing_fields)
+    scalars, parsed_add_links, declarations = await _parse_properties(
+        services, properties, create_missing_properties, on_node=node_id,
     )
-    node = await services.writer.update_node(
+    outcome = await services.writer.update_node(
         node_id,
         name=name,
         summary=summary,
         description=description,
         story_time=story_time,
-        fields=fields,
+        fields=scalars if properties is not None else None,
         add_links=parsed_add_links,
         remove_links=removals,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=declarations,
+        declarations=declarations,
+        admitted_infra_roles=services.visible_infra_roles,
     )
     await _note_mutation(services)
+    node = outcome.node
     stale_note = (
         "\nNOTE: summary flagged stale (no fresh summary in this update); "
         "supply `summary` to clear it."
@@ -700,7 +821,164 @@ async def update_node_tool(
         else ""
     )
     view = await services.reader.get_node(node.id)
-    return f"updated:\n{presenters.render_node_view(view)}{stale_note}"
+    return (
+        f"updated:\n{presenters.render_node_view(view)}{stale_note}"
+        f"{_render_write_outcome_notes(outcome)}"
+    )
+
+
+_EDIT_DOCUMENT_ACTIONS = (
+    "sections", "replace", "insert_after", "delete", "address_comment",
+)
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _render_sections(
+    services: Services,
+    node_id: NodeId,
+    blocks: tuple[tuple[str, str], ...],
+) -> str:
+    """The document's anchor listing: one line per block -- hash, review
+    state when a historian is live (WP42), first line of the text --
+    plus the user's live comments (WP50)."""
+    graph = services.repository.graph
+    name = graph.node(node_id).name if graph.has_node(node_id) else node_id
+    if not blocks:
+        return f"{name} has no sections (empty body)."
+    states = (
+        services.historian.section_states(node_id)
+        if services.historian is not None else {}
+    )
+    lines = [f"sections of {name} ({len(blocks)}):"]
+    for block_hash, raw in blocks:
+        state = states.get(block_hash)
+        badge = f" · {state.status} · {state.intent}" if state else ""
+        first_line = raw.splitlines()[0][:70]
+        lines.append(f"[§{block_hash}{badge}] {first_line}")
+    comments = (
+        services.historian.comments(node_id)
+        if services.historian is not None else ()
+    )
+    if comments:
+        open_count = sum(
+            1 for c in comments if c.state == revisions.COMMENT_OPEN
+        )
+        lines.append(
+            f"comments ({open_count} open, "
+            f"{len(comments) - open_count} addressed):"
+        )
+        for comment in comments:
+            where = (
+                f"on §{comment.hash}" if comment.hash
+                else "(detached; its text was removed)"
+            )
+            lines.append(
+                f'  #{comment.id} {comment.state} {where}: '
+                f'"{_clip(comment.text, 100)}"'
+            )
+        lines.append(
+            "address a comment you have acted on with "
+            "action='address_comment' + comment_id; only the user "
+            "resolves it."
+        )
+    return "\n".join(lines)
+
+
+@guarded
+async def edit_document_tool(
+    services: Services,
+    node_id: str,
+    action: str = "sections",
+    anchor: str = "",
+    text: str = "",
+    summary: str | None = None,
+    comment_id: str = "",
+) -> str:
+    if action not in _EDIT_DOCUMENT_ACTIONS:
+        raise GraphContextError(
+            f"unknown action {action!r}; allowed: "
+            f"{', '.join(_EDIT_DOCUMENT_ACTIONS)}."
+        )
+    resolved = await _resolve(services, node_id)
+    editor = DocumentEditor(services.repository, services.writer)
+    if action == "sections":
+        return _render_sections(
+            services, resolved, await editor.sections(resolved)
+        )
+    if action == "address_comment":
+        # A sidecar bookkeeping write, not a body write: no journal
+        # entry, no card -- the comment log keeps the record (WP50).
+        historian = services.historian
+        if historian is None:
+            raise GraphContextError(
+                "comments are unavailable on this surface (no revision "
+                "history service)."
+            )
+        wanted = comment_id.strip().lstrip("#")
+        if not wanted:
+            raise GraphContextError(
+                "action='address_comment' needs comment_id -- the #id "
+                "shown in the sections listing and the context block."
+            )
+        await historian.set_comment_state(
+            resolved, comment_id=wanted,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        remaining = [
+            c for c in historian.comments(resolved)
+            if c.state == revisions.COMMENT_OPEN
+        ]
+        lines = [f"addressed comment #{wanted}."]
+        if remaining:
+            lines.append(f"still open ({len(remaining)}):")
+            lines.extend(
+                f'  #{c.id}: "{_clip(c.text, 100)}"' for c in remaining
+            )
+        else:
+            lines.append("no comments remain open.")
+        return "\n".join(lines)
+    if action in ("replace", "insert_after") and not text.strip():
+        raise GraphContextError(
+            f"action={action!r} needs `text`: the section's full markdown "
+            "(one or more paragraphs)."
+        )
+    outcome = await editor.edit(
+        resolved, action=action, anchor=anchor, text=text, summary=summary,
+        admitted_infra_roles=services.visible_infra_roles,
+    )
+    await _note_mutation(services)
+    node = outcome.node
+    stale_note = (
+        "\nNOTE: summary flagged stale (no fresh summary in this update); "
+        "supply `summary` to clear it."
+        if node.summary_stale
+        else ""
+    )
+    listing = _render_sections(
+        services, resolved, await editor.sections(resolved)
+    )
+    return (
+        f"edited {node.name} ({action}):\n{listing}{stale_note}"
+        f"{_render_write_outcome_notes(outcome)}"
+    )
+
+
+def _render_write_outcome_notes(outcome: WriteOutcome) -> str:
+    """The write's schema side-channel (ADR 042), after the node view:
+    the auto-drafted type-attach proposal and any degraded warnings."""
+    notes = []
+    for proposal in outcome.drafted:
+        notes.append(
+            f"schema proposal {proposal.id} drafted (attach to "
+            f"{proposal.type_name!r}): a confirmation message follows this "
+            "reply -- the user applies it with a 👍 reaction; you cannot "
+            "apply it. The value is already saved either way."
+        )
+    notes.extend(f"NOTE: {warning}" for warning in outcome.warnings)
+    return "".join(f"\n{note}" for note in notes)
 
 
 @guarded
@@ -715,6 +993,7 @@ async def get_node_tool(
         edge_type_filter=_edge_type_set(edge_types),
         include_provenance=include_provenance,
         excerpt_chars=presenters.EXCERPT_CHARS,
+        visible_roles=services.visible_infra_roles,
     )
     return presenters.render_node_view(view)
 
@@ -814,10 +1093,24 @@ async def query_tool(
     # Corpus scans reach everything, so hide ALL bookkeeping roles (not
     # just explore's default set -- mode config objects included) unless
     # the type filter explicitly names an infra type (same escape hatch
-    # as explore's include_types).
-    exclude_roles: frozenset[Role] = schema.INFRA_ROLES
+    # as explore's include_types). The active mode's meta privilege
+    # (ADR 045) re-admits its roles; Role.MODE keeps NO unprivileged
+    # hatch -- mode objects are assistant config, reachable only with
+    # meta-inspection.
+    exclude_roles: frozenset[Role] = (
+        schema.INFRA_ROLES - services.visible_infra_roles
+    )
     if node_type is not None:
         role = _validate_query_type(services, node_type)
+        if (
+            role is Role.MODE
+            and Role.MODE not in services.visible_infra_roles
+        ):
+            raise GraphContextError(
+                "Activity Mode objects are assistant configuration and "
+                "are not visible in this mode; a mode with "
+                "meta-inspection (the Space Setup mode) can inspect them"
+            )
         if role in schema.INFRA_ROLES:
             exclude_roles = frozenset()
     anchor = await _resolve(services, linked_to) if linked_to else None
@@ -866,7 +1159,8 @@ async def find_node_tool(
 ) -> str:
     def by_name() -> list[Node]:
         return services.repository.graph.find_by_name(
-            name, node_type=type or None, limit=limit
+            name, node_type=type or None, limit=limit,
+            include_roles=services.visible_infra_roles,
         )
 
     matches = by_name()

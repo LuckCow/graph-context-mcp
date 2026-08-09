@@ -2,9 +2,9 @@
 
 import pytest
 
-from graph_context.domain import schema
+from graph_context.domain import models, schema
 from graph_context.domain.schema import Role
-from graph_context.errors import SchemaViolation
+from graph_context.errors import InfraWriteDenied, SchemaViolation
 
 
 class TestResolveRole:
@@ -45,27 +45,54 @@ class TestResolveRole:
         assert role is Role.EVENT
 
 
-class TestValidateFieldDeclarations:
+class TestPropertyDeclarations:
     def test_empty_declarations_are_a_noop(self) -> None:
-        schema.validate_field_declarations({"due": "2026-08-01"}, {})
+        models.validate_property_declarations({"due"}, {})
 
     def test_valid_declaration_passes(self) -> None:
-        schema.validate_field_declarations(
-            {"due": "2026-08-01"}, {"due": "date"}
+        models.validate_property_declarations(
+            {"due"}, {"due": models.PropertyDeclaration("due", "date")}
         )
 
     def test_unknown_format_errors_listing_the_menu(self) -> None:
         with pytest.raises(SchemaViolation, match="formats: .*date.*text"):
-            schema.validate_field_declarations(
-                {"due": "2026-08-01"}, {"due": "datetime"}
+            models.PropertyDeclaration("due", "datetime")
+
+    def test_objects_format_is_creatable(self) -> None:
+        # ADR 042: a relation is just a property whose format is objects.
+        declaration = models.PropertyDeclaration("works_at", "objects")
+        assert declaration.format == "objects"
+
+    def test_declared_key_missing_from_properties_errors(self) -> None:
+        with pytest.raises(SchemaViolation, match="no value"):
+            models.validate_property_declarations(
+                set(), {"due": models.PropertyDeclaration("due", "date")}
             )
 
-    def test_declared_key_missing_from_fields_errors(self) -> None:
-        with pytest.raises(SchemaViolation, match="no value"):
-            schema.validate_field_declarations({}, {"due": "date"})
+    def test_format_and_scope_normalize(self) -> None:
+        declaration = models.PropertyDeclaration("due", " Date ", " TYPE ")
+        assert declaration.format == "date"
+        assert declaration.scope == "type"
 
-    def test_format_matching_is_case_and_space_insensitive(self) -> None:
-        schema.validate_field_declarations({"due": "x"}, {"due": " Date "})
+    def test_unknown_scope_errors_naming_both_words(self) -> None:
+        with pytest.raises(SchemaViolation, match="instance.*type"):
+            models.PropertyDeclaration("due", "date", scope="global")
+
+    def test_gc_prefix_is_reserved(self) -> None:
+        with pytest.raises(SchemaViolation, match="gc_"):
+            models.PropertyDeclaration("gc_due", "date")
+
+    def test_display_name_derives_from_snake_case_key(self) -> None:
+        assert (
+            models.PropertyDeclaration("shift_active", "checkbox").display_name
+            == "Shift Active"
+        )
+
+    def test_explicit_name_wins_over_derivation(self) -> None:
+        declaration = models.PropertyDeclaration(
+            "shift_active", "checkbox", name="On Shift"
+        )
+        assert declaration.display_name == "On Shift"
 
 
 class TestValidateNewNode:
@@ -100,3 +127,35 @@ class TestValidateTypeName:
     def test_gc_prefix_is_reserved(self) -> None:
         with pytest.raises(SchemaViolation, match="reserved gc_"):
             schema.validate_type_name("gc_faction")
+
+
+class TestValidateInfraWrite:
+    """ADR 045: the infra-write guard, in exactly one place."""
+
+    def test_story_and_neutral_roles_pass(self) -> None:
+        schema.validate_infra_write(Role.CHARACTER, "Character")
+        schema.validate_infra_write(None, "Realization")
+
+    def test_infra_role_is_denied_without_privilege(self) -> None:
+        with pytest.raises(InfraWriteDenied, match="system configuration"):
+            schema.validate_infra_write(Role.MODE, "Activity Mode")
+
+    def test_admitted_role_passes(self) -> None:
+        schema.validate_infra_write(
+            Role.MODE, "Activity Mode", frozenset({Role.MODE})
+        )
+
+    def test_privilege_admits_only_its_own_roles(self) -> None:
+        with pytest.raises(InfraWriteDenied):
+            schema.validate_infra_write(
+                Role.RULE, "Automation Rule", frozenset({Role.MODE})
+            )
+
+    def test_error_names_the_escape_hatches_and_known_types(self) -> None:
+        with pytest.raises(InfraWriteDenied) as excinfo:
+            schema.validate_infra_write(
+                Role.SCHEDULED, "Scheduled Event", known=("Character", "Task")
+            )
+        message = str(excinfo.value)
+        assert "meta-inspection" in message and "schedule" in message
+        assert "Character" in message and "Task" in message

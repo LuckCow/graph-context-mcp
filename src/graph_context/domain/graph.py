@@ -32,7 +32,7 @@ from collections.abc import Iterable, Iterator
 from enum import StrEnum
 
 from graph_context.domain.models import Edge, Node, NodeId
-from graph_context.domain.schema import INFRA_ROLES
+from graph_context.domain.schema import INFRA_ROLES, Role
 from graph_context.errors import AmbiguousNodeName, NodeNotFound
 
 
@@ -92,14 +92,17 @@ class GraphIndex:
         query: str,
         node_type: str | None = None,
         limit: int = 10,
+        include_roles: frozenset[Role] = frozenset(),
     ) -> list[Node]:
         """Nodes whose name matches ``query`` (case-insensitive).
 
         Exact-name matches win outright; only if there are none do
         substring matches apply (capped at ``limit``). Bookkeeping roles
         (Prose/SessionContext) are excluded so a bare name never resolves to
-        an infrastructure node. ``node_type`` optionally filters on the type
-        display label. Results are sorted by name then id (deterministic).
+        an infrastructure node -- except roles in ``include_roles``, the
+        caller's meta privilege (ADR 045). ``node_type`` optionally filters
+        on the type display label. Results are sorted by name then id
+        (deterministic).
         """
         q = query.strip().casefold()
         if not q:
@@ -107,7 +110,7 @@ class GraphIndex:
         type_q = node_type.strip().casefold() if node_type else None
 
         def candidate(node: Node) -> bool:
-            if node.role in INFRA_ROLES:
+            if node.role in INFRA_ROLES and node.role not in include_roles:
                 return False
             return type_q is None or node.type.casefold() == type_q
 
@@ -125,18 +128,21 @@ class GraphIndex:
         )
         return substring[:limit]
 
-    def resolve(self, identifier: str) -> Node:
+    def resolve(
+        self, identifier: str, include_roles: frozenset[Role] = frozenset()
+    ) -> Node:
         """Resolve an id *or* a name to a single node.
 
         A real id wins immediately (CIDs are unique and can't collide with a
         name). Otherwise the identifier is treated as a name: a unique match
         resolves, no match raises :class:`NodeNotFound`, and multiple matches
         raise :class:`AmbiguousNodeName` listing the candidates.
+        ``include_roles`` forwards the caller's meta privilege (ADR 045).
         """
         node = self._nodes.get(identifier)
         if node is not None:
             return node
-        matches = self.find_by_name(identifier)
+        matches = self.find_by_name(identifier, include_roles=include_roles)
         if len(matches) == 1:
             return matches[0]
         if not matches:

@@ -100,7 +100,8 @@ class TestChatRest:
         re-list reflects it -- the WP21 auto-titling contract."""
         chat_id = mock.seed_chat(name="")
         await chat.rename(chat_id, "Siege engine logistics")
-        assert (chat_id, "Siege engine logistics") in await chat.list_chats()
+        names = {c.id: c.name for c in await chat.list_chats()}
+        assert names[chat_id] == "Siege engine logistics"
 
 
 class TestMarks:
@@ -292,15 +293,35 @@ class TestIdentityDiscovery:
 
 
 class TestChatDiscovery:
-    async def test_lists_every_chat_as_id_name_pairs(
+    async def test_lists_every_chat_as_summaries(
         self, mock: MockAnytype, chat: AnytypeChatClient
     ) -> None:
         a = mock.seed_chat("Plot")
         b = mock.seed_chat("Characters")
-        assert set(await chat.list_chats()) == {(a, "Plot"), (b, "Characters")}
+        assert {(c.id, c.name) for c in await chat.list_chats()} == {
+            (a, "Plot"), (b, "Characters"),
+        }
 
     async def test_no_chats_lists_empty(self, chat: AnytypeChatClient) -> None:
         assert await chat.list_chats() == []
+
+    async def test_the_listing_carries_the_last_message_stamp(
+        self, mock: MockAnytype, chat: AnytypeChatClient
+    ) -> None:
+        """Quirk C13: ``last_message_date`` tracks the newest message
+        (bot posts included), reads ``""`` until the chat has one, and
+        string comparison is recency order -- the WP35 roster's whole
+        contract with the listing."""
+        quiet = mock.seed_chat("Quiet")
+        busy = mock.seed_chat("Busy")
+        mock.post_chat_message_directly(busy, "human", "hello")
+        listed = {c.id: c for c in await chat.list_chats()}
+        assert listed[quiet].last_message_date == ""
+        first = listed[busy].last_message_date
+        assert first
+        mock.post_chat_message_directly(busy, "human", "again")
+        relisted = {c.id: c for c in await chat.list_chats()}
+        assert relisted[busy].last_message_date > first
 
 
 class TestFiles:

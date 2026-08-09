@@ -36,17 +36,19 @@ async def main() -> None:
     await tools.create_node_tool(
         services, type="Event", name="Siege of Brakk", story_time=10,
         summary="The year-long siege in which the city fell.",
-        links=[{"edge_type": "participated_in", "other": "Mira",
-                "outgoing": False}],
+    )
+    await tools.update_node_tool(
+        services, node_id="Mira", summary="Exiled siege engineer of Brakk.",
+        properties={"participated_in": "Siege of Brakk"},
+        create_missing_properties={"participated_in": "objects"},
     )
     await tools.create_node_tool(
         services, type="Item", name="Ashbrand",
         summary="A blade quenched in ash.",  # zero 'siege' vocabulary
-        links=[
-            {"edge_type": "wielded_by", "other": "Mira"},
-            {"edge_type": "used_in", "other": "Siege of Brakk"},
-        ],
-        create_missing_relations=True,
+        properties={"wielded_by": "Mira", "used_in": "Siege of Brakk"},
+        create_missing_properties={
+            "wielded_by": "objects", "used_in": "objects",
+        },
     )
     assert services.projector is not None
     await services.projector.refresh()

@@ -107,7 +107,7 @@ node_exists = [
 node_absent = [{ name = "Task Creation", fields_truthy = ["gc_mode_mutating"] }]
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Task Creation", summary = "A staged mode object.", fields = { gc_mode_goal = "Turn requests into tasks.", gc_mode_mutating = "false" } } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Character", name = "Task Creation", summary = "A staged mode object.", properties = { gc_mode_goal = "Turn requests into tasks.", gc_mode_mutating = "false" } } }]
 
 [[case.script]]
 reply = "Task Creation is recorded as a read-only mode object."

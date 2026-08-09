@@ -38,10 +38,12 @@ async def test_seeding_heals_a_modeless_space_once(live_config):
             in_space=await AnytypeModeStore(client).load(),
             space_context=await AnytypeSpaceContextStore(client).load(),
         )
-        assert {"world_modeling", "authoring", "example_mode"} <= set(
-            registry.specs
-        )
-        assert registry.default == "world_modeling"  # the seeded link
+        assert {
+            "space_setup", "world_modeling", "authoring", "example_mode",
+        } <= set(registry.specs)
+        assert registry.default == "space_setup"  # the seeded link
+        setup = registry.specs["space_setup"]
+        assert setup.mutating and setup.meta_inspection  # ADR 045 round trip
         authoring = registry.specs["authoring"]
         assert authoring.capture is not None
         assert authoring.capture.artifact_type == "gc_prose"

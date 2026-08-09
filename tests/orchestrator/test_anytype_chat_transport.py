@@ -35,6 +35,7 @@ from graph_context.orchestrator.anytype_chat_transport import (
     fenced_file,
     object_references,
     plainify,
+    plan_streams,
 )
 from graph_context.orchestrator.channels import ChannelRoute
 from graph_context.orchestrator.drivers import (
@@ -210,7 +211,7 @@ class TestTurn:
         )
         recorder = await _run(handler, _message())
         assert recorder.texts() == ["hi there"]
-        assert route.orchestrator.mode_of(f"anytype:{CHAT}") == "world_modeling"
+        assert route.orchestrator.mode_of(f"anytype:{CHAT}") == "space_setup"
 
     async def test_every_posted_id_is_recorded_for_echo_suppression(self) -> None:
         handler = _handler([LLMTurn(reply="a\n" + "b" * 2500)])
@@ -254,6 +255,28 @@ class TestTurn:
         assert len(recorder.messages) > 1  # chunked
         assert recorder.attachments()[0] == (intent_id, OBJECT_ID)  # deduped
         assert all(a == () for a in recorder.attachments()[1:])
+
+    async def test_suppressed_references_never_card(self) -> None:
+        """ADR 046: ids the pipeline stamped as ``suppress`` (the turn's
+        created/edited nodes under a hiding mode) are skipped when the
+        text is scraped -- but an EXPLICIT attach still rides: the
+        pipeline owns both stamps and never contradicts itself."""
+        from graph_context.orchestrator.pipeline import ReplyEvent
+
+        handler = _handler([])
+        recorder = _ChatRecorder()
+        reply = handler.reply(recorder.send, recorder.edit)
+        intent_id = OBJECT_ID.replace("bafyreid", "bafyreie")
+        await handler.deliver_events(
+            [ReplyEvent(
+                f"made [Mira]({OBJECT_ID})",
+                attach=(intent_id,),
+                suppress=(OBJECT_ID,),
+            )],
+            reply,
+        )
+        assert recorder.attachments()[0] == (intent_id,)
+        assert "[Mira](" not in recorder.texts()[0]  # text keeps the name
 
     async def test_a_processed_message_is_not_eligible_twice(self) -> None:
         handler = _handler([LLMTurn(reply="once")])
@@ -312,13 +335,14 @@ class TestProcessingPlaceholder:
         assert "sent-1" in sent  # error posts feed echo suppression too
 
     async def test_command_turns_skip_the_placeholder(self) -> None:
-        # /clear (and /mode) are answered instantly by the pipeline; a
-        # placeholder would only add a notification, so the output posts
-        # alone, fresh.
-        recorder = await _run(_handler(), _message(text="/clear"))
-        assert PROCESSING_NOTICE not in recorder.posted
-        assert recorder.edited == []
-        assert len(recorder.messages) == 1
+        # /clear (and /mode, /run) are answered instantly by the
+        # pipeline; a placeholder would only add a notification, so the
+        # output posts alone, fresh.
+        for text in ("/clear", "/run dinner picker"):
+            recorder = await _run(_handler(), _message(text=text))
+            assert PROCESSING_NOTICE not in recorder.posted
+            assert recorder.edited == []
+            assert len(recorder.messages) == 1
 
     async def test_an_eventless_turn_does_not_strand_the_placeholder(
         self,
@@ -516,6 +540,75 @@ class TestCursor:
         cursor.fast_forward(CHAT, "o9")
         cursor.begin(CHAT)
         assert not cursor.is_new(_message(order_id="o9"))
+
+
+class TestStreamRoster:
+    """WP35 (ADR 043): live SSE streams are a capped, activity-ranked
+    resource -- the most recently messaged chats hold them, everyone
+    else hibernates and wakes when a message makes them the newest."""
+
+    def test_under_the_cap_every_served_chat_streams(self) -> None:
+        plan = plan_streams(
+            {"a": "2026-01-01", "b": ""}, active=set(), cap=5
+        )
+        assert set(plan.start) == {"a", "b"}
+        assert plan.stop == ()
+
+    def test_over_the_cap_the_most_recent_chats_win(self) -> None:
+        plan = plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-01", "c": "2026-01-02"},
+            active=set(), cap=2,
+        )
+        assert plan.start == ("a", "c")  # most recent first
+        assert plan.stop == ()
+
+    def test_a_message_into_a_hibernated_chat_wakes_it(self) -> None:
+        """The wake IS the ranking: the new message makes the sleeper the
+        newest, so it starts and the least recent stream stops."""
+        plan = plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-09", "c": "2026-01-02"},
+            active={"a", "c"}, cap=2,
+        )
+        assert plan.start == ("b",)
+        assert plan.stop == ("c",)
+
+    def test_quiet_ticks_produce_no_churn(self) -> None:
+        plan = plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-01"},
+            active={"a", "b"}, cap=2,
+        )
+        assert plan == plan_streams(
+            {"a": "2026-01-03", "b": "2026-01-01"},
+            active={"a", "b"}, cap=2,
+        )
+        assert plan.start == () and plan.stop == ()
+
+    def test_a_busy_chat_is_never_stopped(self) -> None:
+        """Mid-turn or holding a pending schema confirm: hibernating it
+        would abort the turn or orphan the 👍 -- the tick after it goes
+        quiet retries."""
+        plan = plan_streams(
+            {"a": "2026-01-09", "b": "2026-01-01"},
+            active={"b"}, busy={"b"}, cap=1,
+        )
+        assert plan.start == ("a",)
+        assert plan.stop == ()  # over cap transiently, by design
+
+    def test_a_vanished_chat_stops_even_uncapped(self) -> None:
+        plan = plan_streams({"a": "2026-01-01"}, active={"a", "gone"})
+        assert plan.stop == ("gone",)
+        assert plan.start == ()
+
+    def test_no_cap_streams_everything(self) -> None:
+        activity = {f"c{i}": "" for i in range(50)}
+        plan = plan_streams(activity, active=set(), cap=None)
+        assert set(plan.start) == set(activity)
+
+    def test_ties_break_deterministically_by_chat_id(self) -> None:
+        plan = plan_streams(
+            {"a": "same", "b": "same", "c": "same"}, active=set(), cap=2
+        )
+        assert plan.start == ("c", "b")  # reverse id order, stable
 
 
 class TestIntentOrigin:
@@ -758,6 +851,154 @@ class TestScheduledTurn:
         assert raised
         stored = repository.graph.node(node.id)
         assert stored.fields.get(scheduling.FIELD_LAST_FIRED)  # at-most-once
+
+    async def test_a_simple_event_posts_verbatim_with_no_model_turn(
+        self,
+    ) -> None:
+        from graph_context.application.scheduler import DueEvent
+        from graph_context.domain import scheduling
+
+        driver = _TranscriptRecordingDriver([])  # any decide would fail
+        handler = _handler(routes={CHAT: _route(driver=driver)})
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax note", prompt="",
+            session_key=f"anytype:{CHAT}",
+            message="Taxes are due April 15.",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        assert recorder.posted == ["Taxes are due April 15."]
+        assert recorder.edited == []
+        assert driver.transcripts == []  # the model never woke
+        assert all(m["id"] in handler.sent for m in recorder.messages)
+        stored = repository.graph.node(node.id)
+        assert stored.fields.get(scheduling.FIELD_LAST_FIRED)
+
+    async def test_a_simple_post_is_remembered_for_the_next_turn(
+        self,
+    ) -> None:
+        # ADR 055: no turn ran, so nothing else records the post -- the
+        # next conversational turn must still see the reminder went out.
+        from graph_context.application.scheduler import DueEvent
+
+        driver = _TranscriptRecordingDriver([LLMTurn(reply="It went out.")])
+        handler = _handler(routes={CHAT: _route(driver=driver)})
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax note", prompt="",
+            session_key=f"anytype:{CHAT}", message="Taxes are due April 15.",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        await handler.routes[CHAT].orchestrator.handle_message(
+            f"anytype:{CHAT}", "member-a", "Did the reminder go out?",
+        )
+        replayed = [
+            e for e in driver.transcripts[0]
+            if e.kind == "assistant" and e.text == "Taxes are due April 15."
+        ]
+        assert len(replayed) == 1
+
+    async def test_a_prompt_turn_is_pinned_to_the_events_mode(self) -> None:
+        from graph_context.application.scheduler import DueEvent
+
+        create = ToolCall("create_node", {
+            "type": "Character", "name": "Mira", "summary": "s",
+        })
+        handler = _handler([
+            LLMTurn(tool_calls=(create,)), LLMTurn(reply="tried"),
+        ])
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder", prompt="p",
+            session_key=f"anytype:{CHAT}",
+            mode="authoring",  # read-only: the pinned binding must run
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        assert not repository.graph.find_by_name("Mira")  # rejected
+        # The pin was this turn's alone: the chat session never switched.
+        orchestrator = handler.routes[CHAT].orchestrator
+        assert orchestrator.mode_of(f"anytype:{CHAT}") == "space_setup"
+
+    async def test_a_prompt_turn_carries_the_events_document_type(
+        self,
+    ) -> None:
+        # ADR 057: the due event's document type reaches the pipeline,
+        # so the turn's node of that type cards on the posted reply.
+        # A real journal (the _route helper wires none) -- attach
+        # stamping reads the turn's mutations from it.
+        from graph_context.application.mutation_journal import MutationJournal
+        from graph_context.application.scheduler import DueEvent
+        from tests.orchestrator.mode_fixtures import fiction_registry
+
+        create = ToolCall("create_node", {
+            "type": "Character", "name": "Weekly Report", "summary": "s",
+        })
+        services = build_services(
+            InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+            SessionState(project="Ashfall"), journal=MutationJournal(),
+        )
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver([
+                LLMTurn(tool_calls=(create,)),
+                LLMTurn(reply="Wrote this week's report."),
+            ]),
+            profile=FICTION, registry=fiction_registry(),
+        )
+        handler = _handler(
+            routes={CHAT: ChannelRoute(orchestrator=orchestrator)}
+        )
+        repository, node = await self._seed_event(handler)
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="newsletter", prompt="Compile it.",
+            session_key=f"anytype:{CHAT}", document_type="Character",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        report = repository.graph.find_by_name("Weekly Report")[0]
+        reply_message = recorder.messages[-1]
+        assert report.id in tuple(reply_message["attachments"])
+
+    async def test_an_unset_mode_fires_in_the_default_not_the_chats_mode(
+        self,
+    ) -> None:
+        from graph_context.application.scheduler import DueEvent
+
+        create = ToolCall("create_node", {
+            "type": "Character", "name": "Mira", "summary": "s",
+        })
+        handler = _handler([
+            LLMTurn(tool_calls=(create,)), LLMTurn(reply="done"),
+        ])
+        repository, node = await self._seed_event(handler)
+        orchestrator = handler.routes[CHAT].orchestrator
+        # The chat sits in read-only authoring; the event names no mode.
+        await orchestrator.handle_message(
+            f"anytype:{CHAT}", "member-a", "/mode authoring",
+        )
+        recorder = _ChatRecorder()
+        due = DueEvent(
+            node_id=node.id, name="tax reminder", prompt="p",
+            session_key=f"anytype:{CHAT}",
+        )
+        await handler.run_scheduled(
+            CHAT, due, handler.reply(recorder.send, recorder.edit)
+        )
+        # space_setup (the default) is mutating: the ambient read-only
+        # mode never leaked into the scheduled turn (ADR 055).
+        assert repository.graph.find_by_name("Mira")
+        assert orchestrator.mode_of(f"anytype:{CHAT}") == "authoring"
 
 
 class TestChatTitler:

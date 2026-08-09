@@ -30,6 +30,11 @@ Project" property).
 """
 mutating = true
 
+[[case.seed.field]]
+name = "Linked Projects"
+format = "objects"
+key = "linked_projects"
+
 [[case.seed.node]]
 type = "Project"
 name = "Home Maintenance"
@@ -67,10 +72,10 @@ must_mention = ["Garden"]
 tool_calls = [{ name = "find_node", arguments = { name = "Garden", type = "Project" } }]
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Mow front lawn", summary = "Mow the front lawn.", links = [{ edge_type = "linked_projects", other = "Garden" }] } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Mow front lawn", summary = "Mow the front lawn.", properties = { linked_projects = "Garden" } } }]
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Weed ramps", summary = "Weed the ramps.", links = [{ edge_type = "linked_projects", other = "Garden" }] } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Weed ramps", summary = "Weed the ramps.", properties = { linked_projects = "Garden" } } }]
 
 [[case.script]]
 reply = "Added two tasks to the Garden project: Mow front lawn and Weed ramps."
@@ -93,6 +98,11 @@ someone else, and try to infer which project it belongs to (the "Linked
 Project" property).
 """
 mutating = true
+
+[[case.seed.field]]
+name = "Linked Projects"
+format = "objects"
+key = "linked_projects"
 
 [[case.seed.node]]
 type = "Project"
@@ -126,7 +136,7 @@ tool_calls = [{ name = "find_node", arguments = { name = "Garden", type = "Proje
 tool_calls = [{ name = "create_node", arguments = { type = "Project", name = "Garden", summary = "Yard and garden work." } }]
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Mow front lawn", summary = "Mow the front lawn.", links = [{ edge_type = "linked_projects", other = "Garden" }] } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Task", name = "Mow front lawn", summary = "Mow the front lawn.", properties = { linked_projects = "Garden" } } }]
 
 [[case.script]]
 reply = "Created the Garden project and added the task Mow front lawn to it."

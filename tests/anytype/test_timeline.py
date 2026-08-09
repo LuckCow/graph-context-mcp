@@ -34,13 +34,14 @@ async def test_date_axis_round_trips_and_bootstraps_the_property(
     node = await repo.create_node(NodeDraft(
         "Event", name="Standup", summary="Daily.", story_time="2026-07-04",
     ))
-    assert node.story_time == "2026-07-04"
+    # R2: the store reads a bare date back as the midnight-UTC instant.
+    assert node.story_time == "2026-07-04T00:00:00Z"
     stored = {p["key"]: p for p in mock.object(node.id)["properties"]}
     assert stored["event_date"]["format"] == "date"
-    assert stored["event_date"]["date"] == "2026-07-04"
+    assert stored["event_date"]["date"] == "2026-07-04T00:00:00Z"
     assert "gc_story_time" not in stored
     updated = await repo.update_node(node.id, story_time="2026-07-05")
-    assert updated.story_time == "2026-07-05"
+    assert updated.story_time == "2026-07-05T00:00:00Z"
     await client.aclose()
 
 

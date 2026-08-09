@@ -108,9 +108,104 @@ class TestSet:
         message = str(err.value)
         assert "past" in message and "2026-07-12 16:00:00" in message
 
-    async def test_missing_prompt_is_rejected(self, scheduler: Scheduler) -> None:
-        with pytest.raises(GraphContextError, match="prompt"):
+    async def test_neither_prompt_nor_message_is_rejected_teaching_both(
+        self, scheduler: Scheduler,
+    ) -> None:
+        with pytest.raises(GraphContextError) as err:
             await scheduler.set("nameless", "2027-01-01T09:00", "   ", "")
+        message = str(err.value)
+        assert "'prompt'" in message and "'message'" in message
+        assert "verbatim" in message and "neither" in message
+
+    async def test_prompt_and_message_together_are_rejected(
+        self, scheduler: Scheduler,
+    ) -> None:
+        with pytest.raises(GraphContextError, match="both -- pick one"):
+            await scheduler.set(
+                "greedy", "2027-01-01T09:00", "think about it", "",
+                message="Taxes are due.",
+            )
+
+    async def test_message_only_stores_the_message_and_no_prompt_or_mode(
+        self, scheduler: Scheduler, repository: InMemoryGraphRepository,
+    ) -> None:
+        node, _ = await scheduler.set(
+            "tax note", "2027-04-08T09:00", "", "anytype:chat-1",
+            message="Taxes are due April 15.",
+        )
+        stored = repository.graph.node(node.id)
+        assert stored.fields[scheduling.FIELD_MESSAGE] == "Taxes are due April 15."
+        assert scheduling.FIELD_PROMPT not in stored.fields
+        assert scheduling.FIELD_MODE not in stored.fields
+
+    async def test_mode_with_message_is_rejected(
+        self, scheduler: Scheduler,
+    ) -> None:
+        with pytest.raises(GraphContextError, match="no LLM turn"):
+            await scheduler.set(
+                "confused", "2027-01-01T09:00", "", "",
+                message="Taxes are due.", mode="research",
+            )
+
+    async def test_document_type_with_message_is_rejected(
+        self, scheduler: Scheduler,
+    ) -> None:
+        with pytest.raises(GraphContextError, match="nothing writes a document"):
+            await scheduler.set(
+                "confused", "2027-01-01T09:00", "", "",
+                message="Taxes are due.", document_type="Report",
+            )
+
+    async def test_a_document_type_is_stored_unchecked_on_prompt_events(
+        self, scheduler: Scheduler, repository: InMemoryGraphRepository,
+    ) -> None:
+        # Lenient text like mode (ADR 057): no type vocabulary at set
+        # time even where modes have one -- a typo surfaces at fire time
+        # as a create_node error the model self-corrects.
+        scheduler.mode_names = lambda: ["assistant", "research"]
+        node, _ = await scheduler.set(
+            "newsletter", "0 9 * * 5", "Compile the weekly digest.", "",
+            mode="research", document_type="Totally Unknown Type",
+        )
+        stored = repository.graph.node(node.id)
+        assert (
+            stored.fields[scheduling.FIELD_DOCUMENT_TYPE]
+            == "Totally Unknown Type"
+        )
+
+    async def test_unknown_mode_is_rejected_when_the_vocabulary_is_wired(
+        self, scheduler: Scheduler,
+    ) -> None:
+        scheduler.mode_names = lambda: ["assistant", "research"]
+        with pytest.raises(GraphContextError) as err:
+            await scheduler.set(
+                "digest", "0 9 * * 1", "Compile the digest.", "", mode="nope",
+            )
+        message = str(err.value)
+        assert "assistant, research" in message
+        assert "omit 'mode'" in message  # the default-mode escape hatch
+
+    async def test_a_known_mode_is_stored(
+        self, scheduler: Scheduler, repository: InMemoryGraphRepository,
+    ) -> None:
+        scheduler.mode_names = lambda: ["assistant", "research"]
+        node, _ = await scheduler.set(
+            "digest", "0 9 * * 1", "Compile the digest.", "", mode="research",
+        )
+        stored = repository.graph.node(node.id)
+        assert stored.fields[scheduling.FIELD_MODE] == "research"
+
+    async def test_mode_is_unchecked_without_the_vocabulary(
+        self, scheduler: Scheduler, repository: InMemoryGraphRepository,
+    ) -> None:
+        # The bare MCP server never wires mode_names (ADR 055): set
+        # stores the name and the fire-time degrade covers typos.
+        assert scheduler.mode_names is None
+        node, _ = await scheduler.set(
+            "digest", "0 9 * * 1", "Compile.", "", mode="anything",
+        )
+        stored = repository.graph.node(node.id)
+        assert stored.fields[scheduling.FIELD_MODE] == "anything"
 
     async def test_bad_schedule_error_reaches_the_caller(
         self, scheduler: Scheduler,
@@ -197,6 +292,64 @@ class TestTick:
         clock.advance_to("2030-01-01 00:00:00")
         tick = scheduler.tick()
         assert tick.fire == () and tick.arm == ()
+
+    async def test_a_message_event_fires_verbatim_with_no_prompt_or_mode(
+        self, scheduler: Scheduler, clock: Clock,
+    ) -> None:
+        node, _ = await scheduler.set(
+            "tax note", "2027-04-08T09:00", "", "anytype:chat-1",
+            message="Taxes are due April 15.",
+        )
+        clock.advance_to("2027-04-08 09:00:00")
+        due = scheduler.tick().fire
+        assert [d.node_id for d in due] == [node.id]
+        assert due[0].message == "Taxes are due April 15."
+        assert due[0].prompt == "" and due[0].mode == ""
+        assert due[0].session_key == "anytype:chat-1"
+
+    async def test_a_prompt_event_carries_its_mode(
+        self, scheduler: Scheduler, clock: Clock,
+    ) -> None:
+        await scheduler.set(
+            "digest", "2027-04-08T09:00", "Compile the digest.", "",
+            mode="research",
+        )
+        clock.advance_to("2027-04-08 09:00:00")
+        due = scheduler.tick().fire
+        assert due[0].mode == "research" and due[0].message == ""
+
+    async def test_a_prompt_event_carries_its_document_type(
+        self, scheduler: Scheduler, clock: Clock,
+    ) -> None:
+        await scheduler.set(
+            "newsletter", "2027-04-09T09:00", "Compile the digest.", "",
+            document_type="Report",
+        )
+        clock.advance_to("2027-04-09 09:00:00")
+        due = scheduler.tick().fire
+        assert due[0].document_type == "Report"
+
+    async def test_the_message_wins_when_a_human_stored_both(
+        self, scheduler: Scheduler, repository: InMemoryGraphRepository,
+        clock: Clock,
+    ) -> None:
+        # Only reachable from the Anytype UI -- set() enforces one-of.
+        # Firing the human's exact words beats an inert reminder (ADR 055).
+        await repository.create_node(NodeDraft(
+            type=scheduling.SCHEDULED_TYPE_KEY, name="doubled", summary="s",
+            fields={
+                scheduling.FIELD_SCHEDULE: "2026-07-12T17:00",
+                scheduling.FIELD_PROMPT: "Think hard about taxes.",
+                scheduling.FIELD_MESSAGE: "Taxes are due April 15.",
+                scheduling.FIELD_MODE: "research",
+                scheduling.FIELD_DOCUMENT_TYPE: "Report",
+            },
+        ))
+        clock.advance_to("2026-07-12 17:00:00")
+        due = scheduler.tick().fire
+        assert due[0].message == "Taxes are due April 15."
+        assert due[0].prompt == "" and due[0].mode == ""
+        assert due[0].document_type == ""  # no turn runs, no document
 
     async def test_a_fired_event_with_no_prompt_falls_back_to_its_name(
         self, scheduler: Scheduler, repository: InMemoryGraphRepository,
@@ -295,3 +448,14 @@ class TestCancelAndList:
         assert status["soon"] == "completed (once at 2026-07-12 17:00)"
         assert status["gone"] == "cancelled (once at 2027-05-01 09:00)"
         assert status["broken"].startswith("invalid:")
+
+    async def test_list_views_carry_the_document_type(
+        self, scheduler: Scheduler,
+    ) -> None:
+        await scheduler.set(
+            "newsletter", "0 9 * * 5", "Compile.", "",
+            document_type="Report",
+        )
+        await scheduler.set("plain", "0 9 * * 1", "p", "")
+        docs = {v.node.name: v.document_type for v in scheduler.events()}
+        assert docs == {"newsletter": "Report", "plain": ""}

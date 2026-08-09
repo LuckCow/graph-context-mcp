@@ -32,7 +32,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from graph_context.domain.graph import GraphIndex
 from graph_context.domain.model_choice import model_id
+from graph_context.domain.schema import Role
 from graph_context.errors import GraphContextError
 from graph_context.interface import tools
 from graph_context.interface.mode_config import slugify, spec_from_mapping
@@ -69,9 +71,15 @@ _FULL_SURFACE: dict[str, ToolFn] = {
     # not let a read-only mode change anything unilaterally -- the human
     # authorizes every apply. Same posture as schedule/automation.
     "schema": tools.schema_tool,
+    # WP42 (ADR 049): hash-anchored single-section body edits. Writes
+    # through the same NodeWriter as update_node, so it is a mutation
+    # tool -- read-only modes never bind it.
+    "edit_document": tools.edit_document_tool,
 }
 
-MUTATION_TOOLS: frozenset[str] = frozenset({"create_node", "update_node"})
+MUTATION_TOOLS: frozenset[str] = frozenset(
+    {"create_node", "update_node", "edit_document"}
+)
 
 _READ_SURFACE: dict[str, ToolFn] = {
     name: fn for name, fn in _FULL_SURFACE.items() if name not in MUTATION_TOOLS
@@ -81,6 +89,41 @@ _READ_SURFACE: dict[str, ToolFn] = {
 def binding_for(spec: ModeSpec) -> Mapping[str, ToolFn]:
     """The spec's tool table -- the boundary itself (ADR 007)."""
     return _FULL_SURFACE if spec.mutating else _READ_SURFACE
+
+
+# ADR 048: the standing manuscript discipline for document modes -- the
+# mode's goal says WHAT to write, this says WHERE it lives. Appended by
+# goal_for so a terse human-authored goal still gets the mechanics.
+DOCUMENT_GUIDANCE = """\
+Document discipline: this mode maintains long-form documents as {type} \
+nodes -- the document lives in the node, never in chat.
+- First draft: create ONE {type} node and write the full text into its \
+`description`.
+- Revisions: for targeted changes prefer `edit_document` on THAT SAME \
+node (action='sections' shows the anchors; untouched sections survive \
+verbatim). For a full restructure, update the node's `description` \
+with the complete revised text (it replaces the whole body).
+- Keep the document's `references` property (when the type has one) \
+linked to the entities -- characters, places, events -- that appear in \
+the text.
+- In chat, reply with a short summary of what you wrote or changed and \
+why, a few sentences at most, plus a markdown link [name](node id) to \
+the document node. NEVER paste the document text into the chat."""
+
+
+def goal_for(spec: ModeSpec) -> str:
+    """The spec's effective system-prompt goal.
+
+    The human-authored goal, plus the standing document discipline when
+    the mode maintains documents (ADR 048). The ONE place the prompt is
+    assembled -- every consumer (the prompt fingerprint, the turn-log
+    diary, ``decide``) must route through it or the diary would lie
+    about what the model saw.
+    """
+    if not spec.document_type:
+        return spec.goal
+    guidance = DOCUMENT_GUIDANCE.format(type=spec.document_type)
+    return f"{spec.goal}\n\n{guidance}"
 
 
 def full_surface() -> Mapping[str, ToolFn]:
@@ -110,6 +153,13 @@ async def invoke(
     fn = binding_for(spec).get(name)
     if fn is None:
         return None
+    # ADR 045: the spec's meta privilege rides the Services view for
+    # exactly this call's duration. Set unconditionally (not just when
+    # privileged) so a /mode switch away from a privileged mode drops the
+    # surface with it; turns serialize per space, so no interleaving.
+    services.visible_infra_roles = (
+        frozenset({Role.MODE}) if spec.meta_inspection else frozenset()
+    )
     return await fn(services, **arguments)
 
 
@@ -125,6 +175,43 @@ class ModeRegistry:
 
     def names(self) -> list[str]:
         return sorted(self.specs)
+
+
+def mode_fingerprint(graph: GraphIndex) -> frozenset[tuple[str, str]]:
+    """``(id, modified_at)`` over the mode-config surface of the index.
+
+    Covers every Activity Mode object plus the Space Context singleton:
+    creating, editing, or archiving a mode shifts the set (archived
+    objects leave the index on resync), and relinking ``gc_default_mode``
+    bumps the Space Context node's ``modified_at``. The index carries
+    only identity and the stamp -- the ``gc_mode_*`` payloads and goal
+    bodies are store-only -- so this detects a change; reloading still
+    goes through the stores (ADR 044).
+    """
+    return frozenset(
+        (node.id, node.modified_at)
+        for node in graph.nodes()
+        if node.role is Role.MODE or node.role is Role.SPACE_CONTEXT
+    )
+
+
+@dataclass(slots=True)
+class ModeConfigWatch:
+    """Change detector over :func:`mode_fingerprint` (ADR 044).
+
+    The first call seeds the baseline and reports no change -- the
+    rule-engine discipline: nothing reacts to a restart or to state that
+    predates the watch. Every call advances the baseline, so a change is
+    signalled at most once; a caller whose reaction fails waits for the
+    NEXT edit rather than retrying every tick.
+    """
+
+    _prior: frozenset[tuple[str, str]] | None = None
+
+    def changed(self, graph: GraphIndex) -> bool:
+        current = mode_fingerprint(graph)
+        prior, self._prior = self._prior, current
+        return prior is not None and current != prior
 
 
 def load_registry(
@@ -247,9 +334,12 @@ def _parse_in_space(payloads: Sequence[Mapping[str, Any]]) -> list[ModeSpec]:
         body = {
             key: payload[key]
             for key in (
-                "goal", "mutating", "capture", "activity_detail",
+                "goal", "mutating", "meta_inspection", "capture",
+                "document_type",
+                "activity_detail", "hide_intent_card", "hide_node_cards",
                 "web_search", "model",
-                "thinking", "max_tokens", "web_search_max_uses",
+                "thinking", "max_tokens", "turn_limit",
+                "web_search_max_uses",
                 "web_search_allowed_domains", "web_search_blocked_domains",
             )
             if key in payload

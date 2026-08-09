@@ -29,6 +29,11 @@ the other half -- a bounded per-session ring of prior user/assistant
 messages replayed ahead of the block, cleared by the ``/clear`` command
 (handled here, like ``/mode``, so every transport gets it). Transports
 can prime the ring after a restart via :meth:`Orchestrator.seed_memory`.
+
+``/run <rule>`` (WP52, ADR 058) is the third command: it fires one
+Automation Rule immediately and returns what happened. Like the other
+two it short-circuits before the driver, so a deterministic automation
+-- a formula, a picker -- costs no model turn at all.
 """
 
 from __future__ import annotations
@@ -43,12 +48,15 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from graph_context.application.intent_recorder import IntentRecorder, ToolTrace
-from graph_context.application.rule_engine import RuleTickReport
+from graph_context.application.mutation_journal import MutationRecord
+from graph_context.application.node_historian import NodeHistorian
+from graph_context.application.rule_engine import RuleTickReport, describe_report
 from graph_context.application.scheduler import SchedulerTick
 from graph_context.domain.model_choice import model_id
 from graph_context.domain.models import Node
-from graph_context.errors import GraphContextError
+from graph_context.errors import GraphContextError, NodeNotFound
 from graph_context.interface.context_block import build_turn_context
+from graph_context.interface.mode_config import slugify
 from graph_context.interface.profiles import DomainProfile, ModeSpec
 from graph_context.interface.services import Services
 from graph_context.interface.tools import is_error_result, resync_out_of_band
@@ -66,7 +74,7 @@ from graph_context.orchestrator.turn_log import TurnLog
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_TOOL_CALLS = 16  # per turn; a loop guard, not a feature
+DEFAULT_MAX_TOOL_CALLS = 16  # per turn; ModeSpec.turn_limit overrides
 
 # Injected before the budget's final decide so the driver lands the turn
 # instead of being cut off mid-plan; its consumer is an LLM.
@@ -94,6 +102,12 @@ class ReplyEvent:
     the reply links its own background-process record. Transports
     without an attachment surface ignore it.
 
+    ``suppress`` (ADR 046) names graph objects the event must NOT carry
+    as cards even where its text references them -- the turn's
+    created/edited nodes when the mode hides them. The text keeps its
+    mentions; only the cards go. Same posture as ``attach``: transports
+    without cards ignore it.
+
     ``confirm`` events (WP33, ADR 041 v2) carry a schema proposal's
     harness-rendered confirmation text with ``confirm_id`` naming the
     proposal. The Anytype transport posts one as its OWN message and
@@ -106,6 +120,7 @@ class ReplyEvent:
     kind: str = "reply"
     file_name: str = ""
     attach: tuple[str, ...] = ()
+    suppress: tuple[str, ...] = ()
     confirm_id: str = ""
 
 
@@ -120,7 +135,8 @@ class TurnObserver(Protocol):
     alone interprets the levels). Contract: implementations MUST NOT raise
     -- delivery failures degrade internally (the TurnLog posture: a
     diagnostic never takes a turn down). Command turns (``/mode``,
-    ``/clear``) return before ``turn_started``, so they never stream.
+    ``/clear``, ``/run``) return before ``turn_started``, so they never
+    stream.
     """
 
     async def turn_started(self, mode: str, detail: str) -> None: ...
@@ -165,7 +181,8 @@ def sender_attributed(text: str, sender: str) -> str:
 
 def is_command(text: str) -> bool:
     """Whether ``handle_message`` answers this text instantly -- a
-    ``/``-command handled before the model runs (``/mode``, ``/clear``).
+    ``/``-command handled before the model runs (``/mode``, ``/clear``,
+    ``/run``).
 
     Transports use this to skip work-in-progress affordances (the
     Anytype "Processing…" placeholder): a command's output arrives at
@@ -173,7 +190,14 @@ def is_command(text: str) -> bool:
     vocabulary lives here, next to the dispatch that implements it.
     """
     stripped = text.strip()
-    return stripped.startswith("/mode") or stripped == "/clear"
+    return (
+        stripped.startswith("/mode")
+        or stripped == "/clear"
+        # Exact-or-space-prefixed, so a future "/runsomething" is a
+        # message to the model rather than a mangled rule name.
+        or stripped == "/run"
+        or stripped.startswith("/run ")
+    )
 
 
 DEFAULT_MEMORY_EVENTS = 16   # ~8 turns of (user, reply) pairs
@@ -202,6 +226,15 @@ class ConversationMemory:
     def remember_turn(self, user_text: str, reply_text: str) -> None:
         self._events.append(("user", user_text))
         self._events.append(("assistant", reply_text))
+        self._shrink()
+
+    def remember_assistant(self, text: str) -> None:
+        """One unpaired assistant message -- a harness post the model
+        authored none of (a simple Scheduled Event's verbatim message,
+        ADR 055). Without this the post is invisible to the model live
+        yet appears after a restart (startup seeding replays bot posts)
+        -- memory must match what the chat shows either way."""
+        self._events.append(("assistant", text))
         self._shrink()
 
     def seed(self, events: Sequence[tuple[str, str]]) -> None:
@@ -268,6 +301,11 @@ class Orchestrator:
     profile: DomainProfile
     registry: ModeRegistry
     provenance: IntentRecorder | None = None
+    # WP41 (ADR 049): the revision historian -- when wired, every turn
+    # that touched a TRACKED node (the Space Context's gc_tracked_types
+    # list) records one attributed body revision at the turn boundary,
+    # and history_tick records human edits the change tick surfaces.
+    historian: NodeHistorian | None = None
     turn_log: TurnLog | None = None
     # ADR 015 amendment: re-reads every config source (profile defaults,
     # GC_MODES_FILE, in-space Activity Mode objects). None (tests, no
@@ -280,6 +318,11 @@ class Orchestrator:
     # shared `services` bundle for every session -- pre-WP8 behavior.
     services_for: Callable[[str], Awaitable[Services]] | None = None
     _sessions: dict[str, _SessionState] = field(default_factory=dict)
+    # ADR 044: change detector behind refresh_modes() -- baseline over
+    # the index's mode-config nodes, seeded on the first check.
+    _mode_watch: modes.ModeConfigWatch = field(
+        default_factory=modes.ModeConfigWatch
+    )
 
     def mode_of(self, session_id: str) -> str:
         """Non-creating peek: the mode a session IS in (default if unseen)."""
@@ -318,12 +361,68 @@ class Orchestrator:
         """Stamp an event as fired (call BEFORE its turn runs)."""
         await self.services.scheduler.mark_fired(node_id)
 
+    async def note_scheduled_post(self, session_id: str, text: str) -> None:
+        """Remember a simple Scheduled Event's verbatim post (ADR 055)
+        as an assistant message, so the model's next turn knows the
+        reminder went out -- no turn ran, so nothing else records it."""
+        (await self._session(session_id)).memory.remember_assistant(text)
+
     async def rule_tick(self) -> RuleTickReport:
         """One Automation Rule diff-fire pass (WP31, ADR 039). The
         transports' rule loop calls this after a resync, under the
         route's turn lock; the shared bundle is correct here too --
         rules belong to the space, not to any one session."""
         return await self.services.rules.run_tick()
+
+    async def run_rule(
+        self, identifier: str, trigger: str = ""
+    ) -> RuleTickReport:
+        """Fire ONE Automation Rule on demand (WP52, ADR 058) -- the
+        /run command's seam, and the way a transport or test reaches a
+        manual run without going through chat text. The shared bundle,
+        like ``rule_tick``: one engine per space, so its baseline stays
+        coherent no matter which session asked."""
+        return await self.services.rules.run_now(identifier, trigger)
+
+    async def history_tick(self, changed: frozenset[str]) -> None:
+        """Record human revisions for changed tracked nodes (WP41, ADR
+        049). The change-tick listener calls this after its resync under
+        the route lock; a body edit bumps ``modified_at``, landing the
+        node in ``changed``. Bot writes already advanced the historian's
+        baseline, so their tick compares equal -- nothing double-records.
+        No historian wired = the subsystem is off, like ``provenance``.
+        """
+        if self.historian is not None:
+            await self.historian.sweep(changed)
+
+    async def refresh_modes(self) -> bool:
+        """Reload the registry iff the space's mode config changed (ADR 044).
+
+        The transports' change-tick listener calls this every tick under
+        the route lock; the index fingerprint makes the common no-change
+        tick free. At-most-once per change (the rule-engine discipline):
+        the baseline advances even when the reload fails, so a broken
+        edit degrades once -- keeping the last good registry -- and the
+        human's NEXT edit retries, instead of the stores being re-read
+        and the log spammed every tick. ``/mode`` remains the
+        unconditional-reload path (an explicit human ask). Returns True
+        when a change was detected and a reload attempted.
+        """
+        if self.reload_registry is None:
+            return False
+        if not self._mode_watch.changed(self.services.repository.graph):
+            return False
+        events = await self._refresh_registry()
+        for event in events:
+            # No chat to post to from a background tick; the /mode
+            # command still surfaces the same degrade text on demand.
+            logger.warning("mode auto-refresh: %s", event.text)
+        if not events:
+            logger.info(
+                "mode registry auto-refreshed: [%s], default %r",
+                ", ".join(self.registry.names()), self.registry.default,
+            )
+        return True
 
     def _spec(self, state: _SessionState) -> ModeSpec:
         spec = self.registry.get(state.mode)
@@ -340,15 +439,49 @@ class Orchestrator:
             assert spec is not None  # the default is always loaded
         return spec
 
+    def _override_spec(self, name: str) -> ModeSpec:
+        """Resolve a per-turn mode pin (ADR 055): a scheduled turn names
+        the mode it runs in; empty means the space's default. Unlike
+        :meth:`_spec`, degrading NEVER touches ``state.mode`` or its
+        persisted mirror -- the pin is this turn's alone."""
+        if name.strip():
+            spec = self.registry.get(slugify(name))
+            if spec is not None:
+                return spec
+            logger.warning(
+                "scheduled mode %r not loaded; firing in default %r",
+                name, self.registry.default,
+            )
+        spec = self.registry.get(self.registry.default)
+        assert spec is not None  # the default is always loaded
+        return spec
+
     async def handle_message(
         self, session_id: str, user_id: str, text: str, origin: str = "",
         sender: str = "", observer: TurnObserver | None = None,
         images: Sequence[ImageAttachment] = (),
+        mode: str | None = None,
+        document_type: str = "",
     ) -> list[ReplyEvent]:
         """``images`` (WP23) are inbound image attachments riding this
         turn's user message; the driver shows them to the model as native
-        image blocks. Turn-local: conversation memory keeps only text."""
+        image blocks. Turn-local: conversation memory keeps only text.
+
+        ``mode`` (ADR 055) pins THIS turn to a mode: ``None`` (every
+        conversational caller) runs the session's own mode; a string --
+        how scheduled turns always arrive -- runs the named mode, with
+        unknown or empty names degrading to the space default. The pin
+        never switches or persists the session's mode, and a ``/``-command
+        turn ignores it (commands run before mode resolution).
+
+        ``document_type`` (ADR 057, scheduled callers only) overlays ADR
+        048's document discipline on THIS turn's resolved spec: the
+        output lands in ONE node of that type, the chat gets a summary
+        plus the object card. Turn-local like the mode pin; requires a
+        mutating mode -- a read-only one degrades loudly and runs
+        unchanged."""
         state = await self._session(session_id)
+        override = self._override_spec(mode) if mode is not None else None
         stripped = text.strip()
         # One id per handle_message call ties this turn's diary records --
         # user query, driver decisions, tool calls, final replies -- into
@@ -356,12 +489,15 @@ class Orchestrator:
         turn_id = uuid.uuid4().hex[:12]
         if self.turn_log:
             self.turn_log.user_message(
-                turn_id, session_id, state.mode, user_id, stripped,
+                turn_id, session_id,
+                override.name if override else state.mode, user_id, stripped,
                 sender=sender,
             )
         if is_command(stripped):
             if stripped.startswith("/mode"):
                 command_events = await self._switch_mode(state, stripped)
+            elif stripped.startswith("/run"):
+                command_events = await self._run_rule(stripped)
             else:  # /clear
                 state.memory.clear()
                 command_events = [ReplyEvent(
@@ -377,7 +513,23 @@ class Orchestrator:
                 )
             return command_events
 
-        spec = self._spec(state)
+        spec = override or self._spec(state)
+        if document_type.strip():
+            if spec.mutating:
+                # ADR 057: overlay the schedule's document discipline on
+                # this turn's resolved spec; capture=None keeps ModeSpec's
+                # document/capture mutual exclusion valid (replace re-runs
+                # __post_init__). Per-schedule type beats a document
+                # mode's own.
+                spec = dataclasses.replace(
+                    spec, document_type=document_type.strip(), capture=None
+                )
+            else:
+                logger.warning(
+                    "scheduled document_type %r ignored: mode %r is not "
+                    "mutating; the turn runs without the document override",
+                    document_type, spec.name,
+                )
         # WP23: the outbox is TURN-scoped -- files a crashed earlier turn
         # left behind must not ride out with this one's reply. WP33: same
         # discipline for schema drafts awaiting their confirm messages.
@@ -389,12 +541,17 @@ class Orchestrator:
         if observer:
             await observer.turn_started(spec.name, spec.activity_detail)
         tools = modes.tool_docs(spec, self.profile)
+        # ADR 048: the effective goal -- the human-authored prompt plus
+        # the standing document discipline for document modes. Assembled
+        # once; the fingerprint, the diary, and decide all see the same
+        # text.
+        goal = modes.goal_for(spec)
         if self.turn_log:
-            fingerprint = (spec.name, spec.goal, tuple(sorted(tools)))
+            fingerprint = (spec.name, goal, tuple(sorted(tools)))
             if state.logged_prompt != fingerprint:
                 self.turn_log.prompt(
-                    turn_id, session_id, spec.name, spec.goal,
-                    self.driver.system_prompt(spec.goal), tools,
+                    turn_id, session_id, spec.name, goal,
+                    self.driver.system_prompt(goal), tools,
                 )
                 state.logged_prompt = fingerprint
         # [prior conversation..., context block, the live message]: history
@@ -424,12 +581,15 @@ class Orchestrator:
         # into the intent node the reply's card opens.
         process = ProcessTrace()
         reply_text = ""
-        for decisions_left in range(self.max_tool_calls, 0, -1):
+        # The mode may cap the decide loop tighter (or looser) than the
+        # deployment guard; 0 = not set, like every ModeSpec number.
+        max_tool_calls = spec.turn_limit or self.max_tool_calls
+        for decisions_left in range(max_tool_calls, 0, -1):
             final_decision = decisions_left == 1
             if final_decision:
                 transcript.append(TranscriptEvent("user", LAST_TURN_WARNING))
             turn = await self.driver.decide(
-                transcript, tools, spec.goal,
+                transcript, tools, goal,
                 options=modes.decide_options(spec),
             )
             if self.turn_log:
@@ -508,7 +668,7 @@ class Orchestrator:
                 break
         else:
             events.append(ReplyEvent(
-                f"tool budget exhausted ({self.max_tool_calls} decisions): "
+                f"tool budget exhausted ({max_tool_calls} decisions): "
                 "the final tool calls ran, but the driver bundled no reply "
                 "text despite the warning; the turn was cut short.",
                 kind="notice",
@@ -531,21 +691,47 @@ class Orchestrator:
                 proposal.confirm_text(),
                 kind="confirm", confirm_id=proposal.id,
             ))
-        intent = await self._finish_turn(
+        intent, mutations = await self._finish_turn(
             state.services, spec, user_id, stripped, reply_text, trace,
             origin, process.render() if process.worked else "",
+            sender=sender,
         )
-        if intent is not None and process.worked:
+        attach_ids: list[str] = []
+        if intent is not None and process.worked and not spec.hide_intent_card:
             # ADR 038: the reply carries its background-process record as
             # an object card -- only on turns that DID background work
             # (a plain answer stays a plain answer, even when capture
-            # minted a node for it).
+            # minted a node for it). ADR 046: a mode may hide the card;
+            # the intent node is still recorded either way.
+            attach_ids.append(intent.id)
+        if spec.document_type:
+            # ADR 048: a document mode's reply only SUMMARIZES the write,
+            # so the touched document nodes always card -- explicit attach
+            # rides ahead of the text scrape and is never filtered by
+            # hide_node_cards.
+            wanted = spec.document_type.strip().lower()
+            graph = state.services.repository.graph
+            attach_ids.extend(
+                record.node_id for record in mutations
+                if graph.has_node(record.node_id)
+                and graph.node(record.node_id).type.strip().lower() == wanted
+            )
+        if attach_ids:
             for index in range(len(events) - 1, -1, -1):
                 if events[index].kind == "reply":
                     events[index] = dataclasses.replace(
-                        events[index], attach=(intent.id,)
+                        events[index],
+                        attach=tuple(dict.fromkeys(attach_ids)),
                     )
                     break
+        if spec.hide_node_cards and mutations:
+            # ADR 046: the mode hides the turn's created/edited nodes from
+            # the reply's object cards -- the text keeps naming them, the
+            # transport just must not card them. Every event is stamped:
+            # cards ride whatever event's text mentions the node.
+            hidden = tuple(record.node_id for record in mutations)
+            for index, event in enumerate(events):
+                events[index] = dataclasses.replace(event, suppress=hidden)
         if reply_text:
             # Error-only / budget-exhausted turns leave no useful memory.
             # The attributed form: replayed history must keep who spoke.
@@ -571,15 +757,16 @@ class Orchestrator:
         trace: list[ToolTrace],
         origin: str = "",
         process_trace: str = "",
-    ) -> Node | None:
+        sender: str = "",
+    ) -> tuple[Node | None, tuple[MutationRecord, ...]]:
         """WP7 turn boundary: auto-capture (per the spec's policy), then
-        drain -> intent node (returned so the caller can attach it to the
-        reply, ADR 038). ``services`` is the session's view; its
-        repository/capture/journal are the runtime's shared instances."""
-        if self.provenance is None:
-            return None
+        drain -> intent node (returned, with the drained mutations, so
+        the caller can attach it to the reply, ADR 038 -- and suppress
+        the touched nodes' cards when the mode hides them, ADR 046).
+        ``services`` is the session's view; its repository/capture/journal
+        are the runtime's shared instances."""
         policy = spec.capture
-        if policy is not None and reply_text:
+        if self.provenance is not None and policy is not None and reply_text:
             references = capture.entity_links(
                 reply_text, services.repository.graph
             )
@@ -595,7 +782,33 @@ class Orchestrator:
                     artifact_type=policy.artifact_type,
                     references_label=policy.references_label,
                 )
+        # Drained unconditionally (ADR 048): the caller cards a document
+        # mode's touched nodes (and suppresses cards, ADR 046) whether or
+        # not an intent recorder is wired.
         mutations = services.journal.drain()
+        if self.historian is not None and mutations:
+            # WP41 (ADR 049): one attributed revision per touched tracked
+            # node -- the turn is the revision granularity. A history
+            # failure never fails the turn that did the real work. The
+            # user leg prefers the transport's DISPLAY name (the prose
+            # page shows this string); the raw id stays on the intent
+            # node's gc_user_id stamp, which is the real provenance.
+            author = (
+                f"{model_id(spec.model) or self.model_name}"
+                f" · {spec.name} · {sender or user_id}"
+            )
+            for record in mutations:
+                try:
+                    if self.historian.is_tracked(record.node_id):
+                        await self.historian.record_bot_revision(
+                            record.node_id, author_detail=author,
+                        )
+                except Exception:  # noqa: BLE001 -- bookkeeping, not work
+                    logger.exception(
+                        "historian: failed to record %s", record.node_id
+                    )
+        if self.provenance is None:
+            return None, mutations
         intent = await self.provenance.record_turn(
             prompt=prompt,
             mutations=mutations,
@@ -611,7 +824,7 @@ class Orchestrator:
         if intent is not None:
             logger.info("provenance: recorded %s (%d touches)",
                         intent.id, len(mutations))
-        return intent
+        return intent, mutations
 
     async def _session(self, session_id: str) -> _SessionState:
         """The per-session state, created (with I/O) on first sight.
@@ -670,8 +883,16 @@ class Orchestrator:
                 # ADR 037 knobs report only when set -- the default line
                 # stays short for the common unconfigured mode.
                 parts = []
+                if current.meta_inspection:
+                    parts.append("meta-inspection: on")
+                if current.hide_intent_card:
+                    parts.append("intent card: hidden")
+                if current.hide_node_cards:
+                    parts.append("node cards: hidden")
                 if current.max_tokens:
                     parts.append(f"max tokens: {current.max_tokens}")
+                if current.turn_limit:
+                    parts.append(f"turn limit: {current.turn_limit}")
                 if current.web_search_max_uses:
                     parts.append(f"search uses: {current.web_search_max_uses}")
                 if current.web_search_allowed_domains:
@@ -709,6 +930,62 @@ class Orchestrator:
         ))
         events.extend(await self._persist_mode(state))
         return events
+
+    async def _run_rule(self, command: str) -> list[ReplyEvent]:
+        """``/run <rule>`` -- fire an Automation Rule now, no model turn
+        (WP52, ADR 058).
+
+        Bare ``/run`` lists what there is to run, mirroring bare
+        ``/mode``: rule names are exact-match, so discovery has to be
+        one command away. ``/run <rule> on <object>`` names the trigger
+        object; the bare name is tried FIRST, so a rule actually called
+        "Turn on lights" still resolves.
+        """
+        argument = command.removeprefix("/run").strip()
+        if not argument:
+            views = self.services.rules.views()
+            if not views:
+                return [ReplyEvent(
+                    "no automation rules exist yet. Create one in Anytype "
+                    "(an Automation Rule object) or ask for one.",
+                    kind="notice",
+                )]
+            listing = "\n".join(
+                f"- {view.node.name} -- {view.summary} ({view.status})"
+                for view in views
+            )
+            return [ReplyEvent(
+                f"usage: /run <rule name>\n{listing}", kind="notice",
+            )]
+        try:
+            report = await self._fire_rule(argument)
+        except GraphContextError as err:
+            return [ReplyEvent(str(err), kind="error")]
+        lines = describe_report(report)
+        return [ReplyEvent(
+            "\n".join(lines) if lines else "the rule ran; nothing to change.",
+            kind="notice",
+        )]
+
+    async def _fire_rule(self, argument: str) -> RuleTickReport:
+        """Resolve ``<rule>`` / ``<rule> on <object>`` and fire it.
+
+        The index is resynced first: an explicit command should run
+        against what the user can SEE, and the change tick only refreshes
+        every few seconds. A failed resync degrades -- running against a
+        slightly stale index beats refusing.
+        """
+        try:
+            await self.resync_graph()
+        except GraphContextError as err:
+            logger.warning("could not resync before /run: %s", err)
+        try:
+            return await self.run_rule(argument)
+        except NodeNotFound:
+            if " on " not in argument:
+                raise
+            rule, _, trigger = argument.rpartition(" on ")
+            return await self.run_rule(rule.strip(), trigger.strip())
 
     async def _persist_mode(self, state: _SessionState) -> list[ReplyEvent]:
         """Mirror the switched mode into the session snapshot so it

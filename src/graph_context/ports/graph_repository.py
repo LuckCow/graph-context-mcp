@@ -28,6 +28,7 @@ from graph_context.domain.models import (
     Node,
     NodeDraft,
     NodeId,
+    PropertyDeclaration,
     PropertyDraft,
     TimelineValue,
 )
@@ -73,25 +74,34 @@ class GraphRepository(Protocol):
         draft: NodeDraft,
         links: Sequence[LinkSpec] = (),
         *,
-        create_missing_relations: bool = False,
-        create_missing_fields: Mapping[str, str] | None = None,
+        create_missing: Mapping[str, PropertyDeclaration] | None = None,
     ) -> Node:
         """Create a node and its links.
 
         Resolves ``draft.type`` to an existing space type (raising
-        :class:`graph_context.errors.UnknownNodeType` if none matches) and each
-        link's label to an existing relation. An unknown relation label raises
-        :class:`graph_context.errors.UnknownRelationLabel` unless
-        ``create_missing_relations`` is set, in which case the relation is
-        created. Either approval error is raised *before* any persistence.
-
-        Story-node ``fields`` keys must resolve to existing scalar properties
-        (ADR 023); an unmatched key raises
-        :class:`graph_context.errors.UnknownFieldKey` before any persistence
-        unless declared in ``create_missing_fields`` (key -> format from
-        :data:`graph_context.domain.schema.FIELD_FORMATS`), in which case the
-        property is created. Infra-role drafts are exempt: their fields are
-        bookkeeping, not space vocabulary.
+        :class:`graph_context.errors.UnknownNodeType` if none matches) and
+        each ``fields`` key / link label against the TYPE's attached
+        properties (ADR 047: bare resolution is type-scoped -- a space
+        property no type claims does not resolve; exempt are infra-role
+        targets and the seeded ``gc_edge_*`` starter relations, which
+        stay space-wide). ``create_missing`` is ONE key/label ->
+        :class:`~graph_context.domain.models.PropertyDeclaration` map
+        (ADR 042) that widens resolution to the whole space: a declared
+        key matching an existing same-format space property -- attached
+        or not -- is REUSED (the write attaches it to this object, never
+        minting a twin); a format mismatch raises
+        :class:`graph_context.errors.SchemaChangeConflict` (A12: formats
+        are immutable); a key matching nothing mints new space-level
+        vocabulary (a scalar property, or a relation for format
+        ``objects``). Minting is space-level only -- the property
+        attaches to NO type regardless of the declaration's ``scope``
+        (scope drives the *caller's* proposal drafting); type attachment
+        is exclusively :meth:`add_type_properties`. An unadmitted,
+        undeclared ``fields`` key raises
+        :class:`graph_context.errors.UnknownFieldKey`; an unadmitted,
+        undeclared link label raises
+        :class:`graph_context.errors.UnknownRelationLabel` -- either
+        *before* any persistence.
         """
         ...
 
@@ -105,12 +115,31 @@ class GraphRepository(Protocol):
         body: str | None = None,
         story_time: TimelineValue | None = None,
         fields: Mapping[str, str] | None = None,
-        create_missing_fields: Mapping[str, str] | None = None,
-    ) -> Node: ...
+        create_missing: Mapping[str, PropertyDeclaration] | None = None,
+    ) -> Node:
+        """Apply the non-``None`` keyword arguments and return the updated
+        node. Bare ``fields`` keys resolve against the node's type PLUS
+        the properties the node itself already carries (ADR 047: an
+        object's local properties stay editable; another object's never
+        leak in). ``create_missing`` has :meth:`create_node` semantics
+        (link labels ride :meth:`add_link`'s declaration)."""
+        ...
 
     async def add_link(
-        self, anchor: NodeId, link: LinkSpec, *, create_missing_relations: bool = False
-    ) -> Edge: ...
+        self,
+        anchor: NodeId,
+        link: LinkSpec,
+        *,
+        create_missing: PropertyDeclaration | None = None,
+    ) -> Edge:
+        """Add one outgoing edge from ``anchor``. The label resolves
+        bare against the anchor's type and the relations the anchor
+        already carries (ADR 047). A ``create_missing`` declaration
+        (format ``objects``) widens resolution to the whole space --
+        reusing an existing relation, or minting space-level when none
+        matches; without one an unadmitted label raises
+        :class:`graph_context.errors.UnknownRelationLabel`."""
+        ...
 
     async def remove_link(self, edge: Edge) -> None: ...
 
@@ -118,17 +147,30 @@ class GraphRepository(Protocol):
         """Resolve a requested type identifier to its semantic role (or None)."""
         ...
 
-    def known_node_types(self) -> frozenset[str]:
-        """Type names available as create_node targets (for error suggestions)."""
+    def known_node_types(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> frozenset[str]:
+        """Type names available as create_node targets (for error suggestions).
+
+        Infra-role types are excluded unless their role is in
+        ``include_roles`` -- the caller's meta privilege (ADR 045).
+        """
         ...
 
     def known_edge_labels(self) -> frozenset[str]:
         """Relation labels available to reuse (for error suggestions)."""
         ...
 
-    def relation_label_for(self, field_key: str) -> str | None:
+    def relation_label_for(
+        self,
+        field_key: str,
+        *,
+        on_type: str | None = None,
+        on_node: NodeId | None = None,
+    ) -> str | None:
         """The canonical edge label when ``field_key`` names an
-        ``objects``-format relation, else ``None``.
+        ``objects``-format relation the write's scope admits, else
+        ``None``.
 
         Matched exactly like a ``fields`` key resolves (by property key or
         display name, case-insensitive), because that is what this exists
@@ -136,15 +178,29 @@ class GraphRepository(Protocol):
         write ``fields={"Assignee": ...}``. The tool boundary asks this
         question to route such a key as the link it really is (ADR 006:
         relations are edges) instead of surfacing a rejection.
+
+        Exactly ONE of ``on_type``/``on_node`` is required (ADR 047 --
+        implementations raise ``ValueError`` otherwise, so an unscoped
+        call cannot reintroduce space-wide bare resolution). ``on_type``
+        is create semantics: the named type's attached relations (an
+        unknown type matches nothing -- ``create_node`` raises its own
+        ``UnknownNodeType``). ``on_node`` is update semantics: the node's
+        type plus relations the node itself already carries. Infra-role
+        scopes and the seeded ``gc_edge_*`` vocabulary resolve
+        space-wide.
         """
         ...
 
-    def field_catalog(self) -> Mapping[str, tuple[FieldSpec, ...]]:
+    def field_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
         """Reflectable scalar properties per type display name (ADR 023).
 
         Guidance for the LLM (overview rendering, unmatched-key errors):
         which properties already exist as ``fields`` targets on each
-        non-infra type. May be empty for backends without a space schema.
+        non-infra type -- infra types join the catalog only when their
+        role is in ``include_roles`` (ADR 045). May be empty for backends
+        without a space schema.
         """
         ...
 
@@ -166,7 +222,10 @@ class GraphRepository(Protocol):
         matches an existing space property is REUSED (attached) when the
         formats agree, and conflicts when they differ -- formats are
         immutable (A12), so a mismatch must stop the change, never mint a
-        shadow. User confirmation is the caller's contract (the schema
+        shadow. ``objects`` drafts are legal (ADR 042): a same-name
+        relation attaches, joining the type's edge vocabulary; a *scalar*
+        draft naming a relation conflicts (no scalar shadow of an edge,
+        ADR 006). User confirmation is the caller's contract (the schema
         tool's proposal flow); implementations do not gate.
         """
         ...
@@ -174,7 +233,8 @@ class GraphRepository(Protocol):
     async def add_type_properties(
         self, type_identifier: str, properties: Sequence[PropertyDraft]
     ) -> str:
-        """Attach new scalar properties to an existing type (WP33).
+        """Attach new properties to an existing type (WP33; objects
+        drafts legal per ADR 042, same semantics as :meth:`create_type`).
 
         ``type_identifier`` resolves like ``create_node``'s type (key,
         display name, or role); no match raises

@@ -22,9 +22,8 @@ def _snapshot(graph):
 class TestHydrate:
     async def test_restart_hydrate_reproduces_identical_graph(self, mock, client, repo):
         mira = await repo.create_node(CHAR)
-        await repo.create_node(
-            PLACE, links=[LinkSpec("located_at", other=mira.id, outgoing=False)]
-        )
+        place = await repo.create_node(PLACE)
+        await repo.add_link(mira.id, LinkSpec("located_at", other=place.id))
         original = _snapshot(repo.graph)
 
         # "restart": brand-new client + repository over the same store
@@ -48,8 +47,9 @@ class TestHydrate:
         # (The cap moves only when bootstrap grows enough properties for
         # another page at page_limit=10 -- ADR 027 added the third,
         # ADR 033's gc_mode_model tipped the fourth, ADR 039's nine
-        # gc_rule_* properties the fifth.)
-        assert len(get_calls) <= 12
+        # gc_rule_* properties the fifth, ADR 048/049's document-mode +
+        # history properties the sixth.)
+        assert len(get_calls) <= 13
         assert not any("/objects/" in p for p in get_calls)
 
     async def test_hydrate_keeps_open_edges_but_skips_dangling(self, mock, client, repo):
@@ -112,11 +112,11 @@ class TestResync:
         assert await repo.resync() == frozenset()
 
     async def test_own_composite_writes_are_not_reported_by_resync(self, mock, repo):
-        """Self-write suppression must also cover the PATCHes a composite
-        create issues against *other* objects (incoming links)."""
+        """Self-write suppression must cover the relation PATCH a
+        composite create issues against the new node itself."""
         mira = await repo.create_node(CHAR)
         await repo.create_node(
-            PLACE, links=[LinkSpec("located_at", other=mira.id, outgoing=False)]
+            PLACE, links=[LinkSpec("located_at", other=mira.id)]
         )
         assert await repo.resync() == frozenset()
 

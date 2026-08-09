@@ -29,44 +29,53 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from graph_context.logging_setup import configure_logging
 from graph_context.orchestrator import anytype_chat_bot, discord_bot, inspect_server
+from graph_context.orchestrator.prose_bridge import ProseBridge
 from graph_context.orchestrator.turn_log import turn_log_path
 
 logger = logging.getLogger(__name__)
 
 
-def _start_viewer() -> ThreadingHTTPServer | None:
+def _start_viewer() -> tuple[ThreadingHTTPServer | None, ProseBridge | None]:
     """The inspection server in a daemon thread, or None when switched off.
 
     ``serve_forever`` blocks and cannot be cancelled from the loop, so it
     lives in a plain daemon thread (NOT asyncio.to_thread) and ``run()``
     stops it via ``shutdown()`` in its ``finally``.
+
+    Also returns the prose bridge (WP43) the chat bot fills with live
+    space handles -- created EMPTY here because the server starts before
+    the bots bootstrap; None when the viewer is off (nothing to serve
+    the page, so nothing registers).
     """
     log = turn_log_path()
     if log is None:
         logger.info("inspection server: not starting (GC_TURN_LOG is off)")
-        return None
+        return None, None
     settings = inspect_server.viewer_settings()
     if settings is None:
         logger.info("inspection server: not starting (GC_LOG_VIEWER_PORT is off)")
-        return None
+        return None, None
     host, port = settings
+    bridge = ProseBridge()
     server = inspect_server.create_server(
-        host, port, Path(log), inspect_server.eval_root_setting()
+        host, port, Path(log), inspect_server.eval_root_setting(),
+        prose=bridge, prose_token=inspect_server.prose_token_setting(),
     )
     threading.Thread(
         target=server.serve_forever, daemon=True, name="inspection-server"
     ).start()
     logger.info("inspection server: http://%s:%d/ (tailing %s)", host, port, log)
-    return server
+    return server, bridge
 
 
 async def run() -> None:
-    viewer = _start_viewer()
+    viewer, bridge = _start_viewer()
     try:
         # The viewer is already answering while the bots bootstrap.
         async with asyncio.TaskGroup() as task_group:
-            task_group.create_task(anytype_chat_bot.run())
+            task_group.create_task(anytype_chat_bot.run(prose=bridge))
             if discord_bot.is_configured():
                 task_group.create_task(discord_bot.run())
             else:
@@ -81,7 +90,7 @@ async def run() -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     await run()
 
 

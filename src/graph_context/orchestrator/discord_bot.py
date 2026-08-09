@@ -38,6 +38,7 @@ from pathlib import Path
 
 from graph_context import composition
 from graph_context.errors import GraphContextError
+from graph_context.logging_setup import configure_logging
 from graph_context.orchestrator import bootstrap
 from graph_context.orchestrator.channels import channels_declared
 from graph_context.orchestrator.discord_transport import (
@@ -158,7 +159,7 @@ async def run() -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     await run()
 
 

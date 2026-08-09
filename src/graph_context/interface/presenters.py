@@ -38,9 +38,9 @@ def render_overview(
     can copy one straight into ``explore`` / ``get_node`` / ``hold``.
 
     ``field_catalog`` (ADR 023) appends each type's scalar properties --
-    the vocabulary create/update ``fields`` keys should reuse. Rendered
-    even for zero-instance types (that is exactly when the guidance
-    matters) and on an empty graph.
+    the vocabulary create/update ``properties`` keys should reuse.
+    Rendered even for zero-instance types (that is exactly when the
+    guidance matters) and on an empty graph.
     """
     catalog_lines = _render_field_catalog(field_catalog)
     if overview.total_story_nodes == 0:
@@ -73,11 +73,19 @@ def _render_field_catalog(
 ) -> list[str]:
     if not catalog:
         return []
-    lines = ["properties by type (usable as fields keys on create/update):"]
+    lines = ["properties by type (usable as properties keys on create/update):"]
     for type_name in sorted(catalog):
         rendered = ", ".join(
             f"{spec.name} ({spec.format})" for spec in catalog[type_name]
         )
+        if type_name == "(any type)":
+            lines.append(
+                f"- (any type) -- space-level, not yet on a type; usable "
+                f"on any object, attach one to a type with "
+                f"create_missing_properties scope='type' (or the schema "
+                f"tool): {rendered}"
+            )
+            continue
         lines.append(f"- {type_name}: {rendered}")
     return lines
 

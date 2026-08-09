@@ -25,19 +25,40 @@ services:
       - NET_ADMIN
       - NET_RAW
 
-    # Apply the egress lockdown, then keep the container alive.
-    command: ["/bin/sh", "-c", "sudo /usr/local/bin/init-firewall.sh && exec sleep infinity"]
+    # Boot sequence, in a mandatory order:
+    #   1. the egress lockdown -- it FLUSHES all of netfilter, so anything that
+    #      installs rules must come after it;
+    #   2. tailscale (no-op without an auth key secret);
+    #   3. the orchestrator, unprivileged and in the background
+    #      (GC_SERVE_AUTOSTART=0 skips it; `gc-serve restart` after code edits);
+    #   4. sleep, so the container outlives the app -- a crashed orchestrator
+    #      leaves a container you can still exec into and debug.
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        sudo /usr/local/bin/init-firewall.sh &&
+        sudo /usr/local/bin/start-tailscale.sh &&
+        gc-serve boot &&
+        exec sleep infinity
 
     volumes:
       # Project root (the directory containing .devcontainer/) -> /workspaces/graph-context-mcp
       - ..:/workspaces/graph-context-mcp
       # Persist Claude Code login + settings across rebuilds.
       - claude-config:/home/dev/.claude
+      # The tailnet node's identity. Without this volume every rebuild burns a
+      # fresh auth-key registration and leaves a dead duplicate node behind.
+      - tailscale-state:/var/lib/tailscale
 
     working_dir: /workspaces/graph-context-mcp
 
-    # Only loopback on the host can reach the published ports:
     # 8000 = MCP server, 8765 = turn-log viewer (orchestrator serve).
+    # Published on ALL host interfaces, so anything that can route to this host
+    # reaches them. The inspection server's READS are unauthenticated (the whole
+    # turn diary, every prose document), so on a public-facing VPS this must go
+    # back to "127.0.0.1:8765:8765" -- or be dropped entirely, since the
+    # tailscale node serves the same port over the tailnet without it.
     ports:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:8765:8765"
@@ -79,6 +100,10 @@ services:
       # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
       # account's CLI default; pinned here to Sonnet 5.
       GC_DRIVER_MODEL: "claude-sonnet-5"
+      # Prose-page write token (ADR 050/054): enables saving/marking on
+      # /prose. Same file-not-env-var discipline as the keys above; the
+      # page prompts for the token once and remembers it.
+      GC_PROSE_TOKEN_FILE: "/run/secrets/gc_prose_token"
       # The turn-log viewer must bind all interfaces INSIDE the container:
       # Docker's published-port DNAT delivers host traffic to eth0, not
       # loopback. The host side stays private -- the ports: mapping above
@@ -93,6 +118,8 @@ services:
     secrets:
       - anytype_api_key
       - discord_bot_token
+      - gc_prose_token
+      - tailscale_authkey
 
   # Headless Anytype node (bot account) -- WP14 / ADR 019. Starts with
   # every `up`/rebuild (VS Code included). First-time bootstrap (see
@@ -130,6 +157,7 @@ volumes:
   claude-config:
   anytype-data:
   anytype-config:
+  tailscale-state:
 
 # The secret's value lives in a host file that is git-ignored and never
 # baked into the image. Create it once (see README), then it's mounted
@@ -139,3 +167,10 @@ secrets:
     file: ./secrets/anytype_api_key
   discord_bot_token:
     file: ./secrets/discord_bot_token
+  gc_prose_token:
+    file: ./secrets/gc_prose_token
+  # Compose REFUSES to start when a secret's file is missing, so this one must
+  # exist even when unused -- an empty file is the "no tailnet" configuration
+  # and start-tailscale.sh skips cleanly on it.
+  tailscale_authkey:
+    file: ./secrets/tailscale_authkey

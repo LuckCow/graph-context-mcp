@@ -1,0 +1,1757 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prose editor</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #667085;
+    --line: #e3e7ee; --chip: #eef1f6; --accent: #2f6feb; --err: #c1352b;
+    --err-bg: #fdecea; --code: #f3f4f7; --ok: #12855b; --ok-bg: #e7f5ef;
+    --warn: #8a5b00; --warn-bg: #fdf3e0;
+    --info: #0b6a86; --info-bg: #dcf0f8;  /* minor revisions: cyan, kept
+                           clear of the green/amber/red state hues */
+    --add-bg: #e7f5ef; --del-bg: #fdecea;
+    --ink-bg: #ede7fb;  /* human-typed words: lavender, distinct from
+                           the green/amber/red state highlights */
+    --ink-fg: #6d4fc2;  /* the lavender layer's solid bar colour (--ink is
+                           body text, unrelated despite the name) */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --ink: #e6e9ee; --muted: #93a0b4;
+      --line: #2c323c; --chip: #262c35; --accent: #5b9bff; --err: #ff8a80;
+      --err-bg: #3a1f1c; --code: #12151a; --ok: #4bd6a0; --ok-bg: #17342a;
+      --warn: #e0b24d; --warn-bg: #363018;
+      --info: #67cfe8; --info-bg: #12313d;
+      --add-bg: #17342a; --del-bg: #3a1f1c;
+      --ink-bg: #2b2343; --ink-fg: #a78bfa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.65 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    /* room for the fixed action bar on phones */
+    padding-bottom: calc(150px + env(safe-area-inset-bottom));
+  }
+  /* Header and (on desktop) the action bar share one sticky wrapper. */
+  #chrome { position: sticky; top: 0; z-index: 5; }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 8px 14px;
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+  }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+  header a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+  .spacer { flex: 1 1 auto; }
+  #save-state { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #save-state.dirty { color: var(--warn); }
+  #save-state.err { color: var(--err); }
+  /* The layer legend rides the frozen chrome so the toggles stay reachable
+     from anywhere in a long document -- and collapses from the header
+     button, because a wrapped row of seven chips is real estate a phone
+     needs back once the reader knows the colours. Both the bar and its
+     opener only exist with a document open. */
+  #legend-bar {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 5px 14px;
+  }
+  #legend-bar, #legend-toggle { display: none; }
+  body.has-doc #legend-toggle { display: inline-flex; }
+  body.has-doc.legend-open #legend-bar { display: block; }
+  main { padding: 14px; max-width: 760px; margin: 0 auto; }
+  h2 { font-size: 15px; margin: 18px 2px 8px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 2px; }
+  .crumbs { color: var(--muted); font-size: 12px; margin: 0 2px 12px;
+    overflow-wrap: anywhere; }
+
+  .banner {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; margin: 0 0 12px; font-size: 13px;
+  }
+  .banner.warn { background: var(--warn-bg); color: var(--warn); }
+  .banner.err { background: var(--err-bg); color: var(--err); }
+  .banner .btn-row { margin-top: 6px; }
+
+  .row {
+    display: block; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 12px 14px; margin: 0 0 8px;
+    color: inherit;
+  }
+  .row:hover { text-decoration: none; border-color: var(--accent); }
+  .row b { font-weight: 600; }
+  .row .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  /* Comments live in a sidebar when there's room (wide media query
+     below); until then the panel stays parked here invisibly and shows
+     through the modal. */
+  .doc-side { display: none; }
+
+  .badge {
+    font-size: 11px; padding: 1px 8px; border-radius: 20px; font-weight: 600;
+    background: var(--chip); color: var(--muted); white-space: nowrap;
+  }
+  .badge.approved { background: var(--ok-bg); color: var(--ok); }
+  .badge.raw_ai { background: var(--warn-bg); color: var(--warn); }
+  .badge.human { background: var(--chip); color: var(--accent); }
+  .badge.locked { background: var(--err-bg); color: var(--err); }
+  .badge.needs_change { background: var(--warn-bg); color: var(--warn); }
+  .badge.minor_revisions { background: var(--info-bg); color: var(--info); }
+  .badge.open { background: var(--warn-bg); color: var(--warn); }
+  .badge.addressed { background: var(--ok-bg); color: var(--ok); }
+
+  /* The legend IS the layer control (ADR 056 amendment): one chip per
+     highlight layer, independently on/off, the swatch doubling as the
+     sample. Swatch classes are derived from the JS layer key, so the
+     editor's .cm-fill-<key> and the legend's .sw-<key> stay one
+     vocabulary. */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 0 auto;
+    max-width: 1120px;
+    color: var(--muted); font-size: 12px; align-items: center; }
+  .legend mark.sw { border-radius: 3px; color: inherit;
+    padding: 0 4px; border: 1px solid transparent; }
+  .legend mark.sw-locked { --sw: var(--err); background: var(--err-bg); }
+  .legend mark.sw-needs_change { --sw: var(--warn);
+    background: var(--warn-bg); }
+  .legend mark.sw-minor_revisions { --sw: var(--info);
+    background: var(--info-bg); }
+  .legend mark.sw-approved { --sw: var(--ok); background: var(--ok-bg); }
+  .legend mark.sw-human { --sw: var(--ink-fg); background: var(--ink-bg); }
+  .legend mark.sw-comments { --sw: var(--accent); background: none;
+    border-bottom: 2px dotted var(--accent); border-radius: 0; }
+  .legend mark.sw-blame { --sw: var(--accent); background: none;
+    box-shadow: inset 3px 0 var(--accent); }
+  /* Off reads as "this colour exists but isn't painted": the fill drops
+     out, its outline in the layer's own colour is what remains. */
+  .legend button.mini.off mark.sw { background: none; box-shadow: none;
+    border-style: dashed; border-color: var(--sw, currentColor); }
+  .legend button.mini.off { opacity: .6; }
+  .legend button.mini { display: inline-flex; gap: 5px; align-items: center;
+    color: var(--muted); }
+  .legend button.mini.on { color: var(--accent); }
+  /* Phones pay a whole wrapped line for the affordance hint, on the one
+     layout where the frozen bar's height hurts most -- and where a
+     selection pops the action sheet by itself. */
+  @media (max-width: 899px) { .legend .hint { display: none; } }
+
+  /* Revision history is ONE dropdown, not a chip per revision: the strip
+     grew without bound and pushed the editor off the first screen on any
+     document with real history. */
+  .revs { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    margin: 8px 0 12px; }
+  .revs select {
+    font: inherit; font-size: 12.5px; min-height: 32px; max-width: 100%;
+    padding: 4px 8px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--chip); color: var(--ink); cursor: pointer;
+  }
+  .revs .last { font-size: 12px; color: var(--muted); }
+
+  /* One slim strip: the paragraph under the caret (blame + badges). */
+  #seg-info {
+    font-size: 11.5px; color: var(--muted); margin: 0 2px 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    min-height: 18px; display: flex; flex-wrap: wrap; gap: 4px 10px;
+    align-items: center;
+  }
+
+  /* ---- the editor ---- */
+  #editor-host {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; overflow: hidden;
+  }
+  .cm-editor { font: 16px/1.75 Georgia, "Times New Roman", serif; }
+  .cm-editor.cm-focused { outline: none; }
+  .cm-content { padding: 16px 18px 40vh; caret-color: var(--ink); }
+  .cm-line { padding: 0; }
+  .cm-cursor { border-left-color: var(--ink); }
+  /* !important: the bundle's own focused-selection rule is opaque and
+     higher-specificity; translucency is load-bearing once the layer
+     sits over the text (below). The saturate() boost is what keeps a
+     review-state color READABLE through the selection: the state tint
+     under the rect gets more vivid, not painted over. */
+  .cm-editor .cm-selectionBackground,
+  .cm-editor.cm-focused .cm-selectionBackground {
+    background: color-mix(in srgb, var(--accent) 18%, transparent)
+      !important;
+    -webkit-backdrop-filter: saturate(2.6);
+    backdrop-filter: saturate(2.6);
+  }
+  @media (prefers-color-scheme: dark) {
+    .cm-editor .cm-selectionBackground,
+    .cm-editor.cm-focused .cm-selectionBackground {
+      background: color-mix(in srgb, var(--accent) 26%, transparent)
+        !important;
+      -webkit-backdrop-filter: saturate(2.6) brightness(1.25);
+      backdrop-filter: saturate(2.6) brightness(1.25);
+    }
+  }
+  /* drawSelection paints the selection BEHIND the text (inline
+     z-index -1), so the opaque review-state backgrounds above swallow
+     it. Lift the layer over the content: the translucent accent tint
+     stacks ON the state color, so a selection across a highlight
+     reads as an accent-shifted version of that highlight instead of
+     vanishing. pointer-events must stay off or the lifted layer would
+     eat taps meant for the editor. */
+  .cm-editor .cm-selectionLayer {
+    z-index: 1 !important;
+    pointer-events: none;
+  }
+  /* markdown syntax: readable raw source, markup dimmed via lezer tags */
+  .tok-heading { font-weight: 700; font-size: 1.25em; }
+  .tok-emphasis { font-style: italic; }
+  .tok-strong { font-weight: 700; }
+  .tok-monospace {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .85em; background: var(--code); border-radius: 3px;
+  }
+  .tok-meta { color: var(--muted); }
+  .tok-link, .tok-url { color: var(--accent); }
+  /* Review-state highlights: one mark per word run carrying EVERY layer
+     that applies (ADR 056 amendment). The loudest enabled layer paints
+     the background -- priority locked > needs_change > minor_revisions >
+     approved > human-typed (ADR 053 amendment) -- and each remaining
+     layer stacks a solid bar under the word via --hl-bars, composed in
+     buildDecorations. box-shadow, not border-bottom: an outer shadow is
+     clipped outside the border box (so it reads as a clean stripe) and
+     costs no layout, so marking text never jostles the line height.
+     box-decoration-break is load-bearing: a run that WRAPS is one
+     fragmented inline box, and the default `slice` draws the shadow
+     once around the unfragmented box, so the bars land under a single
+     line at the full run's width. `clone` gives every line its own. */
+  .cm-hl { border-radius: 3px; box-shadow: var(--hl-bars, none);
+    -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+  .cm-fill-human { background: var(--ink-bg); }
+  .cm-fill-approved { background: var(--ok-bg); }
+  .cm-fill-needs_change { background: var(--warn-bg); }
+  .cm-fill-minor_revisions { background: var(--info-bg); }
+  .cm-fill-locked { background: var(--err-bg); }
+  /* blame tick: first line of each paragraph, no layout shift */
+  .cm-blame-model { box-shadow: inset 3px 0 var(--accent); }
+  .cm-blame-human { box-shadow: inset 3px 0 var(--ok); }
+  /* comment underlines (WP50): stack ON TOP of any state background */
+  .cm-comment { border-bottom: 2px dotted var(--accent); }
+  .cm-comment-addressed { border-bottom-style: dashed;
+    border-bottom-color: var(--muted); }
+
+  .diff-pair {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 14px; margin: 0 0 10px;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .diff-pair .meta { font-size: 11.5px; color: var(--muted);
+    margin-bottom: 6px; font-family: ui-monospace, Menlo, monospace; }
+  ins { background: var(--add-bg); color: var(--ok);
+    text-decoration: none; border-radius: 3px; }
+  del { background: var(--del-bg); color: var(--err); border-radius: 3px; }
+
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    display: none;
+  }
+  #bar.open { display: block; }
+  #bar .inner { max-width: 760px; margin: 0 auto; }
+  #bar .which { font-size: 12px; color: var(--muted); margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, Menlo, monospace; }
+  #bar .which .spacer { flex: 1 1 auto; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+  .btn-row .label { font-size: 11px; color: var(--muted); width: 46px;
+    text-transform: uppercase; letter-spacing: .04em; align-self: center; }
+  button {
+    font: inherit; font-size: 13px; min-height: 44px; padding: 6px 14px;
+    border-radius: 9px; border: 1px solid var(--line);
+    background: var(--chip); color: var(--ink); cursor: pointer;
+    touch-action: manipulation;
+  }
+  /* .current signals with color/border only: a weight change would
+     resize the button and shift the whole row on every selection. */
+  button.current { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.close { background: none; border: none; color: var(--muted);
+    min-height: 28px; padding: 2px 8px; }
+  button.mini { min-height: 28px; padding: 2px 10px; font-size: 12px; }
+  button.mini.on { border-color: var(--accent); color: var(--accent); }
+
+  /* the comment composer inside the action bar (WP50) */
+  #bar textarea {
+    flex: 1 1 100%; min-height: 60px; font: inherit; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px;
+    background: var(--bg); color: var(--ink); resize: vertical;
+  }
+
+  /* the comments panel under the editor (WP50) */
+  .comment-row { cursor: pointer; }
+  .comment-row .txt { margin: 4px 0 0; white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .comment-row .sub { display: flex; flex-wrap: wrap; gap: 4px 10px;
+    align-items: center; }
+  .comment-row .sub .spacer { flex: 1 1 auto; }
+  .comment-row textarea { width: 100%; min-height: 56px; margin: 4px 0 0;
+    font: inherit; font-size: 13.5px; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; background: var(--bg);
+    color: var(--ink); resize: vertical; }
+
+  #toast {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(160px + env(safe-area-inset-bottom)); z-index: 40;
+    background: var(--ink); color: var(--bg); font-size: 13px;
+    padding: 8px 14px; border-radius: 20px; opacity: 0;
+    transition: opacity .25s; pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: .95; }
+
+  /* The comments modal: how the panel shows when the sidebar has no
+     room (phones AND mid-width desktop windows). */
+  #comments-modal {
+    position: fixed; inset: 0; z-index: 30; display: none;
+    background: rgba(0, 0, 0, .45);
+    align-items: flex-end; justify-content: center;
+  }
+  #comments-modal.open { display: flex; }
+  #comments-modal .sheet {
+    background: var(--bg); width: 100%; max-width: 640px;
+    max-height: 80vh; overflow-y: auto;
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+    border: 1px solid var(--line); border-radius: 12px 12px 0 0;
+  }
+  #comments-modal .sheet-head { display: flex; align-items: center; }
+  #comments-modal .sheet-head .spacer { flex: 1 1 auto; }
+  #comments-modal h2 { margin-top: 4px; }
+
+  /* Desktop (pointer + keyboard): the action bar docks under the
+     header as a persistent toolbar -- controls stay discoverable,
+     disabled until a selection exists, and the editor never jumps. */
+  @media (min-width: 900px) {
+    body { padding-bottom: 48px; }
+    #bar { position: static; border-top: 0;
+      border-bottom: 1px solid var(--line); padding: 6px 14px; }
+    #bar, #bar.open { display: none; }
+    body.doc-view #bar { display: block; }
+    #bar .inner { display: flex; flex-wrap: wrap; align-items: center;
+      gap: 2px 16px; max-width: 1120px; }
+    /* Fixed-width slot for the selection readout: the text changes as
+       the selection does, and the rest of the toolbar must not shift. */
+    #bar .which { margin: 0; flex: 0 0 250px; }
+    #bar .which #bar-which { flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #bar .which .spacer { display: none; }
+    #bar button.close { display: none; }
+    #bar .btn-row { margin: 0; }
+    /* small basis so the whole toolbar fits one row at ~1200px+; the
+       composer textarea still grows into the available space */
+    #bar #bar-comment { flex: 1 1 120px; }
+    #bar button { min-height: 32px; }
+    #bar textarea { min-height: 32px; flex: 1 1 200px; }
+    #comments-modal { align-items: center; padding: 24px; }
+    #comments-modal .sheet { border-radius: 12px; }
+    #toast { bottom: 30px; }
+  }
+
+  /* Wide desktop: comments ride a sticky sidebar beside the editor
+     (--chrome-h is measured off the sticky header+bar by script). */
+  @media (min-width: 1140px) {
+    main.doc { max-width: 1120px; }
+    .doc-layout { display: grid;
+      grid-template-columns: minmax(0, 760px) 300px;
+      gap: 0 20px; justify-content: center; align-items: start; }
+    .doc-side { display: block; position: sticky;
+      top: calc(var(--chrome-h, 60px) + 14px);
+      max-height: calc(100vh - var(--chrome-h, 60px) - 28px);
+      overflow-y: auto; }
+    .doc-side h2 { margin-top: 0; }
+    /* matches .legend button.mini's specificity, which would otherwise
+       keep the modal opener visible beside the sidebar */
+    .legend button.mini.open-comments { display: none; }
+  }
+</style>
+
+<div id="chrome">
+<header>
+  <div data-gc-nav="prose" data-home="#/"></div>
+  <span class="spacer"></span>
+  <button class="mini" id="legend-toggle" aria-expanded="true"
+    aria-controls="legend-bar">highlights</button>
+  <span id="save-state"></span>
+  <span class="note" id="head-note"></span>
+</header>
+
+<div id="bar"><div class="inner">
+  <div class="which">
+    <span id="bar-which"></span>
+    <button class="mini" id="bar-whole" title="apply to whole paragraphs">¶ whole</button>
+    <span class="spacer"></span>
+    <button class="close" id="bar-close">close</button>
+  </div>
+  <div class="btn-row" id="bar-status"><span class="label">status</span></div>
+  <div class="btn-row" id="bar-intent"><span class="label">intent</span></div>
+  <div class="btn-row" id="bar-comment"><span class="label">note</span></div>
+</div></div>
+
+<div id="legend-bar"><div class="legend" id="legend"></div></div>
+</div>
+<script type="module" src="/static/nav.js"></script>
+
+<main id="main"></main>
+
+<div id="comments-modal"><div class="sheet">
+  <div class="sheet-head">
+    <span class="spacer"></span>
+    <button class="close" id="modal-close">close</button>
+  </div>
+  <div id="modal-body"></div>
+</div></div>
+<div id="toast"></div>
+
+<script type="module">
+"use strict";
+import * as CM from "./static/codemirror.bundle.js";
+
+const main = document.getElementById("main");
+const bar = document.getElementById("bar");
+const commentsModal = document.getElementById("comments-modal");
+
+// Desktop breakpoints (mirror the CSS): at mqBar the action bar docks
+// under the header as a persistent toolbar; at mqSide the comments
+// panel rides a sidebar instead of the modal.
+const mqBar = window.matchMedia("(min-width: 900px)");
+const mqSide = window.matchMedia("(min-width: 1140px)");
+const STATUS_VALUES = ["raw_ai", "approved", "human"];
+// escalating instruction: say nothing → polish → rework → hands off
+const INTENT_VALUES = [
+  "flexible", "minor_revisions", "needs_change", "locked",
+];
+// mirrors revisions._INTENT_BADGE_ORDER: which token intent a mixed
+// block badges as (loudest wins; "flexible" is the fallback).
+const INTENT_BADGE_ORDER = ["locked", "needs_change", "minor_revisions"];
+const TOKEN_KEY = "gc_prose_token";
+const AUTOSAVE_MS = 2500;
+
+// Which highlight layers the editor paints (ADR 056 amendment, replacing
+// WP50's six exclusive view modes). Every layer toggles independently and
+// a word shows ALL of its enabled layers at once -- spans carry the full
+// author/status/intent triple, so priority no longer has to mask.
+// The order IS the fill priority: the first enabled layer a span matches
+// paints its background, the rest stack as bars beneath the word.
+const LAYER_KEY = "gc_prose_layers";
+const LAYERS = [
+  "locked", "needs_change", "minor_revisions", "approved", "human",
+  "comments", "blame",
+];
+const LAYER_LABEL = {
+  locked: "locked", needs_change: "needs change",
+  minor_revisions: "minor", approved: "approved", human: "human-typed",
+  comments: "comments", blame: "blame",
+};
+// Solid bar colour per text layer (the paler --*-bg tints are the fills).
+// comments/blame draw their own marks and never stack as bars.
+const BAR_COLOR = {
+  locked: "var(--err)", needs_change: "var(--warn)",
+  minor_revisions: "var(--info)", approved: "var(--ok)",
+  human: "var(--ink-fg)",
+};
+// Absent key = never chosen = every layer on; "" = every layer off.
+const storedLayers = localStorage.getItem(LAYER_KEY);
+const layersOn = new Set(storedLayers == null
+  ? LAYERS
+  : storedLayers.split(",").filter((k) => LAYERS.includes(k)));
+// Whether the frozen legend bar itself is expanded (default yes -- the
+// colours have to be discoverable before they can be dismissed).
+const LEGEND_KEY = "gc_prose_legend_open";
+let legendOpen = localStorage.getItem(LEGEND_KEY) !== "0";
+
+let writesEnabled = false;
+let knowWrites = false;   // spaces fetched at least once this page-load
+
+// The open document view, or null. One object owns everything the doc
+// view holds live: the CM view, the SSE stream, dirty/save state, and
+// the latest server payload (with code-point offsets pre-converted to
+// UTF-16 -- the wire speaks Python code points, CM speaks JS units).
+let doc = null;
+
+// Writes in flight (save/marks/comments all flow through postWrite).
+// While one is pending, SSE version bumps DEFER instead of refetching:
+// the historian bumps the ledger before the POST's payload is built, so
+// the stream announces our own write seconds before the response lands
+// -- refetching then doubles every gesture into POST + full doc GET.
+let writesInFlight = 0;
+let deferredSseVersion = 0;
+// A marks POST in flight disables the action-bar buttons (no stacked
+// conflicting optimistic patches).
+let marksInFlight = false;
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function link(href, text, cls) {
+  const a = el("a", cls, text);
+  a.href = href;
+  return a;
+}
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString([], { hour12: false });
+}
+function shortHash(h) { return h ? h.slice(0, 8) : ""; }
+
+let toastTimer = null;
+function toast(message) {
+  const node = document.getElementById("toast");
+  node.textContent = message;
+  node.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove("show"), 2600);
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(url + " -> " + res.status);
+  return res.json();
+}
+
+function docUrl(space, node) {
+  return "api/prose/doc?space=" + encodeURIComponent(space) +
+    "&node=" + encodeURIComponent(node);
+}
+
+async function fetchSpaces() {
+  const data = await fetchJson("api/prose/spaces");
+  writesEnabled = !!data.writes_enabled;
+  knowWrites = true;
+  return data;
+}
+
+async function ensureWriteState() {
+  if (knowWrites) return;
+  await fetchSpaces();
+}
+
+function setHeadNote() {
+  document.getElementById("head-note").textContent =
+    writesEnabled ? "" : "read-only (GC_PROSE_TOKEN unset)";
+}
+
+// ---- writes (shared 401-prompt / gate handling) ---------------------------
+
+class StaleWrite extends Error {}
+
+async function postWrite(path, body, retried) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  writesInFlight++;
+  let res;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token,
+      },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    writesInFlight--;
+  }
+  if (res.status === 401 && !retried) {
+    const entered = prompt("Write token (GC_PROSE_TOKEN):");
+    if (entered == null) return null;
+    localStorage.setItem(TOKEN_KEY, entered.trim());
+    return postWrite(path, body, true);
+  }
+  if (res.status === 401) { toast("token rejected"); return null; }
+  if (res.status === 403) { toast("writes are disabled"); return null; }
+  if (res.status === 409) throw new StaleWrite();
+  if (!res.ok) { toast("write failed: " + res.status); return null; }
+  return res.json();
+}
+
+// ---- code point <-> UTF-16 offset conversion ------------------------------
+// The wire's offsets (segments, spans, start_char/end_char) count Python
+// code points; CodeMirror positions count JS UTF-16 units. Identity when
+// the body has no astral characters (the common case).
+
+function offsetMaps(text) {
+  let hasAstral = false;
+  for (const ch of text) if (ch.length === 2) { hasAstral = true; break; }
+  if (!hasAstral) {
+    return { toU16: (cp) => cp, toCp: (u16) => u16 };
+  }
+  const cpToU16 = [0];
+  let units = 0;
+  for (const ch of text) {
+    units += ch.length;
+    cpToU16.push(units);
+  }
+  const u16ToCp = new Array(text.length + 1);
+  for (let cp = 0; cp < cpToU16.length; cp++) u16ToCp[cpToU16[cp]] = cp;
+  let last = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (u16ToCp[i] == null) u16ToCp[i] = last; else last = u16ToCp[i];
+  }
+  return {
+    toU16: (cp) => cpToU16[Math.max(0, Math.min(cp, cpToU16.length - 1))],
+    toCp: (u16) => u16ToCp[Math.max(0, Math.min(u16, text.length))],
+  };
+}
+
+// ---- decorations ----------------------------------------------------------
+
+const setAnnotations = CM.StateEffect.define();
+
+const annotationsField = CM.StateField.define({
+  create: () => CM.Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const effect of tr.effects) {
+      if (effect.is(setAnnotations)) value = effect.value;
+    }
+    return value;
+  },
+  provide: (field) => CM.EditorView.decorations.from(field),
+});
+
+// The one toggle-aware seam: every text layer a span carries, in fill
+// priority order, minus the ones the reader switched off. Intent is
+// single-valued, so a span yields at most three (intent + approved +
+// human) -- one fill and up to two bars.
+function spanLayers(status, intent, author) {
+  const layers = [];
+  // "flexible" says nothing, so it has no colour and no toggle.
+  if (intent !== "flexible" && layersOn.has(intent)) layers.push(intent);
+  if (status === "approved" && layersOn.has("approved")) {
+    layers.push("approved");
+  }
+  // Lavender covers both human PROVENANCE: authorship (typed by the
+  // human) and a human status mark. raw_ai stays unhighlighted -- its
+  // meaning is "unreviewed model text", the page's neutral state.
+  if ((status === "human" || author === "human") && layersOn.has("human")) {
+    layers.push("human");
+  }
+  return layers;
+}
+
+// Loudest layer fills, the rest stack as 3px bars below the word. The
+// bars ride a custom property so one CSS rule composes any combination.
+function spanMark(layers) {
+  const spec = { class: "cm-hl cm-fill-" + layers[0] };
+  if (layers.length > 1) {
+    // 2px each: at most two stack, and 4px is what fits in the editor's
+    // half-leading -- deeper bars land under the NEXT line's fill, which
+    // paints over them.
+    const bars = layers.slice(1).map(
+      (key, i) => "0 " + (i + 1) * 2 + "px 0 0 " + BAR_COLOR[key]);
+    spec.attributes = { style: "--hl-bars:" + bars.join(",") };
+  }
+  return CM.Decoration.mark(spec);
+}
+
+// trim a range's trailing whitespace out of the highlight
+function trimTrailingWs(state, from, to) {
+  while (to > from && /\s/.test(state.doc.sliceString(to - 1, to))) to--;
+  return to;
+}
+
+function buildDecorations(data, state) {
+  const ranges = [];
+  // span layout (prose_bridge._segment_rows, positional):
+  // [start, end, author, status, intent]
+  for (const span of data.spans) {
+    const layers = spanLayers(span[3], span[4], span[2]);
+    if (!layers.length) continue;
+    const from = data.map.toU16(span[0]);
+    const to = trimTrailingWs(state, from, data.map.toU16(span[1]));
+    if (to > from && to <= state.doc.length) {
+      ranges.push(spanMark(layers).range(from, to));
+    }
+  }
+  // Comment underlines stack ON TOP of state backgrounds (WP50).
+  if (layersOn.has("comments")) {
+    for (const comment of data.comments || []) {
+      if (!comment.anchor) continue;  // detached: panel-only
+      const from = data.map.toU16(comment.anchor.start);
+      const to = trimTrailingWs(state, from,
+        data.map.toU16(comment.anchor.end));
+      if (to > from && to <= state.doc.length) {
+        ranges.push(CM.Decoration.mark({
+          class: comment.state === "addressed"
+            ? "cm-comment cm-comment-addressed" : "cm-comment",
+        }).range(from, to));
+      }
+    }
+  }
+  if (layersOn.has("blame")) {
+    for (const segment of data.segments) {
+      if (!segment.blame) continue;
+      const from = data.map.toU16(segment.start);
+      if (from > state.doc.length) continue;
+      const line = state.doc.lineAt(from);
+      ranges.push(CM.Decoration.line({
+        class: "cm-blame-" + segment.blame.author,
+      }).range(line.from));
+    }
+  }
+  return CM.Decoration.set(ranges, true);
+}
+
+// ---- optimistic marks -----------------------------------------------------
+// Patch the retained payload in place and re-dispatch decorations the
+// moment a mark button is clicked -- the highlight must not wait on the
+// POST (route lock + sidecar rewrite + payload folds). The POST's
+// response replaces doc.data wholesale, so any edge rounding here
+// (chars vs the server's token boundaries) self-corrects on reconcile.
+
+function applyMarksLocally(targets, kind, value) {
+  const idx = kind === "status" ? 3 : 4;
+  for (const t of targets) {
+    const whole = wholeMode || t.whole;
+    const lo = whole ? t.seg.start : t.seg.start + t.startCp;
+    const hi = whole ? t.seg.end : t.seg.start + t.endCp;
+    if (hi <= lo) continue;
+    // Split overlapping spans at the boundaries; only the covered
+    // middle takes the new value. Author (index 2) never changes --
+    // marks are review state, not provenance.
+    const patched = [];
+    for (const span of doc.data.spans) {
+      if (span[1] <= lo || span[0] >= hi) { patched.push(span); continue; }
+      if (span[0] < lo) {
+        patched.push([span[0], lo, span[2], span[3], span[4]]);
+      }
+      const mid = [Math.max(span[0], lo), Math.min(span[1], hi),
+        span[2], span[3], span[4]];
+      mid[idx] = value;
+      patched.push(mid);
+      if (span[1] > hi) {
+        patched.push([hi, span[1], span[2], span[3], span[4]]);
+      }
+    }
+    doc.data.spans = patched;
+    // Transient client-side copy of the section_states badge rule
+    // (all-agree status else raw_ai; loudest intent) -- display
+    // only, replaced by the authoritative payload seconds later.
+    const statuses = new Set();
+    const intents = new Set();
+    for (const span of doc.data.spans) {
+      if (span[0] < t.seg.end && span[1] > t.seg.start) {
+        statuses.add(span[3]);
+        intents.add(span[4]);
+      }
+    }
+    if (statuses.size) {
+      t.seg.status = statuses.size === 1
+        ? statuses.values().next().value : "raw_ai";
+      t.seg.intent = INTENT_BADGE_ORDER.find((i) => intents.has(i))
+        || "flexible";
+    } else if (whole) {
+      // Unrecorded block (no spans yet): badge feedback only.
+      if (kind === "status") t.seg.status = value;
+      else t.seg.intent = value;
+    }
+  }
+  doc.view.dispatch({
+    effects: setAnnotations.of(buildDecorations(doc.data, doc.view.state)),
+  });
+  updateBar();
+  renderSegInfo(doc.segInfo);
+}
+
+// ---- the layer legend (ADR 056 amendment) ---------------------------------
+// The legend is the control: one chip per highlight layer, each an
+// independent toggle; flipping one re-dispatches decorations from the
+// retained payload -- no refetch, and never through the router (the CM
+// view and scroll position must survive).
+
+function renderLegendToggle() {
+  const btn = document.getElementById("legend-toggle");
+  btn.classList.toggle("on", legendOpen);
+  btn.setAttribute("aria-expanded", legendOpen ? "true" : "false");
+  btn.title = (legendOpen ? "hide" : "show") + " the highlight toggles";
+  document.body.classList.toggle("legend-open", legendOpen);
+}
+
+function repaintLayers() {
+  localStorage.setItem(LAYER_KEY, [...layersOn].join(","));
+  if (!doc) return;
+  renderLegend(doc.legend);
+  doc.view.dispatch({
+    effects: setAnnotations.of(buildDecorations(doc.data, doc.view.state)),
+  });
+}
+
+function renderLegend(legend) {
+  legend.textContent = "";
+  const count = doc && doc.data.comments ? doc.data.comments.length : 0;
+  for (const key of LAYERS) {
+    const on = layersOn.has(key);
+    const btn = el("button", "mini " + (on ? "on" : "off"));
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.title = (on ? "hide " : "show ") + LAYER_LABEL[key] + " highlights";
+    btn.appendChild(el("mark", "sw sw-" + key, LAYER_LABEL[key]));
+    if (key === "comments" && count) {
+      btn.appendChild(document.createTextNode(String(count)));
+    }
+    btn.addEventListener("click", () => {
+      if (on) layersOn.delete(key); else layersOn.add(key);
+      repaintLayers();
+    });
+    legend.appendChild(btn);
+  }
+  const bulk = (label, next) => {
+    const btn = el("button", "mini", label);
+    btn.addEventListener("click", () => {
+      layersOn.clear();
+      for (const key of next) layersOn.add(key);
+      repaintLayers();
+    });
+    legend.appendChild(btn);
+  };
+  bulk("all", LAYERS);
+  bulk("none", []);
+  if (count) {
+    // No sidebar at this width: the modal is the only way to READ the
+    // panel (resolve buttons included), so the opener rides the legend.
+    const opener = el("button", "mini open-comments",
+      "view comments (" + count + ")");
+    opener.addEventListener("click", openCommentsModal);
+    legend.appendChild(opener);
+  }
+  // The read-only case is the header note's job; repeating it here would
+  // cost the frozen bar a whole wrapped line on a phone.
+  if (writesEnabled) {
+    legend.appendChild(
+      el("span", "hint", "type anywhere · select text to mark or comment"));
+  }
+}
+
+// ---- the action bar (marks over the live selection) -----------------------
+
+let wholeMode = false;
+let composerOpen = false;
+let composerTarget = null;
+
+// On desktop the bar is a PERSISTENT toolbar: with no selection it
+// renders disabled instead of hiding, so the controls stay put and the
+// editor never shifts when a selection appears.
+function persistentBar() {
+  return mqBar.matches && !!doc && writesEnabled;
+}
+
+function closeBar() {
+  composerOpen = false;
+  composerTarget = null;
+  if (persistentBar()) { renderIdleBar(); return; }
+  bar.classList.remove("open");
+  document.getElementById("bar-which").textContent = "";
+  renderCommentRow();
+}
+
+function renderIdleBar() {
+  document.getElementById("bar-which").textContent = "no selection";
+  const whole = document.getElementById("bar-whole");
+  whole.classList.remove("on");
+  whole.disabled = true;
+  renderBarButtons(
+    document.getElementById("bar-status"), STATUS_VALUES, "status", true);
+  renderBarButtons(
+    document.getElementById("bar-intent"), INTENT_VALUES, "intent", true);
+  renderCommentRow(true);
+  bar.classList.add("open");
+}
+
+// ---- the comments modal (narrow screens, WP50 desktop pass) ---------------
+// One panel node renders the comments; it PARKS in the (hidden) .doc-side
+// aside and reparents into the modal sheet while open -- listeners and
+// scroll targets survive, nothing renders twice.
+
+function openCommentsModal() {
+  if (!doc) return;
+  document.getElementById("modal-body").appendChild(doc.panel);
+  commentsModal.classList.add("open");
+}
+
+function closeCommentsModal() {
+  if (!commentsModal.classList.contains("open")) return;
+  commentsModal.classList.remove("open");
+  if (doc) doc.side.appendChild(doc.panel);
+}
+
+function segmentsU16(data) {
+  return data.segments.map((s) => ({
+    seg: s,
+    from: data.map.toU16(s.start),
+    to: data.map.toU16(s.end),
+  }));
+}
+
+function currentTargets() {
+  if (!doc || !writesEnabled) return null;
+  const sel = doc.view.state.selection.main;
+  if (sel.empty) return null;
+  const targets = [];
+  for (const { seg, from, to } of segmentsU16(doc.data)) {
+    const ovFrom = Math.max(sel.from, from);
+    const ovTo = Math.min(sel.to, to);
+    if (ovFrom >= ovTo) continue;  // the blank gap between paragraphs
+    targets.push({
+      seg,
+      whole: ovFrom <= from && ovTo >= to,
+      startCp: doc.data.map.toCp(ovFrom) - seg.start,
+      endCp: doc.data.map.toCp(ovTo) - seg.start,
+    });
+  }
+  return targets.length ? targets : null;
+}
+
+function selectionAgreedValue(kind) {
+  // The value the SELECTION's own tokens agree on (from the server's
+  // span runs), not the paragraph badge -- a badge only flips when the
+  // whole paragraph agrees, so it misreports ranged marks.
+  if (!doc) return null;
+  const sel = doc.view.state.selection.main;
+  const index = kind === "status" ? 3 : 4;
+  const seen = new Set();
+  for (const span of doc.data.spans) {
+    const from = doc.data.map.toU16(span[0]);
+    const to = doc.data.map.toU16(span[1]);
+    if (from < sel.to && to > sel.from) seen.add(span[index]);
+  }
+  return seen.size === 1 ? seen.values().next().value : null;
+}
+
+function renderBarButtons(row, values, kind, disabled) {
+  for (const old of row.querySelectorAll("button")) old.remove();
+  const agreed = disabled ? null : selectionAgreedValue(kind);
+  for (const value of values) {
+    const btn = el("button", value === agreed ? "current" : "",
+      value.replace("_", " "));
+    btn.disabled = !!disabled || marksInFlight;
+    btn.addEventListener("click", () => applyMarks(kind, value));
+    row.appendChild(btn);
+  }
+}
+
+// ---- the comment composer (WP50) ------------------------------------------
+
+function renderCommentRow(disabled) {
+  const row = document.getElementById("bar-comment");
+  for (const old of row.querySelectorAll("button, textarea")) old.remove();
+  const btn = el("button", "", "add comment");
+  btn.disabled = !!disabled;
+  btn.addEventListener("click", openComposer);
+  row.appendChild(btn);
+}
+
+function openComposer() {
+  const targets = currentTargets();
+  if (!targets || !doc) return;
+  // A multi-paragraph selection anchors the comment on its FIRST
+  // paragraph (the note reads in context; the text says the rest).
+  const target = targets[0];
+  composerTarget = {
+    hash: target.seg.hash,
+    whole: wholeMode || target.whole,
+    startCp: target.startCp,
+    endCp: target.endCp,
+  };
+  composerOpen = true;
+  const row = document.getElementById("bar-comment");
+  for (const old of row.querySelectorAll("button, textarea")) old.remove();
+  const input = el("textarea");
+  input.placeholder = "note for the assistant…";
+  const post = el("button", "current", "post");
+  post.addEventListener("click", () => {
+    const text = input.value.trim();
+    if (!text) { toast("a comment needs text"); return; }
+    postComment(text).catch(() => toast("comment failed"));
+  });
+  const cancel = el("button", "", "cancel");
+  cancel.addEventListener("click", closeComposer);
+  row.appendChild(input);
+  row.appendChild(post);
+  row.appendChild(cancel);
+  input.focus();
+}
+
+function closeComposer() {
+  composerOpen = false;
+  composerTarget = null;
+  renderCommentRow();
+  updateBar();
+}
+
+// The shared write skeleton (comments, resolve, marks): flush any
+// pending save first (a stale save opens the conflict banner), POST,
+// and on a stale base toast + refetch instead. `buildPayload` runs
+// AFTER the flush -- a save in flight refreshes doc.data.base, and the
+// POST must carry the new one. save() itself stays a separate flow:
+// its dirty/in-flight bookkeeping would contort both.
+async function submitWrite(path, buildPayload, { onStale, onFresh,
+    onError, success } = {}) {
+  try {
+    await ensureSaved();
+  } catch (err) {
+    if (err instanceof StaleWrite) { showConflict(); return; }
+    if (onError) await onError();
+    throw err;
+  }
+  let fresh;
+  try {
+    fresh = await postWrite(path, buildPayload());
+  } catch (err) {
+    if (err instanceof StaleWrite) {
+      // The refetch below also reverts any optimistic patch.
+      toast("document changed elsewhere -- refreshing");
+      if (onStale) onStale();
+      await refetchDoc();
+      return;
+    }
+    if (onError) await onError();
+    throw err;
+  }
+  if (!fresh) { if (onError) await onError(); return; }
+  if (onFresh) onFresh();
+  applyDocPayload(fresh);
+  toast(success);
+}
+
+async function postComment(text) {
+  if (!doc || !composerTarget) return;
+  const buildComment = () => {
+    const comment = { hash: composerTarget.hash, text };
+    if (!composerTarget.whole) {
+      comment.start_char = composerTarget.startCp;
+      comment.end_char = composerTarget.endCp;
+    }
+    return comment;
+  };
+  await submitWrite("api/prose/comments",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             comment: buildComment() }),
+    {
+      onStale: closeComposer,
+      onFresh: () => {
+        composerOpen = false;
+        composerTarget = null;
+        renderCommentRow();
+      },
+      success: "comment added",
+    });
+}
+
+async function resolveComment(id) {
+  if (!doc) return;
+  await submitWrite("api/prose/comments",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             resolve: id }),
+    { success: "comment resolved" });
+}
+
+// The open inline comment edit, or null: {id, value}. The draft lives
+// HERE, not in the DOM -- renderComments re-runs on every payload (SSE
+// refetches included) and re-seeds the textarea from it, so a refetch
+// never destroys a half-typed edit (the composer guard's discipline).
+let commentEdit = null;
+
+async function saveCommentEdit(id) {
+  if (!doc || !commentEdit || commentEdit.id !== id) return;
+  const text = commentEdit.value.trim();
+  if (!text) { toast("a comment needs text"); return; }
+  // On a stale base the draft survives the refetch; save again after.
+  await submitWrite("api/prose/comments",
+    () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+             edit: { id, text } }),
+    {
+      onFresh: () => { commentEdit = null; },
+      success: "comment updated",
+    });
+}
+
+function cancelCommentEdit() {
+  commentEdit = null;
+  if (doc) renderComments(doc.panel);
+}
+
+function renderComments(panel) {
+  panel.textContent = "";
+  if (!doc) return;
+  const comments = doc.data.comments || [];
+  if (!comments.length) {
+    // Only ever visible in the sidebar (the modal opener needs count>0).
+    panel.appendChild(el("p", "note",
+      "No comments yet — select text and add a note."));
+    return;
+  }
+  panel.appendChild(el("h2", null, "Comments (" + comments.length + ")"));
+  for (const comment of comments) {
+    const row = el("div", "row comment-row");
+    row.dataset.comment = comment.id;
+    const sub = el("div", "sub");
+    sub.appendChild(el("span", "badge " + comment.state, comment.state));
+    const author = comment.by === "human:prose-page" ? "you" : comment.by;
+    sub.appendChild(el("span", null,
+      author + (comment.at ? " · " + fmtTime(comment.at) : "")));
+    if (comment.state === "addressed") {
+      sub.appendChild(el("span", null,
+        "by " + comment.state_by + " -- awaiting your review"));
+    }
+    if (!comment.anchor) {
+      sub.appendChild(el("span", null, "original text was removed"));
+    }
+    sub.appendChild(el("span", "spacer"));
+    const editing = commentEdit && commentEdit.id === comment.id;
+    if (writesEnabled && !editing) {
+      const edit = el("button", "mini", "edit");
+      edit.addEventListener("click", (event) => {
+        event.stopPropagation();
+        commentEdit = { id: comment.id, value: comment.text };
+        renderComments(panel);
+        const open = panel.querySelector(
+          '[data-comment="' + comment.id + '"] textarea');
+        if (open) open.focus();
+      });
+      sub.appendChild(edit);
+      const resolve = el("button", "mini", "resolve");
+      resolve.addEventListener("click", (event) => {
+        event.stopPropagation();
+        resolveComment(comment.id).catch(() => toast("resolve failed"));
+      });
+      sub.appendChild(resolve);
+    }
+    row.appendChild(sub);
+    if (editing) {
+      const input = el("textarea");
+      input.value = commentEdit.value;
+      input.addEventListener("input", () => {
+        commentEdit.value = input.value;
+      });
+      input.addEventListener("click", (event) => event.stopPropagation());
+      const actions = el("div", "btn-row");
+      const save = el("button", "mini current", "save");
+      save.addEventListener("click", (event) => {
+        event.stopPropagation();
+        saveCommentEdit(comment.id).catch(() => toast("edit failed"));
+      });
+      const cancel = el("button", "mini", "cancel");
+      cancel.addEventListener("click", (event) => {
+        event.stopPropagation();
+        cancelCommentEdit();
+      });
+      actions.appendChild(save);
+      actions.appendChild(cancel);
+      row.appendChild(input);
+      row.appendChild(actions);
+    } else {
+      row.appendChild(el("div", "txt", comment.text));
+    }
+    if (comment.anchor) {
+      row.addEventListener("click", () => {
+        if (commentEdit && commentEdit.id === comment.id) return;
+        closeCommentsModal();  // jumping to the text: get out of its way
+        const from = doc.data.map.toU16(comment.anchor.start);
+        const to = doc.data.map.toU16(comment.anchor.end);
+        doc.view.dispatch({
+          selection: { anchor: from, head: to },
+          scrollIntoView: true,
+        });
+        doc.view.focus();
+      });
+    }
+    panel.appendChild(row);
+  }
+}
+
+function updateBar() {
+  if (composerOpen) return;  // never rebuild rows under a typing user
+  const targets = currentTargets();
+  if (!targets) { closeBar(); return; }
+  const which = document.getElementById("bar-which");
+  const allWhole = wholeMode || targets.every((t) => t.whole);
+  if (targets.length === 1) {
+    const t = targets[0];
+    which.textContent = "§" + shortHash(t.seg.hash) +
+      (allWhole ? " · whole paragraph" : " · selection");
+  } else {
+    which.textContent = targets.length + " paragraphs" +
+      (allWhole ? "" : " · selection");
+  }
+  const whole = document.getElementById("bar-whole");
+  whole.disabled = false;
+  whole.classList.toggle("on", wholeMode);
+  renderBarButtons(
+    document.getElementById("bar-status"), STATUS_VALUES, "status");
+  renderBarButtons(
+    document.getElementById("bar-intent"), INTENT_VALUES, "intent");
+  renderCommentRow();
+  bar.classList.add("open");
+}
+
+async function applyMarks(kind, value) {
+  const targets = currentTargets();
+  if (!targets || !doc || marksInFlight) return;
+  const buildMarks = () => targets.map((t) => {
+    const mark = { hash: t.seg.hash, kind, value };
+    if (!wholeMode && !t.whole) {
+      mark.start_char = t.startCp;
+      mark.end_char = t.endCp;
+    }
+    return mark;
+  });
+  // Instant feedback: patch locally before the POST -- unless a save
+  // is pending (its reconcile could shift the offsets under us).
+  const optimistic = !doc.dirty && !doc.saving;
+  marksInFlight = true;
+  if (optimistic) applyMarksLocally(targets, kind, value);
+  try {
+    await submitWrite("api/prose/marks",
+      () => ({ space: doc.space, node: doc.node, base: doc.data.base,
+               marks: buildMarks() }),
+      {
+        success: kind + " → " + value.replace("_", " "),
+        onError: optimistic ? async () => {
+          toast("mark failed -- reverting");
+          await refetchDoc().catch(() => {});
+        } : null,
+      });
+  } finally {
+    marksInFlight = false;
+    updateBar();
+  }
+}
+
+// ---- saving ---------------------------------------------------------------
+
+function saveState(text, cls) {
+  const node = document.getElementById("save-state");
+  node.textContent = text;
+  node.className = cls || "";
+}
+
+function markDirty() {
+  if (!doc) return;
+  doc.dirty = true;
+  saveState("unsaved changes", "dirty");
+  clearTimeout(doc.autosaveTimer);
+  doc.autosaveTimer = setTimeout(() => { save().catch(() => {}); },
+    AUTOSAVE_MS);
+}
+
+async function save() {
+  if (!doc || !doc.dirty || doc.saving || !writesEnabled) return;
+  doc.saving = true;
+  const body = doc.view.state.doc.toString();
+  saveState("saving…");
+  try {
+    const fresh = await postWrite("api/prose/save", {
+      space: doc.space, node: doc.node, base: doc.data.base, body,
+    });
+    if (!fresh) { saveState("save failed", "err"); return; }
+    // Edits typed while the save was in flight keep the buffer dirty;
+    // the next autosave picks them up against the new base.
+    const stillDirty = doc.view.state.doc.toString() !== body;
+    doc.dirty = stillDirty;
+    applyDocPayload(fresh);
+    if (stillDirty) markDirty(); else saveState("saved");
+  } catch (err) {
+    if (err instanceof StaleWrite) { showConflict(); return; }
+    saveState("save failed", "err");
+    throw err;
+  } finally {
+    doc.saving = false;
+  }
+}
+
+async function ensureSaved() {
+  if (!doc) return;
+  while (doc.saving) await new Promise((r) => setTimeout(r, 60));
+  if (doc.dirty) {
+    clearTimeout(doc.autosaveTimer);
+    await save();
+  }
+  while (doc && doc.saving) await new Promise((r) => setTimeout(r, 60));
+}
+
+// ---- conflicts (a 409'd save: the node changed under the page) ------------
+
+function showConflict() {
+  if (!doc || doc.conflictOpen) return;
+  doc.conflictOpen = true;
+  saveState("conflict", "err");
+  const banner = el("div", "banner err",
+    "This document changed elsewhere while you were editing.");
+  const row = el("div", "btn-row");
+  const mine = el("button", null, "keep mine (overwrite)");
+  mine.addEventListener("click", async () => {
+    const body = doc.view.state.doc.toString();
+    const current = await fetchJson(docUrl(doc.space, doc.node));
+    const fresh = await postWrite("api/prose/save", {
+      space: doc.space, node: doc.node, base: current.base, body,
+    }).catch(() => null);
+    banner.remove();
+    doc.conflictOpen = false;
+    if (fresh) { doc.dirty = false; applyDocPayload(fresh); saveState("saved"); }
+  });
+  const theirs = el("button", null, "take theirs (discard mine)");
+  theirs.addEventListener("click", async () => {
+    banner.remove();
+    doc.conflictOpen = false;
+    doc.dirty = false;
+    await refetchDoc();
+    saveState("");
+  });
+  row.appendChild(mine);
+  row.appendChild(theirs);
+  banner.appendChild(row);
+  doc.above.insertBefore(banner, doc.above.firstChild);
+}
+
+// ---- the document view ----------------------------------------------------
+
+function minimalChange(oldText, newText) {
+  let start = 0;
+  const minLen = Math.min(oldText.length, newText.length);
+  while (start < minLen && oldText[start] === newText[start]) start++;
+  let endOld = oldText.length;
+  let endNew = newText.length;
+  while (endOld > start && endNew > start
+         && oldText[endOld - 1] === newText[endNew - 1]) { endOld--; endNew--; }
+  return { from: start, to: endOld, insert: newText.slice(start, endNew) };
+}
+
+// One dropdown for the whole history, newest first: picking a revision
+// routes to its diff, exactly as the per-revision chips did.
+function renderRevisions(strip, data, space, node) {
+  strip.textContent = "";
+  const revs = data.revisions;
+  if (!revs.length) {
+    strip.appendChild(el("span", "last", "no revisions recorded yet"));
+    return;
+  }
+  const select = el("select");
+  select.title = "open a revision diff";
+  const head = el("option", null, revs.length + " revision" +
+    (revs.length === 1 ? "" : "s") + " · pick one to diff");
+  head.value = "";
+  select.appendChild(head);
+  for (let i = revs.length - 1; i >= 0; i--) {
+    const rev = revs[i];
+    const option = el("option", null, "r" + rev.seq + " · " + rev.detail +
+      " · +" + rev.added + " −" + rev.removed + " · " + fmtTime(rev.at));
+    option.value = String(rev.seq);
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => {
+    if (!select.value) return;
+    location.hash = "#/node/" + encodeURIComponent(space) + "/" +
+      encodeURIComponent(node) + "/rev/" + select.value;
+  });
+  strip.appendChild(select);
+  const last = revs[revs.length - 1];
+  strip.appendChild(el("span", "last",
+    "last " + last.author + " · " + fmtTime(last.at)));
+}
+
+function renderSegInfo(info) {
+  info.textContent = "";
+  if (!doc) return;
+  const head = doc.view.state.selection.main.head;
+  const hit = segmentsU16(doc.data).find(
+    ({ from, to }) => head >= from && head <= to);
+  if (!hit) return;
+  const seg = hit.seg;
+  info.appendChild(el("span", null, "§" + shortHash(seg.hash)));
+  info.appendChild(el("span", null, seg.blame
+    ? seg.blame.detail + " · r" + seg.blame.seq + " · " + fmtTime(seg.blame.at)
+    : "not yet recorded"));
+  info.appendChild(el("span", "badge " + seg.status,
+    seg.status.replace("_", " ")));
+  if (seg.intent !== "flexible") {
+    info.appendChild(el("span", "badge " + seg.intent,
+      seg.intent.replace("_", " ")));
+  }
+}
+
+function applyDocPayload(fresh, reconcileText) {
+  if (!doc) return;
+  fresh.map = offsetMaps(fresh.body);
+  doc.data = fresh;
+  if (reconcileText) {
+    const current = doc.view.state.doc.toString();
+    if (current !== fresh.body) {
+      doc.view.dispatch({ changes: minimalChange(current, fresh.body) });
+    }
+  }
+  doc.view.dispatch({
+    effects: setAnnotations.of(buildDecorations(fresh, doc.view.state)),
+  });
+  renderRevisions(doc.revs, fresh, doc.space, doc.node);
+  renderSegInfo(doc.segInfo);
+  renderComments(doc.panel);
+  renderLegend(doc.legend);  // the comments chip count tracks the payload
+  // An effects-only transaction doesn't fire the selection listener,
+  // so the action bar's .current buttons must re-render here or they
+  // show the PRE-mark state forever. (While the composer is open,
+  // updateBar leaves the rows alone -- a refetch must never destroy a
+  // half-typed comment.)
+  updateBar();
+  // Now that doc.data.version is current, any SSE bump deferred behind
+  // an in-flight write either matched this payload (drop) or came from
+  // a genuinely concurrent bot write (refetch).
+  drainDeferredSse();
+}
+
+async function refetchDoc() {
+  if (!doc) return;
+  const fresh = await fetchJson(docUrl(doc.space, doc.node));
+  applyDocPayload(fresh, true);
+}
+
+function drainDeferredSse() {
+  if (!doc || writesInFlight > 0) return;
+  if (deferredSseVersion > doc.data.version) {
+    deferredSseVersion = 0;
+    refetchDoc().catch(() => {});
+  } else {
+    deferredSseVersion = 0;
+  }
+}
+
+function openEvents(space) {
+  const source = new EventSource(
+    "api/prose/events?space=" + encodeURIComponent(space));
+  source.onmessage = (event) => {
+    if (!doc) return;
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; }
+    if (payload.node !== doc.node) return;
+    // The ledger only increments, and every write's own POST response
+    // carries a version read AFTER the bump -- so anything <= what we
+    // hold is already applied (monotonic own-write guard).
+    if (payload.version <= doc.data.version) return;
+    if (writesInFlight > 0) {  // our POST's response carries this bump
+      deferredSseVersion = Math.max(deferredSseVersion, payload.version);
+      return;
+    }
+    if (doc.dirty || doc.saving) return;  // the save's 409 will surface it
+    refetchDoc().catch(() => {});
+  };
+  return source;
+}
+
+function closeDoc() {
+  if (!doc) return;
+  closeCommentsModal();  // while doc.side still exists to take the panel
+  commentEdit = null;
+  clearTimeout(doc.autosaveTimer);
+  if (doc.events) doc.events.close();
+  doc.view.destroy();
+  doc.legend.textContent = "";
+  doc = null;
+  document.body.classList.remove("doc-view", "has-doc");
+  main.classList.remove("doc");
+  closeBar();
+  saveState("");
+}
+
+async function renderNode(space, node) {
+  closeDoc();
+  await ensureWriteState();
+  const data = await fetchJson(docUrl(space, node));
+
+  // Two-column shell: the editor column, and an aside the comments
+  // panel parks in (a sticky sidebar on wide screens, invisible below
+  // that -- the modal borrows the panel node while open).
+  const frag = document.createDocumentFragment();
+  const layout = el("div", "doc-layout");
+  frag.appendChild(layout);
+  const column = el("div");
+  layout.appendChild(column);
+  const crumbs = el("div", "crumbs");
+  crumbs.appendChild(link("#/", "spaces"));
+  crumbs.appendChild(document.createTextNode(" / " + data.name));
+  column.appendChild(crumbs);
+  const above = el("div");
+  column.appendChild(above);
+
+  // The legend lives in the frozen chrome, not the column -- the toggles
+  // stay reachable however far the reader has scrolled.
+  const legend = document.getElementById("legend");
+
+  const revs = el("div", "revs");
+  column.appendChild(revs);
+  const segInfo = el("div");
+  segInfo.id = "seg-info";
+  column.appendChild(segInfo);
+  const host = el("div");
+  host.id = "editor-host";
+  column.appendChild(host);
+  const side = el("aside", "doc-side");
+  layout.appendChild(side);
+  const panel = el("div");
+  side.appendChild(panel);
+
+  const highlight = CM.HighlightStyle.define([
+    { tag: CM.tags.heading, class: "tok-heading" },
+    { tag: CM.tags.emphasis, class: "tok-emphasis" },
+    { tag: CM.tags.strong, class: "tok-strong" },
+    { tag: CM.tags.monospace, class: "tok-monospace" },
+    { tag: CM.tags.meta, class: "tok-meta" },
+    { tag: CM.tags.processingInstruction, class: "tok-meta" },
+    { tag: CM.tags.link, class: "tok-link" },
+    { tag: CM.tags.url, class: "tok-url" },
+  ]);
+
+  let barTick = null;
+  const listener = CM.EditorView.updateListener.of((update) => {
+    if (!doc) return;
+    if (update.docChanged) markDirty();
+    if (update.selectionSet || update.docChanged) {
+      clearTimeout(barTick);
+      barTick = setTimeout(() => { updateBar(); renderSegInfo(segInfo); }, 120);
+    }
+  });
+
+  // A click on an underlined comment range scrolls its panel row into
+  // view (no tooltip machinery -- nothing here needs a bundle rebuild).
+  const commentClicks = CM.EditorView.domEventHandlers({
+    click: (event, view) => {
+      if (!doc || !(event.target instanceof Element)) return false;
+      if (!event.target.closest(".cm-comment")) return false;
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null) return false;
+      const cp = doc.data.map.toCp(pos);
+      const hit = (doc.data.comments || []).find((c) =>
+        c.anchor && cp >= c.anchor.start && cp <= c.anchor.end);
+      if (!hit) return false;
+      if (!mqSide.matches) openCommentsModal();  // no sidebar: show the panel
+      const row = document.querySelector(
+        '[data-comment="' + hit.id + '"]');
+      if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+      return false;  // never consume: the caret still moves
+    },
+  });
+
+  const extensions = [
+    CM.history(),
+    CM.drawSelection(),
+    CM.EditorView.lineWrapping,
+    // Overrides CodeMirror's hardcoded spellcheck="false" on the content
+    // DOM (contentAttributes merges over its defaults). Squiggles only:
+    // autocorrect/autocapitalize stay off because they REWRITE the buffer
+    // silently, and every such rewrite would ride markDirty -> autosave
+    // into the sidecar log as a real human revision -- on invented names,
+    // most of all. Advisory marking suits tracked revisions; substitution
+    // does not. Read-only needs no guard: editable.of(false) below sets
+    // contenteditable="false", which browsers never spellcheck.
+    CM.EditorView.contentAttributes.of({ spellcheck: "true" }),
+    CM.markdown(),
+    CM.syntaxHighlighting(highlight),
+    annotationsField,
+    listener,
+    commentClicks,
+    CM.keymap.of([
+      {
+        key: "Mod-s",
+        run: () => { save().catch(() => {}); return true; },
+      },
+      ...CM.defaultKeymap,
+      ...CM.historyKeymap,
+    ]),
+  ];
+  if (!writesEnabled) {
+    extensions.push(CM.EditorState.readOnly.of(true));
+    extensions.push(CM.EditorView.editable.of(false));
+  }
+
+  const state = CM.EditorState.create({ doc: data.body, extensions });
+  main.replaceChildren(frag);
+  main.classList.add("doc");
+  document.body.classList.toggle("doc-view", writesEnabled);
+  const view = new CM.EditorView({ state, parent: host });
+
+  doc = {
+    space, node, data, view, above, revs, segInfo, panel, legend, side,
+    dirty: false, saving: false, conflictOpen: false,
+    autosaveTimer: null, events: null,
+  };
+  document.body.classList.add("has-doc");
+  renderLegendToggle();
+  // The initial render is the payload funnel too (it attaches the
+  // offset map, dispatches decorations, renders revisions / comments /
+  // legend / seg-info) -- one render path, first paint included.
+  applyDocPayload(data);
+  doc.events = openEvents(space);
+  setHeadNote();
+}
+
+// ---- home + diff views (detached render, single swap) ---------------------
+
+async function renderHome() {
+  closeDoc();
+  const data = await fetchSpaces();
+  setHeadNote();
+  const frag = document.createDocumentFragment();
+  if (!data.spaces.length) {
+    frag.appendChild(el("p", "note",
+      "No live spaces. This page needs the consolidated server " +
+      "(orchestrator.serve) with at least one bound space whose Space " +
+      "Context lists Tracked types."));
+  }
+  for (const space of data.spaces) {
+    frag.appendChild(el("h2", null, space.label));
+    if (space.error)
+      frag.appendChild(el("div", "banner warn", space.error));
+    if (!space.nodes.length)
+      frag.appendChild(el("p", "note",
+        "No tracked nodes yet (Space Context > Tracked types, then a " +
+        "first revision)."));
+    for (const node of space.nodes) {
+      const row = link("#/node/" + encodeURIComponent(space.space_id) +
+        "/" + encodeURIComponent(node.id), "", "row");
+      row.appendChild(el("b", null, node.name));
+      row.appendChild(el("div", "sub", node.revisions + " revision" +
+        (node.revisions === 1 ? "" : "s") +
+        (node.last_at ? " · last " + node.last_author +
+          " · " + fmtTime(node.last_at) : "")));
+      frag.appendChild(row);
+    }
+  }
+  main.replaceChildren(frag);
+}
+
+async function renderDiff(space, node, seq) {
+  closeDoc();
+  const diff = await fetchJson("api/prose/diff?space=" +
+    encodeURIComponent(space) + "&node=" + encodeURIComponent(node) +
+    "&seq=" + encodeURIComponent(seq));
+  const frag = document.createDocumentFragment();
+  const crumbs = el("div", "crumbs");
+  crumbs.appendChild(link("#/", "spaces"));
+  crumbs.appendChild(document.createTextNode(" / "));
+  crumbs.appendChild(link("#/node/" + encodeURIComponent(space) + "/" +
+    encodeURIComponent(node), "document"));
+  crumbs.appendChild(document.createTextNode(" / revision " + diff.seq));
+  frag.appendChild(crumbs);
+  frag.appendChild(el("p", "note", diff.detail + " · " + fmtTime(diff.at)));
+  if (!diff.pairs.length)
+    frag.appendChild(el("p", "note",
+      "No paragraph changes in this revision (a pure move keeps every " +
+      "paragraph's identity)."));
+  for (const pair of diff.pairs) {
+    const wrap = el("div", "diff-pair");
+    const meta = el("div", "meta");
+    const label = pair.new_hash
+      ? (pair.old_hash
+          ? "§" + shortHash(pair.old_hash) + " → §" +
+            shortHash(pair.new_hash)
+          : "new §" + shortHash(pair.new_hash))
+      : "deleted §" + shortHash(pair.old_hash);
+    meta.appendChild(el("span", null, label));
+    wrap.appendChild(meta);
+    for (const span of pair.spans) {
+      const kind = span[0];
+      const tag = kind === "add" ? "ins" : kind === "del" ? "del" : "span";
+      wrap.appendChild(el(tag, null, span[1]));
+    }
+    frag.appendChild(wrap);
+  }
+  main.replaceChildren(frag);
+}
+
+// ---- router ---------------------------------------------------------------
+
+let routing = false;
+async function route() {
+  if (routing) return;  // a hashchange mid-fetch must not interleave renders
+  routing = true;
+  const hash = location.hash || "#/";
+  try {
+    const diffMatch = hash.match(/^#\/node\/([^/]+)\/([^/]+)\/rev\/(\d+)$/);
+    const nodeMatch = hash.match(/^#\/node\/([^/]+)\/([^/]+)$/);
+    if (diffMatch) {
+      await renderDiff(decodeURIComponent(diffMatch[1]),
+        decodeURIComponent(diffMatch[2]), diffMatch[3]);
+    } else if (nodeMatch) {
+      await renderNode(decodeURIComponent(nodeMatch[1]),
+        decodeURIComponent(nodeMatch[2]));
+    } else {
+      await renderHome();
+    }
+  } catch (err) {
+    closeDoc();
+    const frag = document.createDocumentFragment();
+    frag.appendChild(el("div", "banner err",
+      "failed to load: " + err.message));
+    const back = el("p", "note");
+    back.appendChild(link("#/", "back to the space list"));
+    frag.appendChild(back);
+    main.replaceChildren(frag);
+  } finally {
+    routing = false;
+  }
+  window.scrollTo(0, 0);
+}
+
+document.getElementById("bar-close").addEventListener("click", () => {
+  if (doc) {
+    const head = doc.view.state.selection.main.head;
+    doc.view.dispatch({ selection: { anchor: head } });
+  }
+  closeBar();
+});
+document.getElementById("legend-toggle").addEventListener("click", () => {
+  legendOpen = !legendOpen;
+  localStorage.setItem(LEGEND_KEY, legendOpen ? "1" : "0");
+  renderLegendToggle();
+});
+document.getElementById("bar-whole").addEventListener("click", () => {
+  wholeMode = !wholeMode;
+  updateBar();
+});
+document.getElementById("modal-close")
+  .addEventListener("click", closeCommentsModal);
+commentsModal.addEventListener("click", (event) => {
+  if (event.target === commentsModal) closeCommentsModal();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (commentsModal.classList.contains("open")) closeCommentsModal();
+  else closeBar();
+});
+// Crossing a breakpoint swaps the bar's home (bottom sheet <-> top
+// toolbar) and the panel's home (modal <-> sidebar); re-render so JS
+// state matches what the CSS now shows.
+mqBar.addEventListener("change", () => { if (doc) updateBar(); });
+mqSide.addEventListener("change", () => {
+  if (mqSide.matches) closeCommentsModal();
+});
+// The sticky sidebar sits below the sticky chrome, whose height varies
+// (wrapping header, bar rows appearing): measure it into a CSS var.
+const chrome = document.getElementById("chrome");
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty(
+    "--chrome-h", chrome.offsetHeight + "px");
+}).observe(chrome);
+window.addEventListener("beforeunload", (event) => {
+  if (doc && doc.dirty) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && doc && doc.dirty) {
+    save().catch(() => {});
+  }
+});
+renderLegendToggle();
+window.addEventListener("hashchange", () => {
+  const leave = () => route();
+  if (doc && doc.dirty) { ensureSaved().catch(() => {}).then(leave); }
+  else leave();
+});
+route();
+</script>

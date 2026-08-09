@@ -125,3 +125,185 @@ class TestToolAndBlockAgree:
         block = await build_turn_context(services)
         assert "follow up on the vault door" in block
         assert "Mira (Character" in block
+
+
+class TestTrackedBodies:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    async def test_tracked_full_entries_render_per_section_anchors(
+        self, services, world
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+        from graph_context.domain.models import NodeDraft
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        chapter = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(chapter.id, author_detail="m")
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        await historian.record_mark(
+            chapter.id, kind="intent", block_hash=h1,
+            value="locked", by="user",
+        )
+        services.historian = historian
+        services.session.working_set.hold(chapter.id, Detail.FULL)
+        block = await build_turn_context(services)
+        assert f"[§{h1} · locked] {self.P1}" in block
+        assert f"[§{h2}] {self.P2}" in block  # default intent says nothing
+
+    async def test_untracked_bodies_render_unchanged(
+        self, services, world
+    ) -> None:
+        services.session.working_set.hold(world.mira.id, Detail.FULL)
+        await services.repository.update_node(
+            world.mira.id, body="Leads the survivors through the vaults."
+        )
+        block = await build_turn_context(services)
+        assert "    Leads the survivors through the vaults." in block
+        assert "[§" not in block
+
+
+class TestLockedRunLines:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    async def test_partially_locked_blocks_spell_out_their_runs(
+        self, services, world
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+        from graph_context.domain.models import Detail, NodeDraft
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        chapter = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(chapter.id, author_detail="m")
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        tokens = revisions.block_tokens(revisions.normalize_block(self.P1))
+        await historian.record_mark(
+            chapter.id, kind="intent", block_hash=h1,
+            value="locked", by="user", start=0, end=4,
+        )
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        await historian.record_mark(  # fully locked: badge only, no list
+            chapter.id, kind="intent", block_hash=h2,
+            value="locked", by="user",
+        )
+        services.historian = historian
+        services.session.working_set.hold(chapter.id, Detail.FULL)
+        block = await build_turn_context(services)
+        run = "".join(tokens[:4]).strip()
+        assert f'locked verbatim: "{run}"' in block
+        # The fully locked block gets the badge, not a redundant list.
+        assert block.count("locked verbatim:") == 1
+        assert f"[§{h2} · locked]" in block
+
+
+class TestCommentLines:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    async def _tracked(self, services):
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+        from graph_context.domain.models import NodeDraft
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        chapter = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(chapter.id, author_detail="m")
+        services.historian = historian
+        services.session.working_set.hold(chapter.id, Detail.FULL)
+        return chapter, historian
+
+    async def test_comments_render_under_their_anchor_block(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        state = await historian.record_comment(
+            chapter.id, block_hash=h2, text="count them again",
+            by="human:prose-page", start=0, end=3,
+        )
+        block = await build_turn_context(services)
+        line = (
+            f'comment #{state.id} (open): "count them again"'
+            f' — on: "Mira counted the"'
+        )
+        assert line in block
+        assert block.index(self.P2) < block.index(f"#{state.id}")
+
+    async def test_addressed_comments_say_they_await_review(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        state = await historian.record_comment(
+            chapter.id, block_hash=h1, text="fix the tense", by="u",
+        )
+        await historian.set_comment_state(
+            chapter.id, comment_id=state.id,
+            value=revisions.COMMENT_ADDRESSED, by="model",
+        )
+        block = await build_turn_context(services)
+        assert (
+            f"comment #{state.id} (addressed; awaiting human review)"
+            in block
+        )
+
+    async def test_detached_comments_trail_the_body(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h2 = revisions.block_hash(revisions.normalize_block(self.P2))
+        state = await historian.record_comment(
+            chapter.id, block_hash=h2, text="count them again", by="u",
+        )
+        await services.repository.update_node(chapter.id, body=self.P1)
+        await historian.record_external_revision(chapter.id)
+        block = await build_turn_context(services)
+        assert (
+            f"detached comment #{state.id} (its text was removed): "
+            '"count them again"' in block
+        )
+
+    async def test_comments_drop_with_bodies_over_budget(
+        self, services, world
+    ) -> None:
+        from graph_context.domain import revisions
+
+        chapter, historian = await self._tracked(services)
+        h1 = revisions.block_hash(revisions.normalize_block(self.P1))
+        await historian.record_comment(
+            chapter.id, block_hash=h1, text="fix the tense", by="u",
+        )
+        block = await build_turn_context(services, budget_chars=500)
+        assert "fix the tense" not in block
+        assert "[body omitted: over context budget" in block

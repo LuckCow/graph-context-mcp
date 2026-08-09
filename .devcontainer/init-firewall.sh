@@ -9,10 +9,15 @@
 #   - VS Code server + extension marketplace (so the host can attach)
 #   - The Docker host on ports 31009/31012 only (Anytype local API)
 #   - The local container subnet (port forwarding to the host)
+#   - tailscaled, by UID rather than by destination (see "Tailscale" below)
 # Everything else: REJECT.
 
 set -euo pipefail
 IFS=$'\n\t'
+
+# The unprivileged user everything in this container actually runs as. The
+# egress policy is written for THIS user, and verified as it (see the bottom).
+WORKLOAD_USER="${WORKLOAD_USER:-dev}"
 
 echo "[firewall] flushing existing rules..."
 

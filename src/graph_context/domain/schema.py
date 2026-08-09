@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 
-from graph_context.errors import SchemaViolation
+from graph_context.errors import InfraWriteDenied, SchemaViolation
 
 
 class Role(StrEnum):
@@ -55,6 +55,10 @@ class Role(StrEnum):
     # transition plus a built-in action the rule engine runs. Humans
     # author them in Anytype; the engine writes status back.
     RULE = "AutomationRule"
+    # Revision-history sidecars (WP41, ADR 049): one per tracked node,
+    # body = the append-only keyframe+delta log. Bot-maintained
+    # bookkeeping; humans read them in Anytype but should not edit.
+    NODE_HISTORY = "NodeHistory"
 
 
 # Roles that are system bookkeeping: hidden from explore by default and
@@ -62,7 +66,7 @@ class Role(StrEnum):
 INFRA_ROLES: frozenset[Role] = frozenset(
     {
         Role.CAPTURE, Role.SESSION_CONTEXT, Role.INTENT, Role.MODE,
-        Role.SCHEDULED, Role.SPACE_CONTEXT, Role.RULE,
+        Role.SCHEDULED, Role.SPACE_CONTEXT, Role.RULE, Role.NODE_HISTORY,
     }
 )
 
@@ -89,6 +93,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "gc_scheduled_event": Role.SCHEDULED,
     "gc_space_context": Role.SPACE_CONTEXT,
     "gc_rule": Role.RULE,
+    "gc_node_history": Role.NODE_HISTORY,
     # The mode/scheduled types' DISPLAY names. Live spaces resolve them via
     # the gc_ keys above; backends without a key registry (the in-memory
     # repository, eval worlds) see the display name as the type, and these
@@ -98,6 +103,7 @@ DEFAULT_TYPE_ROLES: dict[str, Role] = {
     "scheduled event": Role.SCHEDULED,
     "space context": Role.SPACE_CONTEXT,
     "automation rule": Role.RULE,
+    "node history": Role.NODE_HISTORY,
 }
 
 
@@ -126,10 +132,11 @@ def resolve_role(
     return None
 
 
-# Scalar property formats a ``fields`` value can live in (ADR 023). This is
-# tool-surface vocabulary -- the LLM declares one of these when it asks for a
-# new property via ``create_missing_fields`` -- so it lives in the domain, not
-# the adapter (the adapter's REFLECTED_FIELD_FORMATS aliases it).
+# Scalar property formats a ``properties`` value can live in (ADR 023,
+# amended by ADR 042). This is tool-surface vocabulary -- the LLM declares
+# one of these when it asks for a new property via
+# ``create_missing_properties`` -- so it lives in the domain, not the
+# adapter (the adapter's REFLECTED_FIELD_FORMATS aliases it).
 FIELD_FORMATS: frozenset[str] = frozenset(
     {
         "text",
@@ -144,30 +151,11 @@ FIELD_FORMATS: frozenset[str] = frozenset(
     }
 )
 
-
-def validate_field_declarations(
-    fields: Mapping[str, str],
-    create_missing_fields: Mapping[str, str],
-) -> None:
-    """Well-formedness of a write's new-property declarations (ADR 023).
-
-    Every declared key must also carry a value in ``fields`` (a declaration
-    without a value writes nothing), and every declared format must be one
-    of :data:`FIELD_FORMATS`. Whether a key *needs* declaring -- i.e. whether
-    it matches an existing property -- is the repository's call, not ours.
-    """
-    allowed = ", ".join(sorted(FIELD_FORMATS))
-    for key, fmt in create_missing_fields.items():
-        if key not in fields:
-            raise SchemaViolation(
-                f"create_missing_fields declares {key!r} but 'fields' carries "
-                "no value for it; every declared key needs a value in 'fields'"
-            )
-        if fmt.strip().lower() not in FIELD_FORMATS:
-            raise SchemaViolation(
-                f"unknown format {fmt!r} for new field {key!r}; "
-                f"formats: {allowed}"
-            )
+# Everything a new-property declaration may mint (ADR 042): the scalar
+# formats plus ``objects`` -- the format that makes a property a relation,
+# i.e. an edge (ADR 006). Reads stay split (scalars reflect into fields,
+# objects-format properties reflect as edges); creation is one vocabulary.
+CREATABLE_FORMATS: frozenset[str] = FIELD_FORMATS | {"objects"}
 
 
 def validate_type_name(name: str) -> None:
@@ -183,6 +171,25 @@ def validate_type_name(name: str) -> None:
             f"type name {name!r} uses the reserved gc_ prefix "
             "(infrastructure vocabulary); pick a human name"
         )
+
+
+def validate_infra_write(
+    role: Role | None,
+    type_name: str,
+    admitted: frozenset[Role] = frozenset(),
+    known: tuple[str, ...] = (),
+) -> None:
+    """The infra-write guard (ADR 045), in exactly one place.
+
+    Generic node writes may not target infra-role objects -- mode
+    config, scheduled events, rules, session state are system surfaces
+    with their own owners -- unless the caller's privilege ``admitted``
+    the role (today: meta-inspection admits ``Role.MODE``). The
+    dedicated services (scheduler, rule engine, recorders) write through
+    the repository directly and never pass here.
+    """
+    if role in INFRA_ROLES and role not in admitted:
+        raise InfraWriteDenied(type_name, role.value, known)
 
 
 def validate_new_node(

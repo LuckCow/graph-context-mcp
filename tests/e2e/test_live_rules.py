@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from graph_context.application.rule_engine import RuleEngine
 from graph_context.domain import rules
@@ -172,13 +173,17 @@ async def test_scripted_rule_round_trips_live(repo, raw_api):
     assert (await engine.run_tick()).fired == ()
 
 
-async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api):
+async def test_r2_resolved_a_date_target_gets_local_midnight_with_offset(
+    repo, raw_api,
+):
     """R2 (ADR 039), answered by a live probe 2026-07-19: a native date
     property REJECTS naive timestamps (space- or T-separated) and accepts
-    RFC 3339 only WITH a timezone, or a bare date. The engine's clock is
-    naive local (the scheduling convention), so ``set-property-to-now``
-    writes the bare LOCAL date to date-format targets -- this certifies
-    that write shape end-to-end through a fired rule."""
+    RFC 3339 only WITH a timezone, or a bare date -- but a bare date is
+    stored as midnight UTC, which clients then render a day early in any
+    zone west of Greenwich. ``set-property-to-now`` therefore writes
+    local midnight WITH its explicit UTC offset; this certifies that
+    write shape end-to-end through a fired rule (America/New_York
+    midnight stores as the 04:00Z/05:00Z instant of the same date)."""
     await _ensure_type(repo, "E2E Dated", [
         {"key": "e2e_flag", "name": "E2E Flag", "format": "checkbox"},
         {"key": "e2e_when", "name": "E2E When", "format": "date"},
@@ -198,7 +203,10 @@ async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api)
     node = await repo.create_node(NodeDraft(
         type="E2E Dated", name="probe", summary="s",
     ))
-    engine = RuleEngine(repo, now=Clock("2026-07-19 10:00:05"))
+    engine = RuleEngine(
+        repo, now=Clock("2026-07-19 10:00:05"),
+        zone=ZoneInfo("America/New_York"),
+    )
     await engine.run_tick()  # baseline
     await asyncio.sleep(1.5)  # S3: same-second edits are indistinguishable
     raw_api.set_property(
@@ -209,4 +217,54 @@ async def test_r2_resolved_a_date_target_gets_the_bare_local_date(repo, raw_api)
     assert len(report.fired) == 1
     assert report.errors == ()
     value = _property_value(raw_api.get(node.id), when_key)
-    assert str(value).startswith("2026-07-19")  # reads back 2026-07-19T00:00:00Z
+    # EDT midnight reads back as the UTC instant of the SAME calendar day.
+    assert str(value).startswith("2026-07-19T04:00:00")
+
+
+async def test_run_now_checkbox_round_trips_live(repo, raw_api):
+    """WP52 (ADR 058): the manual-run gesture against a real server.
+
+    Two things only the live store can certify: that gc_rule_run_now
+    mints/retrofits as a real checkbox on the Automation Rule type, and
+    that the engine's claim ("false") actually CLEARS it rather than
+    being rejected -- if it did not, the rule would re-fire every tick.
+    """
+    # Its OWN type: the run-now gesture names no trigger, so the engine
+    # takes the first object of the target type -- with a shared type
+    # that would be whichever object another test happened to leave.
+    await _ensure_type(repo, "E2E Dinner", [
+        {"key": "e2e_pick", "name": "E2E Pick", "format": "text"},
+    ])
+    pick_key = repo.registry.field_property("E2E Pick").key
+    run_now_key = repo.registry.field_property("Rule run now").key
+    rule = await repo.create_node(NodeDraft(
+        type="Automation Rule", name="e2e dinner picker", summary="s",
+        fields={
+            rules.FIELD_TARGET_TYPE: "E2E Dinner",
+            rules.FIELD_CONDITION: "Manual",
+            rules.FIELD_ACTION: "Set property value",
+            rules.FIELD_ACTION_PROPERTY: "E2E Pick",
+            rules.FIELD_ACTION_VALUE: "picked tonight",
+        },
+    ))
+    task = await repo.create_node(NodeDraft(
+        type="E2E Dinner", name="pick dinner", summary="tonight's spot",
+    ))
+    engine = RuleEngine(repo, now=Clock("2026-07-19 10:00:05"))
+    report = await engine.run_tick()  # baseline: a manual rule stays put
+    assert report.fired == ()
+    assert _property_value(raw_api.get(task.id), pick_key) in (None, "")
+
+    # The human ticks "Rule run now" on the rule page.
+    await asyncio.sleep(1.5)  # S3: same-second edits are indistinguishable
+    raw_api.set_property(
+        rule.id, mapping.property_entry(run_now_key, "checkbox", True)
+    )
+    assert rule.id in await repo.resync()
+    report = await engine.run_tick()
+
+    assert [(f.rule_id, f.node_id) for f in report.fired] == [(rule.id, task.id)]
+    assert _property_value(raw_api.get(task.id), pick_key) == "picked tonight"
+    # Claimed in the STORE: the box is clear, so it runs once, not forever.
+    assert _property_value(raw_api.get(rule.id), run_now_key) is False
+    assert (await engine.run_tick()).fired == ()

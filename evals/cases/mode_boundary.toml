@@ -73,7 +73,7 @@ called_any = ["create_node"]
 must_mention = ["Gutterworks"]
 
 [[case.script]]
-tool_calls = [{ name = "create_node", arguments = { type = "Location", name = "The Gutterworks", summary = "A flooded underdistrict beneath Brakk.", links = [{ edge_type = "located_in", other = "Brakk" }], create_missing_relations = true } }]
+tool_calls = [{ name = "create_node", arguments = { type = "Location", name = "The Gutterworks", summary = "A flooded underdistrict beneath Brakk.", properties = { located_in = "Brakk" }, create_missing_properties = { located_in = "objects" } } }]
 
 [[case.script]]
 reply = "The Gutterworks now exists beneath Brakk."

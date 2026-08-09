@@ -13,7 +13,9 @@ import pytest
 
 from graph_context.application.intent_recorder import IntentRecorder
 from graph_context.application.mutation_journal import MutationJournal
-from graph_context.domain import attribution
+from graph_context.application.node_historian import NodeHistorian
+from graph_context.domain import attribution, revisions, rules
+from graph_context.domain.models import NodeDraft
 from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
@@ -46,6 +48,7 @@ from graph_context.orchestrator.pipeline import (
     LAST_TURN_WARNING,
     ConversationMemory,
     Orchestrator,
+    is_command,
     sender_attributed,
 )
 from tests.orchestrator.mode_fixtures import fiction_registry
@@ -56,6 +59,8 @@ FICTION = get_profile("fiction")
 _FICTION_REGISTRY = fiction_registry()
 AUTHORING = _FICTION_REGISTRY.specs["authoring"]
 WORLD_MODELING = _FICTION_REGISTRY.specs["world_modeling"]
+# ADR 045: the seeded default -- privileged, mutating.
+SPACE_SETUP = _FICTION_REGISTRY.specs["space_setup"]
 
 
 class TestBindings:
@@ -68,6 +73,12 @@ class TestBindings:
         assert bound.isdisjoint(MUTATION_TOOLS)
         assert bound == set(TOOL_NAMES) - MUTATION_TOOLS
 
+    def test_edit_document_is_a_mutation_tool(self) -> None:
+        """WP42: section edits write bodies -- read-only modes never
+        bind it, exactly like create/update_node."""
+        assert "edit_document" in MUTATION_TOOLS
+        assert "edit_document" not in binding_for(AUTHORING)
+
     def test_automation_is_bookkeeping_not_mutation(self) -> None:
         """ADR 040: like schedule -- read-only modes can still take
         'whenever X changes, do Y' requests."""
@@ -77,6 +88,22 @@ class TestBindings:
         docs = modes.tool_docs(AUTHORING, FICTION)
         assert set(docs) == set(binding_for(AUTHORING))
         assert all(docs.values())  # docstrings are prompts; never empty
+
+    async def test_invoke_sets_the_meta_privilege_per_call(
+        self, services: Services
+    ) -> None:
+        """ADR 045: the dispatching spec's meta_inspection flag rides the
+        Services view for exactly one call -- and an unprivileged spec's
+        call drops it again (a /mode switch away revokes the surface)."""
+        assert SPACE_SETUP.meta_inspection
+        await modes.invoke(
+            SPACE_SETUP, "context", services, {"action": "get"}
+        )
+        assert services.visible_infra_roles == frozenset({Role.MODE})
+        await modes.invoke(
+            WORLD_MODELING, "context", services, {"action": "get"}
+        )
+        assert services.visible_infra_roles == frozenset()
 
 
 def _mode_payload(**overrides) -> dict:
@@ -98,8 +125,10 @@ class TestRegistryLoader:
 
     def test_the_seeded_corpus_loads_with_the_linked_default(self) -> None:
         registry = fiction_registry()
-        assert registry.names() == ["authoring", "world_modeling"]
-        assert registry.default == "world_modeling"
+        assert registry.names() == [
+            "authoring", "space_setup", "world_modeling",
+        ]
+        assert registry.default == "space_setup"
 
     def test_no_modes_fails_loudly_pointing_at_reseeding(self) -> None:
         with pytest.raises(GraphContextError, match="no Activity Mode"):
@@ -133,7 +162,7 @@ class TestInSpaceModes:
         scribe = registry.get("faithful_scribe")
         assert scribe is not None and scribe.mutating
         assert scribe.goal == "Record only what the user explicitly states."
-        assert registry.default == "world_modeling"  # untouched
+        assert registry.default == "space_setup"  # untouched
 
     def test_in_space_capture_fills_policy_defaults(self) -> None:
         registry = fiction_registry(_mode_payload(
@@ -166,6 +195,174 @@ class TestInSpaceModes:
             fiction_registry(_mode_payload(
                 capture={"artifact_type": "note", "min_chars": -3},
             ))
+
+    def test_in_space_document_type_parses(self) -> None:
+        registry = fiction_registry(_mode_payload(document_type="Chapter"))
+        spec = registry.get("faithful_scribe")
+        assert spec is not None and spec.document_type == "Chapter"
+
+    def test_document_type_without_mutating_names_the_object(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            fiction_registry(_mode_payload(
+                mutating=False, document_type="Chapter",
+            ))
+        assert "obj-1" in str(err.value) and "mutating" in str(err.value)
+
+
+class TestDocumentGuidance:
+    """ADR 048: goal_for appends the standing document discipline."""
+
+    def test_plain_specs_keep_their_goal_verbatim(self) -> None:
+        assert modes.goal_for(WORLD_MODELING) is WORLD_MODELING.goal
+
+    def test_document_specs_get_the_guidance_with_their_type(self) -> None:
+        spec = ModeSpec(
+            name="prose", goal="Write the saga.",
+            mutating=True, document_type="Chapter",
+        )
+        goal = modes.goal_for(spec)
+        assert goal.startswith("Write the saga.")
+        assert "Chapter node" in goal
+        assert "NEVER paste the document text" in goal
+
+
+class TestModeFingerprint:
+    """ADR 044: the change detector's view of the mode-config surface."""
+
+    async def test_only_mode_and_space_context_nodes_participate(self) -> None:
+        repository = InMemoryGraphRepository()
+        empty = modes.mode_fingerprint(repository.graph)
+        await repository.create_node(NodeDraft(
+            type="Character", name="Ada", summary="s",
+        ))
+        assert modes.mode_fingerprint(repository.graph) == empty
+        await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        await repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="s",
+        ))
+        assert len(modes.mode_fingerprint(repository.graph)) == 2
+
+    async def test_an_edit_bumps_the_fingerprint(self) -> None:
+        repository = InMemoryGraphRepository()
+        mode = await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        before = modes.mode_fingerprint(repository.graph)
+        await repository.update_node(mode.id, summary="edited")
+        assert modes.mode_fingerprint(repository.graph) != before
+
+    async def test_an_unrelated_edit_leaves_the_fingerprint_alone(self) -> None:
+        repository = InMemoryGraphRepository()
+        await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        bystander = await repository.create_node(NodeDraft(
+            type="Character", name="Ada", summary="s",
+        ))
+        before = modes.mode_fingerprint(repository.graph)
+        await repository.update_node(bystander.id, summary="edited")
+        assert modes.mode_fingerprint(repository.graph) == before
+
+    async def test_the_watch_seeds_on_the_first_check(self) -> None:
+        repository = InMemoryGraphRepository()
+        await repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="Authoring", summary="m",
+        ))
+        watch = modes.ModeConfigWatch()
+        assert watch.changed(repository.graph) is False  # baseline seeds
+        assert watch.changed(repository.graph) is False  # steady state
+
+
+class TestModeAutoRefresh:
+    """ADR 044: refresh_modes() reloads at most once per detected change."""
+
+    def _wired(
+        self, services: Services, reload,
+    ) -> Orchestrator:
+        return Orchestrator(
+            services=services, driver=ScriptedDriver([]), profile=FICTION,
+            registry=fiction_registry(), reload_registry=reload,
+        )
+
+    async def test_first_check_seeds_the_baseline_without_reloading(
+        self, services: Services
+    ) -> None:
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            return fiction_registry()
+
+        orchestrator = self._wired(services, reload)
+        await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False
+        assert reloads["count"] == 0
+
+    async def test_a_mode_edit_reloads_exactly_once_until_the_next_edit(
+        self, services: Services
+    ) -> None:
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            return fiction_registry(_mode_payload())
+
+        orchestrator = self._wired(services, reload)
+        mode = await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False  # baseline
+        await services.repository.update_node(mode.id, summary="edited")
+        assert await orchestrator.refresh_modes() is True
+        assert orchestrator.registry.get("faithful_scribe") is not None
+        assert await orchestrator.refresh_modes() is False  # no re-reload
+        assert reloads["count"] == 1
+        await services.repository.update_node(mode.id, summary="again")
+        assert await orchestrator.refresh_modes() is True
+        assert reloads["count"] == 2
+
+    async def test_a_failed_reload_keeps_the_registry_and_waits_for_the_next_edit(
+        self, services: Services
+    ) -> None:
+        """At-most-once, the rule-engine discipline: a broken edit
+        degrades once -- no retry storm every tick -- and the human's
+        NEXT edit retries."""
+        reloads = {"count": 0}
+
+        async def reload():
+            reloads["count"] += 1
+            raise GraphContextError(
+                "Activity Mode 'Broken' (obj-9): the goal is empty"
+            )
+
+        orchestrator = self._wired(services, reload)
+        before = orchestrator.registry
+        mode = await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False  # baseline
+        await services.repository.update_node(mode.id, summary="broken")
+        assert await orchestrator.refresh_modes() is True  # attempted
+        assert orchestrator.registry is before  # last good kept
+        assert await orchestrator.refresh_modes() is False  # waits
+        assert reloads["count"] == 1
+        await services.repository.update_node(mode.id, summary="fixed")
+        assert await orchestrator.refresh_modes() is True  # retried
+        assert reloads["count"] == 2
+
+    async def test_refresh_without_a_reload_closure_is_a_no_op(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        await services.repository.create_node(NodeDraft(
+            type="gc_activity_mode", name="World Modeling", summary="m",
+        ))
+        assert await orchestrator.refresh_modes() is False
+        assert await orchestrator.refresh_modes() is False
 
 
 @pytest.fixture
@@ -255,7 +452,7 @@ class TestPipeline:
         ])
         await orchestrator.handle_message("locked-down", "u1", "/mode authoring")
         assert orchestrator.mode_of("locked-down") == "authoring"
-        assert orchestrator.mode_of("fresh") == "world_modeling"
+        assert orchestrator.mode_of("fresh") == "space_setup"
         events = await orchestrator.handle_message("fresh", "u1", "Add Mira.")
         assert events[-1].kind == "reply"
 
@@ -412,7 +609,7 @@ class TestPipeline:
         await orchestrator.handle_message("s1", "u1", "hello")
         await orchestrator.handle_message("s1", "u1", "/mode authoring")
         await orchestrator.handle_message("s1", "u1", "write")
-        assert goals[0] == WORLD_MODELING.goal
+        assert goals[0] == SPACE_SETUP.goal  # the seeded default (ADR 045)
         assert goals[1] == AUTHORING.goal
 
     async def test_mode_command_refreshes_the_registry(
@@ -474,7 +671,7 @@ class TestPipeline:
         assert any(
             e.kind == "notice" and "no longer loaded" in e.text for e in events
         )
-        assert orchestrator.mode_of("s1") == "world_modeling"
+        assert orchestrator.mode_of("s1") == "space_setup"
 
     async def test_vanished_mode_mid_turn_degrades_without_dying(
         self, services: Services
@@ -496,7 +693,7 @@ class TestPipeline:
         await orchestrator.handle_message("b", "u2", "/mode")  # b refreshes
         events = await orchestrator.handle_message("a", "u1", "hello")
         assert events[-1].kind == "reply"
-        assert orchestrator.mode_of("a") == "world_modeling"
+        assert orchestrator.mode_of("a") == "space_setup"
 
     async def test_tool_budget_cuts_a_runaway_turn(self, services: Services) -> None:
         probe = ToolCall("context", {"action": "get"})
@@ -509,6 +706,26 @@ class TestPipeline:
         events = await orchestrator.handle_message("s1", "u1", "loop forever")
         assert events[-1].kind == "notice"
         assert "budget exhausted" in events[-1].text
+
+    async def test_a_mode_turn_limit_overrides_the_deployment_guard(
+        self, services: Services
+    ) -> None:
+        """ModeSpec.turn_limit is the per-mode word on the decide loop;
+        the orchestrator's max_tool_calls is only the unset default."""
+        probe = ToolCall("context", {"action": "get"})
+        driver = ScriptedDriver([LLMTurn(tool_calls=(probe,))] * 99)
+        capped = ModeSpec(name="capped", goal="g", turn_limit=2)
+        registry = fiction_registry()
+        specs = dict(registry.specs) | {capped.name: capped}
+        orchestrator = Orchestrator(
+            services=services, driver=driver, profile=FICTION,
+            registry=ModeRegistry(specs=specs, default=registry.default),
+            max_tool_calls=10,
+        )
+        await orchestrator.handle_message("s1", "u1", "/mode capped")
+        events = await orchestrator.handle_message("s1", "u1", "loop forever")
+        assert events[-1].kind == "notice"
+        assert "budget exhausted (2 decisions)" in events[-1].text
 
     async def test_only_the_final_decision_is_warned(
         self, services: Services
@@ -630,6 +847,357 @@ def _keyed_orchestrator(
     return orchestrator, store
 
 
+class TestModeOverrideTurn:
+    """ADR 055: ``mode=`` pins ONE turn to a named mode -- scheduled
+    turns always arrive this way -- without ever switching or persisting
+    the session's own mode."""
+
+    async def test_override_turn_runs_the_named_mode_and_leaves_the_session(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="done"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        events = await orchestrator.handle_message(
+            # Display-name spelling: the pin slugifies like /mode does.
+            "s1", "u1", "Add Mira.", mode="World Modeling",
+        )
+        assert events[-1].kind == "reply"
+        # The mutating binding ran even though the session is read-only...
+        assert services.repository.graph.find_by_name("Mira")
+        # ...and the pin never stuck: ambient and persisted mode intact.
+        assert orchestrator.mode_of("s1") == "authoring"
+        assert services.session.mode == "authoring"
+
+    async def test_the_next_ambient_turn_is_back_in_the_sessions_mode(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="pinned"),
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="ambient"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        await orchestrator.handle_message(
+            "s1", "u1", "Add Mira.", mode="world_modeling",
+        )
+        events = await orchestrator.handle_message("s1", "u1", "Again.")
+        errors = [e for e in events if e.kind == "error"]
+        assert errors and "not available in authoring mode" in errors[0].text
+
+    async def test_unknown_and_empty_overrides_degrade_to_the_default(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [
+            LLMTurn(reply="a"), LLMTurn(reply="b"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        observer = _RecordingObserver()
+        await orchestrator.handle_message(
+            "s1", "u1", "hi", mode="no_such_mode", observer=observer,
+        )
+        await orchestrator.handle_message(
+            "s1", "u1", "hi again", mode="", observer=observer,
+        )
+        started = [e for e in observer.events if e[0] == "turn_started"]
+        # Never the chat's ambient mode: both degrade to the default.
+        assert [mode for _, mode, _ in started] == [
+            "space_setup", "space_setup",
+        ]
+
+    async def test_the_intent_node_stamps_the_override_mode(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="done"),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode authoring")
+        await orchestrator.handle_message(
+            "s1", "u1", "Add Mira.", mode="world_modeling",
+        )
+        (intent,) = _intent_nodes(services)
+        assert intent.fields[attribution.FIELD_MODE] == "world_modeling"
+
+
+DOCUMENT_SPEC = ModeSpec(
+    name="chapters", goal="Write chapters as nodes.",
+    mutating=True, document_type="Chapter",
+)
+
+CREATE_CHAPTER = ToolCall("create_node", {
+    "type": "Chapter", "name": "Chapter One", "summary": "Opening chapter.",
+    "description": "The city fell quiet before the siege began.",
+})
+
+
+class TestDocumentModeCards:
+    """ADR 048: a document mode's touched document nodes always card on
+    the reply -- the text only summarizes, so the card is the link."""
+
+    async def test_document_turn_cards_the_node_beside_the_intent(
+        self,
+    ) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One."),
+        ], extra_specs=(DOCUMENT_SPEC,))
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        events = await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (intent,) = _intent_nodes(services)
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert reply.attach == (intent.id, chapter.id)
+
+    async def test_hide_node_cards_never_strips_the_document_card(
+        self,
+    ) -> None:
+        spec = ModeSpec(
+            name="chapters", goal="Write chapters as nodes.",
+            mutating=True, document_type="Chapter", hide_node_cards=True,
+            hide_intent_card=True,
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One."),
+        ], extra_specs=(spec,))
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        events = await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        # Explicit attach survives ADR 046 suppression: the transport
+        # filters only its text-scrape by suppress, never event.attach.
+        assert reply.attach == (chapter.id,)
+        assert chapter.id in reply.suppress
+
+    async def test_non_document_mutations_do_not_attach(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Noted."),
+        ], extra_specs=(DOCUMENT_SPEC,))
+        # world_modeling mutates but has no document_type: only the
+        # intent node cards (ADR 038 behavior, unchanged).
+        await orchestrator.handle_message("s1", "u1", "/mode world_modeling")
+        events = await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (intent,) = _intent_nodes(services)
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert reply.attach == (intent.id,)
+
+
+class TestScheduledDocumentOverride:
+    """ADR 057: a scheduled event's document_type overlays ADR 048's
+    document discipline on that ONE turn's resolved spec -- node + card
+    instead of the full text in chat, whatever mode the turn runs in."""
+
+    async def test_a_document_pin_overlays_the_resolved_mode(self) -> None:
+        # world_modeling mutates but has no document_type of its own;
+        # the pin makes this turn card its Chapter like a document mode.
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One."),
+        ])
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="world_modeling",
+            document_type="Chapter",
+        )
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert chapter.id in reply.attach
+
+    async def test_the_pin_displaces_a_capture_mode_without_error(
+        self,
+    ) -> None:
+        capture_spec = ModeSpec(
+            name="journal", goal="Capture replies.", mutating=True,
+            capture=CapturePolicy(artifact_type="Chapter", min_chars=10),
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted Chapter One, long enough to capture."),
+        ], extra_specs=(capture_spec,))
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="journal", document_type="Chapter",
+        )
+        assert not [e for e in events if e.kind == "error"]
+        # capture=None for the turn: the model's own Chapter is the only
+        # one -- no artifact node was minted from the reply text.
+        chapters = [
+            n for n in services.repository.graph.nodes()
+            if n.type == "Chapter"
+        ]
+        assert [n.name for n in chapters] == ["Chapter One"]
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert chapters[0].id in reply.attach
+
+    async def test_a_read_only_mode_ignores_the_pin_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(reply="Nothing to write."),
+        ])
+        with caplog.at_level("WARNING"):
+            events = await orchestrator.handle_message(
+                "s1", "u1", "Draft it.", mode="authoring",
+                document_type="Chapter",
+            )
+        assert any("not mutating" in r.message for r in caplog.records)
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert reply.attach == ()  # no override, no document card
+
+    async def test_the_pin_never_persists_on_the_session(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+            LLMTurn(tool_calls=(ToolCall("create_node", {
+                "type": "Chapter", "name": "Chapter Two", "summary": "s",
+            }),)),
+            LLMTurn(reply="Drafted another."),
+        ])
+        await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="world_modeling",
+            document_type="Chapter",
+        )
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Again.", mode="world_modeling",
+        )
+        (second,) = services.repository.graph.find_by_name("Chapter Two")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert second.id not in reply.attach
+
+    async def test_the_pin_overrides_a_document_modes_own_type(self) -> None:
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_CHAPTER, CREATE_MIRA)),
+            LLMTurn(reply="Wrote the report."),
+        ], extra_specs=(DOCUMENT_SPEC,))
+        events = await orchestrator.handle_message(
+            "s1", "u1", "Draft it.", mode="chapters",
+            document_type="Character",
+        )
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (mira,) = services.repository.graph.find_by_name("Mira")
+        reply = [e for e in events if e.kind == "reply"][-1]
+        assert mira.id in reply.attach
+        assert chapter.id not in reply.attach
+
+
+class TestRevisionRecording:
+    """WP41 (ADR 049): the turn boundary records one attributed revision
+    per touched tracked node; the change tick records human edits and
+    never echoes the bot's own writes."""
+
+    async def _world(
+        self, turns: list[LLMTurn]
+    ) -> tuple[Orchestrator, Services, NodeHistorian]:
+        journal = MutationJournal()
+        services = build_services(
+            InMemoryGraphRepository(role_overrides=FICTION.role_overrides),
+            SessionState(project="Ashfall"),
+            journal=journal,
+        )
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        historian = NodeHistorian(services.repository, now=lambda: "T")
+        registry = fiction_registry()
+        registry = modes.ModeRegistry(
+            specs={**registry.specs, DOCUMENT_SPEC.name: DOCUMENT_SPEC},
+            default=registry.default,
+        )
+        orchestrator = Orchestrator(
+            services=services,
+            driver=ScriptedDriver(turns),
+            profile=FICTION,
+            registry=registry,
+            provenance=IntentRecorder(services.repository, now=lambda: "T0"),
+            historian=historian,
+            model_name="scripted",
+        )
+        return orchestrator, services, historian
+
+    async def test_a_document_turn_records_one_attributed_revision(
+        self,
+    ) -> None:
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (record,) = historian.history(chapter.id)
+        assert record.author_kind == revisions.AUTHOR_MODEL
+        assert record.author_detail == "scripted · chapters · u1"
+
+    async def test_the_revision_author_prefers_the_display_name(
+        self,
+    ) -> None:
+        # The user leg of "model · mode · user" is a DISPLAY string (the
+        # prose page's blame banner): the transport's readable sender
+        # wins over the raw id (`anytype:_participant_…`); the raw id
+        # keeps living on the intent node's gc_user_id stamp.
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message(
+            "s1", "anytype:_participant_deadbeef", "Draft it.",
+            sender="Nick",
+        )
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (record,) = historian.history(chapter.id)
+        assert record.author_detail == "scripted · chapters · Nick"
+
+    async def test_the_tick_after_a_bot_turn_records_no_phantom(
+        self,
+    ) -> None:
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        await orchestrator.history_tick(frozenset({chapter.id}))
+        assert len(historian.history(chapter.id)) == 1
+
+    async def test_a_human_edit_reaches_history_through_the_tick(
+        self,
+    ) -> None:
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Drafted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode chapters")
+        await orchestrator.handle_message("s1", "u1", "Draft it.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        await services.repository.update_node(
+            chapter.id, body="A human rewrote the whole opening at night.",
+        )
+        await orchestrator.history_tick(frozenset({chapter.id}))
+        records = historian.history(chapter.id)
+        assert [r.author_kind for r in records] == [
+            revisions.AUTHOR_MODEL, revisions.AUTHOR_HUMAN,
+        ]
+
+    async def test_tracked_writes_record_from_any_mode(self) -> None:
+        """Tracking is a data concern: a mode WITHOUT document_type
+        touching a tracked type still records (cross-mode edits must
+        never later misattribute as human)."""
+        orchestrator, services, historian = await self._world([
+            LLMTurn(tool_calls=(CREATE_CHAPTER,)),
+            LLMTurn(reply="Noted."),
+        ])
+        await orchestrator.handle_message("s1", "u1", "/mode world_modeling")
+        await orchestrator.handle_message("s1", "u1", "Add the chapter.")
+        (chapter,) = services.repository.graph.find_by_name("Chapter One")
+        (record,) = historian.history(chapter.id)
+        assert record.author_kind == revisions.AUTHOR_MODEL
+        assert "world_modeling" in record.author_detail
+
+
 class TestSchemaConfirmEvents:
     """WP33 (ADR 041 v2): a turn that drafted schema proposals rides them
     out AFTER the reply as confirm events -- harness-rendered text, the
@@ -711,11 +1279,11 @@ class TestKeyedSessions:
         await orchestrator.handle_message("anytype:b", "u1", "hi")  # stays default
         # A fresh orchestrator over the same store == a restart.
         restarted, _ = _keyed_orchestrator([LLMTurn(reply="ok")], store=store)
-        assert restarted.mode_of("anytype:a") == "world_modeling"  # not yet seen
+        assert restarted.mode_of("anytype:a") == "space_setup"  # not yet seen
         await restarted.handle_message("anytype:a", "u1", "resume")
         assert restarted.mode_of("anytype:a") == "authoring"  # restored on first turn
         await restarted.handle_message("anytype:b", "u1", "resume")
-        assert restarted.mode_of("anytype:b") == "world_modeling"
+        assert restarted.mode_of("anytype:b") == "space_setup"
 
     async def test_persisted_but_vanished_mode_degrades_to_default(self) -> None:
         store = InMemorySessionStore()
@@ -724,7 +1292,7 @@ class TestKeyedSessions:
         await store.save(seed.to_snapshot(), "anytype:a")
         orchestrator, _ = _keyed_orchestrator([LLMTurn(reply="ok")], store=store)
         await orchestrator.handle_message("anytype:a", "u1", "hi")
-        assert orchestrator.mode_of("anytype:a") == "world_modeling"
+        assert orchestrator.mode_of("anytype:a") == "space_setup"
 
     async def test_mode_switch_flush_failure_degrades_to_a_notice(self) -> None:
         class Flaky(InMemorySessionStore):
@@ -771,7 +1339,7 @@ class TestTurnObserver:
             "s1", "u1", "create Mira", observer=observer
         )
         assert observer.events == [
-            ("turn_started", "world_modeling", DEFAULT_ACTIVITY_DETAIL),
+            ("turn_started", "space_setup", DEFAULT_ACTIVITY_DETAIL),
             ("decision", ("create_node",)),
             ("tool_result", "create_node", True),
             ("decision", ()),
@@ -826,9 +1394,11 @@ class TestActivityDetailFromTheMode:
     ) -> None:
         orchestrator = _orchestrator(services, [])
         events = await orchestrator.handle_message("s1", "u1", "/mode")
+        # The seeded default is the setup mode (ADR 045), so the status
+        # line also reports its meta privilege.
         assert (
             f"(activity detail: {DEFAULT_ACTIVITY_DETAIL}; web search: off; "
-            "model: default; thinking: default)"
+            "model: default; thinking: default; meta-inspection: on)"
             in events[-1].text
         )
 
@@ -849,7 +1419,7 @@ class TestActivityDetailFromTheMode:
         observer = _RecordingObserver()
         await orchestrator.handle_message("s1", "u1", "hi", observer=observer)
         assert observer.events[0] == (
-            "turn_started", "world_modeling", DEFAULT_ACTIVITY_DETAIL,
+            "turn_started", "space_setup", DEFAULT_ACTIVITY_DETAIL,
         )
         await orchestrator.handle_message("s1", "u1", "/mode narrator")
         observer.events.clear()
@@ -1039,11 +1609,13 @@ class TestDriverOptionsFromTheMode:
             web_search_max_uses=4.0,
             web_search_allowed_domains="Example.com  b.example",
             max_tokens=32000.0,
+            turn_limit=6.0,
         ))
         spec = registry.get("faithful_scribe")
         assert spec is not None
         assert spec.web_search_max_uses == 4
         assert spec.max_tokens == 32000
+        assert spec.turn_limit == 6
         assert spec.web_search_allowed_domains == (
             "example.com", "b.example",
         )
@@ -1095,7 +1667,7 @@ class TestDriverOptionsFromTheMode:
     ) -> None:
         tuned = ModeSpec(
             name="tuned", goal="g", thinking="xhigh", max_tokens=32000,
-            web_search=True, web_search_max_uses=3,
+            turn_limit=6, web_search=True, web_search_max_uses=3,
             web_search_allowed_domains=("example.com",),
         )
         registry = fiction_registry()
@@ -1111,6 +1683,7 @@ class TestDriverOptionsFromTheMode:
         text = events[-1].text
         assert "thinking: xhigh" in text
         assert "max tokens: 32000" in text
+        assert "turn limit: 6" in text
         assert "search uses: 3" in text
         assert "search domains: example.com" in text
 
@@ -1230,7 +1803,7 @@ class TestProvenanceTurns:
         (intent,) = _intent_nodes(services)
         assert intent.name.startswith("Intent: Add Mira.")
         assert intent.fields[attribution.FIELD_USER_ID] == "cli:nick"
-        assert intent.fields[attribution.FIELD_MODE] == "world_modeling"  # the active binding
+        assert intent.fields[attribution.FIELD_MODE] == "space_setup"  # the active binding
         mira = services.repository.graph.resolve("Mira")
         assert {e.target for e in services.repository.graph.edges(intent.id)} == {
             mira.id
@@ -1279,6 +1852,51 @@ class TestProvenanceTurns:
             intent.id
         )
         assert events[-1].attach == (intent.id,)
+
+    async def test_hide_intent_card_keeps_the_trace_off_the_reply(self) -> None:
+        """ADR 046: a mode with hide_intent_card still RECORDS the intent
+        node -- only the reply's card goes."""
+        quiet = ModeSpec(
+            name="quiet_trace", goal="work quietly", mutating=True,
+            hide_intent_card=True,
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ], extra_specs=(quiet,))
+        await orchestrator.handle_message("s1", "u", "/mode quiet_trace")
+        events = await orchestrator.handle_message("s1", "u", "Add Mira.")
+        assert _intent_nodes(services) != []  # the record survives
+        assert events[-1].attach == ()
+
+    async def test_hide_node_cards_suppresses_touched_nodes(self) -> None:
+        """ADR 046: a mode with hide_node_cards stamps the turn's
+        created/edited ids as ``suppress`` on the events, so the
+        transport never cards them; the intent card is independent and
+        still rides ``attach``."""
+        quiet = ModeSpec(
+            name="quiet_nodes", goal="work quietly", mutating=True,
+            hide_node_cards=True,
+        )
+        orchestrator, services = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ], extra_specs=(quiet,))
+        await orchestrator.handle_message("s1", "u", "/mode quiet_nodes")
+        events = await orchestrator.handle_message("s1", "u", "Add Mira.")
+        mira = services.repository.graph.resolve("Mira")
+        assert events[-1].suppress == (mira.id,)
+        (intent,) = _intent_nodes(services)
+        assert events[-1].attach == (intent.id,)
+
+    async def test_default_mode_suppresses_no_cards(self) -> None:
+        """Pre-046 behavior is the default: nothing is suppressed."""
+        orchestrator, _ = _provenance_orchestrator([
+            LLMTurn(tool_calls=(CREATE_MIRA,)),
+            LLMTurn(reply="Mira exists."),
+        ])
+        events = await orchestrator.handle_message("s1", "u", "Add Mira.")
+        assert all(event.suppress == () for event in events)
 
     async def test_capture_policy_threshold_is_respected(self) -> None:
         """A custom spec with a lower threshold captures what the default
@@ -1424,3 +2042,146 @@ class TestOutboundFileEvents:
         orchestrator = _orchestrator(services, [LLMTurn(reply="fresh turn")])
         events = await orchestrator.handle_message("s1", "u1", "hi")
         assert [e.kind for e in events] == ["reply"]
+
+
+class TestRunCommand:
+    """WP52 (ADR 058): /run fires an Automation Rule with no model turn."""
+
+    @staticmethod
+    def _vocabulary() -> dict[str, str]:
+        return {
+            rules.FIELD_TARGET_TYPE: "Character",
+            rules.FIELD_CONDITION: "Manual",
+            rules.FIELD_ACTION: "Set property value",
+            rules.FIELD_ACTION_PROPERTY: "Mood",
+            rules.FIELD_ACTION_VALUE: "restless",
+        }
+
+    async def _seed(self, services: Services, name: str, **overrides: str):
+        return await services.repository.create_node(NodeDraft(
+            type="gc_rule", name=name, summary="an automation",
+            fields={**self._vocabulary(), **overrides},
+        ))
+
+    def test_the_command_vocabulary_is_exact_or_space_prefixed(self) -> None:
+        assert is_command("/run")
+        assert is_command("/run dinner picker")
+        assert is_command("  /run x  ")
+        assert not is_command("/runner up")
+        assert not is_command("run the picker")
+
+    async def test_it_fires_the_rule_without_calling_the_driver(
+        self, services: Services
+    ) -> None:
+        await self._seed(services, "dinner picker")
+        mira = await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        # An EMPTY script: any decide() would exhaust it and blow up.
+        orchestrator = _orchestrator(services, [])
+
+        events = await orchestrator.handle_message("s1", "u1", "/run dinner picker")
+
+        assert [e.kind for e in events] == ["notice"]
+        assert "dinner picker" in events[0].text
+        assert services.repository.graph.node(mira.id).fields["Mood"] == "restless"
+
+    async def test_it_records_no_intent_node(self, services: Services) -> None:
+        await self._seed(services, "dinner picker")
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+        before = {n.id for n in services.repository.graph.nodes()}
+
+        await orchestrator.handle_message("s1", "u1", "/run dinner picker")
+
+        after = {n.id for n in services.repository.graph.nodes()}
+        assert after == before  # no turn ran, so no intent node
+
+    async def test_bare_run_lists_the_rules_and_the_usage(
+        self, services: Services
+    ) -> None:
+        await self._seed(services, "dinner picker")
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run")
+        assert events[0].kind == "notice"
+        assert "usage: /run <rule name>" in events[0].text
+        assert "dinner picker" in events[0].text
+
+    async def test_bare_run_says_so_when_there_are_no_rules(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run")
+        assert events[0].kind == "notice"
+        assert "no automation rules" in events[0].text
+
+    async def test_an_unknown_rule_is_an_error_event_not_a_crash(
+        self, services: Services
+    ) -> None:
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run nope")
+        assert [e.kind for e in events] == ["error"]
+
+    async def test_a_paused_rule_refuses(self, services: Services) -> None:
+        await self._seed(
+            services, "dinner picker", **{rules.FIELD_STATUS: rules.STATUS_PAUSED},
+        )
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+        events = await orchestrator.handle_message("s1", "u1", "/run dinner picker")
+        assert [e.kind for e in events] == ["error"]
+        assert "paused" in events[0].text
+
+    async def test_on_names_the_trigger_object(self, services: Services) -> None:
+        await self._seed(services, "dinner picker")
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Aran", summary="First by id.",
+        ))
+        mira = await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+
+        await orchestrator.handle_message("s1", "u1", "/run dinner picker on Mira")
+
+        assert services.repository.graph.node(mira.id).fields["Mood"] == "restless"
+
+    async def test_a_rule_whose_name_contains_on_still_resolves_bare(
+        self, services: Services
+    ) -> None:
+        # The bare name is tried FIRST, so " on " inside a rule name is
+        # never mistaken for the trigger separator.
+        await self._seed(services, "turn on lights")
+        mira = await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+
+        events = await orchestrator.handle_message("s1", "u1", "/run turn on lights")
+
+        assert [e.kind for e in events] == ["notice"]
+        assert services.repository.graph.node(mira.id).fields["Mood"] == "restless"
+
+    async def test_every_session_shares_one_engine(
+        self, services: Services
+    ) -> None:
+        # The baseline is per SPACE, so /run from any chat must reach the
+        # same engine -- observable through the shared last-fired stamp.
+        rule = await self._seed(services, "dinner picker")
+        await services.repository.create_node(NodeDraft(
+            type="Character", name="Mira", summary="Exiled siege engineer.",
+        ))
+        orchestrator = _orchestrator(services, [])
+
+        await orchestrator.handle_message("chat-one", "u1", "/run dinner picker")
+        stamped = services.repository.graph.node(rule.id).fields[
+            rules.FIELD_LAST_FIRED
+        ]
+        await orchestrator.handle_message("chat-two", "u1", "/run dinner picker")
+
+        assert stamped  # the first run booked on the shared engine
+        assert orchestrator.services.rules is services.rules

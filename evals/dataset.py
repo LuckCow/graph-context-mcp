@@ -171,6 +171,7 @@ class CaseMode:
     name: str
     goal: str
     mutating: bool = False
+    meta_inspection: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +218,7 @@ _CASE_KEYS = {
     "id", "mode", "trials", "provenance", "must_fail",
     "seed", "modes", "turn", "expect", "judge", "script",
 }
-_MODE_KEYS = {"name", "goal", "mutating"}  # no capture until a case needs it
+_MODE_KEYS = {"name", "goal", "mutating", "meta_inspection"}  # no capture until a case needs it
 _SEED_KEYS = {"node", "edge", "field", "members"}
 _SEED_FIELD_KEYS = {"name", "format", "key", "options"}
 # What a seeded property may be: the mintable scalar menu plus "objects"
@@ -434,6 +435,9 @@ def _parse_case_mode(raw: Mapping[str, Any], origin: str) -> CaseMode:
         name=_required_str(raw, "name", ctx),
         goal=_required_str(raw, "goal", ctx),
         mutating=_flag(raw.get("mutating", False), f"{ctx}: mutating"),
+        meta_inspection=_flag(
+            raw.get("meta_inspection", False), f"{ctx}: meta_inspection"
+        ),
     )
 
 

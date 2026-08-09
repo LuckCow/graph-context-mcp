@@ -13,15 +13,17 @@ from dataclasses import dataclass, field
 from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.application.explorer import Explorer
 from graph_context.application.mutation_journal import MutationJournal, NullJournal
+from graph_context.application.node_historian import NodeHistorian
 from graph_context.application.node_reader import NodeReader
 from graph_context.application.node_writer import NodeWriter
 from graph_context.application.querier import Querier
 from graph_context.application.ranker import Ranker
 from graph_context.application.rule_engine import RuleEngine
-from graph_context.application.scheduler import Scheduler, local_clock
+from graph_context.application.scheduler import Scheduler, local_clock, local_zone
 from graph_context.application.schema_proposals import SchemaProposals
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_persister import SessionPersister
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
 from graph_context.ports.graph_repository import GraphRepository
 from graph_context.ports.script_runner import ScriptRunner
@@ -76,6 +78,19 @@ class Services:
     # the outbox clear so a proposal can never apply in the turn that
     # drafted it.
     proposals: SchemaProposals = field(default_factory=SchemaProposals)
+    # ADR 045 (meta-inspection): infra roles the ACTIVE mode may see and
+    # write. Set per tool call by ``modes.invoke`` from the dispatching
+    # spec (the mode can change between turns, so this is never static
+    # session state); empty -- the default everywhere else, including the
+    # bare MCP server -- means no infra surface at all.
+    visible_infra_roles: frozenset[Role] = frozenset()
+    # WP42 (ADR 049): the space's revision historian. LATE-BOUND: the
+    # orchestrator's bootstrap sets it on the donor bundle after
+    # ``historian.rebuild()``; sessions derive lazily afterwards, so
+    # every derived writer gets it as its locked-section guard. None --
+    # the bare MCP server, tests -- means no history surface and no
+    # locked enforcement (ADR 049's v1 scope).
+    historian: NodeHistorian | None = None
 
 
 def build_services(
@@ -92,10 +107,14 @@ def build_services(
     script_runner: ScriptRunner | None = None,
 ) -> Services:
     journal = journal or NullJournal()
+    # One proposal ledger per session, shared between the schema tool and
+    # the writer's scope="type" auto-drafts (ADR 042) -- both must land in
+    # the same ledger or the confirm flow would miss the writer's drafts.
+    proposals = SchemaProposals()
     return Services(
         repository=repository,
         session=session,
-        writer=NodeWriter(repository, session, journal),
+        writer=NodeWriter(repository, session, journal, proposals=proposals),
         reader=NodeReader(repository, session),
         explorer=Explorer(repository, session),
         querier=Querier(repository, views),
@@ -104,7 +123,7 @@ def build_services(
         # not the container's (usually UTC); resolved loudly at startup.
         scheduler=Scheduler(repository, journal=journal, now=local_clock(timezone)),
         rules=RuleEngine(
-            repository, now=local_clock(timezone),
+            repository, now=local_clock(timezone), zone=local_zone(timezone),
             script_runner=script_runner, journal=journal,
         ),
         persister=persister,
@@ -112,6 +131,7 @@ def build_services(
         projector=projector,
         ranker=ranker,
         session_key=session_key,
+        proposals=proposals,
     )
 
 
@@ -129,10 +149,16 @@ def derive_services(
     views over one space, not runtimes of their own. Cheap: three thin
     wrappers, no I/O.
     """
+    # Session-scoped like the session itself (ADR 041): each derived view
+    # gets its own ledger, shared between its writer and its schema tool.
+    proposals = SchemaProposals()
     return Services(
         repository=base.repository,
         session=session,
-        writer=NodeWriter(base.repository, session, base.journal),
+        writer=NodeWriter(
+            base.repository, session, base.journal, proposals=proposals,
+            section_guard=base.historian,
+        ),
         reader=NodeReader(base.repository, session),
         explorer=Explorer(base.repository, session),
         querier=base.querier,
@@ -144,4 +170,6 @@ def derive_services(
         projector=base.projector,
         ranker=base.ranker,
         session_key=session_key,
+        proposals=proposals,
+        historian=base.historian,
     )

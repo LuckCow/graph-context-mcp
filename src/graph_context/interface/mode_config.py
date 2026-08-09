@@ -38,8 +38,11 @@ from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import CapturePolicy, ModeSpec
 
 _SPEC_KEYS = {
-    "goal", "mutating", "capture", "activity_detail", "web_search", "model",
-    "thinking", "max_tokens", "web_search_max_uses",
+    "goal", "mutating", "meta_inspection", "capture", "document_type",
+    "activity_detail",
+    "hide_intent_card", "hide_node_cards",
+    "web_search", "model",
+    "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
     "web_search_allowed_domains", "web_search_blocked_domains",
 }
 _CAPTURE_KEYS = {"artifact_type", "references_label", "min_chars"}
@@ -98,11 +101,16 @@ def spec_from_mapping(
             name=name,
             goal=str(body.get("goal", "")),
             mutating=bool(body.get("mutating", False)),
+            meta_inspection=bool(body.get("meta_inspection", False)),
             capture=capture,
+            document_type=str(body.get("document_type") or "").strip(),
+            hide_intent_card=bool(body.get("hide_intent_card", False)),
+            hide_node_cards=bool(body.get("hide_node_cards", False)),
             web_search=bool(body.get("web_search", False)),
             model=model,
             thinking=thinking,
             max_tokens=_count(body.get("max_tokens"), f"{origin}: max_tokens"),
+            turn_limit=_count(body.get("turn_limit"), f"{origin}: turn_limit"),
             web_search_max_uses=_count(
                 body.get("web_search_max_uses"),
                 f"{origin}: web_search_max_uses",
@@ -287,9 +295,12 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
             "name": seed.display_name,
             "goal": spec.goal,
             "mutating": spec.mutating,
+            "meta_inspection": spec.meta_inspection,
             "web_search": spec.web_search,
             "capture": None,
             "activity_detail": spec.activity_detail,
+            "hide_intent_card": spec.hide_intent_card,
+            "hide_node_cards": spec.hide_node_cards,
             "origin": f"seed [modes.{seed.name}]",
             "icon": seed.icon,
             "default": seed.default,
@@ -300,12 +311,16 @@ def seed_payloads(seeds: Sequence[ModeSeed]) -> list[dict[str, Any]]:
                 "references_label": spec.capture.references_label,
                 "min_chars": spec.capture.min_chars,
             }
+        if spec.document_type:
+            payload["document_type"] = spec.document_type
         if spec.model:
             payload["model"] = spec.model
         if spec.thinking:
             payload["thinking"] = spec.thinking
         if spec.max_tokens:
             payload["max_tokens"] = spec.max_tokens
+        if spec.turn_limit:
+            payload["turn_limit"] = spec.turn_limit
         if spec.web_search_max_uses:
             payload["web_search_max_uses"] = spec.web_search_max_uses
         if spec.web_search_allowed_domains:

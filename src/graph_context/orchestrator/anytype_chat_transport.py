@@ -36,6 +36,7 @@ import os
 import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -284,6 +285,55 @@ class ChatCursor:
                 "cannot persist chat cursor to %s; positions are in-memory "
                 "for this process", self._path,
             )
+
+
+# -- stream roster (WP35, ADR 043) ------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPlan:
+    """One roster tick's verdict: chats to open live streams for (most
+    recently active first) and chats to close them for."""
+
+    start: tuple[str, ...] = ()
+    stop: tuple[str, ...] = ()
+
+
+def plan_streams(
+    activity: Mapping[str, str],
+    active: AbstractSet[str],
+    busy: AbstractSet[str] = frozenset(),
+    cap: int | None = None,
+) -> StreamPlan:
+    """Which chats deserve a live SSE stream right now (WP35, ADR 043).
+
+    Every open stream pins a pooled connection for its lifetime, so a
+    space with hundreds of chats cannot stream them all. The roster is
+    memoryless top-N by recency: ``activity`` maps every served chat to
+    its ``last_message_date`` stamp (C13; an opaque orderable string,
+    ``""`` for a chat with no messages, ties broken by chat id) and the
+    ``cap`` most recent hold streams. Wake falls out for free -- a
+    message into a hibernated chat makes it the newest, the next tick
+    starts it, and the cursor's catch-up answers the message. The
+    displaced stream is the least recently active, whose next message
+    wakes it back the same way: a message is only ever answered late by
+    one rescan interval, never lost.
+
+    ``busy`` chats (mid-turn, or holding a pending schema confirm whose
+    reaction only arrives over SSE) are never stopped -- the tick after
+    they go quiet retries. A chat absent from ``activity`` (deleted or
+    no longer served) stops even uncapped. ``cap=None`` streams every
+    served chat: the pre-WP35 behavior, and the fallback whenever the
+    rescan watcher (the only wake mechanism) is disabled.
+    """
+    ranked = sorted(
+        activity, key=lambda chat_id: (activity[chat_id], chat_id),
+        reverse=True,
+    )
+    desired = set(ranked if cap is None else ranked[:cap])
+    start = tuple(c for c in ranked if c in desired and c not in active)
+    stop = tuple(sorted(c for c in active if c not in desired and c not in busy))
+    return StreamPlan(start=start, stop=stop)
 
 
 # -- inbound file attachments (WP23, ADR 032) ------------------------------
@@ -668,9 +718,14 @@ class AnytypeChatTurnHandler:
             rendered = render(event)
             # ADR 038: explicit attachments (the turn's intent node) ride
             # ahead of ids scraped from the text, deduped, same cap.
-            merged = tuple(dict.fromkeys(
-                (*event.attach, *object_references(rendered))
-            ))[:MAX_ATTACHMENTS]
+            # ADR 046: mode-suppressed ids (the turn's created/edited
+            # nodes) never card from the text -- explicit attach still
+            # rides; the pipeline owns both stamps.
+            merged = tuple(dict.fromkeys((
+                *event.attach,
+                *(ref for ref in object_references(rendered)
+                  if ref not in event.suppress),
+            )))[:MAX_ATTACHMENTS]
             attachments = merged
             for piece in chunk(plainify(rendered), ANYTYPE_MESSAGE_LIMIT):
                 await reply.deliver(piece, attachments)
@@ -701,19 +756,37 @@ class AnytypeChatTurnHandler:
     async def run_scheduled(
         self, chat_id: str, due: DueEvent, reply: TurnReply
     ) -> None:
-        """One due Scheduled Event -> turn -> deliveries.
+        """One due Scheduled Event -> post or turn -> deliveries.
 
         The system-initiated sibling of :meth:`run_turn`: no inbound
         message, so no gate and no cursor -- and no "Processing"
         placeholder either: nobody is waiting on a turn they didn't
         start, so nothing posts until the reply is ready (``deliver``
         without an open placeholder is a plain send). The event is
-        marked fired BEFORE the turn runs (at-most-once -- a crashing
-        turn must not re-fire every tick; its error still reaches the
-        chat through ``reply``), inside the route lock like the turn
-        itself.
+        marked fired BEFORE anything posts (at-most-once -- a crashing
+        fire must not re-fire every tick; its error still reaches the
+        chat through ``reply``), inside the route lock.
+
+        A simple event (ADR 055) skips the model entirely: its stored
+        message posts verbatim -- ``deliver`` routes it through the
+        sent ledger, so the bot never answers its own reminder -- and
+        is then remembered as an assistant message so the model's next
+        turn knows it went out. A prompt event runs a turn ALWAYS
+        mode-pinned: the event's own mode, or the space default when it
+        names none -- never the chat's ambient mode. An event naming a
+        document type (ADR 057) has that turn write its output into ONE
+        node of the type and card it on the reply instead of posting the
+        full text.
         """
         route = self.routes[chat_id]
+        if due.message:
+            async with route.lock:
+                await route.orchestrator.mark_scheduled_fired(due.node_id)
+            await reply.deliver(due.message)
+            await route.orchestrator.note_scheduled_post(
+                f"anytype:{chat_id}", due.message
+            )
+            return
         async with route.lock:
             await route.orchestrator.mark_scheduled_fired(due.node_id)
             events = await route.orchestrator.handle_message(
@@ -722,6 +795,8 @@ class AnytypeChatTurnHandler:
                 text=scheduled_prompt(due.name, due.prompt),
                 # Intent nodes point back at the event node that fired.
                 origin=f"schedule:{due.node_id}",
+                mode=due.mode,
+                document_type=due.document_type,
             )
         await self.deliver_events(events, reply, chat_id=chat_id)
 

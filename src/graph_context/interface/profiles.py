@@ -42,7 +42,7 @@ from graph_context.domain.model_choice import (
     model_id,
     thinking_locked,
 )
-from graph_context.domain.schema import FIELD_FORMATS, Role
+from graph_context.domain.schema import CREATABLE_FORMATS, FIELD_FORMATS, Role
 from graph_context.domain.session import (
     DEFAULT_FULL_SLOTS,
     DEFAULT_SUMMARY_SLOTS,
@@ -64,6 +64,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "automation",
     "send_file",
     "schema",
+    "edit_document",
 )
 
 
@@ -111,21 +112,50 @@ class ModeSpec:
     adaptive thinking at that effort; ``off`` disables thinking -- and
     is rejected here when the mode pins a Fable/Mythos model, where
     thinking cannot be turned off); ``max_tokens`` caps one decision's
-    output; ``web_search_max_uses`` / ``web_search_allowed_domains`` /
+    output; ``turn_limit`` caps how many decisions (driver calls) one
+    turn may spend before the pipeline cuts it short -- a mode knob over
+    the orchestrator's loop guard, not a driver option;
+    ``web_search_max_uses`` / ``web_search_allowed_domains`` /
     ``web_search_blocked_domains`` bound the server-side search tool
     (inert unless ``web_search`` is on; the API takes at most ONE of the
     domain lists per request, so setting both is a spec error).
+
+    Reply-card visibility (ADR 046): ``hide_intent_card`` keeps the
+    turn's intent (process-trace) node off the reply's object cards;
+    ``hide_node_cards`` keeps the turn's created/edited nodes off them
+    (the text still names them -- only the cards go). Both default to
+    showing, the pre-046 behavior; the transport-neutral suppression
+    rides the reply events, so surfaces without cards ignore it.
+
+    ``document_type`` (ADR 048) names the node type this mode maintains
+    long-form documents in (e.g. ``Chapter``): the model writes and
+    revises the document node via ``create_node``/``update_node`` and
+    keeps chat replies to a short change summary -- so it requires
+    ``mutating`` and is mutually exclusive with ``capture`` (which copies
+    chat prose into nodes; a document mode's prose never IS chat prose).
+
+    ``meta_inspection`` (ADR 045) grants the mode the meta surface:
+    Activity Mode objects -- normally hidden infra -- become visible to
+    the read tools and writable through ``create_node``/``update_node``,
+    so a setup mode can author modes for the user. Off for ordinary
+    modes; the infra-write guard keeps them out regardless of what they
+    guess.
     """
 
     name: str
     goal: str
     mutating: bool = False
+    meta_inspection: bool = False
     capture: CapturePolicy | None = None
+    document_type: str = ""
     activity_detail: str = DEFAULT_ACTIVITY_DETAIL
+    hide_intent_card: bool = False
+    hide_node_cards: bool = False
     web_search: bool = False
     model: str = ""
     thinking: str = ""
     max_tokens: int = 0
+    turn_limit: int = 0
     web_search_max_uses: int = 0
     web_search_allowed_domains: tuple[str, ...] = ()
     web_search_blocked_domains: tuple[str, ...] = ()
@@ -140,6 +170,18 @@ class ModeSpec:
                 f"mode {self.name!r} has unknown activity_detail "
                 f"{self.activity_detail!r}; allowed: "
                 f"{', '.join(ACTIVITY_DETAIL_LEVELS)}"
+            )
+        if self.document_type and not self.mutating:
+            raise ValueError(
+                f"mode {self.name!r} sets document_type "
+                f"{self.document_type!r} but is not mutating -- maintaining "
+                "a document node needs the mutation tools"
+            )
+        if self.document_type and self.capture is not None:
+            raise ValueError(
+                f"mode {self.name!r} sets both document_type and capture; "
+                "pick one -- a document mode writes its document via the "
+                "node tools, capture copies chat replies into nodes"
             )
         if self.model and self.model not in MODEL_CHOICES:
             raise ValueError(
@@ -156,10 +198,14 @@ class ModeSpec:
                 f"mode {self.name!r} sets thinking = off but pins "
                 f"{self.model!r}, which cannot turn thinking off"
             )
-        if self.max_tokens < 0 or self.web_search_max_uses < 0:
+        if (
+            self.max_tokens < 0
+            or self.turn_limit < 0
+            or self.web_search_max_uses < 0
+        ):
             raise ValueError(
-                f"mode {self.name!r}: max_tokens and web_search_max_uses "
-                "must be non-negative (0 = not set)"
+                f"mode {self.name!r}: max_tokens, turn_limit, and "
+                "web_search_max_uses must be non-negative (0 = not set)"
             )
         if self.web_search_allowed_domains and self.web_search_blocked_domains:
             raise ValueError(
@@ -232,12 +278,33 @@ def get_profile(name: str | None) -> DomainProfile:
 # means the profiles have actually diverged.
 # ---------------------------------------------------------------------------
 
-# The one source for the mintable-format menu (domain-owned, ADR 023):
+# The one source for the mintable-format menu (domain-owned, ADR 023;
+# ADR 042 added "objects" -- the format that makes a property a relation):
 # adding a format updates every prompt that lists it.
 _FORMAT_MENU = ", ".join(sorted(FIELD_FORMATS))
+_CREATABLE_MENU = ", ".join(sorted(CREATABLE_FORMATS))
+
+# The ADR 042 creation recipe + scope heuristic (type-scoped resolution
+# per ADR 047): one text, every surface.
+_CREATE_MISSING_DOC = f"""\
+An unmatched key ERRORS, listing the type's own properties you can use
+  bare, and the space's other properties -- to use one of THOSE (or
+  create a real new property when none fits), resend with
+  create_missing_properties={{"key": "<format>"}}: a declared key
+  matching an existing space property REUSES it (attaching it to this
+  object, never duplicating); otherwise it is created (formats:
+  {_CREATABLE_MENU}; "objects" makes it a relation -- its value is then
+  a node id/name like any relation entry). Think about SCOPE:
+  {{"key": {{"format": ..., "scope": "type"}}}} when the property is
+  a recurring attribute EVERY object of this type should carry (this
+  drafts a schema proposal the user confirms with a 👍 reaction -- the
+  value saves immediately either way -- and is REQUIRED if an automation
+  rule should watch the property); the default scope "instance" (the
+  string shorthand) fits a one-off fact about this object only. An
+  optional "name" sets the property's human display name."""
 
 _UPDATE_NODE_DOC = f"""\
-Modify a node's fields and/or links. Only provided arguments change.
+Modify a node's properties and/or links. Only provided arguments change.
 
 node_id accepts a node NAME as well as an id (resolved for you).
 
@@ -253,41 +320,81 @@ saw it. An empty string clears it. Never list the node's links in the
 description: a Connections section is maintained automatically at the
 bottom of the page (you never see or write it).
 
-fields: {{"key": "value"}} attributes. Every key MUST match one of the
-space's own properties, by key or display name -- get_node shows what a
+properties: {{"key": "value"}} -- scalar attributes AND relations in one
+map. Every key MUST match a property of this node's TYPE, or one this
+object already carries, by key or display name -- get_node shows what a
 node already carries, and context action='overview' lists each type's
-properties. The value updates THAT property, visible and filterable in
-Anytype; select options match by name and are created when new;
-multi-select values are comma-separated names ("Dark, Hopeful"). A key
-that names a RELATION (e.g. "Assignee") also works: its value is a node
-id or name, and the entry becomes a link, same as add_links. An
-unmatched key ERRORS, listing the properties you can reuse -- prefer
-reusing one. Only when none fits, resend with
-create_missing_fields={{"key": "format"}} to create a real new property
-(formats: {_FORMAT_MENU}).
+properties (other space properties need the create_missing_properties
+attach gesture below). A scalar key updates
+THAT property, visible and filterable in Anytype; select options match
+by name and are created when new; multi-select values are comma-
+separated names ("Dark, Hopeful"). A key that names a RELATION (e.g.
+"Assignee") takes a node id or name -- or a list of them -- and each
+becomes a link; relation entries ADD to the existing links (to reassign
+a single-target relation, also remove_links the old target -- the
+updated view in the response shows the result). {_CREATE_MISSING_DOC}
 
-add_links: same shape as create_node's links (set create_missing_relations
-to create a brand-new relation label rather than reuse an existing one).
 remove_links: list of {{"source", "edge_type", "target"}} exactly as shown
 by get_node.
 """
 
-def _fields_doc(examples: str) -> str:
-    """The create_node ``fields`` parameter doc (ADR 023): shared semantics,
-    profile-specific example property names. Lives here exactly once."""
+_EDIT_DOCUMENT_DOC = """\
+Edit ONE section of a document node's long-form text without re-sending
+the whole body. Sections are paragraph blocks addressed by a stable hash
+anchor, shown as [§hash] in section listings and the context block.
+
+action='sections' (default): list the document's current anchors -- one
+line per block with its review state (status · intent, when history is
+on) and first line. Start here when you don't have fresh anchors; every
+edit response re-lists them (an edited block's anchor CHANGES with its
+text).
+
+action='replace': swap the anchored section for `text` (full markdown,
+one or more paragraphs). action='insert_after': add `text` as new
+section(s) after the anchor; anchor='top' inserts at the very beginning.
+action='delete': remove the anchored section. Anchors accept a unique
+prefix of the hash.
+
+Prefer this over update_node for targeted revisions -- untouched
+sections survive verbatim by construction (update_node's `description`
+stays right for full rewrites). The summary staleness rule applies:
+pass `summary` when the change is meaningful.
+
+The section's `intent` is the user's standing instruction for that text:
+`locked` -- cannot be changed or deleted; if a change is needed there,
+ask the user to unlock the section. `minor_revisions` -- keep the
+content and stay as close to the original intent as possible; improve
+only sentence structure, organization, and word choice. `needs_change`
+-- the user wants this text reworked. `flexible` (the default) says
+nothing.
+
+The user leaves COMMENTS on document text (shown as `comment #id` lines
+in the sections listing and the context block, anchored to the words
+they discuss). After an edit that acts on one, mark it done:
+action='address_comment' + comment_id. Addressed comments stay visible
+as awaiting the user's review -- only the user resolves them; a
+detached comment (its text was removed) stays listed until resolved.
+"""
+
+
+def _properties_doc(examples: str) -> str:
+    """The create_node ``properties`` parameter doc (ADR 042): shared
+    semantics, profile-specific example property names. Lives here
+    exactly once."""
     return f"""\
-fields: {{"key": "value"}} attributes. Every key MUST match one of the
-  space's own properties, by key or display name (e.g. {examples});
-  context action='overview' lists each type's properties, and get_node
-  shows what a node already carries. The value writes THAT property,
-  visible and filterable in Anytype; select options match by name and
-  are created when new; multi-select values are comma-separated names.
-  A key that names a RELATION (e.g. "Assignee") also works: its value
-  is a node id or name, and the entry becomes a link, same as links.
-  An unmatched key ERRORS, listing the properties you can reuse --
-  prefer reusing one. Only when none fits, resend with
-  create_missing_fields={{"key": "format"}} to create a real new property
-  (formats: {_FORMAT_MENU})."""
+properties: {{"key": "value"}} -- scalar attributes AND relations in one
+  map. Every key MUST match a property of the TYPE you are creating, by
+  key or display name (e.g. {examples}); context action='overview' lists
+  each type's properties, and get_node shows what a node already
+  carries (other space properties need the create_missing_properties
+  attach gesture below). A
+  scalar key writes THAT property, visible and filterable in Anytype;
+  select options match by name and are created when new; multi-select
+  values are comma-separated names. A key that names a RELATION (e.g.
+  "Assignee") takes a node id or name -- or a list of them -- and each
+  becomes a link from this node. (An edge pointing the OTHER way is the
+  other node's property: create this node first, then update_node the
+  other one.) {_CREATE_MISSING_DOC}"""
 
 
 def _query_doc(examples: str) -> str:
@@ -335,14 +442,15 @@ detail: names | summaries (default) | full.
 
 _SCHEDULE_DOC = """\
 Schedule a future or recurring check-in (WHEN to act, not world data).
-At the scheduled time the system starts a turn in this same chat and
-hands you your stored prompt -- use it for reminders ("remind me a week
-before taxes are due"), follow-ups ("ask on Friday whether the draft
-shipped"), or recurring reviews ("every Monday 09:00, list stale
-summaries").
+At the scheduled time either your stored message posts to this chat
+as-is, or an LLM turn runs your stored prompt -- use it for reminders
+("remind me a week before taxes are due"), follow-ups ("ask on Friday
+whether the draft shipped"), or recurring reviews ("every Monday 09:00,
+list stale summaries").
 
 Actions:
-  set    -- create one. Requires all three:
+  set    -- create one. Requires name, schedule, and EXACTLY ONE of
+            message or prompt:
             name     -- a short label (e.g. "tax reminder").
             schedule -- WHEN, in the server's LOCAL time, two forms:
                         * one-shot ISO date-time "2027-04-08T09:00"
@@ -351,17 +459,35 @@ Actions:
                         * cron, 5 fields "minute hour day month weekday"
                           e.g. "0 9 * * 1" = Mondays 09:00 (ranges a-b,
                           steps */n, lists a,b; weekday 0 and 7 = Sunday)
-            prompt   -- the instructions your future self receives when
-                        it fires, with NO other context -- write them
-                        self-contained: who/what/why and what to do
-                        (e.g. "Remind Nick that taxes are due April 15
-                        and ask whether he has filed yet.").
+            message  -- text posted to the chat VERBATIM at fire time,
+                        no LLM turn. Prefer this whenever the wording is
+                        already known ("Taxes are due April 15 -- file
+                        this week."): it is exact, instant, and free.
+            prompt   -- instructions an LLM turn follows at fire time,
+                        with NO other context -- use this only when the
+                        fired turn must think, look things up, or act
+                        (compile a digest, check the graph). Write it
+                        self-contained: who/what/why and what to do.
+            mode     -- optional, prompt events only: the Activity Mode
+                        the fired turn runs in (pick one whose tools fit
+                        the job, e.g. a web-search mode for a newsletter
+                        digest). Omitted = the space's DEFAULT mode --
+                        never the chat's current mode.
+            document_type -- optional, prompt events only: a node type
+                        name (e.g. "Report"). The fired turn writes its
+                        output into ONE object of that type and posts a
+                        short summary + link instead of the full text --
+                        use it for recurring long-form output
+                        (newsletters, digests) that would flood the
+                        chat. Needs a mode with the editing tools; on a
+                        read-only mode it is ignored.
             The response echoes the computed next-fire time and the
             current server time -- CHECK the math against what the user
             asked for ("a week before April 15" -> April 8).
   list   -- every scheduled event: id, schedule and next fire, target
-            chat, prompt, status. Also shows the current server time --
-            call this when you need today's date.
+            chat, mode, document type, message or prompt, status. Also
+            shows the current server time -- call this when you need
+            today's date.
   cancel -- stop one; node_id is the id shown by list, or the exact
             event name. Sets its "Schedule status" to Cancelled; the
             object and its schedule stay in Anytype, and the user can
@@ -370,9 +496,11 @@ Actions:
 A recurring event fires at most once per occurrence; occurrences missed
 while the system was down collapse into ONE late fire. Events live as
 "Scheduled Event" objects in Anytype (fields: Schedule, Schedule
-prompt, Schedule status, Last fired), so the user can view, edit, or
-create them there too -- an empty status counts as Pending, and a fired
-one-shot is marked Completed automatically.
+message, Schedule prompt, Schedule mode, Schedule document type,
+Schedule status, Last fired),
+so the user can view, edit, or create them there too -- an empty status
+counts as Pending, and a fired one-shot is marked Completed
+automatically.
 """
 
 
@@ -394,14 +522,27 @@ Tool actions:
   pause / resume -- switch a rule off/on without deleting it (rule=...).
   test   -- DRY RUN: simulate one fire against a real object and report
             what WOULD be written; nothing is applied. rule=<id/name>
-            tests a stored rule; passing the create params (+ script)
-            tests a DRAFT before creating it. Optional trigger=<object
-            id or name> picks the simulated object. ALWAYS test a
-            script before creating it.
+            tests a stored rule (add script=... to try a REPLACEMENT
+            script against its stored config without saving it);
+            passing the create params (+ script) tests a DRAFT before
+            creating it. Optional trigger=<object id or name> picks the
+            simulated object. Script rules are auto-tested on create
+            and update -- read that result and fix any failure before
+            moving on.
 
 condition -- the rule watches TRANSITIONS, not states:
   "changed to true" / "changed to false" (checkbox flips), "changed"
-  (any value change).
+  (any value change), or "manual" -- the rule NEVER fires on its own and
+  runs only when the user asks for it. Use "manual" for a formula or a
+  picker: something to compute on demand rather than in reaction to an
+  edit. watch_property is optional (and ignored) for a manual rule.
+
+watch_property -- a property attached to the target TYPE (the error
+  lists them; a property created with create_missing_properties scope
+  "type" becomes watchable once the user confirms the attach). Every
+  type also has the BUILT-IN "modified_at" -- the object's last-modified
+  stamp, so the rule fires on ANY edit to the object; condition
+  "changed" only, and it is read-only (never an action property).
 
 rule_action -- what happens when the condition fires:
   "set property to now"    -- write the current date-time into
@@ -422,8 +563,12 @@ rule_action -- what happens when the condition fires:
       objects(type=None), find(name, type=None), field(obj, prop),
       neighbors(obj, edge_type=None) -- read any object in the space
       set(obj_or_id, prop, value) -- queue one write (str/bool/int/
-                        float; max 20 per fire; the property must
-                        already exist on the target's type)
+                        float; max 20 per fire). Writes reach SCALAR
+                        properties that already exist on the target's
+                        type -- an object's summary, description, and
+                        body are NOT script-writable; if no suitable
+                        property exists, propose one with the schema
+                        tool first.
       log(msg)       -- a line for the system log (print() is discarded)
       No imports beyond the stdlib, no network, ~5s time limit, and the
       space snapshot caps at 2000 objects.
@@ -432,6 +577,12 @@ Rules fire only on changes the system OBSERVES while running (nothing
 retroactive), rules never trigger other rules, and a broken rule shows
 status Error + "Rule last error" on its object -- it heals on its own
 once fixed.
+
+Running a rule on demand is the USER's gesture, not yours: they send
+"/run <rule name>" in the chat, or tick "Rule run now" on the rule
+object in Anytype. You have NO action for this -- do not claim you ran
+a rule. If they ask you to run one, tell them the two ways, or offer
+action="test" for a dry run that changes nothing.
 """
 
 
@@ -474,11 +625,15 @@ Actions:
 properties -- a list of objects, each:
   {"name": "Status", "format": "select", "options": ["Open", "Done"]}
   formats: text, number, select, multi_select, date, checkbox, url,
-  email, phone. options only for select/multi_select. A property that
-  already exists in the space with the SAME format is reused (attached
-  to the type); a different format is a conflict -- the error names it.
-  Links between objects are NOT properties: use create_node/update_node
-  links with create_missing_relations for a new edge label.
+  email, phone, objects ("objects" = a relation: once attached, it is an
+  edge label whose values are links to other objects). options only for
+  select/multi_select. A property that already exists in the space with
+  the SAME format is reused (attached to the type); a different format
+  is a conflict -- the error names it.
+  Writing a VALUE at the same time? You don't need this tool:
+  create_node/update_node with create_missing_properties={"key":
+  {"format": ..., "scope": "type"}} saves the value immediately AND
+  drafts this same proposal for you.
 
 Don't repeat the draft's contents in your reply -- the confirmation
 message carries them. Proposals are drafts for THIS conversation (they
@@ -536,7 +691,7 @@ Actions:
                   scratchpad, working set, and recent trail.
   overview     -- DERIVED entry-point map for a cold start: per-type
                   counts, each type's properties (reuse these as create/
-                  update `fields` keys), plus the highest-degree "hub"
+                  update `properties` keys), plus the highest-degree "hub"
                   nodes with name, type, id and summary. START HERE in a
                   fresh session to obtain node ids for explore /
                   get_node / hold. {overview_note}(alias: map)
@@ -566,7 +721,7 @@ def _get_node_doc(
     """The ``get_node`` doc: one body, profile-specific example nouns and
     the optional read-several-at-once tip."""
     return f"""\
-Read ONE node in depth: all fields plus every edge grouped by type,
+Read ONE node in depth: all properties plus every edge grouped by type,
 with neighbor names and ids. Use when you need the full picture of a
 single {entity_noun}; use `explore` to see a neighborhood instead. The full
 description (the node's Anytype page body) is fetched fresh on every
@@ -655,18 +810,14 @@ description: long-form text (a portrait, a place's atmosphere, an
   user reads and edits it directly; returned by get_node and
   explore(detail="full"). Write it for the page, in Markdown.
 story_time: REQUIRED for an Event-role node (number; timeline position).
-""" + _fields_doc("role, tech_type") + """
-links: list of {"edge_type", "other" (target node id OR name),
-  "outgoing" (default true)}. `other` accepts a node name -- it is
-  resolved for you (ambiguous names report the candidates).
-  edge_type is a relation LABEL. Reuse an existing relation (e.g. knows,
-  located_at, participated_in, triggered_by, or any relation already in
-  your space). A label with no existing relation is surfaced for approval;
-  set create_missing_relations=true to create it on the fly.
-  outgoing=false means the edge points FROM `other` TO the new node --
-  e.g. creating an Event that an existing Character took part in:
-    {"edge_type": "participated_in", "other": "<character id>",
-     "outgoing": false}
+""" + _properties_doc("role, tech_type") + """
+  Relation example -- linking the new node to existing ones (labels like
+  knows, located_at, participated_in, or any relation in your space):
+    properties={"located_at": "The Undercroft", "knows": ["Mira", "Brakk"]}
+  An edge pointing INTO the new node (e.g. an existing Character
+  participated_in this new Event) is the Character's own property: create
+  the Event, then update_node(<character>,
+  properties={"participated_in": "<event id>"}).
 icon: a single emoji for the page, shown in lists and the graph view --
   pick one that fits the node (a face for a person, a place mark for a
   location, an object for an item). Optional; humans may change it later.
@@ -727,6 +878,7 @@ EXAMPLES -- the census tool (explore walks outward; query scans the world):
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
     "schema": _SCHEMA_DOC,
+    "edit_document": _EDIT_DOCUMENT_DOC,
 }
 
 # Starter activity modes live in mode_seeds/*.toml since ADR 035 -- the
@@ -777,17 +929,14 @@ story_time: REQUIRED for an Event-role node (meetings, decisions,
   milestones): its position on the timeline as a sortable number -- use
   epoch seconds or YYYYMMDD (e.g. 20260702). The parameter name is
   historical; read it as "time".
-""" + _fields_doc("status, priority") + """
-links: list of {"edge_type", "other" (target node id OR name),
-  "outgoing" (default true)}. `other` accepts a node name -- it is
-  resolved for you (ambiguous names report the candidates).
-  edge_type is a relation LABEL. Reuse an existing relation (e.g.
-  member_of, works_on, attended, decided_in, or any relation already in
-  your space). A label with no existing relation is surfaced for approval;
-  set create_missing_relations=true to create it on the fly.
-  outgoing=false means the edge points FROM `other` TO the new node --
-  e.g. creating a Meeting that an existing Person attended:
-    {"edge_type": "attended", "other": "<person id>", "outgoing": false}
+""" + _properties_doc("status, priority") + """
+  Relation example -- linking the new node to existing ones (labels like
+  member_of, works_on, attended, decided_in, or any relation in your
+  space):
+    properties={"works_on": "Atlas Project", "member_of": ["Platform Team"]}
+  An edge pointing INTO the new node (e.g. an existing Person attended
+  this new Meeting) is the Person's own property: create the Meeting,
+  then update_node(<person>, properties={"attended": "<meeting id>"}).
 icon: a single emoji for the page, shown in lists and the graph view --
   pick one that fits the node (a face for a person, a calendar for a
   meeting, a target for a milestone). Optional; humans may change it later.
@@ -849,6 +998,7 @@ EXAMPLES:
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
     "schema": _SCHEMA_DOC,
+    "edit_document": _EDIT_DOCUMENT_DOC,
 }
 
 WORKSPACE = DomainProfile(
@@ -901,13 +1051,10 @@ description: long-form text (a task's context, a procedure's overview, a
 story_time: REQUIRED for an Event-role node (meetings, milestones): an
   ISO date like "2026-07-04". The parameter name is historical; read it
   as "when".
-""" + _fields_doc('status, priority, "Due date"') + """
-links: list of {"edge_type", "other" (target node id OR name),
-  "outgoing" (default true)}. `other` accepts a node name -- it is
-  resolved for you. Reuse an existing relation (e.g. part_of, assigned_to,
-  documents, or any relation already in the space); a label with no
-  existing relation is surfaced for approval; set
-  create_missing_relations=true to create it on the fly.
+""" + _properties_doc('status, priority, "Due date"') + """
+  Relation example -- linking the new node to existing ones (labels like
+  part_of, assigned_to, documents, or any relation in the space):
+    properties={"part_of": "Website Refresh", "assigned_to": "Dana"}
 icon: a single emoji for the page, shown in lists and the graph view --
   pick one that fits (a checkbox for a task, a clipboard for a
   procedure, a calendar for a meeting). Optional.
@@ -967,6 +1114,7 @@ EXAMPLES:
     "automation": _AUTOMATION_DOC,
     "send_file": _SEND_FILE_DOC,
     "schema": _SCHEMA_DOC,
+    "edit_document": _EDIT_DOCUMENT_DOC,
 }
 
 ASSISTANT = DomainProfile(

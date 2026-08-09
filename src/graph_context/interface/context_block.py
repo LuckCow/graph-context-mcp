@@ -25,10 +25,11 @@ Rules the block guarantees:
 
 from __future__ import annotations
 
-from graph_context.domain import schema
+from graph_context.domain import revisions, schema
 from graph_context.domain.graph import GraphIndex
 from graph_context.domain.models import Detail, Node, NodeId
 from graph_context.domain.session import WorkingSetEntry
+from graph_context.errors import GraphContextError
 from graph_context.interface.services import Services
 
 DEFAULT_BUDGET_CHARS = 3500
@@ -113,9 +114,10 @@ def _render(
             if entry.detail is Detail.FULL:
                 body = bodies.get(entry.node_id, "")
                 if body:
-                    lines.append(
-                        f"    {body}" if with_bodies else _BODY_OMITTED
-                    )
+                    if with_bodies:
+                        lines.extend(_body_lines(services, entry.node_id, body))
+                    else:
+                        lines.append(_BODY_OMITTED)
                 lines.extend(_edge_lines(graph, node))
             elif with_summary_edges:
                 lines.extend(_edge_lines(graph, node))
@@ -123,6 +125,84 @@ def _render(
         names = ", ".join(graph.node(i).name for i in recent)
         lines.append(f"recent (automatic trail): {names}")
     return "\n".join(lines)
+
+
+def _body_lines(
+    services: Services, node_id: NodeId, body: str
+) -> list[str]:
+    """A FULL entry's body. Tracked nodes (WP42) render per section with
+    the hash anchor `edit_document` speaks -- plus the section's intent
+    when a human set one (locked/minor_revisions/needs_change are
+    instructions to the model, spelled out in the `edit_document` tool
+    doc; the default flexible says nothing). Untracked nodes keep the
+    single-line rendering byte-identical."""
+    historian = services.historian
+    if historian is None or not historian.is_tracked(node_id):
+        return [f"    {body}"]
+    states = historian.section_states(node_id)
+    tokens = historian.token_states(node_id)
+    runs = historian.locked_runs(node_id)
+    # WP50: the user's live comments, grouped under their anchor block;
+    # detached ones (their text was removed) trail the body.
+    anchored: dict[str, list[revisions.CommentState]] = {}
+    detached: list[revisions.CommentState] = []
+    for comment in historian.comments(node_id):
+        if comment.hash:
+            anchored.setdefault(comment.hash, []).append(comment)
+        else:
+            detached.append(comment)
+    rendered = []
+    for block_hash, raw in revisions.body_blocks(body):
+        state = states.get(block_hash)
+        badge = (
+            f" · {state.intent}"
+            if state and state.intent != revisions.INTENT_FLEXIBLE
+            else ""
+        )
+        rendered.append(f"    [§{block_hash}{badge}] {raw}")
+        # WP46: partially-locked blocks spell out the verbatim text the
+        # model must not alter (a fully locked block needs no list --
+        # the badge covers it).
+        token_state = tokens.get(block_hash)
+        partial = token_state is not None and any(
+            intent != revisions.INTENT_LOCKED
+            for intent in token_state.intent
+        )
+        if partial and block_hash in runs:
+            listed = " | ".join(f'"{run}"' for run in runs[block_hash])
+            rendered.append(f"      locked verbatim: {listed}")
+        for comment in anchored.get(block_hash, ()):
+            rendered.append(f"      {_comment_line(comment, raw)}")
+    for comment in detached:
+        rendered.append(
+            f"      detached comment #{comment.id} (its text was "
+            f'removed): "{comment.text}"'
+        )
+    return rendered or [f"    {body}"]
+
+
+def _comment_line(comment: revisions.CommentState, raw: str) -> str:
+    """One live comment under its anchor block: state, text, and -- for
+    a ranged comment -- the anchored words themselves, so the model
+    knows exactly which text the note discusses."""
+    label = (
+        "open" if comment.state == revisions.COMMENT_OPEN
+        else "addressed; awaiting human review"
+    )
+    quoted = ""
+    if comment.start >= 0:
+        try:
+            lo, hi = revisions.token_range_to_chars(
+                raw, comment.start, comment.end
+            )
+        except GraphContextError:
+            pass  # a range the raw text no longer has: whole-block note
+        else:
+            words = raw[lo:hi]
+            if len(words) > 60:
+                words = words[:60] + "…"
+            quoted = f' — on: "{words}"'
+    return f'comment #{comment.id} ({label}): "{comment.text}"{quoted}'
 
 
 def _edge_lines(graph: GraphIndex, node: Node) -> list[str]:

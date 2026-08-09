@@ -47,10 +47,13 @@ async def main() -> None:
     show("create alice", await tools.create_node_tool(
         svc, type="Person", name="Alice Reyes", summary="Staff engineer, storage."))
     alice = svc.session.recent.items[0]
-    show("create team (linked in one call)", await tools.create_node_tool(
-        svc, type="Team", name="Storage Guild", summary="Owns the storage layer.",
-        links=[{"edge_type": "member_of", "other": alice, "outgoing": False}],
-        create_missing_relations=True))
+    show("create team", await tools.create_node_tool(
+        svc, type="Team", name="Storage Guild", summary="Owns the storage layer."))
+    team = svc.session.recent.items[0]
+    show("alice joins the team (her own property)", await tools.update_node_tool(
+        svc, node_id=alice, summary="Staff engineer, storage.",
+        properties={"member_of": team},
+        create_missing_properties={"member_of": "objects"}))
 
     # The role override at work: a Meeting is an Event-role node, so it
     # requires a timeline position -- the error is the proof.
@@ -59,19 +62,21 @@ async def main() -> None:
              svc, type="Meeting", name="Q3 replatform sync",
              summary="Decide the Q3 storage replatform approach."))
 
-    show("meeting with attendees (one call)", await tools.create_node_tool(
+    show("meeting with a time", await tools.create_node_tool(
         svc, type="Meeting", name="Q3 replatform sync",
         summary="Decide the Q3 storage replatform approach.",
-        story_time=20260630,
-        links=[{"edge_type": "attended", "other": alice, "outgoing": False}],
-        create_missing_relations=True))
+        story_time=20260630))
     meeting = svc.session.recent.items[0]
+    show("alice attended (her own property)", await tools.update_node_tool(
+        svc, node_id=alice, summary="Staff engineer, storage.",
+        properties={"attended": meeting},
+        create_missing_properties={"attended": "objects"}))
 
     show("decision recorded against the meeting", await tools.create_node_tool(
         svc, type="Decision", name="Adopt object storage",
         summary="Move blob data to object storage in Q3.", story_time=20260630,
-        links=[{"edge_type": "decided_in", "other": meeting}],
-        create_missing_relations=True))
+        properties={"decided_in": meeting},
+        create_missing_properties={"decided_in": "objects"}))
     decision = svc.session.recent.items[0]
 
     show("meeting brief via explore", await tools.explore_tool(

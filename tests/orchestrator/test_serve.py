@@ -101,7 +101,7 @@ def launched(monkeypatch):
     calls: list[str] = []
 
     def record(name: str):
-        async def run() -> None:
+        async def run(**_kwargs) -> None:  # accepts serve's prose= handoff
             calls.append(name)
         return run
 
@@ -127,7 +127,7 @@ class TestLaunch:
     async def test_one_bot_crashing_takes_the_server_down(
         self, monkeypatch, no_viewer, launched
     ) -> None:
-        async def crash() -> None:
+        async def crash(**_kwargs) -> None:
             raise GraphContextError("GC_SPACES_FILE is unset")
 
         monkeypatch.setattr(anytype_chat_bot, "run", crash)

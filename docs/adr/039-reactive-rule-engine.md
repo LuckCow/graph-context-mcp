@@ -170,10 +170,15 @@ there, like scheduled events.
   explainer documents the caveat.
 - `Set property to now` is format-aware (R2, live-probed 2026-07-19):
   a native date property rejects naive timestamps and accepts RFC 3339
-  only WITH a timezone — which the naive-local clock convention cannot
-  honestly supply — or a bare date. Date targets therefore get the bare
-  **local date** (`YYYY-MM-DD`); text targets carry the full
-  `YYYY-MM-DD HH:MM:SS` stamp. Want time-of-day? Use a text property.
+  only WITH a timezone, or a bare date. **Amended 2026-07-19
+  (dogfooding, same day):** a bare date is stored as midnight **UTC**
+  and clients render it in the viewer's zone, so the stamp displayed a
+  day early in US zones. Date targets therefore get **local midnight
+  with its explicit UTC offset** (`YYYY-MM-DDT00:00:00-04:00`); the
+  engine takes the zone behind its clock (`local_zone(GC_TIMEZONE)`,
+  empty = resolve the system offset at write time, DST-safe either
+  way). Text targets carry the full `YYYY-MM-DD HH:MM:SS` stamp. Want
+  time-of-day? Use a text property.
 - A 5s default tick re-runs `resync()` (which also reloads the
   registry) — acceptable against the sidecar, tunable via the knob; a
   registry-skipping fast resync is possible follow-up work.

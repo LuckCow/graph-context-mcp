@@ -63,8 +63,12 @@ async def main() -> None:
         svc, type="Location", name="The Undercroft", summary="Vaults beneath Brakk.",
         description="Cold galleries of pre-Fall stonework; every sound "
                     "arrives twice.",
-        links=[{"edge_type": "located_at", "other": mira, "outgoing": False}],
-        create_missing_relations=True,
+    )
+    undercroft = svc.session.recent.items[0]
+    await tools.update_node_tool(
+        svc, node_id=mira, summary="Exiled siege engineer of Brakk.",
+        properties={"located_at": undercroft},
+        create_missing_properties={"located_at": "objects"},
     )
     show("3. explore full = scene assembly with full descriptions",
          await tools.explore_tool(svc, start=mira, depth=1, detail="full"))

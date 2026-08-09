@@ -96,6 +96,48 @@ class TestParseSeedModes:
         assert seed.spec.goal == "g"
 
 
+class TestDocumentTypeKey:
+    """ADR 048: a document mode maintains its manuscript as nodes."""
+
+    def test_document_type_parses_stripped(self) -> None:
+        (seed,) = parse_seed_modes(
+            '[modes.prose]\ngoal = "g"\nmutating = true\n'
+            'document_type = " Chapter "\n',
+            "test",
+        )
+        assert seed.spec.document_type == "Chapter"
+
+    def test_document_type_requires_mutating(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            parse_seed_modes(
+                '[modes.prose]\ngoal = "g"\ndocument_type = "Chapter"\n',
+                "test",
+            )
+        assert "[modes.prose]" in str(err.value)
+        assert "mutating" in str(err.value)
+
+    def test_document_type_and_capture_conflict(self) -> None:
+        with pytest.raises(GraphContextError) as err:
+            parse_seed_modes(
+                '[modes.prose]\ngoal = "g"\nmutating = true\n'
+                'document_type = "Chapter"\n'
+                '[modes.prose.capture]\nartifact_type = "gc_prose"\n',
+                "test",
+            )
+        assert "document_type and capture" in str(err.value)
+
+    def test_document_type_rides_seed_payloads(self) -> None:
+        seeds = parse_seed_modes(
+            '[modes.prose]\ngoal = "g"\nmutating = true\n'
+            'document_type = "Chapter"\n'
+            '[modes.plain]\ngoal = "g"\n',
+            "test",
+        )
+        prose, plain = seed_payloads(seeds)
+        assert prose["document_type"] == "Chapter"
+        assert "document_type" not in plain
+
+
 class TestDriverOptionKeys:
     """ADR 037: thinking / max_tokens / web-search limits parse with the
     same "empty = unset" normalization the model choice uses."""
@@ -121,6 +163,20 @@ class TestDriverOptionKeys:
                 'thinking = "off"\n',
                 "seed",
             )
+
+    def test_reply_card_toggles_parse_and_default_off(self) -> None:
+        """ADR 046: the two card-hiding booleans ride like mutating --
+        absent reads False (pre-046 behavior: everything shows)."""
+        (discreet,) = parse_seed_modes(
+            '[modes.discreet]\ngoal = "g"\nhide_intent_card = true\n'
+            'hide_node_cards = true\n',
+            "test",
+        )
+        assert discreet.spec.hide_intent_card is True
+        assert discreet.spec.hide_node_cards is True
+        (plain,) = parse_seed_modes('[modes.plain]\ngoal = "g"\n', "test")
+        assert plain.spec.hide_intent_card is False
+        assert plain.spec.hide_node_cards is False
 
     def test_domains_parse_from_a_string_or_a_list(self) -> None:
         (seed,) = parse_seed_modes(
@@ -158,11 +214,15 @@ class TestDriverOptionKeys:
             parse_seed_modes(
                 '[modes.m]\ngoal = "g"\nweb_search_max_uses = 2.5\n', "test"
             )
+        with pytest.raises(GraphContextError, match="turn_limit"):
+            parse_seed_modes(
+                '[modes.m]\ngoal = "g"\nturn_limit = -3\n', "test"
+            )
 
     def test_option_payloads_emit_only_when_set(self) -> None:
         seeds = parse_seed_modes(
             '[modes.tuned]\ngoal = "g"\nthinking = "high"\n'
-            'max_tokens = 32000\nweb_search = true\n'
+            'max_tokens = 32000\nturn_limit = 6\nweb_search = true\n'
             'web_search_max_uses = 3\n'
             'web_search_allowed_domains = ["example.com", "b.example"]\n'
             '[modes.plain]\ngoal = "g"\n',
@@ -171,11 +231,12 @@ class TestDriverOptionKeys:
         tuned, plain = seed_payloads(seeds)
         assert tuned["thinking"] == "high"
         assert tuned["max_tokens"] == 32000
+        assert tuned["turn_limit"] == 6
         assert tuned["web_search_max_uses"] == 3
         # Domains flatten to the human-typed text-property shape.
         assert tuned["web_search_allowed_domains"] == "example.com b.example"
         for key in (
-            "thinking", "max_tokens", "web_search_max_uses",
+            "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
             "web_search_allowed_domains", "web_search_blocked_domains",
         ):
             assert key not in plain
@@ -204,8 +265,10 @@ class TestPackagedCorpora:
         for profile in ("fiction", "workspace"):
             seeds = load_seed_modes(None, profile)
             by_name = {s.name: s for s in seeds}
-            assert set(by_name) == {"world_modeling", "authoring"}
-            assert default_seed(seeds).name == "world_modeling"
+            assert set(by_name) == {
+                "space_setup", "world_modeling", "authoring",
+            }
+            assert default_seed(seeds).name == "space_setup"
             assert by_name["world_modeling"].spec.mutating is True
             authoring = by_name["authoring"].spec
             assert authoring.mutating is False
@@ -215,9 +278,9 @@ class TestPackagedCorpora:
         seeds = load_seed_modes(None, "assistant")
         by_name = {s.name: s for s in seeds}
         assert set(by_name) == {
-            "organizing", "record_procedure", "meeting_notes",
+            "space_setup", "organizing", "record_procedure", "meeting_notes",
         }
-        assert default_seed(seeds).name == "organizing"
+        assert default_seed(seeds).name == "space_setup"
         assert by_name["organizing"].spec.mutating is True
         assert by_name["record_procedure"].spec.capture == CapturePolicy(
             artifact_type="procedure", min_chars=120
@@ -237,6 +300,16 @@ class TestPackagedCorpora:
             for seed in load_seed_modes(None, profile):
                 assert mode_config.slugify(seed.display_name) == seed.name
 
+    def test_every_profile_defaults_to_the_setup_mode(self) -> None:
+        """ADR 045: fresh spaces start in Space Setup -- a privileged,
+        mutating mode that builds the space with the user."""
+        for profile in ("fiction", "workspace", "assistant"):
+            seeds = load_seed_modes(None, profile)
+            setup = default_seed(seeds)
+            assert setup.name == "space_setup"
+            assert setup.spec.mutating is True
+            assert setup.spec.meta_inspection is True
+
 
 class TestSeedPayloads:
     """The payload shape is the ModeStore port's: one representation
@@ -249,9 +322,12 @@ class TestSeedPayloads:
             "name": "Organizing",
             "goal": "Maintain the knowledge base.",
             "mutating": True,
+            "meta_inspection": False,
             "web_search": False,
             "capture": None,
             "activity_detail": "minimal",
+            "hide_intent_card": False,
+            "hide_node_cards": False,
             "origin": "seed [modes.organizing]",
             "icon": "X",
             "default": True,

@@ -24,6 +24,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         procps \
     && rm -rf /var/lib/apt/lists/*
 
+# Tailscale, from the pinned static tarball. pkgs.tailscale.com is NOT in the
+# runtime egress allowlist, so this never self-updates: bump the ARG and
+# rebuild. Build time is before the firewall exists, so the download works.
+ARG TAILSCALE_VERSION=1.86.2
+RUN curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" \
+      | tar xzf - --strip-components=1 -C /usr/local/bin \
+        "tailscale_${TAILSCALE_VERSION}_amd64/tailscale" \
+        "tailscale_${TAILSCALE_VERSION}_amd64/tailscaled" \
+    && mkdir -p /var/lib/tailscale /var/run/tailscale \
+    && tailscaled --version
+
 # Node.js 20 (runtime for Claude Code), then Claude Code itself.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -49,15 +60,31 @@ deps=list(p.get('dependencies',[])) + list(opt.get('dev',[])) + list(opt.get('or
 subprocess.check_call([sys.executable,'-m','pip','install','--no-cache-dir',*deps]) if deps else None" \
     && rm /tmp/pyproject.toml
 
-# Non-root user. May only sudo the firewall script, nothing else.
+# Add playwright in order to validate layouts. The browser binaries must
+# live in a world-readable shared path: this RUN executes as root, and the
+# default location (~/.cache/ms-playwright) would be invisible to the
+# non-root dev user created below. ENV persists so runtime finds them.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pip install playwright && playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
+# Non-root user. May only sudo the two startup scripts, nothing else -- this
+# file is also what bounds the firewall's root-egress exemption for tailscaled
+# (see the "Tailscale" section of init-firewall.sh): keep the list at exactly
+# these two entries, or that exemption widens with it.
 RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && useradd --uid ${USER_UID} --gid ${USER_GID} -m -s /bin/bash ${USERNAME} \
-    && echo "${USERNAME} ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" \
+    && echo "${USERNAME} ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/start-tailscale.sh" \
        > /etc/sudoers.d/firewall \
     && chmod 0440 /etc/sudoers.d/firewall
 
 COPY .devcontainer/init-firewall.sh /usr/local/bin/init-firewall.sh
-RUN chmod +x /usr/local/bin/init-firewall.sh
+COPY .devcontainer/start-tailscale.sh /usr/local/bin/start-tailscale.sh
+# Orchestrator process control. NOT in the sudoers file above, on purpose:
+# the server must run unprivileged (see the script's header).
+COPY .devcontainer/gc-serve.sh /usr/local/bin/gc-serve
+RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/start-tailscale.sh \
+             /usr/local/bin/gc-serve
 
 # Pre-create ~/.claude OWNED BY dev. Docker initializes a fresh named volume
 # from the image's directory (content + ownership), so this ensures the

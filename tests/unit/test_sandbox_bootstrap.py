@@ -139,5 +139,24 @@ class TestLogsAndErrors:
         with pytest.raises(ZeroDivisionError):
             bootstrap.execute(payload("x = 1\ny = x / 0"))
 
+    def test_assistant_tool_names_are_decoys_that_teach_the_api(self) -> None:
+        # The author is an LLM whose muscle memory is the assistant tool
+        # surface; calling one must name the real API, not NameError.
+        with pytest.raises(RuntimeError) as err:
+            bootstrap.execute(payload(
+                "update_node(node_id='t1', summary='s', description='d')"
+            ))
+        message = str(err.value)
+        assert "update_node() is an assistant tool" in message
+        assert "set(obj_or_id, property, value)" in message
+        assert "not script-writable" in message
+
+    def test_every_decoy_name_refuses(self) -> None:
+        names = ("create_node", "update_node", "get_node", "find_node",
+                 "explore")
+        for name in names:
+            with pytest.raises(RuntimeError, match=f"{name}\\(\\) is an"):
+                bootstrap.execute(payload(f"{name}()"))
+
     def test_empty_script_yields_empty_outcome(self) -> None:
         assert bootstrap.execute(payload("")) == {"sets": [], "logs": []}

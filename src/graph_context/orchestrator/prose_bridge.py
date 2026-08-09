@@ -1,0 +1,584 @@
+"""The prose review page's thread/loop seam (WP43, ADR 049).
+
+The inspection server runs in a plain daemon thread; historian baselines
+and the repository index are mutated on the bot's asyncio loop. This
+module is the ONLY door between them: every read and write the prose
+page makes is a coroutine scheduled onto the owning space's loop via
+``asyncio.run_coroutine_threadsafe`` -- the HTTP thread never touches
+shared state directly (even reads would race the loop's mutations), and
+mark writes additionally take the space's route lock so they never
+interleave with a turn's own recording.
+
+Late binding by construction: ``serve`` hands ``create_server`` an EMPTY
+registry before the bots bootstrap; the chat bot registers each space
+once its runtime (and historian) exists. A standalone inspect server has
+no bridge and renders the page's empty state.
+
+Composition rules: this module may import application/ports/domain but
+never infrastructure (import-linter); the composition roots inject the
+repository and historian handles.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import threading
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
+from dataclasses import dataclass
+from typing import Any, cast
+
+from graph_context.application.node_historian import (
+    MarkRequest,
+    NodeHistorian,
+)
+from graph_context.domain import revisions
+from graph_context.errors import GraphContextError, StaleSectionMark
+from graph_context.ports.graph_repository import GraphRepository
+
+logger = logging.getLogger(__name__)
+
+CALL_TIMEOUT_SECONDS = 15.0
+
+MARK_AUTHOR = "human:prose-page"
+
+# The author_detail user leg as transports record it (`anytype:<object
+# id>`); display resolves the id to the member object's name.
+_ANYTYPE_ID = re.compile(r"anytype:(\S+)")
+
+
+@dataclass(frozen=True, slots=True)
+class ProseSpace:
+    """One registered space: its loop handle plus the callables the
+    server routes speak. The callables close over the space's historian,
+    repository, and route lock -- the server never sees those."""
+
+    space_id: str
+    label: str
+    loop: asyncio.AbstractEventLoop
+    list_nodes: Callable[[], Awaitable[list[dict[str, Any]]]]
+    revision_diff: Callable[[str, int], Awaitable[dict[str, Any]]]
+    # WP48 (ADR 054): the document-level editor wire.
+    # (node) -> full raw body + absolute-offset segments/spans
+    doc_view: Callable[[str], Awaitable[dict[str, Any]]]
+    # (node, base, body) -- whole-document save; base is the doc
+    # payload's concurrency token, mismatch -> 409
+    save_body: Callable[[str, str, str], Awaitable[dict[str, Any]]]
+    # (node, base, marks) -- batch status/intent marks, one sidecar write
+    set_marks: Callable[
+        [str, str, list[dict[str, Any]]], Awaitable[dict[str, Any]]
+    ]
+    # WP50 (ADR 056): (node, base, payload) -- comment create/resolve/
+    # edit, one sidecar write; payload carries exactly one of
+    # comment/resolve/edit
+    set_comment: Callable[
+        [str, str, dict[str, Any]], Awaitable[dict[str, Any]]
+    ]
+
+
+class ProseBridge:
+    """Thread-safe registry of live spaces + the one cross-thread call.
+
+    Also the live-update ledger (WP48): every historian sidecar write
+    bumps a per-(space, node) counter via :meth:`bump` (called on the
+    space's loop through the historian's ``on_record`` hook), and the
+    server's ``/api/prose/events`` SSE thread polls
+    :meth:`versions_for` -- an open page learns of bot edits within one
+    poll tick without any cross-thread coroutine."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._spaces: dict[str, ProseSpace] = {}
+        self._versions: dict[tuple[str, str], int] = {}
+
+    def register(self, space: ProseSpace) -> None:
+        with self._lock:
+            self._spaces[space.space_id] = space
+
+    def get(self, space_id: str) -> ProseSpace | None:
+        with self._lock:
+            return self._spaces.get(space_id)
+
+    def spaces(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return [(s.space_id, s.label) for s in self._spaces.values()]
+
+    def bump(self, space_id: str, node_id: str) -> None:
+        with self._lock:
+            key = (space_id, node_id)
+            self._versions[key] = self._versions.get(key, 0) + 1
+
+    def versions_for(self, space_id: str) -> dict[str, int]:
+        with self._lock:
+            return {
+                node: version
+                for (sid, node), version in self._versions.items()
+                if sid == space_id
+            }
+
+    def version_of(self, space_id: str, node_id: str) -> int:
+        with self._lock:
+            return self._versions.get((space_id, node_id), 0)
+
+    def call(
+        self,
+        space_id: str,
+        name: str,
+        /,
+        *args: Any,
+        timeout: float = CALL_TIMEOUT_SECONDS,
+    ) -> Any:
+        """Run one space callable ON ITS LOOP and wait for the result.
+
+        Raises ``KeyError`` for an unknown space, ``TimeoutError`` when
+        the loop is too busy (the server maps it to 504), and re-raises
+        whatever the coroutine raised (stale marks -> 409, etc.)."""
+        space = self.get(space_id)
+        if space is None:
+            raise KeyError(space_id)
+        fn: Callable[..., Awaitable[Any]] = getattr(space, name)
+        coro = cast("Coroutine[Any, Any, Any]", fn(*args))
+        future: Any = asyncio.run_coroutine_threadsafe(coro, space.loop)
+        try:
+            return future.result(timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
+
+
+def register_space(
+    bridge: ProseBridge,
+    *,
+    space_id: str,
+    label: str,
+    historian: NodeHistorian,
+    repository: GraphRepository,
+    route_lock: asyncio.Lock,
+) -> None:
+    """Build a space's callables and register it. Must run ON the
+    space's serving loop -- the captured ``get_running_loop`` is what the
+    HTTP thread schedules onto. Also wires the historian's ``on_record``
+    hook to the bridge's version ledger (the SSE live-update signal)."""
+    loop = asyncio.get_running_loop()
+
+    def _name_of(node_id: str) -> str:
+        graph = repository.graph
+        return graph.node(node_id).name if graph.has_node(node_id) else node_id
+
+    def _display_detail(detail: str) -> str:
+        """An author_detail string for DISPLAY: any ``anytype:<id>``
+        user leg resolves to that object's name when the graph knows it
+        (space members hydrate as first-class nodes, quirk A10/S11) --
+        pre-WP48 revisions recorded the raw participant id, and the
+        stored log is history, so the readable name is a read-time
+        derivation like blame itself. Unknown ids stay verbatim."""
+        def _swap(match: re.Match[str]) -> str:
+            name = _name_of(match.group(1))
+            return name if name != match.group(1) else match.group(0)
+        return _ANYTYPE_ID.sub(_swap, detail)
+
+    def _usable(node_id: str) -> tuple[revisions.RevisionRecord, ...]:
+        return revisions.usable_records(historian.history(node_id))
+
+    async def list_nodes() -> list[dict[str, Any]]:
+        rows = []
+        for node_id in historian.tracked_ids():
+            usable = _usable(node_id)
+            last = usable[-1] if usable else None
+            rows.append({
+                "id": node_id,
+                "name": _name_of(node_id),
+                "revisions": len(usable),
+                "last_at": last.at if last else "",
+                "last_author": (
+                    _display_detail(last.author_detail) if last else ""
+                ),
+            })
+        rows.sort(key=lambda r: str(r["last_at"]), reverse=True)
+        return rows
+
+    async def revision_diff(node_id: str, seq: int) -> dict[str, Any]:
+        records = _usable(node_id)
+        texts = revisions.texts_of(records)
+        for step in revisions.revision_steps(records):
+            if step.record.seq != seq:
+                continue
+            # Display pairing CONSUMES matches (one old block pairs one
+            # new block) -- deliberately unlike the lineage folds, so it
+            # stays here rather than riding RevisionStep.ancestors.
+            removed = set(step.removed)
+            pairs = []
+            for new_hash in step.added:
+                text = texts.get(new_hash, "")
+                ancestor = revisions.closest(text, removed, texts)
+                old = texts.get(ancestor, "") if ancestor else ""
+                pairs.append({
+                    "old_hash": ancestor,
+                    "new_hash": new_hash,
+                    "spans": [
+                        [kind, span]
+                        for kind, span in revisions.word_diff(old, text)
+                    ],
+                })
+                removed.discard(ancestor)
+            for old_hash in sorted(removed):  # deletions with no successor
+                pairs.append({
+                    "old_hash": old_hash,
+                    "new_hash": "",
+                    "spans": [["del", texts.get(old_hash, "")]],
+                })
+            return {
+                "seq": step.record.seq,
+                "at": step.record.at,
+                "author": step.record.author_kind,
+                "detail": _display_detail(step.record.author_detail),
+                "pairs": pairs,
+            }
+        raise GraphContextError(f"no revision {seq} of {node_id!r}")
+
+    # -- the document-level wire (WP48, ADR 054) -----------------------
+
+    def _body_token(body: str) -> str:
+        """The doc view's concurrency token: a digest of the body's
+        hash SEQUENCE, so a save 409s exactly when the document's
+        identity-bearing content changed since the page loaded (a
+        whitespace-only store reflow does not invalidate the page)."""
+        return revisions.block_hash(
+            "\n".join(h for h, _ in revisions.hash_sequence(body))
+        )
+
+    async def _fetch_checked(
+        node_id: str, base: str, retry_action: str
+    ) -> str:
+        """fetch_body plus THE base-token gate every write route runs:
+        a mismatch raises StaleSectionMark (the server's 409) with the
+        route's retry wording."""
+        current = await repository.fetch_body(node_id)
+        if _body_token(current) != base:
+            raise StaleSectionMark(
+                f"{_name_of(node_id)!r} changed since this view "
+                f"loaded; reload and {retry_action}."
+            )
+        return current
+
+    def _blocks_by_hash(body: str) -> dict[str, str]:
+        """hash -> the block's raw text (a duplicated hash keeps the
+        last occurrence, like the original mapping comprehension)."""
+        return {
+            h: body[s:e] for h, s, e in revisions.block_offsets(body)
+        }
+
+    def _token_range(
+        by_hash: Mapping[str, str], node_id: str,
+        block_hash: str, item: Mapping[str, Any],
+    ) -> tuple[int | None, int | None]:
+        """An item's optional ``start_char``/``end_char`` selection
+        offsets -> token indices over the block's raw text (the
+        domain's ``char_range_to_tokens`` is the only place chars
+        become tokens); absent -> ``(None, None)``."""
+        if item.get("start_char") is None:
+            return None, None
+        text = by_hash.get(block_hash)
+        if text is None:
+            raise StaleSectionMark(
+                f"section {block_hash} is not in the current "
+                f"version of {_name_of(node_id)!r}; reload."
+            )
+        return revisions.char_range_to_tokens(
+            text, int(item["start_char"]), int(item["end_char"])
+        )
+
+    def _segment_rows(
+        node_id: str, body: str,
+        offsets: Sequence[tuple[str, int, int]],
+    ) -> tuple[list[dict[str, Any]], list[list[Any]]]:
+        """Per-block segment rows PLUS the merged token spans -- one
+        walk, since spans coalesce inside blocks. Span layout is
+        positional: ``[start, end, author, status, intent]``
+        (prose.html indexes by number)."""
+        blame = historian.blame(node_id)
+        badges = historian.section_states(node_id)
+        tokens_state = historian.token_states(node_id)
+        authors = historian.word_token_authors(node_id)
+        segments: list[dict[str, Any]] = []
+        spans: list[list[Any]] = []
+        for block_hash, start, end in offsets:
+            text = body[start:end]
+            badge = badges.get(block_hash)
+            entry = blame.get(block_hash)
+            segments.append({
+                "hash": block_hash,
+                "start": start,
+                "end": end,
+                "status": badge.status if badge else revisions.STATUS_RAW_AI,
+                "intent": (
+                    badge.intent if badge else revisions.INTENT_FLEXIBLE
+                ),
+                # None = not recorded yet (an edit between change
+                # ticks) or a word-free separator -- neutral display.
+                "blame": {
+                    "author": entry.author_kind,
+                    "detail": _display_detail(entry.author_detail),
+                    "at": entry.at,
+                    "seq": entry.seq,
+                } if entry else None,
+            })
+            block_authors = authors.get(block_hash)
+            state = tokens_state.get(block_hash)
+            tokens = revisions.block_tokens(text)
+            if (
+                block_authors is None
+                or not revisions.has_words(text)
+                or len(block_authors) != len(tokens)
+            ):
+                continue  # neutral: no spans over this block
+            statuses: Sequence[str] = (
+                state.status if state and len(state.status) == len(tokens)
+                else (revisions.STATUS_RAW_AI,) * len(tokens)
+            )
+            intents: Sequence[str] = (
+                state.intent if state and len(state.intent) == len(tokens)
+                else (revisions.INTENT_FLEXIBLE,) * len(tokens)
+            )
+            cursor = start
+            for author, status, intent, token in zip(
+                block_authors, statuses, intents, tokens, strict=True
+            ):
+                token_end = cursor + len(token)
+                if (
+                    spans
+                    and spans[-1][1] == cursor
+                    and spans[-1][2:] == [author, status, intent]
+                ):
+                    spans[-1][1] = token_end
+                else:
+                    spans.append(
+                        [cursor, token_end, author, status, intent]
+                    )
+                cursor = token_end
+        return segments, spans
+
+    def _comment_rows(
+        node_id: str, body: str,
+        offsets: Sequence[tuple[str, int, int]],
+    ) -> list[dict[str, Any]]:
+        """WP50: live comments with ABSOLUTE anchors (code-point
+        offsets over the body; null = detached). Ranged anchors derive
+        through token_range_to_chars; a range the fetched text no
+        longer has degrades to the whole block, never a crash."""
+        first_offset: dict[str, tuple[int, int]] = {}
+        for block_hash, start, end in offsets:
+            first_offset.setdefault(block_hash, (start, end))
+        comments: list[dict[str, Any]] = []
+        for comment in historian.comments(node_id):
+            anchor: dict[str, int] | None = None
+            span = first_offset.get(comment.hash) if comment.hash else None
+            if span is not None:
+                block_start, block_end = span
+                anchor = {"start": block_start, "end": block_end}
+                if comment.start >= 0:
+                    try:
+                        lo, hi = revisions.token_range_to_chars(
+                            body[block_start:block_end],
+                            comment.start, comment.end,
+                        )
+                        anchor = {
+                            "start": block_start + lo,
+                            "end": block_start + hi,
+                        }
+                    except GraphContextError:
+                        pass  # whole-block anchor stands
+            comments.append({
+                "id": comment.id,
+                "text": comment.text,
+                "state": comment.state,
+                "hash": comment.hash,
+                "at": comment.at,
+                "by": _display_detail(comment.by),
+                "state_at": comment.state_at,
+                "state_by": _display_detail(comment.state_by),
+                "anchor": anchor,
+            })
+        return comments
+
+    def _timeline_rows(
+        usable: Sequence[revisions.RevisionRecord],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "seq": step.record.seq,
+                "at": step.record.at,
+                "author": step.record.author_kind,
+                "detail": _display_detail(step.record.author_detail),
+                "added": len(set(step.added)),
+                "removed": len(step.removed),
+            }
+            for step in revisions.revision_steps(usable)
+        ]
+
+    async def _doc_payload(
+        node_id: str, body: str | None = None
+    ) -> dict[str, Any]:
+        """The whole-document wire payload. ``body`` short-circuits the
+        fetch when the caller already holds the current body under the
+        same route-lock hold (marks/comments never change it) -- the
+        page's writes must not pay two remote GETs per gesture."""
+        if body is None:
+            body = await repository.fetch_body(node_id)
+        usable = _usable(node_id)
+        offsets = revisions.block_offsets(body)
+        segments, spans = _segment_rows(node_id, body, offsets)
+        return {
+            "id": node_id,
+            "name": _name_of(node_id),
+            "version": bridge.version_of(space_id, node_id),
+            "base": _body_token(body),
+            "body": body,
+            "segments": segments,
+            "spans": spans,
+            "comments": _comment_rows(node_id, body, offsets),
+            "revisions": _timeline_rows(usable),
+        }
+
+    async def doc_view(node_id: str) -> dict[str, Any]:
+        if node_id not in historian.tracked_ids():
+            raise GraphContextError(f"no tracked node {node_id!r}")
+        return await _doc_payload(node_id)
+
+    async def save_body(node_id: str, base: str, body: str) -> dict[str, Any]:
+        """Whole-document save (WP48): the page IS the editor, so the
+        save carries the full body. Base-token mismatch -> 409 (the
+        node changed under the page; the client reconciles). Writes
+        through the repository like a human's Anytype-UI edit --
+        deliberately NOT through NodeWriter: the locked guard binds the
+        MODEL; the human who locks text is the authority to change it.
+        Records immediately (rides WP44 roll-up, so an autosave storm
+        coalesces into one pending human revision)."""
+        if node_id not in historian.tracked_ids():
+            raise GraphContextError(f"no tracked node {node_id!r}")
+        async with route_lock:
+            await _fetch_checked(node_id, base, "merge your edits")
+            await repository.update_node(node_id, body=body)
+            await historian.record_external_revision(
+                node_id, detail=MARK_AUTHOR
+            )
+        logger.info(
+            "prose page: saved %r (%s, %d chars)",
+            _name_of(node_id), node_id, len(body),
+        )
+        return await _doc_payload(node_id)
+
+    async def set_marks(
+        node_id: str, base: str, marks: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Batch status/intent marks (WP48): one POST per selection
+        gesture, one route-lock hold, one sidecar rewrite. Optional
+        ``start_char``/``end_char`` are offsets over the block's raw
+        text; the domain's ``char_range_to_tokens`` is the only place
+        they become token indices."""
+        async with route_lock:
+            current = await _fetch_checked(
+                node_id, base, "re-apply the marks"
+            )
+            by_hash = _blocks_by_hash(current)
+            requests = []
+            for mark in marks:
+                block_hash = str(mark["hash"])
+                start, end = _token_range(
+                    by_hash, node_id, block_hash, mark
+                )
+                requests.append(MarkRequest(
+                    kind=str(mark["kind"]),
+                    block_hash=block_hash,
+                    value=str(mark["value"]),
+                    start=start,
+                    end=end,
+                ))
+            await historian.record_marks(
+                node_id, requests=requests, by=MARK_AUTHOR
+            )
+        logger.info(
+            "prose page: %d mark(s) on %r (%s): %s",
+            len(requests), _name_of(node_id), node_id,
+            ", ".join(sorted({f"{r.kind}={r.value}" for r in requests})),
+        )
+        return await _doc_payload(node_id, body=current)
+
+    async def set_comment(
+        node_id: str, base: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Comment create/resolve/edit (WP50; edit per the ADR 056
+        amendment): one POST, one route-lock hold, one sidecar rewrite.
+        Create takes the anchored block's hash plus optional
+        ``start_char``/``end_char`` selection offsets (the domain's
+        ``char_range_to_tokens`` is the only place they become token
+        indices); resolve takes a comment id; edit takes ``{id, text}``
+        and rewrites the note in place (an addressed comment reopens).
+        The base token gates all three -- a stale page reconciles
+        before it comments."""
+        async with route_lock:
+            current = await _fetch_checked(node_id, base, "retry")
+            resolve = payload.get("resolve")
+            edit = payload.get("edit")
+            if resolve is not None:
+                await historian.set_comment_state(
+                    node_id, comment_id=str(resolve),
+                    value=revisions.COMMENT_RESOLVED, by=MARK_AUTHOR,
+                )
+                logger.info(
+                    "prose page: resolved comment %s on %r (%s)",
+                    resolve, _name_of(node_id), node_id,
+                )
+            elif edit is not None:
+                await historian.edit_comment(
+                    node_id, comment_id=str(edit["id"]),
+                    text=str(edit["text"]), by=MARK_AUTHOR,
+                )
+                logger.info(
+                    "prose page: edited comment %s on %r (%s)",
+                    edit["id"], _name_of(node_id), node_id,
+                )
+            else:
+                comment = payload["comment"]
+                block_hash = str(comment["hash"])
+                start = end = None
+                if comment.get("start_char") is not None:
+                    # by_hash builds lazily: resolve-only posts and
+                    # whole-block comments never pay for the offsets.
+                    start, end = _token_range(
+                        _blocks_by_hash(current), node_id,
+                        block_hash, comment,
+                    )
+                await historian.record_comment(
+                    node_id, block_hash=block_hash,
+                    text=str(comment["text"]), by=MARK_AUTHOR,
+                    start=start, end=end,
+                )
+                logger.info(
+                    "prose page: new comment on %r (%s), section %s",
+                    _name_of(node_id), node_id, block_hash,
+                )
+        return await _doc_payload(node_id, body=current)
+
+    # WP48: every historian write (turn boundary, change tick, page
+    # save, marks) bumps the live-update ledger the SSE route polls.
+    historian.on_record = lambda node_id: bridge.bump(space_id, node_id)
+
+    bridge.register(ProseSpace(
+        space_id=space_id,
+        label=label,
+        loop=loop,
+        list_nodes=list_nodes,
+        revision_diff=revision_diff,
+        doc_view=doc_view,
+        save_body=save_body,
+        set_marks=set_marks,
+        set_comment=set_comment,
+    ))

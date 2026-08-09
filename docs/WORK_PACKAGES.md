@@ -2167,7 +2167,9 @@ in the Anytype UI as `gc_rule` objects, no deployment config.
 * R2 resolved by live probe (2026-07-19): native date properties
   reject naive timestamps (accept RFC 3339 with timezone, or a bare
   date), so `set-property-to-now` is format-aware — date targets get
-  the bare local date, text targets the full stamp;
+  local midnight with its explicit UTC offset (amended same day: a
+  bare date stores as midnight UTC and displayed a day early in US
+  zones; ADR 039 amendment), text targets the full stamp;
   `tests/e2e/test_live_rules.py` certifies both live.
 
 ---
@@ -2265,6 +2267,638 @@ vocabulary" amended with one human-gated path the model cannot walk.
 * Bound in every mode beside `schedule`/`automation` (drafting is
   harmless everywhere; the human alone executes); MCP-registered as
   the `schema` tool.
+
+---
+
+## WP34 — One `properties` surface: scoped creation + built-in watchables (ADR 042) — **shipped 2026-07-19**
+
+**Status:** complete. The write tools' fragmented property surface —
+`fields`, `links`/`add_links`, `create_missing_relations`,
+`create_missing_fields` — collapsed into ONE `properties` dict plus one
+explicit `create_missing_properties` declaration map, and the
+type-vs-instance distinction became a first-class `scope` the model
+must choose. Driven by two dogfooding failures (turns `ba3ab5c05a28`
+and `de38192f56dc`; forensics in the ADR).
+
+### The shipped shape
+
+* **One dict, discriminated by the space.** A `properties` key naming
+  an existing `objects` relation takes a node id/name (or list) and
+  becomes link(s) — relation entries ADD; `remove_links` handles
+  removal; the reverse edge is the other node's own write (incoming
+  links retired, `LinkSpec.outgoing` gone, the composite-create
+  patch-other-objects rollback deleted). Every other key is a scalar,
+  with JSON-native values coerced at the boundary (a boolean checkbox
+  value used to crash to "internal error"). Retired params survive as
+  implementation-only redirects; the MCP wrappers never advertise them.
+* **Declarations carry format AND scope** (`PropertyDeclaration`,
+  construction-validated; formats = `CREATABLE_FORMATS` = scalars +
+  `objects`). `instance` = the ADR 023 space-level mint; `type` = the
+  same immediate mint + value PLUS an auto-drafted EXTEND_TYPE proposal
+  riding ADR 041's 👍 flow (`NodeWriter` shares the session's
+  `SchemaProposals` ledger; `WriteOutcome` returns node + drafted +
+  warnings; drafting failures degrade to warnings, never unwind a
+  landed write). The human gate on all type changes is intact.
+* **Duplicate-safe minting** (quirk A14, live-spiked): a declared key
+  matching an existing same-format property is a reuse; a format
+  mismatch is a loud A12 conflict; the store's duplicate-key 400 maps
+  to a typed error naming the way out. Mints derive display names from
+  keys (`shift_active` → "Shift Active"; declaration `name` overrides).
+* **`objects` drafts in schema proposals**: create/attach a relation to
+  a type; reuse entries carry the property id (A11 amendment — a
+  key-only objects reuse 400s on the live type PATCH).
+* **Built-in rule watchable `modified_at`** (+ human aliases): watches
+  the store clock on ANY type, condition `changed` only, read-only.
+  The fake stamps a deterministic monotonic clock; the adapter folds
+  link-write PATCH responses into the index so the stamp stays
+  truthful; the engine's baseline rebuild keeps no-cascade by
+  construction. The automation tool and rule-engine errors advertise
+  it.
+* Docstrings across all three profiles teach the unified surface and
+  the scope heuristic (recurring attribute of the kind → `type`,
+  required for rule-watching; one-off fact → `instance`); goldens
+  regenerated as the review artifact; eval scripted cases and demo
+  scripts moved over.
+
+---
+
+## WP35 — Activity-capped chat streams: hibernate + wake (ADR 043) — **shipped 2026-07-21**
+
+**Status:** complete. Every served chat used to hold a live SSE stream
+forever; each stream pins one connection from the space client's shared
+httpx pool (default 100), so a space accumulating chats walked toward
+silently starving its own request path at ~90+ streams. Now only the
+`GC_CHAT_STREAM_CAP` (default 20) most recently active chats per space
+stream; the rest hibernate — registered, sessioned, reachable by
+scheduled events and replies — and wake within one rescan tick of their
+next message.
+
+* **Quirk C13** (live-probed): the `/chats` list carries a
+  server-maintained `last_message_date` date property advancing on every
+  post (bot posts included), absent until the first message; string
+  comparison is recency order. Pinned in `chat.py` + `MockAnytype`;
+  `AnytypeChatClient.list_chats` now returns `ChatSummary` records (the
+  bootstrap lister contract stays plain tuples — the composition root
+  converts).
+* **`plan_streams`** (`anytype_chat_transport`, pure): memoryless top-N
+  by activity stamp, ties on chat id; a message into a hibernated chat
+  makes it the newest, so the wake IS the rescan poll — `_watch_chats`
+  feeds the same re-list it already makes into the plan and
+  starts/stops serve tasks. `busy` chats (mid-turn/catch-up, marked by
+  the serve task; plus chats holding a pending WP33 confirm, whose 👍
+  only arrives over SSE) are never stopped — plan and cancel run with
+  no await between, so eviction is race-free by single-threaded
+  construction.
+* **ADR 019 intact:** chats hibernated at startup get one stream-less
+  `_catch_up` from the watcher before its first tick (offline backlog
+  answered, first-run history fast-forwarded; failures retried per
+  tick, chats the roster wakes first dropped from the debt).
+* **Fallbacks:** cap `0`/`off` streams everything; rescan off ignores
+  the cap loudly (the poll is the only wake mechanism); pinned bindings
+  are never capped.
+
+---
+
+## WP36 — Unified change tick: mode auto-refresh (ADR 044) — **shipped 2026-07-21**
+
+**Status:** complete. Editing an Activity Mode object or relinking
+`gc_default_mode` on the Space Context in the Anytype UI used to sit
+invisible until a restart or a `/mode` command; now it is live within
+one change tick (~5s). Structurally, `_watch_rules` — the only
+change-driven watcher — became the unified `_watch_changes` tick, so
+future on-change features are one listener each instead of a new
+watcher.
+
+* **`_watch_changes`** (`anytype_chat_bot.py`): per tick, under the
+  route lock — one modified-since resync, then the ordered named
+  listeners from `_change_listeners` (`rules` first, ADR 039's latency
+  contract; then `modes`), each with its own crash guard so a failing
+  listener never starves the next. `GC_CHANGE_TICK_SECONDS` (default 5,
+  `off` disables all listeners); `GC_RULE_TICK_SECONDS` honored as a
+  compat alias.
+* **`Orchestrator.refresh_modes()`** (public, beside `rule_tick`):
+  fingerprint-gated reload — `modes.mode_fingerprint(graph)` is
+  `(id, modified_at)` over `Role.MODE`/`Role.SPACE_CONTEXT` index nodes,
+  `ModeConfigWatch` seeds its baseline on the first check (nothing
+  reloads on restart). On change it runs `/mode`'s `_refresh_registry`
+  degrade path (last good registry kept, errors logged not posted), and
+  the baseline advances even on failure — at-most-once per change, the
+  human's next edit retries. `/mode` stays the unconditional reload.
+* **Unchanged by construction:** specs re-resolve from the registry
+  every turn (edits live next turn), vanished modes degrade to the
+  default, default-mode changes affect only new sessions (ADR 034).
+
+---
+
+## WP37 — Meta-inspection privilege + Space Setup mode (ADR 045) — **shipped 2026-07-22**
+
+**Status:** complete. A new starter mode helps the user set up their
+space in conversation: it interviews them, authors a tailored Activity
+Mode object (goal prompt + every `gc_mode_*` option), proposes object
+types through the WP33 👍 flow, and suggests rules/scheduled events.
+Mode objects are normally hidden infra, so this shipped as a privilege,
+not a hole:
+
+* **`ModeSpec.meta_inspection`** (`gc_mode_meta_inspection` checkbox,
+  bootstrap-retrofitted): flows through every `mutating`-style seam
+  (mode_config, in-space parse, store, seeder, eval overlay; `/mode`
+  reports `meta-inspection: on`). The mode-config key/format table moved
+  to the domain (`activity.MODE_CONFIG_FIELDS`) since it now reflects.
+* **Threading**: `Services.visible_infra_roles`, set per call by
+  `modes.invoke` from the dispatching spec — `{Role.MODE}` or empty.
+  Tool signatures unchanged (driver schemas would leak a parameter).
+* **Visibility (MODE only)**: query's exclude-set honors the privilege
+  and its infra hatch CLOSES for Role.MODE unprivileged (was a silent
+  leak of goal bodies); `find_by_name`/`resolve`, `get_node` neighbors,
+  and the port catalogs (`known_node_types`/`field_catalog`, both
+  backends) gain `include_roles`. `gc_mode_*` reflects into
+  `Node.fields` (invisible to unprivileged modes anyway).
+* **Infra-write guard (new)**: `schema.validate_infra_write` +
+  `InfraWriteDenied` — `NodeWriter` rejects infra-role targets unless
+  admitted; before this, any mutating mode could write a guessed
+  `type="Activity Mode"`. The dedicated services (scheduler, rules,
+  recorders) bypass NodeWriter and never meet it. Three eval cases
+  repinned to `space_setup`.
+* **Seeds + rollout**: `[modes.space_setup]` in all three corpora,
+  marked `default = true` (fresh spaces start in it; live spaces keep
+  their defaults). Seed-once stands: `scripts/seed_space_setup_mode.py`
+  is the one-time idempotent retrofit for already-seeded spaces — mints
+  the object per binding, never touches `gc_default_mode`.
+
+---
+
+## WP38 — Reply-card visibility mode toggles (ADR 046) — **shipped 2026-07-25**
+
+**Status:** complete. Two Activity Mode checkboxes control what a reply
+cards, both defaulting to the old always-show behavior:
+`gc_mode_hide_intent_card` keeps the ADR 038 process-trace card off
+replies (the intent node is still recorded), and
+`gc_mode_hide_node_cards` keeps the turn's created/edited nodes from
+carding even where the reply text names them — the pipeline stamps the
+drained mutation ids on a new `ReplyEvent.suppress` tuple and the
+Anytype transport filters them out of its text-scrape (explicit `attach`
+is never filtered; read-only mentions still card). Plumbing rides the
+`web_search`-checkbox precedent end to end: domain field table (mint +
+retrofit + ADR 045 reflection for free), spec validation, store/seeder
+round trip, seed-TOML pre-fill, ADR 044 auto-refresh; the Space Setup
+menu and Example Mode explainer document both fields.
+
+---
+
+## WP39 — Type-scoped write resolution (ADR 047) — **shipped 2026-07-25**
+
+**Status:** complete. Bare `properties` keys (scalars and relations)
+resolve against the write's TYPE scope — the target type's attached
+properties on create, plus the object's own vocabulary on update —
+instead of the space-wide catalog, closing the incident where an
+unattached near-duplicate relation ("Linked Project" beside the type's
+"Linked Projects") kept resolving silently and spread object by
+object. `create_missing_properties` widens resolution to the whole
+space: a declared key matching an existing same-format property is
+REUSED (attach, never a twin), so one explicit declaration is the
+deliberate path to unattached space vocabulary; infra-role writers and
+the seeded `gc_edge_*` starter relations stay space-wide. The port's
+`relation_label_for` takes a mandatory `on_type`/`on_node` scope; the
+registry gains `attached_property`/`attached_relation_key`; the fake
+gains per-type `attachments` (its catalog-without-attachments mode
+keeps the historical flat behavior for fixtures/evals; open mode
+untouched). Unmatched-key errors are sectioned — the type's own
+properties AND relations first, then unattached space vocabulary with
+the exact attach gesture, naming the exact space match when there is
+one. No fuzzy matching anywhere (considered, rejected — ADR 014's
+stance stands). One-off remediation:
+`scripts/cleanup_duplicate_linked_project.py` migrates the incident
+space's duplicate links onto `linked_projects` and deletes the
+duplicate.
+
+---
+
+## WP40 — Document modes (ADR 048) — **shipped 2026-07-27**
+
+**Status:** complete. A mode that maintains long-form documents sets
+`gc_mode_document_type` (e.g. `Chapter`; requires `gc_mode_mutating`,
+mutually exclusive with `gc_capture_type`) and the MODEL maintains the
+document node through the normal write tools — create once, revise the
+same node's description, curate its `references` itself — fixing both
+capture-era dogfooding failures: the chat no longer floods with pasted
+prose (replies are a short change summary; the touched document nodes
+always card via `ReplyEvent.attach`, never filtered by
+`hide_node_cards`) and iteration no longer mints duplicate Chapter
+nodes. `modes.goal_for(spec)` appends the standing `DOCUMENT_GUIDANCE`
+block in one place (fingerprint, diary, and `decide` all route through
+it); `_finish_turn` drains the journal unconditionally. Reply
+discipline is deliberately prompt-only (no harness reply rewriting).
+Plumbing rides the mode-checkbox precedent end to end; the Space Setup
+menus document the new option. ProseWeaver migration appendix in the
+ADR.
+
+---
+
+## WP41 — Node revision history (ADR 049) — **shipped 2026-07-27**
+
+**Status:** complete. General-purpose, space-following revision history
+for the node types listed in the Space Context's new **Tracked types**
+(`gc_tracked_types`) property — data config, not mode config: writes
+from ANY mode and human Anytype-UI edits both record. Identity is
+paragraph-level normalized content hashes (`domain/revisions.py`, the
+single home of segmentation/normalization/blame/compaction; absorbs
+A9/A13/whitespace drift, honoring ADR 010's no-byte-exact rule);
+history is a keyframe+delta JSONL log inside one fence in a hidden
+`gc_node_history` sidecar per tracked node (lenient parse; ~400 K soft
+cap with truncation-marker compaction that re-carries live block
+texts). `application/node_historian.py` records compare-to-baseline —
+baselines always from `fetch_body` output, so store normalization can
+never mint phantom revisions — at two structural points: the turn
+boundary (one attributed `model · mode · user` revision per touched
+tracked node; failures never fail the turn) and a third `history`
+listener on the ADR 044 change tick (author `human`; the bot's own
+writes compare equal, so nothing double-records). `rebuild()` restores
+baselines on startup and catches up offline edits. Blame is derived at
+read time (introduced-by + difflib lineage), never stored. Fenced-JSONL
+body round-trip pinned by contract test on both backends and
+live-confirmed (`docs/spikes/node-history-body.md`). Open spike: API
+last-modified-by identity (human revisions attribute generically until
+then).
+
+---
+
+## WP42 — Section status, revision intent, locked enforcement (ADR 050) — **shipped 2026-07-28**
+
+**Status:** complete. Per-block `status` (`raw_ai | approved | human`)
+and `intent` (`locked | flexible | needs_change`) marks are new line
+kinds in the SAME sidecar log (no `seq`; file order is fold order;
+pre-WP42 readers skip them leniently). `revisions.section_states`
+folds the interleaved log into current state keyed to the final
+sequence: lineage through the ONE similarity rule (`closest`, shared
+with blame); a HUMAN edit's successor inherits status AND intent (a
+no-ancestor human block starts `human`; editing is not approving); a
+MODEL edit drops the successor to `raw_ai` — any AI edit voids
+`approved` — while intent follows. Compaction hoists live dropped-era
+marks after the first kept keyframe. Locked enforcement is one rule in
+one place: `NodeWriter` consults an injected `SectionGuard` protocol on
+body updates (`historian.check_body_update` — sync, in-memory fold,
+order-insensitive `missing_locked` presence check, no diffing), raising
+`LockedSectionsChanged` errors-are-prompts; the historian late-binds
+onto the donor `Services` in bootstrap (`services.historian`), so every
+derived session writer is guarded while the bare MCP server stays
+unguarded (no historian, ADR 049 v1 scope); infra writers bypass
+NodeWriter and the guard — locked is a contract with the model, never
+a storage ACL against the human. The `edit_document` mutation tool
+(`sections | replace | insert_after | delete`, hash anchors with
+git-style unique prefixes, `top` prepends) rides
+`application/document_editor.py` → `fetch_body` → `revisions.edit_body`
+→ the session writer, so guard/journal/staleness/infra checks apply
+with zero new enforcement points and untouched blocks keep their hashes
+byte-verbatim; `SectionAnchorNotFound` echoes the real anchors;
+`update_node` full rewrites stay valid (ADR 048 guidance now prefers
+the tool for targeted revisions). Tracked FULL working-set entries
+render per block in the context block as `[§hash · intent]` (default
+intent bare), feeding anchors + constraints into every turn.
+
+---
+
+## WP43 — Prose review page on the inspect server (ADR 050) — **shipped 2026-07-28**
+
+**Status:** complete. `prose.html` beside `inspect_server.py`, ADR 025
+house style plus a first: mobile-responsive (viewport meta, thumb-reach
+fixed action bar, ≥44 px targets, dark scheme) — the user reads it on a
+phone over Tailscale (network reach is ops, not code). The thread/loop
+seam is `orchestrator/prose_bridge.py`: an initially-EMPTY registry
+handed to `create_server` before the bots bootstrap; each space
+registers (historian + repository + route lock + its serving loop) as
+runtimes come up, and every page read/write crosses via
+`run_coroutine_threadsafe` onto the owning loop (`set_mark` under the
+route lock; 15 s timeout → 504). GET routes `/prose`,
+`/api/prose/spaces|node|diff` serve blocks joined with blame +
+section states, a revision timeline, and word-level intra-block diffs
+computed server-side with difflib (no client diff library). The
+server's FIRST non-GET route, `POST /api/prose/mark`, is doubly gated:
+same-origin enforcement (`Sec-Fetch-Site`/`Origin`-vs-`Host`) plus a
+shared bearer token — `GC_PROSE_TOKEN`, off-values = writes disabled
+(403; the page renders read-only), bad token = 401 (the page prompts
+once, caches in localStorage), stale hash = 409 (toast + reload). GETs
+stay tokenless; standalone inspect launches have no bridge and render
+the empty state. Highlight-a-selection-as-context stays deferred.
+
+---
+
+## WP44 — Human-revision roll-up (ADR 051) — **shipped 2026-07-28**
+
+**Status:** complete. Consecutive HUMAN revisions coalesce into ONE
+pending revision: `revisions.rollup_base` (pure) trims a human tail
+that is still the log's LAST entry, and the historian re-records
+against that base — same seq, so keyframe cadence (seq-derived)
+survives; `known_hashes` re-derivation re-carries tail-only texts.
+Solidification is structural: a model revision or ANY mark displaces
+the tail as last entry (a mark pins exactly the reviewed text); the
+next human edit opens a new revision. The full-baseline no-op guard
+runs first (idle ticks never rewrite); a full undo REMOVES the pending
+revision (revert-to-base) instead of minting an empty delta; roll-up
+refuses over a post-compaction marker-then-keyframe log (re-recording
+would regress seq). No new persistence — restart + `rebuild()` keeps
+coalescing. Net: a typing session in Anytype is one revision, not one
+per 5-second tick.
+
+---
+
+## WP45 — Derived word-level authorship (ADR 051) — **shipped 2026-07-28**
+
+**Status:** complete. `revisions.word_token_authors(records)` (shipped
+as `word_authorship`; the span merge moved to the doc-wire consumer
+when ADR 054's document wire landed) — a pure,
+derived view (nothing stored): one pass over `state_walk` carrying a
+per-token author for every hash ever seen; added blocks inherit their
+ancestor's authors on token-equal ranges (`closest` WITHOUT consuming
+matches — a split paragraph's halves BOTH inherit; `revision_diff`'s
+greedy display pairing is deliberately different) and take the
+introducing revision's author elsewhere; restored-verbatim hashes keep
+their authorship; `MIN_BLAME_CHARS` floor applies; truncation degrades
+to introduced-at-keyframe. `prose_bridge.node_view` blocks gain
+`authorship` spans over the NORMALIZED text (raw heading marker
+re-prepended; fenced blocks and unrecorded edits degrade to `None`) and
+`prose.html` renders human-typed words as a subtle highlight. Roll-up
+(WP44) compounds: one authorship hop per editing session.
+
+**Editor roadmap (decisions recorded in ADR 051):** stage 3 = in-page
+editing + selection-to-approve with TRUE sub-paragraph span state (user
+decision — accepts new span-anchoring machinery); stage 4 = embedded
+chat panel, one session per document (`prose:<node-id>`), async turn
+jobs + SSE (turns outrun the bridge's 15s call timeout), selection as
+turn context.
+
+---
+
+## WP46 — Span-level review marks (ADR 052) — **shipped 2026-07-28**
+
+**Status:** complete. Highlight any stretch of text on the prose page
+and approve / lock / flag exactly that portion. `SectionMark` gains an
+optional TOKEN range (wire keys `s`/`e`; absent = whole block — old
+marks and old readers unaffected); review state now lives per token in
+`revisions.token_states`, carried across edits by the SAME positional
+inheritance as word authorship — no stored offsets, no re-anchoring
+machinery: the "span drift" problem never exists because ranges are
+consumed at fold time and state rides tokens thereafter. Fallout
+semantics (deliberate, ADR 052): an AI edit voids `approved` exactly on
+the words it changed; `section_states` becomes the derived badge view
+(all tokens agree → `approved`/`human`, mixed → `raw_ai`; intent =
+strictest token). Locked enforcement is now verbatim-RUN presence
+(`locked_runs` + substring check, still no diffing): the model may edit
+the rest of a partially locked paragraph and may move locked text
+anywhere, but the locked words must survive character-perfect; the
+guard error and the context block (`locked verbatim: "…"` lines under
+partially locked blocks) both teach the exact runs. Surfaces:
+`record_mark(start=, end=)` with per-slice change-only, `node_view`
+serves merged `[author, status, intent, text]` spans + `token_lens` +
+heading `glue`, `POST /api/prose/mark` takes optional `start`/`end`,
+and the page renders state as composable underline decorations
+(approved solid / locked double / needs-change wavy over the
+authorship background), with text selection opening the action bar on
+one token-ranged target per touched paragraph (tap still = whole
+block). Remaining stage-3/4 work: in-page text EDITING, then the
+embedded chat panel.
+
+---
+
+## WP47 — In-page prose editing (ADR 053) — **shipped 2026-07-28**
+
+**Status:** complete. The prose page edits paragraphs directly: tap a
+block → `edit` / `insert below` on the action bar (plus `＋ add
+paragraph` at the document end and a confirmed delete) → a plain
+`<textarea>` in the card — NO editor library (the block is the editing
+atom; ADR 025's no-dependency rule stands) and NO websockets (writes
+are POSTs; future bot-edit auto-refresh is an SSE job, deferred).
+`POST /api/prose/edit` (`replace | insert_after | delete`, hash
+anchors, same origin+token gates, 256 KB cap, stale anchor → 409)
+reaches the bridge's `edit_block`: under the route lock,
+`fetch_body → edit_body → repository.update_node →
+record_external_revision(detail="human:prose-page")` — recorded
+IMMEDIATELY (fresh blame on the refreshed view, no tick wait),
+coalescing into any pending human revision (WP44). Page edits are
+HUMAN edits end to end: they bypass the NodeWriter locked guard (the
+human is the locking authority — same standing as an Anytype-UI edit),
+and the historian's no-op guard absorbs the next change tick. Also
+amended ADR 052's display: state indicators are now subtle background
+highlights, one per word by priority (locked red > needs-change amber
+> approved green > human-typed lavender), replacing underlines.
+Remaining stage-4 work: the embedded chat panel.
+
+---
+
+## WP48 — The prose editor: CodeMirror, raw indexing, document wire (ADR 054) — **shipped 2026-07-28**
+
+**Status:** complete. Total rework of WP42–47's page after dogfooding
+rejected the block-card model (tap-to-textarea editing, blank-page
+re-render on every action, one POST per selected paragraph).
+Supersedes ADR 053's no-library decision: the page is now ONE
+CodeMirror 6 editor over the whole raw body — direct inline typing,
+styled-raw markdown (never WYSIWYG: a markdown serializer would
+rewrite source text and reintroduce the drift this WP removes). The
+bundle is vendored PREBUILT (`orchestrator/static/`, MIT, ~500 KB;
+reproducible build documented in `scripts/vendor/codemirror/`) — no
+build step in repo or CI; the server grew its first static route
+(`safe_child`, 404 on missing) and `create_server` verifies the
+bundle ships. Domain: identity hashes stay normalized (ADR 010), but
+every text index went RAW — `new_blocks` stores raw text, tokens/mark
+ranges/authorship/locked runs index it, `missing_locked` folds
+whitespace instead of normalizing, `MIN_BLAME_CHARS` died for a
+`has_words` separator rule (short dialogue is markable; fences no
+longer degrade), and `next_record` re-emits drifted texts — one
+mechanism that also auto-migrates pre-054 sidecars on the first
+`rebuild()`. New pure helpers `block_offsets` / `char_range_to_tokens`
+feed the document wire: `GET /api/prose/doc` (raw body + hash-sequence
+`base` token + offset segments/spans), `POST /api/prose/save`
+(whole-document, 409 on base mismatch → conflict banner with
+overwrite/discard; autosave debounce coalesces via WP44 roll-up;
+still bypasses the locked guard — human authority), `POST
+/api/prose/marks` (batch: one selection gesture = one lock hold = one
+sidecar rewrite via the historian's new `record_marks`), and `GET
+/api/prose/events` (SSE version bumps off the historian's new
+`on_record` hook → bridge counter; an open page reconciles bot edits
+in place by minimal-diff transaction). Decorations live in a CM
+StateField and MAP through local edits, so highlights ride the text
+while typing; nothing ever blanks. Old routes/callables
+(`node`/`mark`/`edit`, `node_view`/`set_mark`/`edit_block`, `glue`/
+`token_lens`) removed; gate order re-pinned on the new POSTs.
+
+---
+
+## WP49 — Scheduled Events: per-event modes + simple messages (ADR 055) — **shipped 2026-08-03**
+
+**Status:** complete. Overhauls ADR 027's firing semantics: a
+Scheduled Event now carries exactly ONE of `gc_schedule_message` (a
+*simple* event — the text posts to the chat VERBATIM at fire time, no
+model turn; `TurnReply.deliver` with no placeholder keeps it in the
+sent ledger, and `Orchestrator.note_scheduled_post` remembers it as an
+assistant message so live memory matches the restart-seeded view) or
+`gc_schedule_prompt` (an LLM turn), the latter optionally pinned to an
+Activity Mode by NAME in `gc_schedule_mode` (text, not select/objects
+— names are live registry data; typos degrade safely). Scheduled
+turns are ALWAYS mode-pinned now: `handle_message` grew
+`mode: str | None = None` (`None` = ambient, every conversational
+caller unchanged; a string = a per-turn pin via the pipeline's
+`_override_spec`, slugified, unknown/empty degrading to the registry
+default, never touching the session's own or persisted mode) and
+`run_scheduled` always passes `mode=due.mode` — a pre-existing event
+with no mode now fires in the SPACE DEFAULT mode, not the chat's
+ambient one (deliberate behavior change). The `schedule` tool's `set`
+takes exactly one of `message`/`prompt` plus optional `mode`
+(rejected with `message`); teaching errors own the distinction, and a
+human storing both in the UI gets message-wins (the rule lives in
+`Scheduler.tick`) with a `list` warning. Set-time mode validation
+rides a late-bound `Scheduler.mode_names` callable (the
+`services.historian` pattern — assembly binds it to the live
+registry; the bare MCP server never does and degrades to fire-time).
+Simple fires mint no intent node and no turn-log records
+(`gc_last_fired` + the bot's log line are the record) — distinct from
+ADR 027's rejected "synthetic chat message", which was a model turn
+dressed as conversation. Two new minted properties ride the existing
+`SCHEDULED_PROPERTIES` derivations (inline mint, retrofit,
+reflection) and the seeded explainer teaches the one-of choice.
+
+---
+
+## WP50 — Prose editor: highlight view modes + comments (ADR 056) — **shipped 2026-08-03**
+
+**Status:** complete. Two prose-page enhancements. **View modes**
+(frontend-only; superseded by the layer toggles below): the legend
+became the control — six chips (`all · authorship · status · intent ·
+comments · none`, persisted in `localStorage`) where single-concern
+modes UNMASK layers the `all` priority hides (authorship lavender shows
+on locked words; spans carry the full triple, `spanClass` is the one
+mode-aware seam); switching re-dispatches decorations from the retained
+payload, never through the router. **Comments**: human-authored notes on selections, stored as two
+new line kinds in the SAME sidecar log (`comment` with the ranged-mark
+anchor shape, `comment_state` transitions folded last-wins with
+`resolved` terminal; `open` implicit; clock-free content-hash ids).
+The `comment_states` fold rides anchors through edits with the shared
+`closest`/`_inherit` lineage (whole-block fallback when the commented
+words are deleted; detach on block removal — still listed until
+resolved; verbatim restore re-attaches), and `compact` REWRITES
+dropped-era live comments to their fold-current anchors (mark-style
+hoisting would kill migrated/detached ones); a comment line solidifies
+the WP44 roll-up (pins the text it discusses). Lifecycle splits by
+authority: the model may only mark `addressed` — `edit_document
+action="address_comment"` (bookkeeping: no journal, no card); the
+human resolves on the page via `POST /api/prose/comments` (same gates
++ base token as save/marks, one lock hold, one sidecar rewrite; the
+doc payload grew `comments` with absolute anchors, detached = null).
+The model sees comments under their anchor block in the context block
+(`comment #id (open): "…" — on: "<words>"`) and in the sections
+listing; the page shows dotted underlines (dashed once addressed)
+stacked on state backgrounds plus a panel with resolve buttons —
+row-click scrolls to the anchor, underline-click scrolls to the row,
+and the composer guard keeps SSE refetches from destroying a
+half-typed note. `_inherit` went generic; the review folds guard on
+`isinstance(RevisionRecord)` so future line kinds are inert. No
+bundle rebuild.
+
+**Independent layer toggles landed 2026-08-08** (ADR 056 amendment):
+the six exclusive view modes are retired — `all` masked and the
+single-concern modes hid two axes to show one, so reading a word's full
+state meant cycling chips. Seven layers (`locked · needs_change ·
+minor_revisions · approved · human · comments · blame`, blame now
+toggleable too) each flip independently, persisted as a comma-joined
+enabled list under `gc_prose_layers` (absent = all on, `""` = all off;
+no migration from `gc_prose_view_mode`), with `all`/`none` shortcut
+buttons and off chips keeping a dashed swatch outline in the layer's
+own colour. `spanClass` became `spanLayers` (the ordered *enabled*
+layers a span matches) + `spanMark`: the first layer paints the
+background fill on the surviving ADR 053 ladder, each remaining layer
+stacks a 3px solid bar via a `--hl-bars` custom property one `.cm-hl`
+rule composes — `box-shadow`, so bars are clipped outside the border
+box and cost no layout (marking never jostles line heights). At most
+one fill + two bars (intent is single-valued); a single-layer word is
+pixel-identical to before. Editor and legend class names now both
+derive from the layer key (`.cm-fill-<key>` / `.legend mark.sw-<key>`),
+replacing two hand-synced class sets, pinned by
+`TestProseHighlightLayers`. Frontend-only, no wire change.
+
+---
+
+## WP51 — Scheduled Events: per-schedule document output (ADR 057) — **shipped 2026-08-07**
+
+**Status:** complete. A prompt event may name
+`gc_schedule_document_type` ("Schedule document type"; lenient TEXT
+like `gc_schedule_mode` — type names are live space data, typos
+degrade at fire time as a self-correctable `create_node` error): the
+fired turn runs under ADR 048's document discipline — output into ONE
+node of that type, the chat gets a short summary plus the object card
+instead of a full newsletter-sized post. Mechanically a turn-local
+`ModeSpec` overlay: `DueEvent` carries the type, `run_scheduled`
+passes `handle_message(document_type=…)`, and the pipeline — AFTER
+the ADR 055 mode-pin resolution — does `dataclasses.replace(spec,
+document_type=…, capture=None)` so `DOCUMENT_GUIDANCE`, attach
+stamping, and cards all ride the existing ADR 048 path unchanged
+(`replace` re-runs `__post_init__`; the `mutating` gate and
+`capture=None` keep it valid). A read-only effective mode degrades
+loudly (warning log, turn runs without the override — mutation tools
+are never granted implicitly); the per-schedule type beats a pinned
+document mode's own; message-wins leaves it inert (no turn, no
+document); the `schedule` tool's `set` rejects it with `message`,
+echoes the document target, and `list` renders `document=<type>`. The
+minted property rides the existing `SCHEDULED_PROPERTIES` derivations
+(inline mint, retrofit, reflection) and the seeded explainer teaches
+it.
+
+---
+
+## WP52 — Manual rule runs (ADR 058) — **shipped 2026-08-08**
+
+**Status:** complete. An Automation Rule can now be run on demand, with
+no LLM turn — the motivating case being a Dinner Picker mode whose
+`run script` rule holds the formula that picks the next spot. Before
+this, firing such a rule meant faking a property change or spending a
+model turn on work the sandbox already does deterministically.
+
+* **The `manual` condition** (`domain/rules.py`): a fourth token whose
+  `condition_met` is False for every before/after pair — one line in
+  the domain IS "never fires on its own", so the engine's planner
+  carries no second copy of the rule. It is the only condition for
+  which `parse_rule_fields` relaxes the watch-property requirement (a
+  target type is still required — a fire needs a trigger object), and
+  the missing-watch error now points at it.
+* **Two surfaces, one entry point.** `/run <rule>` joins `/mode` and
+  `/clear` in `pipeline.is_command` + its dispatch, short-circuiting
+  before the driver: no model turn, no intent node, and Anytype /
+  Discord / CLI get it for free. Bare `/run` lists the rules and the
+  usage (names are exact-match); `/run <rule> on <object>` names the
+  trigger, with the bare name tried FIRST so "Turn on lights" still
+  resolves. The `gc_rule_run_now` checkbox ("Rule run now") is the
+  Anytype-UI gesture — the tenth `gc_rule_*` property and the first
+  with shared ownership: the human ticks, the engine unticks.
+* **`RuleEngine.run_now` + `_claim_manual_requests`**: `/run` calls the
+  former, the checkbox becomes a plan source inside `run_tick`. Neither
+  consults the condition — the request IS the trigger, so an ordinary
+  reactive rule can be run by hand too. The scan lives inside the tick
+  rather than in a second ADR 044 listener so a rule that both
+  transitioned and was hand-requested books and rebaselines once.
+* **Invariants inherited, not re-argued.** The box is unticked BEFORE
+  the run (the scheduler's at-most-once discipline; a failed claim
+  leaves it ticked and skips the fire, so it cannot go through the
+  error-swallowing `_write_rule_fields`); every path ends at the
+  extracted `_rebaseline(bound)` over the FULL bound set, so manual
+  writes can never read as transitions. `run_now`'s *bookkeeping* is
+  scoped to the one rule — the asymmetry is deliberate and commented.
+* **Paused refuses loudly**, writing only `gc_rule_last_error` and
+  never the Error status: `is_paused("Error")` is False, so an Error
+  write would self-heal the rule to Active on the next tick — ticking
+  a box would silently resume a rule the human switched off.
+* **No `automation action="run"`.** The tool surface is unchanged; the
+  doc names the two human gestures and tells the model it has no
+  action for this, or it invents one and claims it fired the rule.
+* **Two bugs found on the way in.** `_write_rule_fields` merged over
+  the fields snapshot taken at the top of the tick while its sibling
+  `_write_field` re-reads — nothing exercised the difference until the
+  run-now claim, which the same tick's `gc_rule_last_fired` write would
+  have undone, firing the rule forever. And `_note_overlaps` compared
+  two manual script rules' empty keys as equal, logging a cascade that
+  cannot exist. Both fixed, both pinned.
+* **`_resolve_watch` short-circuits** on an empty watch property:
+  resolving `""` against a KNOWN catalog type raises, so a manual rule
+  would have passed on the memory backend and broken on every real
+  space. Pinned at the adapter layer, and live-certified — the E2E case
+  confirms the checkbox mints/retrofits as a real checkbox and that
+  writing `"false"` actually clears it.
 
 ---
 

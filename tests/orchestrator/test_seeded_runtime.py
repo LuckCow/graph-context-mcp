@@ -30,8 +30,10 @@ async def _registry_of(built: composition.BuiltRuntime):
 async def test_the_memory_runtime_serves_the_packaged_corpus() -> None:
     built = await composition.build_runtime(get_profile("fiction"))
     registry = await _registry_of(built)
-    assert registry.names() == ["authoring", "world_modeling"]
-    assert registry.default == "world_modeling"
+    assert registry.names() == [
+        "authoring", "space_setup", "world_modeling",
+    ]
+    assert registry.default == "space_setup"
     await composition.run_teardown(built.teardown)
 
 
@@ -39,9 +41,9 @@ async def test_each_profile_seeds_its_own_corpus_and_default() -> None:
     built = await composition.build_runtime(get_profile("assistant"))
     registry = await _registry_of(built)
     assert registry.names() == [
-        "meeting_notes", "organizing", "record_procedure",
+        "meeting_notes", "organizing", "record_procedure", "space_setup",
     ]
-    assert registry.default == "organizing"  # the marked seed, linked
+    assert registry.default == "space_setup"  # the marked seed, linked
     await composition.run_teardown(built.teardown)
 
 

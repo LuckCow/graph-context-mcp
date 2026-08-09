@@ -14,8 +14,11 @@ import pytest
 
 from graph_context.application.capture_recorder import CaptureRecorder
 from graph_context.domain import rules as rules_domain
+from graph_context.domain import scheduling
 from graph_context.domain.models import NodeDraft
+from graph_context.domain.schema import Role
 from graph_context.domain.session import SessionState
+from graph_context.errors import GraphContextError
 from graph_context.infrastructure.memory.fake_repository import InMemoryGraphRepository
 from graph_context.interface import tools
 from graph_context.interface.services import build_services
@@ -134,15 +137,15 @@ async def test_empty_node_type_errors(services: tools.Services) -> None:
     assert "type" in out
 
 
-async def test_empty_edge_label_errors(
+async def test_empty_properties_key_errors(
     services: tools.Services, world: World
 ) -> None:
     out = await tools.create_node_tool(
         services, type="Item", name="Relic", summary="s",
-        links=[{"edge_type": "", "other": world.mira.id}],
+        properties={"": world.mira.id},
     )
     assert "ERROR:" in out
-    assert "edge_type" in out
+    assert "empty key" in out
 
 
 async def test_bad_detail_lists_allowed_levels(
@@ -153,15 +156,25 @@ async def test_bad_detail_lists_allowed_levels(
     assert "names" in out and "summaries" in out and "full" in out
 
 
-async def test_malformed_link_names_required_keys(
+async def test_retired_write_params_redirect_to_properties(
     services: tools.Services, world: World
 ) -> None:
+    """ADR 042: an old-shape call (replayed transcript, stale habit) gets
+    a self-correcting redirect, never an opaque internal error."""
     out = await tools.create_node_tool(
         services, type="Item", name="Relic", summary="s",
-        links=[{"edge_type": "possesses"}],  # missing 'other'
+        links=[{"edge_type": "possesses", "other": world.mira.id}],
     )
     assert "ERROR:" in out
-    assert "edge_type" in out and "other" in out
+    assert "replaced" in out and "properties" in out
+
+    out = await tools.update_node_tool(
+        services, node_id=world.mira.id,
+        fields={"x": "y"}, create_missing_fields={"x": "text"},
+    )
+    assert "ERROR:" in out
+    assert "'fields' was replaced" in out
+    assert "'create_missing_fields' was replaced" in out
 
 
 # -- invariant 2 / WP2 policy: Prose & SessionContext hidden by default ------
@@ -238,9 +251,9 @@ async def _semantic_services(world: World) -> tools.Services:
     from graph_context.domain.models import LinkSpec, NodeDraft
 
     writer = NodeWriter(repository, SessionState())
-    mira = await writer.create_node(NodeDraft(
+    mira = (await writer.create_node(NodeDraft(
         "Character", name="Mira", summary="Exiled siege engineer of Brakk.",
-    ))
+    ))).node
     await writer.create_node(
         NodeDraft("Item", name="Ashbrand", summary="A blade quenched in ash."),
         links=[LinkSpec("wielded_by", other=mira.id)],
@@ -362,7 +375,7 @@ class TestQueryTool:
         ):
             out = await tools.create_node_tool(
                 services, type="Todo", name=name, summary=f"{name}.",
-                description=description, fields=fields,
+                description=description, properties=fields,
             )
             assert out.startswith("created:")
 
@@ -494,7 +507,7 @@ class TestQueryViewParam:
         ):
             await tools.create_node_tool(
                 services, type="Todo", name=name, summary=f"{name}.",
-                fields=fields,
+                properties=fields,
             )
 
     async def test_a_saved_view_runs_with_its_own_filters_and_order(self) -> None:
@@ -554,34 +567,67 @@ class TestFieldCatalogSurface:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"due": "2026-08-01"},
+            properties={"due": "2026-08-01"},
         )
         assert out.startswith("ERROR:")
-        assert "Due date (date)" in out and "create_missing_fields" in out
+        assert "Due date (date)" in out and "create_missing_properties" in out
 
     async def test_matching_by_display_name_writes_the_property(self) -> None:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Due date": "2026-08-01"},
+            properties={"Due date": "2026-08-01"},
         )
         assert out.startswith("created:")
         assert "due_date: 2026-08-01" in out
 
-    async def test_create_missing_fields_creates_and_writes(self) -> None:
+    async def test_create_missing_properties_creates_and_writes(self) -> None:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"effort": "3"}, create_missing_fields={"effort": "Number"},
+            properties={"effort": "3"},
+            create_missing_properties={"effort": "Number"},
         )
         assert out.startswith("created:")
         assert "effort: 3" in out
+
+    async def test_scope_type_saves_the_value_and_drafts_a_proposal(self) -> None:
+        """ADR 042: scope="type" writes immediately AND drafts the
+        EXTEND_TYPE proposal into the session ledger for the 👍 flow."""
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            properties={"effort": "3"},
+            create_missing_properties={
+                "effort": {"format": "number", "scope": "type"}
+            },
+        )
+        assert out.startswith("created:")
+        assert "effort: 3" in out
+        assert "schema proposal" in out and "cannot apply" in out
+        drafted = services.proposals.drain_drafted()
+        assert len(drafted) == 1
+        assert drafted[0].type_name == "Item"
+        assert drafted[0].properties[0].name == "Effort"
+
+    async def test_boolean_checkbox_value_coerces(self) -> None:
+        """Turn de38192f56dc: a JSON boolean for a checkbox crashed to an
+        opaque internal error; it must simply work now (D8)."""
+        services = self._services()
+        out = await tools.create_node_tool(
+            services, type="Item", name="Ship it", summary="s.",
+            properties={"shift_active": True},
+            create_missing_properties={"shift_active": "checkbox"},
+        )
+        assert out.startswith("created:")
+        assert "shift_active: true" in out
 
     async def test_bad_declared_format_errors_with_the_menu(self) -> None:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"due": "soon"}, create_missing_fields={"due": "datetime"},
+            properties={"due": "soon"},
+            create_missing_properties={"due": "datetime"},
         )
         assert out.startswith("ERROR:") and "formats:" in out
 
@@ -602,9 +648,9 @@ class TestRelationFieldCoercion:
         return build_services(repository, SessionState(project="t"))
 
     async def _seed_member(self, services: tools.Services):
-        return await services.writer.create_node(
+        return (await services.writer.create_node(
             NodeDraft("Person", name="Luckcow", summary="moo")
-        )
+        )).node
 
     def _edges_to(self, services: tools.Services, name: str, target_id: str):
         from graph_context.domain.graph import Direction
@@ -621,22 +667,21 @@ class TestRelationFieldCoercion:
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow"},
+            properties={"Assignee": "Luckcow"},
         )
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)
         assert len(edges) == 1
         assert not node.fields  # an edge landed, never a scalar shadow
 
-    async def test_field_and_link_naming_the_same_edge_land_once(self) -> None:
-        """The exact failing call: fields={'Assignee': ...} AND the same
-        edge in links. One edge results; nothing errors."""
+    async def test_duplicate_relation_targets_land_once(self) -> None:
+        """The same target spelled twice (name and id, or a list with a
+        repeat) results in ONE edge; nothing errors."""
         services = self._services()
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow"},
-            links=[{"edge_type": "assignee", "other": member.id}],
+            properties={"Assignee": ["Luckcow", member.id]},
         )
         assert out.startswith("created:")
         _, edges = self._edges_to(services, "Ship it", member.id)
@@ -649,7 +694,7 @@ class TestRelationFieldCoercion:
             services, type="Item", name="Ship it", summary="s.",
         )
         out = await tools.update_node_tool(
-            services, node_id="Ship it", fields={"Assignee": "Luckcow"},
+            services, node_id="Ship it", properties={"Assignee": "Luckcow"},
         )
         assert out.startswith("updated:")
         _, edges = self._edges_to(services, "Ship it", member.id)
@@ -659,19 +704,19 @@ class TestRelationFieldCoercion:
         services = self._services()
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Nobody"},
+            properties={"Assignee": "Nobody"},
         )
         assert out.startswith("ERROR:") and "Nobody" in out
 
     async def test_declaration_for_a_relation_key_is_dropped(self) -> None:
-        """A create_missing_fields declaration must not mint a scalar
+        """A create_missing_properties declaration must not mint a scalar
         shadow of the relation -- the entry still becomes the edge."""
         services = self._services()
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow"},
-            create_missing_fields={"Assignee": "text"},
+            properties={"Assignee": "Luckcow"},
+            create_missing_properties={"Assignee": "text"},
         )
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)
@@ -687,12 +732,83 @@ class TestRelationFieldCoercion:
         member = await self._seed_member(services)
         out = await tools.create_node_tool(
             services, type="Item", name="Ship it", summary="s.",
-            fields={"Assignee": "Luckcow", "Due date": "2026-08-01"},
+            properties={"Assignee": "Luckcow", "Due date": "2026-08-01"},
         )
         assert out.startswith("created:")
         node, edges = self._edges_to(services, "Ship it", member.id)
         assert len(edges) == 1
-        assert node.fields["due_date"] == "2026-08-01"
+        # R2: a bare date reads back as the midnight-UTC instant.
+        assert node.fields["due_date"] == "2026-08-01T00:00:00Z"
+
+
+class TestTypeScopedPropertyRouting:
+    """ADR 047 at the tool boundary: the link-vs-scalar split asks the
+    TYPE (create) or the node itself (update), so an unattached
+    relation-named key falls through to the repository's sectioned
+    approval error instead of silently linking through space vocabulary
+    the type never claimed."""
+
+    def _services(self) -> tools.Services:
+        from graph_context.domain.models import FieldSpec
+
+        repository = InMemoryGraphRepository(
+            field_catalog=[
+                FieldSpec(name="Assignee", format="objects", key="assignee"),
+                FieldSpec(name="Linked Projects", format="objects",
+                          key="linked_projects"),
+                FieldSpec(name="Linked Project", format="objects",
+                          key="linked_project"),
+            ],
+            attachments={"Item": ("Assignee", "Linked Projects")},
+        )
+        return build_services(repository, SessionState(project="t"))
+
+    async def _seed_item(self, services: tools.Services, name: str):
+        return (await services.writer.create_node(
+            NodeDraft("Item", name=name, summary="s.")
+        )).node
+
+    async def test_create_routes_only_type_attached_relations_to_links(
+        self,
+    ) -> None:
+        services = self._services()
+        await self._seed_item(services, "Thesis Revisions")
+        out = await tools.create_node_tool(
+            services, type="Item", name="Fix margins", summary="s.",
+            properties={"Linked Project": "Thesis Revisions"},
+        )
+        assert out.startswith("ERROR:") and "NOT attached" in out
+        out = await tools.create_node_tool(
+            services, type="Item", name="Fix margins", summary="s.",
+            properties={"Linked Projects": "Thesis Revisions"},
+        )
+        assert out.startswith("created:")
+
+    async def test_update_routes_the_objects_own_relation_keys(self) -> None:
+        services = self._services()
+        await self._seed_item(services, "Thesis Revisions")
+        await self._seed_item(services, "Side Project")
+        out = await tools.create_node_tool(
+            services, type="Item", name="Holder", summary="s.",
+            properties={"Linked Project": "Thesis Revisions"},
+            create_missing_properties={
+                "Linked Project": {"format": "objects"}
+            },
+        )
+        assert out.startswith("created:")
+        # The holder carries the relation: a bare update keeps working.
+        out = await tools.update_node_tool(
+            services, node_id="Holder",
+            properties={"Linked Project": "Side Project"},
+        )
+        assert out.startswith("updated:")
+        # A fresh object never picked it up: the same bare write errors.
+        await self._seed_item(services, "Fresh")
+        out = await tools.update_node_tool(
+            services, node_id="Fresh",
+            properties={"Linked Project": "Thesis Revisions"},
+        )
+        assert out.startswith("ERROR:") and "NOT attached" in out
 
 
 # -- the schedule tool (WP18, ADR 027) ---------------------------------------
@@ -773,6 +889,108 @@ class TestScheduleTool:
         assert out.startswith("cancelled 'tax reminder'")
         assert "re-enable" in out  # the human's Pending flip is taught
         assert "cancelled" in await tools.schedule_tool(services, action="list")
+
+    async def test_set_with_message_confirms_the_verbatim_no_llm_kind(
+        self,
+    ) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="tax note",
+            schedule="2199-04-08T09:00", message="Taxes are due April 15.",
+        )
+        assert out.startswith("scheduled 'tax note'")
+        assert "verbatim" in out and "no LLM turn" in out
+
+    async def test_set_with_prompt_echoes_the_mode_or_default(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="digest", schedule="0 9 * * 1",
+            prompt="Compile the digest.", mode="Research Mode",
+        )
+        assert "mode: research_mode" in out  # slugified like /mode
+        out = await tools.schedule_tool(
+            services, action="set", name="plain", schedule="0 9 * * 2",
+            prompt="Check in.",
+        )
+        assert "mode: (space default)" in out
+
+    async def test_set_with_document_type_echoes_the_document_target(
+        self,
+    ) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="newsletter", schedule="0 9 * * 5",
+            prompt="Compile the weekly digest.", document_type="Report",
+        )
+        assert "output lands in a 'Report' object" in out
+        assert "summary + link" in out
+
+    async def test_list_shows_the_document_type(self) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="newsletter", schedule="0 9 * * 5",
+            prompt="Compile.", document_type="Report",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "document=Report" in out
+
+    async def test_document_type_with_message_is_rejected(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+            message="m", document_type="Report",
+        )
+        assert out.startswith("ERROR:")
+        assert "nothing writes a document" in out
+
+    async def test_neither_and_both_errors_teach_the_distinction(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+        )
+        assert out.startswith("ERROR:")
+        assert "'prompt'" in out and "'message'" in out and "verbatim" in out
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+            prompt="p", message="m",
+        )
+        assert out.startswith("ERROR:") and "both -- pick one" in out
+
+    async def test_mode_with_message_is_rejected(self) -> None:
+        services = self._services()
+        out = await tools.schedule_tool(
+            services, action="set", name="x", schedule="2199-01-01T09:00",
+            message="m", mode="research",
+        )
+        assert out.startswith("ERROR:") and "drop 'mode'" in out
+
+    async def test_list_shows_message_mode_and_the_both_set_warning(
+        self,
+    ) -> None:
+        services = self._services()
+        await tools.schedule_tool(
+            services, action="set", name="tax note",
+            schedule="2199-04-08T09:00", message="Taxes are due April 15.",
+        )
+        await tools.schedule_tool(
+            services, action="set", name="digest", schedule="0 9 * * 1",
+            prompt="Compile the digest.", mode="research",
+        )
+        out = await tools.schedule_tool(services, action="list")
+        assert "message: Taxes are due April 15." in out
+        assert "mode=research" in out
+        assert "the message wins" not in out
+        # A human stored both in the Anytype UI: the list surfaces D2.
+        node = next(
+            v.node for v in services.scheduler.events()
+            if v.node.name == "digest"
+        )
+        await services.repository.update_node(node.id, fields={
+            **dict(node.fields), scheduling.FIELD_MESSAGE: "Digest day.",
+        })
+        out = await tools.schedule_tool(services, action="list")
+        assert "message: Digest day." in out
+        assert "the message wins -- clear one" in out
 
 
 # -- the automation tool (WP32, ADR 040) -------------------------------------
@@ -860,6 +1078,91 @@ class TestAutomationTool:
         )
         assert out.startswith("ERROR:") and "'script'" in out
 
+    async def test_create_script_rule_auto_tests_the_saved_script(
+        self,
+    ) -> None:
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('hi')",
+        )
+        assert out.startswith("created automation rule 'rollup'")
+        assert "auto-test of the saved script:" in out
+        assert "would set 'ship it'.Note = 'scripted'" in out
+        assert "nothing was applied (dry run)" in out
+
+    async def test_a_failing_auto_test_reports_but_the_rule_is_saved(
+        self,
+    ) -> None:
+        class FailingScriptRunner:
+            async def run(self, script, payload):  # type: ignore[no-untyped-def]
+                raise GraphContextError(
+                    "the script failed: NameError: name 'update_node' "
+                    "is not defined"
+                )
+
+        services = build_services(
+            InMemoryGraphRepository(), SessionState(project="t"),
+            script_runner=FailingScriptRunner(),
+        )
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        out = await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="update_node()",
+        )
+        assert out.startswith("created automation rule 'rollup'")
+        assert "auto-test FAILED" in out and "update_node" in out
+        assert "action='update'" in out  # teaches the fix path
+        assert [
+            n for n in services.repository.graph.nodes()
+            if n.name == "rollup"
+        ]  # saved despite the failing test
+
+    async def test_update_with_a_script_auto_tests_it(self) -> None:
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('v1')",
+        )
+        out = await tools.automation_tool(
+            services, action="update", rule="rollup", script="log('v2')",
+        )
+        assert out.startswith("updated automation rule 'rollup'")
+        assert "auto-test of the saved script:" in out
+        assert "would set 'ship it'.Note = 'scripted'" in out
+
+    async def test_test_with_rule_and_script_runs_the_inline_script(
+        self,
+    ) -> None:
+        # The silent-ignore trap: rule= + script= must exercise the
+        # inline script (the engine-level tests pin WHICH script runs;
+        # here we pin that the tool surface accepts the combination).
+        services = self._services()
+        await services.repository.create_node(
+            NodeDraft(type="Task", name="ship it", summary="s")
+        )
+        await tools.automation_tool(
+            services, action="create", name="rollup", target_type="Task",
+            watch_property="Done", condition="changed",
+            rule_action="run script", script="log('v1')",
+        )
+        out = await tools.automation_tool(
+            services, action="test", rule="rollup", script="log('inline')",
+        )
+        assert "dry run against 'ship it'" in out
+        assert "nothing was applied (dry run)" in out
+
     async def test_list_shows_status_and_config(self) -> None:
         services = self._services()
         await self._create(services)
@@ -867,6 +1170,34 @@ class TestAutomationTool:
         assert "automation rules (1):" in out
         assert "stamp completion" in out and "active" in out
         assert "when 'Done' on 'Task'" in out
+
+    async def test_a_manual_rule_is_creatable_without_a_watch_property(
+        self,
+    ) -> None:
+        # WP52 (ADR 058): the model AUTHORS run-on-demand rules; it just
+        # cannot fire them.
+        services = self._services()
+        out = await tools.automation_tool(
+            services, action="create", name="dinner picker",
+            target_type="Task", condition="manual",
+            rule_action="set property value", action_property="Pick",
+            action_value="tonight",
+        )
+        assert out.startswith("created automation rule 'dinner picker'")
+        listing = await tools.automation_tool(services, action="list")
+        assert "manual run only on 'Task'" in listing
+
+    async def test_there_is_no_run_action(self) -> None:
+        # The absence IS the design: firing a rule is the user's
+        # gesture (/run, or the Rule run now checkbox), never a tool
+        # call. The error must not invent one.
+        services = self._services()
+        await self._create(services)
+        out = await tools.automation_tool(
+            services, action="run", rule="stamp completion",
+        )
+        assert out.startswith("ERROR:")
+        assert "create, update, list, pause, resume, test" in out
 
     async def test_empty_list_guides_creation(self) -> None:
         out = await tools.automation_tool(self._services(), action="list")
@@ -1115,3 +1446,303 @@ class TestSchemaTool:
         out = await tools.schema_tool(self._services(), action="destroy")
         assert out.startswith("ERROR:")
         assert "propose_type" in out and "cancel" in out
+
+
+class TestMetaInspection:
+    """ADR 045: mode objects are reachable only with the meta privilege --
+    the query hatch is closed for Role.MODE, and the write tools forward
+    the privilege into the infra-write guard."""
+
+    @pytest.fixture
+    async def mode_node(self, services: tools.Services):
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.create_node_tool(
+            services,
+            type="Activity Mode",
+            name="Recipe Mode",
+            summary="Cooks recipes.",
+            description="Track recipes as the user cooks.",
+            properties={"gc_mode_mutating": "true"},
+        )
+        assert out.startswith("created:")
+        services.visible_infra_roles = frozenset()
+        return services.repository.graph.find_by_name(
+            "Recipe Mode", include_roles=frozenset({Role.MODE})
+        )[0]
+
+    async def test_unprivileged_create_gets_the_guard_error(
+        self, services: tools.Services
+    ) -> None:
+        out = await tools.create_node_tool(
+            services, type="Activity Mode", name="Sneaky", summary="s.",
+        )
+        assert out.startswith("ERROR:")
+        assert "system configuration" in out and "meta-inspection" in out
+
+    async def test_unprivileged_query_by_mode_type_is_refused(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        out = await tools.query_tool(services, type="Activity Mode")
+        assert out.startswith("ERROR:")
+        assert "not visible in this mode" in out
+
+    async def test_other_infra_types_keep_their_query_hatch(
+        self, services: tools.Services
+    ) -> None:
+        # The documented escape hatch survives for non-mode infra.
+        out = await tools.query_tool(services, type="Scheduled Event")
+        assert not out.startswith("ERROR:")
+
+    async def test_privileged_query_lists_mode_objects(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.query_tool(services, type="Activity Mode")
+        assert "Recipe Mode" in out
+
+    async def test_privileged_find_node_resolves_a_mode_by_name(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        unprivileged = await tools.find_node_tool(services, name="Recipe Mode")
+        assert "Recipe Mode" not in unprivileged
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.find_node_tool(services, name="Recipe Mode")
+        assert "Recipe Mode" in out
+
+    async def test_privileged_get_node_shows_the_mode_config_fields(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.get_node_tool(services, node_id=mode_node.id)
+        assert "gc_mode_mutating" in out
+
+    async def test_privileged_update_rewrites_the_goal(
+        self, services: tools.Services, mode_node
+    ) -> None:
+        out = await tools.update_node_tool(
+            services, node_id=mode_node.id,
+            summary="Cooks and plans recipes.",
+            description="Track recipes and plan meals.",
+        )
+        assert out.startswith("ERROR:")  # unprivileged: denied
+        services.visible_infra_roles = frozenset({Role.MODE})
+        out = await tools.update_node_tool(
+            services, node_id="Recipe Mode",  # name resolution, privileged
+            summary="Cooks and plans recipes.",
+            description="Track recipes and plan meals.",
+        )
+        assert out.startswith("updated:")
+
+
+class TestEditDocumentTool:
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+    P3 = "Rain came at dusk and the watch fires guttered along the wall."
+
+    @staticmethod
+    def _h(text: str) -> str:
+        from graph_context.domain import revisions
+
+        return revisions.block_hash(revisions.normalize_block(text))
+
+    async def _chapter(self, services: tools.Services):
+        return await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+
+    async def test_sections_lists_hash_anchors(self, services) -> None:
+        await self._chapter(services)
+        out = await tools.edit_document_tool(services, node_id="Chapter One")
+        assert f"[§{self._h(self.P1)}]" in out
+        assert "sections of Chapter One (2):" in out
+        assert self.P2.split()[0] in out  # first-line excerpts
+
+    async def test_replace_reports_the_new_anchor_listing(
+        self, services
+    ) -> None:
+        node = await self._chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="replace",
+            anchor=self._h(self.P2), text=self.P3,
+        )
+        assert out.startswith("edited Chapter One (replace):")
+        assert f"[§{self._h(self.P3)}]" in out
+        assert f"[§{self._h(self.P2)}]" not in out
+        assert "summary flagged stale" in out
+
+    async def test_unknown_action_and_missing_text_are_prompts(
+        self, services
+    ) -> None:
+        node = await self._chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="append", anchor="top",
+        )
+        assert out.startswith("ERROR:") and "insert_after" in out
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="replace",
+            anchor=self._h(self.P1),
+        )
+        assert out.startswith("ERROR:") and "text" in out
+
+    async def test_anchor_miss_echoes_the_real_anchors(self, services) -> None:
+        node = await self._chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="delete", anchor="feedbeefcafe",
+        )
+        assert out.startswith("ERROR:")
+        assert self._h(self.P1) in out
+
+    async def test_listing_shows_review_state_when_history_is_live(
+        self, services
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await self._chapter(services)
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(node.id, author_detail="m")
+        await historian.record_mark(
+            node.id, kind="intent", block_hash=self._h(self.P1),
+            value="locked", by="user",
+        )
+        services.historian = historian
+        out = await tools.edit_document_tool(services, node_id=node.id)
+        assert f"[§{self._h(self.P1)} · raw_ai · locked]" in out
+        assert f"[§{self._h(self.P2)} · raw_ai · flexible]" in out
+
+    async def test_a_locked_violation_surfaces_as_a_prompt(
+        self, services
+    ) -> None:
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.application.node_writer import NodeWriter
+        from graph_context.domain import revisions
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await self._chapter(services)
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(node.id, author_detail="m")
+        await historian.record_mark(
+            node.id, kind="intent", block_hash=self._h(self.P1),
+            value="locked", by="user",
+        )
+        services.historian = historian
+        services.writer = NodeWriter(
+            services.repository, services.session, section_guard=historian,
+        )
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="replace",
+            anchor=self._h(self.P1), text=self.P3,
+        )
+        assert out.startswith("ERROR:")
+        assert "LOCKED" in out and "unlock" in out
+
+
+class TestEditDocumentComments:
+    """WP50 (ADR 056): comments in the sections listing, and the model's
+    address_comment action -- addressing is sidecar bookkeeping, resolve
+    stays human-only."""
+
+    P1 = "The city fell quiet before the siege began, every gate barred."
+    P2 = "Mira counted the engines twice; one was missing from the yard."
+
+    @staticmethod
+    def _h(text: str) -> str:
+        from graph_context.domain import revisions
+
+        return revisions.block_hash(revisions.normalize_block(text))
+
+    async def _commented_chapter(self, services: tools.Services):
+        from graph_context.application.node_historian import NodeHistorian
+        from graph_context.domain import revisions
+
+        await services.repository.create_node(NodeDraft(
+            type="gc_space_context", name="Space Context", summary="cfg",
+            fields={revisions.FIELD_TRACKED_TYPES: "Chapter"},
+        ))
+        node = await services.repository.create_node(NodeDraft(
+            type="Chapter", name="Chapter One", summary="ch",
+            body=f"{self.P1}\n\n{self.P2}",
+        ))
+        historian = NodeHistorian(services.repository)
+        await historian.record_bot_revision(node.id, author_detail="m")
+        services.historian = historian
+        state = await historian.record_comment(
+            node.id, block_hash=self._h(self.P2),
+            text="count them again", by="human:prose-page",
+        )
+        return node, historian, state
+
+    async def test_the_listing_shows_comments_and_teaches_addressing(
+        self, services
+    ) -> None:
+        node, _, state = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(services, node_id=node.id)
+        assert "comments (1 open, 0 addressed):" in out
+        assert (
+            f'#{state.id} open on §{self._h(self.P2)}: "count them again"'
+            in out
+        )
+        assert "address_comment" in out
+
+    async def test_addressing_reports_and_lists_whats_still_open(
+        self, services
+    ) -> None:
+        node, historian, state = await self._commented_chapter(services)
+        other = await historian.record_comment(
+            node.id, block_hash=self._h(self.P1), text="why barred?", by="u",
+        )
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id=f"#{state.id}",  # the sigil-prefixed form works
+        )
+        assert f"addressed comment #{state.id}." in out
+        assert "still open (1):" in out and other.id in out
+        from graph_context.domain import revisions
+
+        by_id = {c.id: c for c in historian.comments(node.id)}
+        assert by_id[state.id].state == revisions.COMMENT_ADDRESSED
+        assert by_id[other.id].state == revisions.COMMENT_OPEN
+
+    async def test_addressing_the_last_comment_says_none_remain(
+        self, services
+    ) -> None:
+        node, _, state = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id=state.id,
+        )
+        assert "no comments remain open." in out
+
+    async def test_an_unknown_id_error_lists_the_live_ids(
+        self, services
+    ) -> None:
+        node, _, state = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id="cnosuch01",
+        )
+        assert out.startswith("ERROR:")
+        assert state.id in out
+
+    async def test_missing_id_and_missing_historian_are_prompts(
+        self, services
+    ) -> None:
+        node, _, _ = await self._commented_chapter(services)
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+        )
+        assert out.startswith("ERROR:") and "comment_id" in out
+        services.historian = None
+        out = await tools.edit_document_tool(
+            services, node_id=node.id, action="address_comment",
+            comment_id="c12345678",
+        )
+        assert out.startswith("ERROR:") and "unavailable" in out

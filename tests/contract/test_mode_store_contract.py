@@ -84,11 +84,15 @@ def _seed_mode(
     capture_type: str = "",
     references: str = "",
     min_chars: float | None = None,
+    document_type: str = "",
     activity_detail: str = "",
     web_search: bool = False,
+    hide_intent_card: bool = False,
+    hide_node_cards: bool = False,
     model: str = "",
     thinking: str = "",
     max_tokens: float | None = None,
+    turn_limit: float | None = None,
     search_max_uses: float | None = None,
     search_allowed: str = "",
     search_blocked: str = "",
@@ -98,6 +102,10 @@ def _seed_mode(
          "checkbox": mutating},
         {"key": mapping.PROP_MODE_WEB_SEARCH, "format": "checkbox",
          "checkbox": web_search},
+        {"key": mapping.PROP_MODE_HIDE_INTENT_CARD, "format": "checkbox",
+         "checkbox": hide_intent_card},
+        {"key": mapping.PROP_MODE_HIDE_NODE_CARDS, "format": "checkbox",
+         "checkbox": hide_node_cards},
         {"key": mapping.PROP_CAPTURE_TYPE, "format": "text",
          "text": capture_type},
         # A select: the read side sees the picked option as a tag envelope.
@@ -111,6 +119,9 @@ def _seed_mode(
     if max_tokens is not None:
         properties.append({"key": mapping.PROP_MODE_MAX_TOKENS,
                            "format": "number", "number": max_tokens})
+    if turn_limit is not None:
+        properties.append({"key": mapping.PROP_MODE_TURN_LIMIT,
+                           "format": "number", "number": turn_limit})
     if search_max_uses is not None:
         properties.append({"key": mapping.PROP_MODE_SEARCH_MAX_USES,
                            "format": "number", "number": search_max_uses})
@@ -120,6 +131,9 @@ def _seed_mode(
     if search_blocked:
         properties.append({"key": mapping.PROP_MODE_SEARCH_BLOCKED,
                            "format": "text", "text": search_blocked})
+    if document_type:
+        properties.append({"key": mapping.PROP_MODE_DOCUMENT_TYPE,
+                           "format": "text", "text": document_type})
     if references:
         properties.append({"key": mapping.PROP_CAPTURE_REFERENCES,
                            "format": "text", "text": references})
@@ -202,6 +216,24 @@ async def test_web_search_checkbox_rides_the_payload(
     assert payloads["Grounded"]["web_search"] is False
 
 
+async def test_reply_card_checkboxes_ride_the_payload(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """ADR 046: gc_mode_hide_intent_card / gc_mode_hide_node_cards are
+    checkboxes with the web_search rule -- always in the payload, ticked
+    reads True, unticked/absent reads False."""
+    _seed_mode(
+        mock, "Discreet", "A goal.",
+        hide_intent_card=True, hide_node_cards=True,
+    )
+    _seed_mode(mock, "Carded", "A goal.")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Discreet"]["hide_intent_card"] is True
+    assert payloads["Discreet"]["hide_node_cards"] is True
+    assert payloads["Carded"]["hide_intent_card"] is False
+    assert payloads["Carded"]["hide_node_cards"] is False
+
+
 async def test_model_choice_rides_the_payload_when_set(
     anytype_client: AnytypeClient, mock: MockAnytype
 ) -> None:
@@ -241,13 +273,15 @@ async def test_driver_options_ride_the_payload_when_set(
     object yields the same payload it did before the fields existed."""
     _seed_mode(
         mock, "Tuned", "A goal.", thinking="Xhigh", max_tokens=32000.0,
-        search_max_uses=5.0, search_allowed="example.com, docs.example.com",
+        turn_limit=6.0, search_max_uses=5.0,
+        search_allowed="example.com, docs.example.com",
     )
-    _seed_mode(mock, "Untouched", "A goal.", max_tokens=0.0)
+    _seed_mode(mock, "Untouched", "A goal.", max_tokens=0.0, turn_limit=0.0)
     payloads = await _load_by_name(anytype_client)
     tuned = payloads["Tuned"]
     assert tuned["thinking"] == "Xhigh"
     assert tuned["max_tokens"] == 32000.0
+    assert tuned["turn_limit"] == 6.0
     assert tuned["web_search_max_uses"] == 5.0
     assert tuned["web_search_allowed_domains"] == (
         "example.com, docs.example.com"
@@ -255,7 +289,7 @@ async def test_driver_options_ride_the_payload_when_set(
     assert "web_search_blocked_domains" not in tuned
     untouched = payloads["Untouched"]
     for key in (
-        "thinking", "max_tokens", "web_search_max_uses",
+        "thinking", "max_tokens", "turn_limit", "web_search_max_uses",
         "web_search_allowed_domains", "web_search_blocked_domains",
     ):
         assert key not in untouched  # zero/empty = unset
@@ -334,6 +368,19 @@ async def test_bootstrap_heals_a_text_minted_detail_property(
     }
     assert attached[mapping.PROP_MODE_ACTIVITY_DETAIL] == "select"
     assert set(mapping.MODE_PROPERTIES) <= set(attached)  # nothing lost
+
+
+async def test_document_type_rides_the_payload_when_set(
+    anytype_client: AnytypeClient, mock: MockAnytype
+) -> None:
+    """ADR 048: presence enables, like capture -- an empty text property
+    keeps the key off the payload entirely."""
+    _seed_mode(mock, "Prose Weaver", "Write chapters.",
+               mutating=True, document_type="Chapter")
+    _seed_mode(mock, "Plain Mode", "A goal.", document_type="  ")
+    payloads = await _load_by_name(anytype_client)
+    assert payloads["Prose Weaver"]["document_type"] == "Chapter"
+    assert "document_type" not in payloads["Plain Mode"]
 
 
 async def test_capture_absent_when_capture_type_empty(

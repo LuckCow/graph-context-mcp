@@ -2,17 +2,24 @@
 
 import pytest
 
+from graph_context.application.node_writer import NodeWriter
 from graph_context.domain.models import LinkSpec, NodeDraft
-from graph_context.errors import NodeNotFound, SchemaViolation
+from graph_context.domain.schema import Role
+from graph_context.errors import (
+    InfraWriteDenied,
+    LockedSectionsChanged,
+    NodeNotFound,
+    SchemaViolation,
+)
 from tests.conftest import World
 
 
 class TestCreateNode:
     async def test_composite_create_writes_node_and_links(self, writer, repository, world: World):
-        faction = await writer.create_node(
+        faction = (await writer.create_node(
             NodeDraft("Organization", name="Emberguard", summary="Brakk's last defenders."),
-            links=[LinkSpec("member_of", other=world.mira.id, outgoing=False)],
-        )
+            links=[LinkSpec("member_of", other=world.mira.id)],
+        )).node
         neighbors = {n.name for _, n in repository.graph.neighbors(faction.id)}
         assert neighbors == {"Mira"}
 
@@ -34,9 +41,9 @@ class TestCreateNode:
     async def test_created_node_is_the_most_recently_touched(
         self, writer, session, world: World
     ):
-        node = await writer.create_node(
+        node = (await writer.create_node(
             NodeDraft("Location", name="Brakk Gate", summary="The city gate.")
-        )
+        )).node
         assert session.recent.items[0] == node.id
         assert session.working_set.entries == ()  # holds are explicit only
 
@@ -66,3 +73,202 @@ class TestUpdateNode:
     async def test_unknown_node_fails_fast(self, writer):
         with pytest.raises(NodeNotFound):
             await writer.update_node("ghost", description="?")
+
+
+class TestTypeScopedDeclarations:
+    """ADR 042: a scope="type" declaration drafts an EXTEND_TYPE proposal
+    into the session ledger AFTER the write lands; drafting failures
+    degrade to warnings, never unwind the write."""
+
+    def _writer_with_ledger(self):
+        from graph_context.application.node_writer import NodeWriter
+        from graph_context.application.schema_proposals import SchemaProposals
+        from graph_context.domain.session import SessionState
+        from graph_context.infrastructure.memory.fake_repository import (
+            InMemoryGraphRepository,
+        )
+
+        repository = InMemoryGraphRepository()
+        proposals = SchemaProposals()
+        writer = NodeWriter(
+            repository, SessionState(), proposals=proposals
+        )
+        return writer, repository, proposals
+
+    async def test_type_scope_writes_the_value_and_drafts(self) -> None:
+        from graph_context.domain.models import PropertyDeclaration
+
+        writer, repository, proposals = self._writer_with_ledger()
+        outcome = await writer.create_node(
+            NodeDraft("Character", name="Gerald", summary="A cook.",
+                      fields={"shift_active": "true"}),
+            declarations={
+                "shift_active": PropertyDeclaration(
+                    "shift_active", "checkbox", scope="type"
+                )
+            },
+        )
+        node = repository.graph.node(outcome.node.id)
+        assert node.fields["shift_active"] == "true"  # value is durable
+        assert len(outcome.drafted) == 1
+        proposal = outcome.drafted[0]
+        assert proposal.type_name == "Character"
+        assert proposal.properties[0].name == "Shift Active"
+        # The draft rides the SHARED ledger, so the pipeline's
+        # drain_drafted turns it into a confirm event.
+        assert proposals.drain_drafted() == (proposal,)
+
+    async def test_instance_scope_drafts_nothing(self) -> None:
+        from graph_context.domain.models import PropertyDeclaration
+
+        writer, _, proposals = self._writer_with_ledger()
+        outcome = await writer.create_node(
+            NodeDraft("Character", name="Gerald", summary="A cook.",
+                      fields={"quirk": "hums"}),
+            declarations={"quirk": PropertyDeclaration("quirk", "text")},
+        )
+        assert outcome.drafted == () and outcome.warnings == ()
+        assert proposals.drain_drafted() == ()
+
+    async def test_ledger_cap_degrades_to_a_warning(self) -> None:
+        from graph_context.domain.models import PropertyDeclaration, PropertyDraft
+
+        writer, repository, proposals = self._writer_with_ledger()
+        for n in range(5):  # fill the ledger to MAX_PENDING_PROPOSALS
+            proposals.propose_fields(
+                repository, "Character",
+                (PropertyDraft(name=f"Filler {n}", format="text"),),
+            )
+        outcome = await writer.create_node(
+            NodeDraft("Character", name="Gerald", summary="A cook.",
+                      fields={"shift_active": "true"}),
+            declarations={
+                "shift_active": PropertyDeclaration(
+                    "shift_active", "checkbox", scope="type"
+                )
+            },
+        )
+        # The write landed; the drafting failure became a warning.
+        assert repository.graph.node(outcome.node.id).fields["shift_active"] == "true"
+        assert outcome.drafted == ()
+        assert any("saved" in w for w in outcome.warnings)
+
+    async def test_no_ledger_degrades_to_a_warning(self, writer) -> None:
+        from graph_context.domain.models import PropertyDeclaration
+
+        outcome = await writer.create_node(
+            NodeDraft("Character", name="Gerald", summary="A cook.",
+                      fields={"shift_active": "true"}),
+            declarations={
+                "shift_active": PropertyDeclaration(
+                    "shift_active", "checkbox", scope="type"
+                )
+            },
+        )
+        assert outcome.drafted == ()
+        assert any("schema tool" in w for w in outcome.warnings)
+
+    async def test_declaration_without_a_value_is_rejected(self, writer) -> None:
+        from graph_context.domain.models import PropertyDeclaration
+
+        with pytest.raises(SchemaViolation, match="no value"):
+            await writer.create_node(
+                NodeDraft("Character", name="Gerald", summary="A cook."),
+                declarations={
+                    "quirk": PropertyDeclaration("quirk", "text")
+                },
+            )
+
+
+class TestInfraWriteGuard:
+    """ADR 045: generic writes may not target infra-role objects unless
+    the caller's privilege admits the role. The dedicated services
+    (scheduler, rule engine, recorders) bypass NodeWriter entirely."""
+
+    MODE_DRAFT = NodeDraft(
+        "Activity Mode", name="Recipe Mode", summary="Cooks recipes."
+    )
+
+    async def test_unprivileged_create_of_a_mode_object_is_denied(
+        self, writer, repository
+    ):
+        before = repository.graph.node_count()
+        with pytest.raises(InfraWriteDenied, match="system configuration"):
+            await writer.create_node(self.MODE_DRAFT)
+        assert repository.graph.node_count() == before
+
+    async def test_admitted_create_lands_with_the_mode_role(
+        self, writer, repository
+    ):
+        node = (await writer.create_node(
+            self.MODE_DRAFT, admitted_infra_roles=frozenset({Role.MODE}),
+        )).node
+        assert repository.graph.node(node.id).role is Role.MODE
+
+    async def test_update_of_a_mode_object_needs_the_same_privilege(
+        self, writer, repository
+    ):
+        node = (await writer.create_node(
+            self.MODE_DRAFT, admitted_infra_roles=frozenset({Role.MODE}),
+        )).node
+        with pytest.raises(InfraWriteDenied):
+            await writer.update_node(node.id, summary="tweaked")
+        updated = (await writer.update_node(
+            node.id, summary="tweaked",
+            admitted_infra_roles=frozenset({Role.MODE}),
+        )).node
+        assert updated.summary == "tweaked"
+
+    async def test_mode_privilege_does_not_unlock_other_infra(self, writer):
+        with pytest.raises(InfraWriteDenied):
+            await writer.create_node(
+                NodeDraft("Scheduled Event", name="Ping", summary="s."),
+                admitted_infra_roles=frozenset({Role.MODE}),
+            )
+
+
+class TestSectionGuard:
+    class _Guard:
+        """Recording fake; raises when armed with missing sections."""
+
+        def __init__(
+            self, missing: tuple[tuple[str, str], ...] = ()
+        ) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self._missing = missing
+
+        def check_body_update(self, node_id: str, new_body: str) -> None:
+            self.calls.append((node_id, new_body))
+            if self._missing:
+                raise LockedSectionsChanged("Chapter One", self._missing)
+
+    async def test_guard_runs_only_on_body_updates(
+        self, repository, session, world: World
+    ):
+        guard = self._Guard()
+        writer = NodeWriter(repository, session, section_guard=guard)
+        await writer.update_node(world.mira.id, summary="Fresh summary.")
+        assert guard.calls == []
+        await writer.update_node(world.mira.id, description="New body.")
+        assert guard.calls == [(world.mira.id, "New body.")]
+
+    async def test_a_locked_violation_blocks_the_repository_write(
+        self, repository, session, world: World
+    ):
+        guard = self._Guard(missing=(("abc123", "the locked text"),))
+        writer = NodeWriter(repository, session, section_guard=guard)
+        with pytest.raises(LockedSectionsChanged):
+            await writer.update_node(world.mira.id, description="Clobbered.")
+        assert await repository.fetch_body(world.mira.id) != "Clobbered."
+
+    async def test_create_never_guards(self, repository, session):
+        guard = self._Guard(missing=(("abc123", "the locked text"),))
+        writer = NodeWriter(repository, session, section_guard=guard)
+        await writer.create_node(NodeDraft(
+            "Character", name="Orla", summary="A smuggler.",
+            body="A first body.",
+        ))
+        assert guard.calls == []
+
+    async def test_no_guard_means_no_enforcement(self, writer, world: World):
+        await writer.update_node(world.mira.id, description="Free rewrite.")

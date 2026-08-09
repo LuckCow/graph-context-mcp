@@ -61,11 +61,9 @@ async def _eval_world() -> InMemoryGraphRepository:
     siege = await r.create_node(
         NodeDraft("Event", name="Siege of Brakk", story_time=10,
                   summary="The year-long siege in which the city fell."),
-        links=[
-            LinkSpec("participated_in", other=mira.id, outgoing=False),
-            LinkSpec("located_at", other=undercroft.id),
-        ],
+        links=[LinkSpec("located_at", other=undercroft.id)],
     )
+    await r.add_link(mira.id, LinkSpec("participated_in", other=siege.id))
     await r.create_node(
         NodeDraft("Item", name="Ashbrand", summary="A blade quenched in ash."),
         links=[
@@ -81,10 +79,10 @@ async def _eval_world() -> InMemoryGraphRepository:
         "Character", name="Renata Voss",
         summary="Senior product executive at Argus Systems.",
     ))
-    await r.create_node(
+    argus = await r.create_node(
         NodeDraft("Organization", name="Argus Systems", summary="A megacorp."),
-        links=[LinkSpec("member_of", other=renata.id, outgoing=False)],
     )
+    await r.add_link(renata.id, LinkSpec("member_of", other=argus.id))
     capture = CaptureRecorder(r, now=lambda: "t")
     await capture.record(
         text="Scene", summary="s", references=[mira.id, undercroft.id],

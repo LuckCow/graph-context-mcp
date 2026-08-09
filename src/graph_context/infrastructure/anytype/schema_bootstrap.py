@@ -43,6 +43,7 @@ MODE_TYPE_KEY = "gc_activity_mode"  # ADR 015 amendment: in-space mode config
 SCHEDULED_TYPE_KEY = "gc_scheduled_event"  # WP18/ADR 027: timed prompts
 SPACE_CONTEXT_TYPE_KEY = "gc_space_context"  # ADR 034: space-wide settings
 RULE_TYPE_KEY = "gc_rule"  # WP31/ADR 039: reactive automations
+HISTORY_TYPE_KEY = "gc_node_history"  # WP41/ADR 049: revision sidecars
 INFRA_TYPES: dict[str, str] = {
     PROSE_TYPE_KEY: Role.CAPTURE.value,
     SESSION_TYPE_KEY: Role.SESSION_CONTEXT.value,
@@ -51,6 +52,7 @@ INFRA_TYPES: dict[str, str] = {
     SCHEDULED_TYPE_KEY: "Scheduled Event",
     SPACE_CONTEXT_TYPE_KEY: "Space Context",
     RULE_TYPE_KEY: "Automation Rule",
+    HISTORY_TYPE_KEY: "Node History",
 }
 
 # Types whose fields humans edit in the Anytype UI get their properties
@@ -79,6 +81,7 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
     },
     SPACE_CONTEXT_TYPE_KEY: mapping.SPACE_CONTEXT_PROPERTIES,
     RULE_TYPE_KEY: mapping.RULE_PROPERTIES,
+    HISTORY_TYPE_KEY: mapping.HISTORY_PROPERTIES,
 }
 
 # The Activity Mode explainer/template moved to mode_seeder.py (ADR 035):
@@ -91,12 +94,13 @@ _INLINE_TYPE_PROPERTIES: dict[str, dict[str, str]] = {
 # the `schedule` tool.
 EXAMPLE_EVENT_NAME = "Example Scheduled Event"
 EXAMPLE_EVENT_SUMMARY = (
-    "Template: fill Schedule and Schedule prompt to make the assistant "
-    "check in on its own; this example never fires (its Schedule is empty)."
+    "Template: fill Schedule plus Schedule message (posted as-is) or "
+    "Schedule prompt (the assistant acts on it); this example never "
+    "fires (its Schedule is empty)."
 )
 EXAMPLE_EVENT_BODY = """\
-A Scheduled Event makes the assistant start a chat turn on its own at a \
-time you choose, following the instructions you store here.
+A Scheduled Event posts a stored message, or makes the assistant start \
+a chat turn on its own, at a time you choose.
 
 Fields:
 
@@ -104,14 +108,28 @@ Fields:
 date-time like 2027-04-08T09:00 (fires once), or a 5-field cron line \
 "minute hour day month weekday" like 0 9 * * 1 (Mondays 09:00; weekday \
 0 and 7 are Sunday).
-- Schedule prompt -- the instructions the assistant receives when it \
-fires. Write them self-contained, e.g. "Remind Nick that taxes are due \
-April 15 and ask whether he has filed."
+- Schedule message -- text posted to the chat exactly as written, with \
+no assistant turn. Use this for reminders where the wording is already \
+known, e.g. "Taxes are due April 15 -- file this week."
+- Schedule prompt -- instructions the assistant follows when it fires. \
+Use this when the fired turn must think or act; write it \
+self-contained, e.g. "Remind Nick that taxes are due April 15 and ask \
+whether he has filed." Fill ONE of message or prompt -- if both are \
+set, the message wins and the prompt is ignored.
+- Schedule mode -- optional, prompt events only: the name of the \
+Activity Mode the fired turn runs in. Empty runs the space's default \
+mode (never the chat's current mode).
+- Schedule document type -- optional, prompt events only: a node type \
+name like "Report". The fired turn writes its output into ONE object of \
+that type and posts only a short summary plus the object link -- use it \
+for recurring long-form output (newsletters, digests) that would flood \
+the chat. Needs a mode with the editing tools; empty posts the full \
+reply into the chat as usual.
 - Schedule status -- Pending events fire; set Completed or Cancelled to \
 stop one, or back to Pending to re-enable it. Empty counts as Pending. \
 The assistant marks a one-shot Completed after it fires.
 - Last fired -- bookkeeping, written by the assistant.
-- Session key -- optional: which chat the fired turn speaks into \
+- Session key -- optional: which chat the fired event speaks into \
 (anytype:<chat id>). Empty delivers to the space's first served chat.
 
 You can also just ask the assistant in chat ("remind me a week before \
@@ -138,8 +156,10 @@ Fields:
 - Rule watch property -- the property whose change triggers the rule, \
 by its display name, e.g. Done. Checkbox and select properties work \
 best; a text property saves as you type, so "Changed" can fire on a \
-half-typed value.
-- Rule condition -- Changed to true, Changed to false, or Changed.
+half-typed value. Leave it empty for a Manual rule.
+- Rule condition -- Changed to true, Changed to false, Changed, or \
+Manual. A Manual rule never runs by itself: it runs only when you tick \
+Rule run now, or send /run <rule name> in a chat.
 - Rule action -- what happens:
   - Set property to now writes the current date-time into the Rule \
 action property (e.g. Completion date). A date-format property gets \
@@ -154,6 +174,10 @@ Recipe 3) in a sandbox.
 - Rule status -- Active rules run; set Paused to switch one off. Empty \
 counts as Active. The assistant sets Error (with Rule last error) when \
 a rule is misconfigured, and flips it back to Active once it is fixed.
+- Rule run now -- tick this box to run the rule once, right now. The \
+assistant unticks it as it starts (within a few seconds), so ticking \
+it again runs it again. Works on any rule; a Paused rule refuses and \
+says so in Rule last error.
 - Rule last fired / Rule last error -- bookkeeping, written by the \
 assistant.
 
@@ -177,7 +201,16 @@ if project:
     log(f"{len(open_tasks)} open tasks")
 ```
 
-The script sees: trigger (the changed object as a dict), before/after \
+Recipe 4 -- a formula you run on demand: target type Restaurant, Rule \
+watch property empty, condition Manual, action Run script, with the \
+formula in this page's body. Nothing triggers it automatically -- run \
+it by ticking Rule run now, or by sending /run <rule name> in a chat. \
+Use this for anything you want computed when you ask rather than when \
+something changes.
+
+The script sees: trigger (the changed object as a dict -- for a Manual \
+rule, the first object of the target type unless you name one), \
+before/after \
 (the watched value around the change; empty means unset), now (the \
 current local date-time as text -- use it instead of the clock), \
 objects(type=None), find(name, type=None), field(obj, prop), \
@@ -317,6 +350,7 @@ async def ensure_schema(
     for key, fmt in {
         **mapping.SCHEDULED_PROPERTIES, **mapping.ATTRIBUTION_PROPERTIES,
         **mapping.SPACE_CONTEXT_PROPERTIES, **mapping.RULE_PROPERTIES,
+        **mapping.HISTORY_PROPERTIES,
     }.items():
         if key not in existing_properties:
             logger.info("bootstrap: creating property %s (%s)", key, fmt)

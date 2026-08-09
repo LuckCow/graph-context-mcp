@@ -43,6 +43,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from graph_context import composition
 from graph_context.interface import profiles, tools
 from graph_context.interface.services import Services
+from graph_context.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -110,19 +111,16 @@ async def create_node(
     summary: str,
     description: str = "",
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     icon: str = "",
-    create_missing_relations: bool = False,
-    create_missing_fields: dict[str, str] | None = None,
+    create_missing_properties: dict[str, Any] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.create_node_tool(
         _services(ctx), type=type, name=name, summary=summary,
-        description=description, story_time=story_time, fields=fields, links=links,
-        icon=icon,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=create_missing_fields,
+        description=description, story_time=story_time,
+        properties=properties, icon=icon,
+        create_missing_properties=create_missing_properties,
     )
 
 
@@ -134,19 +132,16 @@ async def update_node(
     summary: str | None = None,
     description: str | None = None,
     story_time: float | str | None = None,
-    fields: dict[str, str] | None = None,
-    add_links: list[dict[str, Any]] | None = None,
+    properties: dict[str, Any] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
-    create_missing_relations: bool = False,
-    create_missing_fields: dict[str, str] | None = None,
+    create_missing_properties: dict[str, Any] | None = None,
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.update_node_tool(
         _services(ctx), node_id=node_id, name=name, summary=summary,
-        description=description, story_time=story_time, fields=fields,
-        add_links=add_links, remove_links=remove_links,
-        create_missing_relations=create_missing_relations,
-        create_missing_fields=create_missing_fields,
+        description=description, story_time=story_time,
+        properties=properties, remove_links=remove_links,
+        create_missing_properties=create_missing_properties,
     )
 
 
@@ -228,12 +223,16 @@ async def schedule(
     name: str = "",
     schedule: str = "",
     prompt: str = "",
+    message: str = "",
+    mode: str = "",
+    document_type: str = "",
     node_id: str = "",
 ) -> str:
     """LLM-facing description supplied by the active profile (profiles.py)."""
     return await tools.schedule_tool(
         _services(ctx), action=action, name=name, schedule=schedule,
-        prompt=prompt, node_id=node_id,
+        prompt=prompt, message=message, mode=mode,
+        document_type=document_type, node_id=node_id,
     )
 
 
@@ -289,6 +288,23 @@ async def send_file(
     return await tools.send_file_tool(_services(ctx), name=name, content=content)
 
 
+@mcp.tool(description=_PROFILE.tool_docs["edit_document"])
+async def edit_document(
+    ctx: Context[Any, Any, Any],
+    node_id: str,
+    action: str = "sections",
+    anchor: str = "",
+    text: str = "",
+    summary: str | None = None,
+    comment_id: str = "",
+) -> str:
+    """LLM-facing description supplied by the active profile (profiles.py)."""
+    return await tools.edit_document_tool(
+        _services(ctx), node_id=node_id, action=action, anchor=anchor,
+        text=text, summary=summary, comment_id=comment_id,
+    )
+
+
 @mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
     ctx: Context[Any, Any, Any],
@@ -303,5 +319,5 @@ async def find_node(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     mcp.run()

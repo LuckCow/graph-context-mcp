@@ -23,6 +23,34 @@ class SchemaViolation(GraphContextError):
     """A write violated a node-creation invariant or a structural rule."""
 
 
+class InfraWriteDenied(GraphContextError):
+    """A write targeted a system-configuration (infra-role) type (ADR 045).
+
+    Raised by :func:`graph_context.domain.schema.validate_infra_write`
+    when a ``create_node``/``update_node`` targets an infra-role object
+    the active mode's privilege does not admit. The message names the
+    legitimate surfaces so the model self-corrects instead of retrying.
+    """
+
+    def __init__(
+        self, type_name: str, role: str, known: tuple[str, ...] = ()
+    ) -> None:
+        self.type_name = type_name
+        self.role = role
+        hint = (
+            f" Types you can write: {', '.join(sorted(known))}."
+            if known else ""
+        )
+        super().__init__(
+            f"{type_name!r} is system configuration ({role}), not "
+            "story/world data; this mode cannot create or modify it. "
+            "Activity Mode objects are editable only by a mode with "
+            "meta-inspection (the Space Setup mode) or directly in "
+            "Anytype; Scheduled Events and Automation Rules have their "
+            f"own tools (schedule, automation).{hint}"
+        )
+
+
 class ApprovalRequired(GraphContextError):
     """A write needs a new space-level type or relation the user must approve.
 
@@ -43,36 +71,88 @@ class UnknownNodeType(ApprovalRequired):
 
 
 class UnknownRelationLabel(ApprovalRequired):
-    """A link used a relation label with no matching existing relation."""
+    """A link used a relation label the write's type scope does not admit.
 
-    def __init__(self, label: str, known: tuple[str, ...] = ()) -> None:
+    With a ``type_name`` the message renders the ADR 047 sections: the
+    type's own relations (bare-usable), then space relations not attached
+    to the type -- reusable through the same ``create_missing_properties``
+    declaration that would mint a new one (a declared label matching an
+    existing relation attaches it instead of minting). The bare form
+    (open-mode fake, legacy raisers) keeps the space-wide wording.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        known: tuple[str, ...] = (),
+        *,
+        type_name: str = "",
+        attached: tuple[str, ...] = (),
+        unattached: tuple[str, ...] = (),
+    ) -> None:
         self.label = label
         self.known = tuple(known)
-        hint = (
-            f" Existing relations: {', '.join(sorted(self.known))}." if self.known else ""
+        self.type_name = type_name
+        self.attached = tuple(attached)
+        self.unattached = tuple(unattached)
+        declaration = (
+            f"create_missing_properties={{{label!r}: {{'format': 'objects', "
+            "'scope': 'instance'|'type'}}}"
         )
-        super().__init__(
-            f"no existing relation matches label {label!r}; pass "
-            f"create_missing_relations=true to create it.{hint}"
+        if not type_name:
+            hint = (
+                f" Existing relations: {', '.join(sorted(self.known))}."
+                if self.known else ""
+            )
+            super().__init__(
+                f"no existing relation matches label {label!r}; declare it in "
+                f"{declaration} to create it.{hint}"
+            )
+            return
+        parts = [f"no relation on {type_name} matches label {label!r}."]
+        if self.attached:
+            parts.append(
+                f"Relations on {type_name}: {', '.join(sorted(self.attached))}."
+            )
+        if self.unattached:
+            parts.append(
+                f"Space relations NOT attached to {type_name} (a declaration "
+                "naming one attaches it instead of minting): "
+                f"{', '.join(sorted(self.unattached))}."
+            )
+        parts.append(
+            f"Declare it in {declaration} to attach an existing relation or "
+            "create a new one ('type' scope also drafts the attach-to-type "
+            "proposal for the user's 👍)."
         )
+        super().__init__(" ".join(parts))
 
 
 class UnknownFieldKey(ApprovalRequired):
-    """A ``fields`` key matched no existing scalar property (ADR 023).
+    """A ``properties`` key the write's type scope does not admit (ADR 047).
 
-    Fields must land in real store properties -- never a hidden extras
-    blob (ADR 028) -- so an unmatched key stops the write. The message lists the
-    reusable properties (the requested type's own first) and the explicit
-    opt-in for creating a genuinely new one, mirroring
-    :class:`UnknownRelationLabel`'s approval gesture.
+    Values must land in real store properties -- never a hidden extras
+    blob (ADR 028) -- and bare keys resolve only against the target
+    type's attached properties (plus, on update, the object's own), so an
+    unadmitted key stops the write. The message lists the type's own
+    vocabulary first (bare-usable), then space vocabulary NOT attached to
+    the type -- reusable through the same explicit
+    ``create_missing_properties`` declaration that would mint a genuinely
+    new property (a declared key matching an existing same-format space
+    property attaches it instead of minting).
 
-    ``relation_label``: the key DID match an ``objects``-format relation --
-    in this system an edge, not a field (ADR 006). The message then
-    redirects to ``links`` instead of listing properties or offering
-    ``create_missing_fields`` (which would try to mint a scalar shadowing
-    the relation). Live-caught: a space's "Assignee" relation was invisible
-    to a model that only knew fields, and the old message sent it further
-    astray.
+    ``relation_label``: the key DID match a relation the scope admits --
+    in this system an edge (ADR 006), whose value is a node reference. The
+    message then teaches the relation value shape instead of listing scalar
+    properties or offering a declaration (which would try to mint a scalar
+    shadowing the relation). Live-caught: a space's "Assignee" relation was
+    invisible to a model that only knew scalar keys, and the old message
+    sent it further astray.
+
+    ``space_match_name``/``space_match_format``: the key exactly matches
+    space vocabulary that is NOT attached to the type -- the incident
+    shape (ADR 047: an unattached near-duplicate relation kept resolving
+    bare). The message states that fact and the attach gesture first.
     """
 
     def __init__(
@@ -80,36 +160,70 @@ class UnknownFieldKey(ApprovalRequired):
         key: str,
         type_name: str,
         type_properties: tuple[str, ...] = (),
-        other_properties: tuple[str, ...] = (),
+        type_relations: tuple[str, ...] = (),
+        unattached_properties: tuple[str, ...] = (),
+        unattached_relations: tuple[str, ...] = (),
         formats: tuple[str, ...] = (),
         relation_label: str = "",
+        space_match_name: str = "",
+        space_match_format: str = "",
     ) -> None:
         self.key = key
         self.type_name = type_name
         self.type_properties = tuple(type_properties)
-        self.other_properties = tuple(other_properties)
+        self.type_relations = tuple(type_relations)
+        self.unattached_properties = tuple(unattached_properties)
+        self.unattached_relations = tuple(unattached_relations)
         self.relation_label = relation_label
+        self.space_match_name = space_match_name
+        self.space_match_format = space_match_format
         if relation_label:
             super().__init__(
-                f"{key!r} is an objects-format RELATION in this space -- "
-                f"an edge, not a scalar field. Drop the {key!r} fields key "
-                f"and pass links=[{{'edge_type': {relation_label!r}, "
-                "'other': '<target node id or name>'}] instead (the target "
-                "must be an existing node)."
+                f"{key!r} is an objects-format RELATION here -- an "
+                "edge, not a scalar. Its value must be an existing node's id "
+                f"or name (or a list of them): properties="
+                f"{{{relation_label!r}: '<target node id or name>'}}."
             )
             return
-        parts = [f"no property in this space matches field {key!r}."]
+        parts = [f"no property on {type_name} matches key {key!r}."]
+        if space_match_name:
+            parts.append(
+                f"{key!r} matches the space property {space_match_name!r} "
+                f"(format {space_match_format!r}) which is NOT attached to "
+                f"{type_name}; to use it here, resend with "
+                f"create_missing_properties={{{key!r}: {{'format': "
+                f"{space_match_format!r}, 'scope': 'instance'|'type'}}}} -- "
+                "it will be reused, not duplicated ('type' scope also "
+                "drafts the attach-to-type proposal for the user's 👍)."
+            )
         if self.type_properties:
             parts.append(
                 f"Properties on {type_name}: {', '.join(self.type_properties)}."
             )
-        if self.other_properties:
+        if self.type_relations:
             parts.append(
-                f"Other properties in the space: {', '.join(self.other_properties)}."
+                f"Relations on {type_name} (each value is a node id/name, "
+                f"or a list): {', '.join(sorted(self.type_relations))}."
+            )
+        if self.unattached_properties:
+            parts.append(
+                f"Space properties NOT attached to {type_name} (declare in "
+                "create_missing_properties to reuse): "
+                f"{', '.join(self.unattached_properties)}."
+            )
+        if self.unattached_relations:
+            parts.append(
+                f"Space relations NOT attached to {type_name} (declare with "
+                "format 'objects' to reuse): "
+                f"{', '.join(sorted(self.unattached_relations))}."
             )
         parts.append(
-            "To reuse one, use its name as the fields key; to create a NEW "
-            f"property, resend with create_missing_fields={{{key!r}: '<format>'}}"
+            "To use the type's own vocabulary, use its name as the "
+            "properties key; to attach existing space vocabulary or create "
+            "a NEW property, resend with create_missing_properties="
+            f"{{{key!r}: '<format>'}} (or {{'format': ..., 'scope': "
+            "'instance'|'type'}} -- 'type' when every object of the type "
+            "should carry it)"
         )
         if formats:
             parts.append(f"(formats: {', '.join(sorted(formats))}).")
@@ -170,6 +284,65 @@ class AmbiguousNodeName(GraphContextError):
         super().__init__(
             f"{query!r} matches {len(candidates)} nodes: {listing}. "
             "Retry with an exact id, or a more specific name."
+        )
+
+
+class LockedSectionsChanged(GraphContextError):
+    """A body update dropped or altered LOCKED sections (WP42, ADR 049).
+
+    Raised by the section guard consulted in ``NodeWriter.update_node``
+    when a tracked node's new body no longer contains every block whose
+    intent is ``locked`` (an order-insensitive presence check -- moving
+    a locked block is fine, changing or deleting it is not). The message
+    is a prompt: it shows the missing sections and the ways out.
+    """
+
+    def __init__(
+        self, node_name: str, missing: tuple[tuple[str, str], ...]
+    ) -> None:
+        self.node_name = node_name
+        self.missing = missing
+        listing = "; ".join(
+            f"[§{h}] {excerpt!r}" for h, excerpt in missing
+        )
+        super().__init__(
+            f"this update to {node_name!r} drops {len(missing)} LOCKED "
+            f"section(s): {listing}. Locked sections must survive "
+            "verbatim: reproduce them unchanged in the new body, use "
+            "edit_document to change only other sections, or ask the "
+            "user to unlock them (prose review page)."
+        )
+
+
+class StaleSectionMark(GraphContextError):
+    """A status/intent mark named a hash no longer in the node's current
+    sequence (WP42) -- the marking view is stale. Callers re-fetch and
+    retry; the prose page maps this to HTTP 409."""
+
+
+class SectionAnchorNotFound(GraphContextError):
+    """An ``edit_document`` anchor matched no section (WP42).
+
+    The message echoes the document's current anchor vocabulary (hash +
+    first line) so the model can retry with a real anchor instead of
+    guessing.
+    """
+
+    def __init__(
+        self,
+        anchor: str,
+        sections: tuple[tuple[str, str], ...],
+        reason: str = "no section matches",
+    ) -> None:
+        self.anchor = anchor
+        self.sections = sections
+        listing = "; ".join(
+            f"[§{h}] {first_line!r}" for h, first_line in sections
+        ) or "(document has no sections)"
+        super().__init__(
+            f"{reason} anchor {anchor!r}. Current sections: {listing}. "
+            "Retry with one of these hashes (edit_document "
+            "action='sections' re-lists them)."
         )
 
 
