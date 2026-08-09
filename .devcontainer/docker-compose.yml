@@ -104,6 +104,10 @@ services:
       # /prose. Same file-not-env-var discipline as the keys above; the
       # page prompts for the token once and remembers it.
       GC_PROSE_TOKEN_FILE: "/run/secrets/gc_prose_token"
+      # The Messages-API driver's key (GC_DRIVER=anthropic_api). Read from
+      # the FILE, never an env var -- and an empty file is the supported
+      # "this deployment stays on the subscription" state.
+      ANTHROPIC_API_KEY_FILE: "/run/secrets/anthropic_api_key"
       # The turn-log viewer must bind all interfaces INSIDE the container:
       # Docker's published-port DNAT delivers host traffic to eth0, not
       # loopback. The host side stays private -- the ports: mapping above
@@ -116,6 +120,7 @@ services:
       TZ: "America/New_York"
 
     secrets:
+      - anthropic_api_key
       - anytype_api_key
       - discord_bot_token
       - gc_prose_token
@@ -163,6 +168,11 @@ volumes:
 # baked into the image. Create it once (see README), then it's mounted
 # read-only at /run/secrets/anytype_api_key inside the container.
 secrets:
+  # Like tailscale_authkey below, this must exist even when unused: an empty
+  # file leaves GC_DRIVER on the subscription path (build_driver's billing
+  # gate treats it as "no key configured").
+  anthropic_api_key:
+    file: ./secrets/anthropic_api_key
   anytype_api_key:
     file: ./secrets/anytype_api_key
   discord_bot_token:

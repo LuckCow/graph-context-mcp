@@ -26,6 +26,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from graph_context import composition
 from graph_context.application.intent_recorder import IntentRecorder
@@ -123,6 +124,36 @@ _DRIVER_ALIASES = {
 }
 
 
+def _resolve_anthropic_key() -> str | None:
+    """The API key, from ``ANTHROPIC_API_KEY_FILE`` or the environment.
+
+    Same precedence as every other secret in this stack (see
+    ``anytype/config.py``): the FILE is primary because the container
+    mounts secrets read-only and env vars leak through ``docker inspect``,
+    ``/proc``, and child processes; the inline env var stays as the
+    host-local fallback. Returns None when nothing is configured -- the
+    billing gate in ``build_driver`` is what turns that into a refusal.
+
+    ``ANTHROPIC_AUTH_TOKEN`` is deliberately NOT read here: it is a
+    different credential on a different header, so it satisfies the gate
+    but is left for the SDK to pick up from the environment itself.
+    """
+    path = os.environ.get("ANTHROPIC_API_KEY_FILE", "").strip()
+    if path:
+        try:
+            key = Path(path).read_text().strip()
+        except OSError as err:
+            raise GraphContextError(
+                f"could not read ANTHROPIC_API_KEY_FILE at {path}: {err}"
+            ) from None
+        if key:
+            return key
+        # An empty file is the documented "this deployment has no API key"
+        # state (compose requires the file to exist), not an error: fall
+        # through to the env var, then to the gate.
+    return os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+
+
 def build_driver(turn_log: TurnLog | None = None) -> tuple[LLMDriver, str, str]:
     """GC_DRIVER resolution -> (driver, attribution model name, help line).
 
@@ -179,13 +210,16 @@ def build_driver(turn_log: TurnLog | None = None) -> tuple[LLMDriver, str, str]:
         # The billing switch must be a conscious choice: no key, no driver.
         # The SDK would otherwise silently fall back to an `ant auth login`
         # OAuth profile, which hides WHO is paying.
+        api_key = _resolve_anthropic_key()
         if not (
-            os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            api_key
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
         ):
             raise GraphContextError(
                 "GC_DRIVER=anthropic_api bills API credits, not the Claude "
-                "subscription -- set ANTHROPIC_API_KEY to opt in, or use "
+                "subscription -- set ANTHROPIC_API_KEY_FILE (preferred; the "
+                "devcontainer mounts /run/secrets/anthropic_api_key) or "
+                "ANTHROPIC_API_KEY to opt in, or use "
                 "GC_DRIVER=anthropic_subscription for the plan-billed path"
             )
         logger.warning(
@@ -195,6 +229,7 @@ def build_driver(turn_log: TurnLog | None = None) -> tuple[LLMDriver, str, str]:
         anthropic_driver = AnthropicDriver(
             model=model or DEFAULT_MODEL, effort=effort,
             on_result=turn_log.usage if turn_log else None,
+            api_key=api_key,
         )
         help_line = (
             "talking to the model over the Anthropic API (bills API "
