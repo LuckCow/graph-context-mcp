@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph (characters, locations, events, prose) is the source of truth; an LLM builds the world and renders scenes from it via thirteen stdio MCP tools. Design docs: `docs/adr/` (decisions), `docs/WORK_PACKAGES.md` (roadmap/status), `docs/TESTING.md` (suites, live E2E, goldens, behavioral evals, demo scripts), README (setup + layout table).
+An MCP server exposing a story-world knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph (characters, locations, events, prose) is the source of truth; an LLM builds the world and renders scenes from it via thirteen stdio MCP tools. Design docs: `docs/adr/` (decisions), `docs/WORK_PACKAGES.md` (roadmap/status), `docs/TESTING.md` (suites, live E2E, goldens, behavioral evals, demo scripts), `docs/DEPLOYMENT.md` (boot chain, secrets, the state that lives outside git, host migration), README (setup + layout table).
 
 ## Environment constraints
 

@@ -6,7 +6,7 @@ The stack, storage core up: an async `GraphRepository` port with two certified i
 
 **Space-reflecting ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure. Everything the server writes is a REAL Anytype property or the object body ([ADR 028](docs/adr/028-native-properties-everywhere.md)): summaries live in the built-in `description` property ([ADR 011](docs/adr/011-summary-in-builtin-description.md)), long-form descriptions in the body ([ADR 010](docs/adr/010-descriptions-in-the-body.md)) — visible, filterable, editable in the UI.
 
-Docs: [`docs/adr/`](docs/adr/) (decisions), [`docs/WORK_PACKAGES.md`](docs/WORK_PACKAGES.md) (roadmap + status), [`docs/TESTING.md`](docs/TESTING.md) (suites, live E2E, golden snapshots, behavioral evals, demo scripts).
+Docs: [`docs/adr/`](docs/adr/) (decisions), [`docs/WORK_PACKAGES.md`](docs/WORK_PACKAGES.md) (roadmap + status), [`docs/TESTING.md`](docs/TESTING.md) (suites, live E2E, golden snapshots, behavioral evals, demo scripts), [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) (boot chain, secrets, state outside git, moving to another host).
 
 ```bash
 pip install -e ".[dev]"    # Python >= 3.11
