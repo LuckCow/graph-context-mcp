@@ -4,7 +4,7 @@ The Anytype sibling of ``discord_transport``: everything the bot decides
 per message -- the echo/backlog/creator gate, the ``anytype:<id>``
 identity mapping, plain-text rendering + object attachments, the
 "Processing" placeholder, chunked sends -- is plain logic
-over primitives, so the whole policy tests without httpx or a server.
+over primitives, so the whole policy tests without httpx2 or a server.
 The placeholder is edited into the first reply chunk UNLESS a
 live-activity sink claims it first (WP19, ADR 029: ``turn_activity``
 streams the turn into it and the reply posts fresh).

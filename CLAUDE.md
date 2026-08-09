@@ -94,7 +94,7 @@ Key ideas that span multiple files:
 Follow **CLEAN** principles in all code: **C**ohesive (one reason to change per module), **L**oosely coupled (depend on ports/abstractions, not concretions), **E**ncapsulated (no reaching into internals — tests included), **A**ssertive (objects act on their own state rather than interrogating others'), **N**on-redundant (a rule or fact lives in exactly one place). The repo-specific rules below are applications of these:
 
 1. **Business rules live in exactly one place** — edge legality in `GraphIndex.add_edge`, creation invariants in `schema.validate_new_node`, summary staleness in `NodeWriter`. Re-checking a rule in a second layer means it's in the wrong place.
-2. **Domain stays pure**: no I/O, no `httpx`, no MCP types, no clocks — this keeps `tests/unit` in milliseconds.
+2. **Domain stays pure**: no I/O, no `httpx2`, no MCP types, no clocks — this keeps `tests/unit` in milliseconds.
 3. Services take dependencies via constructor, typed against ports; a new tool ≈ a new application service shaped like `Explorer`.
 4. Parameter objects mirror the tool surface (`ExploreQuery` ↔ the `explore` tool schema); keep them in lockstep.
 5. Test names state behavior (`test_failed_link_rolls_back_the_created_node`), grouped in classes per scenario; fixtures build worlds through public APIs, never by poking internals.

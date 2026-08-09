@@ -38,7 +38,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 
 from graph_context import composition
 from graph_context.interface import profiles, tools
@@ -61,7 +61,7 @@ class AppContext:
 
 
 @asynccontextmanager
-async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
+async def lifespan(_: MCPServer) -> AsyncIterator[AppContext]:
     # The build itself is shared with the orchestrator's composition root
     # (ADR 007): one wiring, two roots -- see graph_context/composition.py.
     # The runtime's mode store is unused here: activity modes are an
@@ -74,10 +74,10 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppContext]:
         await composition.run_teardown(built.teardown)
 
 
-mcp = FastMCP("graph-context", lifespan=lifespan)
+mcp = MCPServer("graph-context", lifespan=lifespan)
 
 
-def _services(ctx: Context[Any, Any, Any]) -> Services:
+def _services(ctx: Context[AppContext]) -> Services:
     app: AppContext = ctx.request_context.lifespan_context
     return app.services
 
@@ -89,7 +89,7 @@ def _services(ctx: Context[Any, Any, Any]) -> Services:
 
 @mcp.tool(description=_PROFILE.tool_docs["context"])
 async def context(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     action: str = "get",
     node_id: str = "",
     project: str = "",
@@ -105,7 +105,7 @@ async def context(
 
 @mcp.tool(description=_PROFILE.tool_docs["create_node"])
 async def create_node(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     type: str,
     name: str,
     summary: str,
@@ -126,7 +126,7 @@ async def create_node(
 
 @mcp.tool(description=_PROFILE.tool_docs["update_node"])
 async def update_node(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     node_id: str,
     name: str | None = None,
     summary: str | None = None,
@@ -147,7 +147,7 @@ async def update_node(
 
 @mcp.tool(description=_PROFILE.tool_docs["get_node"])
 async def get_node(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     node_id: str,
     edge_types: list[str] | None = None,
     include_provenance: int = 0,
@@ -161,7 +161,7 @@ async def get_node(
 
 @mcp.tool(description=_PROFILE.tool_docs["explore"])
 async def explore(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     start: str = "",
     depth: int = 1,
     include_types: list[str] | None = None,
@@ -184,7 +184,7 @@ async def explore(
 
 @mcp.tool(description=_PROFILE.tool_docs["query"])
 async def query(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     type: str = "",
     linked_to: str = "",
     edge_types: list[str] | None = None,
@@ -203,7 +203,7 @@ async def query(
 
 @mcp.tool(description=_PROFILE.tool_docs["find_path"])
 async def find_path(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     target: str,
     start: str = "",
     edge_types: list[str] | None = None,
@@ -218,7 +218,7 @@ async def find_path(
 
 @mcp.tool(description=_PROFILE.tool_docs["schedule"])
 async def schedule(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     action: str = "list",
     name: str = "",
     schedule: str = "",
@@ -238,7 +238,7 @@ async def schedule(
 
 @mcp.tool(description=_PROFILE.tool_docs["automation"])
 async def automation(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     action: str = "list",
     name: str = "",
     rule: str = "",
@@ -263,7 +263,7 @@ async def automation(
 
 @mcp.tool(description=_PROFILE.tool_docs["schema"])
 async def schema(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     action: str = "list",
     type: str = "",
     plural: str = "",
@@ -280,7 +280,7 @@ async def schema(
 
 @mcp.tool(description=_PROFILE.tool_docs["send_file"])
 async def send_file(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     name: str,
     content: str,
 ) -> str:
@@ -290,7 +290,7 @@ async def send_file(
 
 @mcp.tool(description=_PROFILE.tool_docs["edit_document"])
 async def edit_document(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     node_id: str,
     action: str = "sections",
     anchor: str = "",
@@ -307,7 +307,7 @@ async def edit_document(
 
 @mcp.tool(description=_PROFILE.tool_docs["find_node"])
 async def find_node(
-    ctx: Context[Any, Any, Any],
+    ctx: Context[AppContext],
     name: str,
     type: str = "",
     limit: int = 10,
@@ -320,4 +320,5 @@ async def find_node(
 
 if __name__ == "__main__":
     configure_logging()
-    mcp.run()
+    # mcp 2 moved transport selection from the constructor onto run().
+    mcp.run(transport="stdio")
