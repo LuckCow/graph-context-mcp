@@ -1,4 +1,4 @@
-"""WP14 Anytype chat transport policy: gate, cursor, deep links -- no httpx.
+"""WP14 Anytype chat transport policy: gate, cursor, deep links -- no httpx2.
 
 The whole per-message policy is plain logic in ``anytype_chat_transport``
 (only the ``anytype_chat_bot`` composition root touches infrastructure;

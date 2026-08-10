@@ -87,6 +87,45 @@ class TestAnthropicApiBranch:
         assert model == "claude-opus-4-8"
         assert "credits" in help_line
 
+    def test_the_key_can_come_from_a_file(self, monkeypatch, tmp_path) -> None:
+        # The container mounts secrets as read-only FILES; env vars leak via
+        # `docker inspect`, /proc, and child processes. The file is primary.
+        pytest.importorskip("anthropic")
+        from graph_context.orchestrator.anthropic_driver import AnthropicDriver
+
+        key_file = tmp_path / "anthropic_api_key"
+        key_file.write_text("sk-from-a-file\n")
+        monkeypatch.setenv("GC_DRIVER", "anthropic_api")
+        monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(key_file))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        driver, _model, _help = build_driver()
+        assert isinstance(driver, AnthropicDriver)
+
+    def test_an_empty_key_file_still_refuses(self, monkeypatch, tmp_path) -> None:
+        # Compose requires the secret file to EXIST, so an empty one is the
+        # documented "no API key here" state -- it must reach the billing
+        # gate, not sneak past it as a configured credential.
+        pytest.importorskip("anthropic")
+        key_file = tmp_path / "anthropic_api_key"
+        key_file.write_text("")
+        monkeypatch.setenv("GC_DRIVER", "anthropic_api")
+        monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(key_file))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        with pytest.raises(GraphContextError, match="API credits"):
+            build_driver()
+
+    def test_an_unreadable_key_file_names_the_path(self, monkeypatch, tmp_path) -> None:
+        pytest.importorskip("anthropic")
+        missing = tmp_path / "nope" / "anthropic_api_key"
+        monkeypatch.setenv("GC_DRIVER", "anthropic_api")
+        monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(missing))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        with pytest.raises(GraphContextError, match="ANTHROPIC_API_KEY_FILE"):
+            build_driver()
+
     def test_no_model_override_reports_the_driver_default(
         self, monkeypatch
     ) -> None:

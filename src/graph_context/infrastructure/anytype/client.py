@@ -23,7 +23,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-import httpx
+import httpx2
 
 from graph_context.infrastructure.anytype.config import AnytypeApiError, AnytypeConfig
 
@@ -47,13 +47,13 @@ class AnytypeClient:
         self,
         config: AnytypeConfig,
         *,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx2.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._config = config
         self._sleep = sleep
         self.request_count = 0
-        self._http = httpx.AsyncClient(
+        self._http = httpx2.AsyncClient(
             base_url=config.base_url,
             timeout=config.timeout_seconds,
             transport=transport,
@@ -97,7 +97,7 @@ class AnytypeClient:
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
         retry: bool = True,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """The bounded-retry request loop, response un-decoded (the file
         endpoints speak bytes; everything else JSON-decodes in request)."""
         last_error: AnytypeApiError | None = None
@@ -109,7 +109,7 @@ class AnytypeClient:
                     method, path, params=params, json=json,
                     content=content, headers=headers,
                 )
-            except httpx.HTTPError as err:
+            except httpx2.HTTPError as err:
                 # Transport-level failure (connection refused, timeout, ...):
                 # translate so callers see one error family, per the module
                 # contract. status=0 marks "no HTTP response at all".
@@ -352,7 +352,7 @@ class AnytypeClient:
         it in place the server answers "missing file in request"
         (live-caught) -- so the multipart body is encoded by a bare
         request and sent with its own boundary header."""
-        bare = httpx.Request(
+        bare = httpx2.Request(
             "POST", "http://multipart.encode",
             files={"file": (filename, content)},
         )
@@ -435,7 +435,7 @@ class AnytypeClient:
         stream raises instead of hanging forever -- the caller's reconnect
         loop is the recovery path. Framing is parsed in ``chat.py``.
         """
-        timeout = httpx.Timeout(
+        timeout = httpx2.Timeout(
             self._config.timeout_seconds, read=heartbeat_seconds * 2 + 5
         )
         try:
@@ -450,7 +450,7 @@ class AnytypeClient:
                     raise self._to_error(response, path)
                 async for line in response.aiter_lines():
                     yield line
-        except httpx.HTTPError as err:
+        except httpx2.HTTPError as err:
             raise AnytypeApiError(0, "transport", str(err), path) from err
 
     def stream_chat_messages(
@@ -462,7 +462,7 @@ class AnytypeClient:
         )
 
     @staticmethod
-    def _to_error(response: httpx.Response, endpoint: str) -> AnytypeApiError:
+    def _to_error(response: httpx2.Response, endpoint: str) -> AnytypeApiError:
         code, message = "unknown", response.text[:200]
         try:
             body = response.json()

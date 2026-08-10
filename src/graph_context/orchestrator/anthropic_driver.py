@@ -489,11 +489,13 @@ class AnthropicDriver:
     """LLMDriver over the Messages API (API-key authenticated, bills
     credits).
 
-    The zero-arg ``AsyncAnthropic()`` resolves ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_AUTH_TOKEN`` from the environment; ``build_driver``
-    refuses to construct this driver unless one is set, so the billing
-    switch is always a conscious choice. ``client`` is injectable for
-    tests."""
+    ``api_key`` is the key read from a file by ``build_driver`` (the
+    container mounts secrets as files; env vars leak via ``docker
+    inspect`` and ``/proc``). Left unset, ``AsyncAnthropic()`` resolves
+    ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` from the environment
+    itself. Either way ``build_driver`` refuses to construct this driver
+    without a key, so the billing switch is always a conscious choice.
+    ``client`` is injectable for tests."""
 
     def __init__(
         self,
@@ -503,6 +505,7 @@ class AnthropicDriver:
         schemas: Mapping[str, Mapping[str, Any]] | None = None,
         on_result: Callable[[DecideUsage], None] | None = None,
         client: AsyncAnthropic | None = None,
+        api_key: str | None = None,
     ) -> None:
         self._model = model
         self._effort = effort
@@ -520,7 +523,7 @@ class AnthropicDriver:
                 name: derive_schema(fn) for name, fn in modes.full_surface().items()
             }
         self._schemas = schemas
-        self._client = client or AsyncAnthropic()
+        self._client = client or AsyncAnthropic(api_key=api_key)
 
     def system_prompt(self, goal: str) -> str:
         return assembled_system_prompt(goal)

@@ -32,7 +32,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -79,12 +79,12 @@ def _base() -> str:
 
 def _request(
     base: str, headers: dict[str, str], method: str, path: str, **kw: Any
-) -> httpx.Response:
+) -> httpx2.Response:
     """Plain call with bounded retry on throttling AND transient 5xx (a
     freshly created space 500s briefly before it is ready)."""
-    response: httpx.Response | None = None
+    response: httpx2.Response | None = None
     for attempt in range(12):
-        response = httpx.request(
+        response = httpx2.request(
             method, f"{base}{path}", headers=headers, timeout=30, **kw
         )
         if response.status_code not in (429, 500, 502, 503, 504):
@@ -151,7 +151,7 @@ def _reset_space(base: str, headers: dict[str, str], space_id: str) -> None:
             and prop_key not in _RESET_KEEP_RELATIONS
         ):
             # a failed delete is an undeletable builtin; harmless to leave
-            with contextlib.suppress(httpx.HTTPStatusError):
+            with contextlib.suppress(httpx2.HTTPStatusError):
                 _request(
                     base, headers, "DELETE",
                     f"/v1/spaces/{space_id}/properties/{prop['id']}",
@@ -213,10 +213,10 @@ class RawApi:
             "Anytype-Version": config.api_version,
         }
 
-    def _send(self, method: str, obj_id: str, **kw: Any) -> httpx.Response:
+    def _send(self, method: str, obj_id: str, **kw: Any) -> httpx2.Response:
         url = f"{self._base}/v1/spaces/{self._space}/objects/{obj_id}"
         for _ in range(15):
-            response = httpx.request(method, url, headers=self._headers, timeout=30, **kw)
+            response = httpx2.request(method, url, headers=self._headers, timeout=30, **kw)
             if response.status_code != 429:
                 response.raise_for_status()
                 return response

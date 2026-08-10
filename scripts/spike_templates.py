@@ -9,7 +9,7 @@ all, and which request field name actually triggers template application.
 Surgical + self-cleaning: it only ever *creates* objects, tracks their ids, and
 archives them in a ``finally`` block. It never resets or mass-deletes a space, so
 it is safe to point at a working space that already owns a template. It does NOT
-depend on the production client -- raw httpx only.
+depend on the production client -- raw httpx2 only.
 
     ANYTYPE_API_KEY_FILE=/run/secrets/anytype_api_key \
     ANYTYPE_API_BASE_URL=http://anytype:31012 \
@@ -25,7 +25,7 @@ import os
 import sys
 from typing import Any
 
-import httpx
+import httpx2
 
 API_VERSION = "2025-11-08"
 
@@ -61,7 +61,7 @@ def _base() -> str:
 
 class Spike:
     def __init__(self) -> None:
-        self.http = httpx.Client(
+        self.http = httpx2.Client(
             base_url=_base(),
             headers={
                 "Authorization": f"Bearer {_key()}",
@@ -79,7 +79,7 @@ class Spike:
         r.raise_for_status()
         return r.json()
 
-    def _post(self, path: str, body: dict[str, Any]) -> httpx.Response:
+    def _post(self, path: str, body: dict[str, Any]) -> httpx2.Response:
         return self.http.post(path, content=json.dumps(body))
 
     def _paged(self, path: str) -> list[dict[str, Any]]:
@@ -130,7 +130,7 @@ class Spike:
                     tpls = self._get(
                         f"/v1/spaces/{sid}/types/{tid}/templates?limit=5"
                     ).get("data", [])
-                except httpx.HTTPStatusError:
+                except httpx2.HTTPStatusError:
                     continue
                 if tpls:
                     tpl = tpls[0]
@@ -240,7 +240,7 @@ class Spike:
         for sid, oid in self.created:
             try:
                 self.http.delete(f"/v1/spaces/{sid}/objects/{oid}")
-            except httpx.HTTPError as exc:  # best-effort; report, don't crash
+            except httpx2.HTTPError as exc:  # best-effort; report, don't crash
                 print(f"  cleanup failed for {oid}: {exc}")
         print(f"cleaned up {len(self.created)} object(s)")
 
