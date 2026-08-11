@@ -97,8 +97,13 @@ services:
       # transport. Endpoint-agnostic -- works against the desktop today
       # and the sidecar after cutover.
       GC_SPACES_FILE: "/workspaces/graph-context-mcp/spaces.toml"
-      # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
-      # account's CLI default; pinned here to Sonnet 5.
+      # Driver selection (bootstrap.py). anthropic_api routes model calls
+      # through the raw Messages API (billed to API credits via
+      # ANTHROPIC_API_KEY_FILE below) instead of the Claude subscription --
+      # this VPS's chosen model-access path (see docs/DEPLOYMENT.md).
+      GC_DRIVER: "anthropic_api"
+      # Pin the orchestrator LLM (bootstrap.py). Unset = the driver's own
+      # default; pinned here to Sonnet 5.
       GC_DRIVER_MODEL: "claude-sonnet-5"
       # Prose-page write token (ADR 050/054): enables saving/marking on
       # /prose. Same file-not-env-var discipline as the keys above; the

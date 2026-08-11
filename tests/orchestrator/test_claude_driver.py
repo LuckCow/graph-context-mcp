@@ -59,7 +59,10 @@ class TestSchemaDerivation:
         assert p["depth"] == {"type": "integer"}
         assert p["weight"] == {"type": ["number", "string"]}
         assert p["tags"] == {"type": "array", "items": {"type": "string"}}
-        assert p["fields"] == {"type": "object"}
+        # A nested dict-typed param needs additionalProperties:false too --
+        # the raw Messages API's strict-tool-schema validator rejects ANY
+        # object-typed fragment, top-level or nested, that omits it.
+        assert p["fields"] == {"type": "object", "additionalProperties": False}
         assert p["strict"] == {"type": "boolean"}
 
     def test_every_surface_tool_derives_a_closed_object_schema(self):

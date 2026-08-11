@@ -301,21 +301,22 @@ def anthropic_tools(
     """One native tool definition per bound tool, sorted by name
     (deterministic order keeps requests cache-friendly).
 
-    A derived schema carries ``additionalProperties: false`` +
-    ``required``, so it qualifies for ``strict`` validation. A name
-    without a schema degrades to a bare object -- WITHOUT ``strict``,
-    which the API rejects on schemas lacking those keys."""
+    A derived schema carries ``additionalProperties: false`` + ``required``
+    on every object fragment (nested included) -- the raw Messages API's
+    strict-tool-schema validator requires it, 400ing otherwise ("tools.N.
+    custom: For 'object' type, 'additionalProperties' must be explicitly
+    set to false"). NOT setting ``strict: True`` itself is deliberate: that
+    flag switches the tool set to grammar-compiled decoding, which caps the
+    request's TOTAL optional parameters across every tool at 24 -- our full
+    surface runs ~80. A schema-less name degrades to a bare object."""
     definitions: list[dict[str, Any]] = []
     for name, doc in sorted(tools.items()):
         schema = schemas.get(name)
-        definition: dict[str, Any] = {
+        definitions.append({
             "name": name,
             "description": doc,
             "input_schema": dict(schema) if schema else {"type": "object"},
-        }
-        if schema:
-            definition["strict"] = True
-        definitions.append(definition)
+        })
     return definitions
 
 

@@ -55,7 +55,14 @@ def _json_type(annotation: Any) -> dict[str, Any]:
         items = _json_type(args[0]) if args else {}
         return {"type": "array", "items": items} if items else {"type": "array"}
     if origin is dict:
-        return {"type": "object"}
+        # The raw Messages API's strict tool-schema validation rejects any
+        # 'object'-typed fragment -- nested ones included -- that doesn't
+        # explicitly set additionalProperties (400: "tools.N.custom: For
+        # 'object' type, 'additionalProperties' must be explicitly set to
+        # false"). derive_schema's top-level object already sets it; every
+        # nested dict-typed parameter (properties, create_missing_*, a
+        # list[dict]'s items, ...) needs the same.
+        return {"type": "object", "additionalProperties": False}
     if origin in (types.UnionType, Union):
         members = [a for a in get_args(annotation) if a is not type(None)]
         fragments = [_json_type(m) for m in members]
