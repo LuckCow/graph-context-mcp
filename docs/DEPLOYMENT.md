@@ -73,7 +73,7 @@ box gets you none of it. **This is the migration checklist.**
 | Volume | Holds | If lost |
 |---|---|---|
 | `anytype-data` (`/root/.anytype`) + `anytype-config` (`/root/.config/anytype`) | The bot account's identity, config, and API-key store | The bot loses its account **and** its membership in every space. Recover from the `anytype_account_key` secret, then re-issue the API key. Both volumes are needed — the CLI splits state across them, and a rebuild wiped them once. |
-| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path | The orchestrator has no model. See [Model access](#model-access). |
+| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path | The orchestrator has no model. Server deployments pin `GC_DRIVER: anthropic_api` instead. See [Model access](#model-access). |
 | `tailscale-state` (`/var/lib/tailscale`) | The tailnet node identity | The node re-registers from the auth key, leaving a dead duplicate behind. Use a **reusable, non-ephemeral** key. |
 
 The graph itself is **not** in this list: it lives in Anytype and syncs over
@@ -148,25 +148,67 @@ date stamp. `GC_TIMEZONE` overrides it independently if the two must differ.
 
 ## Moving to a VPS
 
-1. Land and push the working tree; confirm CI is green. The box deploys from
-   git, so anything uncommitted does not exist there.
-2. Provision secrets (see `secrets/README.md`). `tailscale_authkey` must be
-   **reusable**, **non-ephemeral**, and ideally **tagged** (`tag:vps` via
-   `TS_UP_EXTRA_ARGS=--advertise-tags=tag:vps`).
-3. Recover the Anytype bot identity from `anytype_account_key`, then
-   `anytype auth apikey create` and write `anytype_api_key`.
-4. Decide the model path *before* first boot (see above); the subscription
-   path needs an interactive login or a minted token on a headless box.
-5. Keep `ports:` on `127.0.0.1`. Keep `TZ`.
-6. Build, boot, and check the four log lines above.
-7. Verify: `pytest -q`, then `ANYTYPE_E2E=1 pytest tests/e2e -q` against the
-   new sidecar. The live suite find-or-creates its own `GC-E2E` space and
-   resets it around each run.
+Compose is self-sufficient: `devcontainer.json` carries only VS Code glue
+(`service`, `workspaceFolder`, `remoteUser`), while everything load-bearing —
+the `NET_ADMIN`/`NET_RAW` capabilities the firewall needs, `user: dev`, and the
+boot chain — lives in the compose file. Headless is therefore just:
+
+```bash
+docker compose -f .devcontainer/docker-compose.yml up -d --build
+```
+
+**Stop the old orchestrator before the new one serves.** Both instances answer
+the same Anytype chats, so a running desktop stack means every message is
+answered twice — two bots holding two independent route locks. Two Anytype
+*nodes* on one account is fine (that is just sync); it is the two orchestrators
+that collide. Bring the VPS up with `GC_SERVE_AUTOSTART=0` until cutover.
+
+1. **Push first, confirm CI.** The box deploys from git; anything uncommitted
+   does not exist there.
+2. **Host prep.** Docker Engine + compose plugin, git. Budget disk and RAM for
+   the build: torch (CPU wheel), sentence-transformers, Node, and a Playwright
+   Chromium add up to several GB, and the build will OOM on a 1 GB box. The
+   build needs unrestricted network — the egress firewall applies only *inside*
+   the container at runtime.
+3. **Clone as uid 1000.** The repo is bind-mounted and the container runs as
+   `dev` (uid/gid 1000). A mismatch means the container cannot write `logs/`,
+   the turn diary, or prose saves: `sudo chown -R 1000:1000 .`
+4. **Copy secrets** (`.devcontainer/secrets/`, all git-ignored).
+   `anthropic_api_key` and `tailscale_authkey` must exist even if empty or
+   compose refuses to start. Mint a **fresh** tailscale key — reusable,
+   non-ephemeral, tagged (`TS_UP_EXTRA_ARGS=--advertise-tags=tag:vps`).
+5. **Give the bot an Anytype account.** Migrating `anytype-data` +
+   `anytype-config` keeps the old identity, its API key, and its space
+   membership. Re-creating is usually easier and costs only: re-inviting the
+   bot to each space in `spaces.toml`, re-issuing the API key, and a full
+   re-sync. **The API key must be re-issued** because it is a bearer token for
+   *that node's* local API, minted into the key store in `anytype-config` — a
+   new node has an empty store, so the old token authenticates nothing. Save
+   the output of `anytype auth create` into `anytype_account_key` this time:
+   it is the difference between a two-minute recovery and repeating this.
+6. **Copy `logs/` if you want continuity.** It is git-ignored and lives in the
+   repo, not in a volume, so neither path carries it. It holds the turn diary
+   and the per-chat cursors. Re-copy `logs/chat_cursor*.json` at the *moment*
+   of cutover, after the old bot stops: a stale cursor makes the new bot
+   re-answer everything the old one handled after the copy. A chat with no
+   cursor at all skips its history rather than replaying it, so the failure
+   mode of forgetting them is a dropped backlog, not a flood.
+7. **Keep `ports:` on `127.0.0.1`, keep `TZ`.** Both are already correct in
+   compose. On the provider's firewall, SSH only — the tailnet is the access
+   path.
+8. **Boot and check the four log lines above**, then verify: `pytest -q` and
+   `ANYTYPE_E2E=1 pytest tests/e2e -q` against the new sidecar. The live suite
+   find-or-creates its own `GC-E2E` space and resets it around each run.
+
+A server deployment differs from the workstation one in two committed ways:
+both services carry `restart: unless-stopped` (the boot chain is re-entrant, so
+a reboot is safe), and `GC_DRIVER: anthropic_api` is pinned — the subscription
+path authenticates from the `claude-config` volume, which does not travel.
 
 What is *not* on the VPS: the Anytype **desktop** app. `host.docker.internal`
-and port `31009` exist for the desktop's local API, which is a human
-convenience on a workstation; the headless sidecar at `anytype:31012` is the
-only backend a server needs.
+and port `31009` exist for the desktop's local API, a human convenience on a
+workstation; the headless sidecar at `anytype:31012` is the only backend a
+server needs.
 
 ## Troubleshooting
 

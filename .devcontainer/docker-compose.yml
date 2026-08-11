@@ -19,6 +19,10 @@ services:
     container_name: graph-context-mcp-dev
     user: dev
     init: true
+    # A server should come back after a host reboot. The boot chain is
+    # re-entrant (the firewall re-applies, tailscale reapplies, `gc-serve
+    # boot` no-ops on a running server), so a restart is always safe.
+    restart: unless-stopped
 
     # Required for the iptables/ipset egress firewall.
     cap_add:
@@ -102,8 +106,9 @@ services:
       # ANTHROPIC_API_KEY_FILE below) instead of the Claude subscription --
       # this VPS's chosen model-access path (see docs/DEPLOYMENT.md).
       GC_DRIVER: "anthropic_api"
-      # Pin the orchestrator LLM (bootstrap.py). Unset = the driver's own
-      # default; pinned here to Sonnet 5.
+      # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
+      # account's CLI default; pinned here to Sonnet 5.
+      # Messages-API credits, not the Claude 
       GC_DRIVER_MODEL: "claude-sonnet-5"
       # Prose-page write token (ADR 050/054): enables saving/marking on
       # /prose. Same file-not-env-var discipline as the keys above; the
@@ -142,6 +147,7 @@ services:
     build:
       context: ./anytype
     container_name: graph-context-mcp-anytype
+    restart: unless-stopped
     environment:
       # Local bot node: the server-side write throttle (~1 req/s, spike
       # S7) protects nothing here -- disable it.
