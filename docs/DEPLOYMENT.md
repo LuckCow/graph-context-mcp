@@ -116,7 +116,7 @@ Then the named Docker volumes:
 | Volume | Holds | If lost |
 |---|---|---|
 | `anytype-data` (`/root/.anytype`) + `anytype-config` (`/root/.config/anytype`) | The bot account's identity, config, and API-key store | The bot loses its account **and** its membership in every space. Recover from the `anytype_account_key` secret, then re-issue the API key. Both volumes are needed — the CLI splits state across them, and a rebuild wiped them once. |
-| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path | The orchestrator has no model. Server deployments pin `GC_DRIVER: anthropic_api` instead. See [Model access](#model-access). |
+| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path, which compose selects | The orchestrator has no model at all: this volume *is* the authentication. Log in once on the new host, or switch that deployment to `GC_DRIVER: anthropic_api` and give it a key. See [Model access](#model-access). |
 | `tailscale-state` (`/var/lib/tailscale`) | The tailnet node identity | The node re-registers from the auth key, leaving a dead duplicate behind. Use a **reusable, non-ephemeral** key. |
 
 The graph itself is **not** in this list: it lives in Anytype and syncs over
@@ -124,9 +124,11 @@ Anytype's network. What you are migrating is the machinery that reads it.
 
 ## Model access
 
-Two paths, selected by `GC_DRIVER`:
+Two paths, selected by `GC_DRIVER` — compose selects the subscription, and
+the choice is per deployment, so a host that cannot carry an OAuth login can
+switch without any other change:
 
-**Subscription (current default).** `GC_DRIVER` unset or
+**Subscription (the default, and what compose sets).** `GC_DRIVER` unset or
 `anthropic_subscription` (aliases: `claude`, `subscription`). Runs
 `claude-agent-sdk` over the bundled Claude Code CLI, billed to the Claude
 plan. Authentication comes from the OAuth login persisted in the
@@ -140,7 +142,7 @@ fresh host, either log in interactively once, or mint a token with
 > volume. Wiring it to `CLAUDE_CODE_OAUTH_TOKEN` would give the headless path
 > a fresh host actually needs.
 
-**API (planned).** `GC_DRIVER=anthropic_api` (aliases: `anthropic`, `api`)
+**API (opt-in).** `GC_DRIVER=anthropic_api` (aliases: `anthropic`, `api`)
 plus `ANTHROPIC_API_KEY`, and the `anthropic` extra installed. Bills API
 credits, not the subscription — bootstrap refuses to start without an
 explicit key rather than silently falling back to an OAuth profile, so the
@@ -257,10 +259,14 @@ collide over.
 > after — or take the downtime: the next boot mints a template and the
 > orchestrator waits, refusing to start, until you refill it.
 
-A server deployment differs from the workstation one in two committed ways:
-both services carry `restart: unless-stopped` (the boot chain is re-entrant, so
-a reboot is safe), and `GC_DRIVER: anthropic_api` is pinned — the subscription
-path authenticates from the `claude-config` volume, which does not travel.
+Compose is committed and shared, so a server and a workstation run it
+identically — including `restart: unless-stopped` on both services, which is
+what brings the stack back after a host reboot (the boot chain is re-entrant,
+so that is always safe). The one thing a server has to solve for itself is
+[model access](#model-access): `GC_DRIVER` selects the subscription, whose
+OAuth login lives in the `claude-config` volume and does not travel, so a new
+host either logs in once or switches that deployment to `anthropic_api` with a
+key.
 
 What is *not* on the VPS: the Anytype **desktop** app. `host.docker.internal`
 and port `31009` exist for the desktop's local API, a human convenience on a

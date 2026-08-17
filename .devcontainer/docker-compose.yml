@@ -101,14 +101,29 @@ services:
       # transport. Endpoint-agnostic -- works against the desktop today
       # and the sidecar after cutover.
       GC_SPACES_FILE: "/workspaces/graph-context-mcp/spaces.toml"
-      # Driver selection (bootstrap.py). anthropic_api routes model calls
-      # through the raw Messages API (billed to API credits via
-      # ANTHROPIC_API_KEY_FILE below) instead of the Claude subscription --
-      # this VPS's chosen model-access path (see docs/DEPLOYMENT.md).
-      GC_DRIVER: "anthropic_api"
-      # Pin the orchestrator LLM (bootstrap.py). Unset = the logged-in
-      # account's CLI default; pinned here to Sonnet 5.
-      # Messages-API credits, not the Claude 
+      # Where the model comes from, and WHO PAYS (bootstrap.py). Three
+      # values; unset = anthropic_subscription:
+      #
+      #   anthropic_subscription  claude-agent-sdk over the bundled Claude
+      #       Code CLI, billed to the Claude plan. Authenticates from the
+      #       OAuth login in the claude-config VOLUME -- which does not
+      #       travel between hosts, so a new host logs in once (or mints a
+      #       token with `claude setup-token` on one that already has).
+      #   anthropic_api  the raw Messages API, billing API CREDITS. Needs a
+      #       key (ANTHROPIC_API_KEY_FILE below); bootstrap refuses to start
+      #       without one rather than quietly falling back to an OAuth
+      #       profile, so the billing switch is always deliberate. Inline
+      #       web-search citations exist only on this path (ADR 036).
+      #   manual  no model at all -- you drive the loop by hand. The way to
+      #       debug a new host before its model access works.
+      #
+      # (Legacy aliases still resolve, with a log line: claude/subscription
+      # -> anthropic_subscription, anthropic/api -> anthropic_api.)
+      GC_DRIVER: "anthropic_subscription"
+      # Deployment default for the model. Unset = whatever the chosen driver
+      # defaults to (the logged-in CLI's model, or the API driver's pin).
+      # An Activity Mode's own gc_mode_model beats this per mode (ADR 033),
+      # as gc_mode_thinking does for GC_DRIVER_EFFORT (ADR 037).
       GC_DRIVER_MODEL: "claude-sonnet-5"
       # Prose-page write token (ADR 050/054): enables saving/marking on
       # /prose. Same file-not-env-var discipline as the keys above; the
