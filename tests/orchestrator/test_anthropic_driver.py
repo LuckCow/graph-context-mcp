@@ -189,7 +189,12 @@ class TestTranscriptMapping:
 
 
 class TestToolDefinitions:
-    def test_tools_are_sorted_strict_and_closed(self):
+    def test_tools_are_sorted_and_closed(self):
+        # No "strict": True -- the raw Messages API's strict/grammar-compiled
+        # mode caps a request's TOTAL optional parameters across every tool
+        # at 24, and this surface runs ~80. additionalProperties:false stays
+        # (a plain custom-tool schema still needs it on every object
+        # fragment, strict or not).
         schemas = {"get_node": derive_schema(modes.full_surface()["get_node"])}
         tools = anthropic_tools(
             {"get_node": "Fetch one node.", "explore": "Walk the graph."}, schemas
@@ -197,15 +202,13 @@ class TestToolDefinitions:
         assert [t["name"] for t in tools] == ["explore", "get_node"]
         get_node = tools[1]
         assert get_node["description"] == "Fetch one node."
-        assert get_node["strict"] is True
+        assert "strict" not in get_node
         assert get_node["input_schema"]["additionalProperties"] is False
         assert "node_id" in get_node["input_schema"]["properties"]
 
-    def test_a_name_without_a_schema_degrades_to_bare_object_without_strict(self):
+    def test_a_name_without_a_schema_degrades_to_bare_object(self):
         tools = anthropic_tools({"explore": "Walk the graph."}, {})
         assert tools[0]["input_schema"] == {"type": "object"}
-        # strict requires additionalProperties:false + required, which a
-        # bare object lacks -- the API would reject the pairing.
         assert "strict" not in tools[0]
 
     def test_every_surface_tool_builds_a_definition(self):
@@ -215,7 +218,7 @@ class TestToolDefinitions:
         tools = anthropic_tools(docs, schemas)
         assert len(tools) == len(surface)
         for definition in tools:
-            assert definition["strict"] is True
+            assert "strict" not in definition
 
 
 class TestResponseHarvest:
