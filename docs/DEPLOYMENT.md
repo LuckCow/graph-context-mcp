@@ -10,7 +10,9 @@ secret is and how to obtain it), [TESTING.md](TESTING.md) (what "verified"
 means), [adr/025](adr/025-inspection-server.md) (the inspection server),
 [adr/019](adr/019-anytype-chat-transport-and-headless-sidecar.md) (the
 headless sidecar), [adr/059](adr/059-tailscaled-egress-by-uid.md) (why root is exempt
-from the egress policy, and why the boot chain cannot hang).
+from the egress policy, and why the boot chain cannot hang),
+[adr/060](adr/060-deployment-scoped-space-bindings.md) (why the space bindings
+are not in git).
 
 ## What actually runs
 
@@ -65,10 +67,51 @@ recognizing:
 [gc-serve] already running (pid N)        # or: running (pid N) -- logs: ...
 ```
 
+## Dev and prod
+
+The two deployments run **identical builds** — same image, same compose file,
+same branch. They differ in exactly one thing: `spaces.toml`, which is
+git-ignored and lives one copy per host ([ADR 060](adr/060-deployment-scoped-space-bindings.md)).
+The dev box binds a test space; the VPS binds the production spaces; no space
+id appears in both.
+
+That file is the *entire* separation, because the bot account was migrated
+rather than recreated: both hosts run the same Anytype identity, so both can
+reach every space. Nothing but the binding decides which chats each one
+answers — and when `spaces.toml` was committed, both answered all of them.
+
+Driving prod from your workstation shell (**not** from inside the
+devcontainer — tailscaled there is userspace-networking with no SOCKS proxy,
+so it has no outbound tailnet path at all):
+
+```bash
+scripts/gc-prod status              # pid + the last log lines
+scripts/gc-prod logs                # tail -f the orchestrator log
+scripts/gc-prod deploy              # git pull + restart, health-checked
+scripts/gc-prod deploy --to <sha>   # roll back
+scripts/gc-prod shell               # a shell in the prod container
+```
+
+`gc-prod` is a thin SSH wrapper (target from `GC_PROD_SSH`, default the
+ssh-config alias `gc-prod`); the work happens in `scripts/deploy.sh` **on the
+server**, which refuses on a dirty tree, fast-forwards only, and picks its own
+restart depth: a touched `pyproject.toml` or `.devcontainer/**` rebuilds the
+image, anything else is just `gc-serve restart`, since source is a bind mount.
+It then polls until the orchestrator answers and tails `serve.log` if it does
+not. Promotion flow: work on `dev` → CI green → merge to `main` → `gc-prod
+deploy`.
+
 ## State that does NOT travel
 
-Everything below is a named Docker volume on the host. `git clone` on a new
-box gets you none of it. **This is the migration checklist.**
+`git clone` on a new box gets you none of this. **This is the migration
+checklist.** Config first:
+
+| File | Holds | If lost |
+|---|---|---|
+| `spaces.toml` | Which Anytype spaces THIS deployment serves (ADR 060) | The orchestrator mints a template from the packaged example and refuses to start until you fill it in. Restoring it wrong is worse than losing it: a copy of the *other* deployment's file makes two bots answer one set of chats. |
+| `channels.toml` | The same, for Discord channels (ADR 017) | Nothing — an absent file means "Discord parked", the same as a file with zero tables. Copy `src/graph_context/orchestrator/channels.example.toml` to the repo root when you want it back. |
+
+Then the named Docker volumes:
 
 | Volume | Holds | If lost |
 |---|---|---|
@@ -157,11 +200,15 @@ boot chain — lives in the compose file. Headless is therefore just:
 docker compose -f .devcontainer/docker-compose.yml up -d --build
 ```
 
-**Stop the old orchestrator before the new one serves.** Both instances answer
-the same Anytype chats, so a running desktop stack means every message is
-answered twice — two bots holding two independent route locks. Two Anytype
-*nodes* on one account is fine (that is just sync); it is the two orchestrators
-that collide. Bring the VPS up with `GC_SERVE_AUTOSTART=0` until cutover.
+**Two orchestrators must never share a space.** Both instances answer the same
+Anytype chats, so a second running stack means every message is answered twice
+— two bots holding two independent route locks. Two Anytype *nodes* on one
+account is fine (that is just sync); it is the two orchestrators that collide.
+During a migration, bring the VPS up with `GC_SERVE_AUTOSTART=0` until
+cutover; *after* one, [ADR 060](adr/060-deployment-scoped-space-bindings.md) is
+what keeps it from recurring — the surviving dev box binds its own test space
+in its own git-ignored `spaces.toml`, so there is no shared space left to
+collide over.
 
 1. **Push first, confirm CI.** The box deploys from git; anything uncommitted
    does not exist there.
@@ -173,11 +220,15 @@ that collide. Bring the VPS up with `GC_SERVE_AUTOSTART=0` until cutover.
 3. **Clone as uid 1000.** The repo is bind-mounted and the container runs as
    `dev` (uid/gid 1000). A mismatch means the container cannot write `logs/`,
    the turn diary, or prose saves: `sudo chown -R 1000:1000 .`
-4. **Copy secrets** (`.devcontainer/secrets/`, all git-ignored).
+4. **Copy `spaces.toml`** (git-ignored since ADR 060) — or let the first boot
+   mint a template and fill it in there. Whichever you do, the new host's
+   bindings and the old host's must not overlap unless the old host is being
+   retired.
+5. **Copy secrets** (`.devcontainer/secrets/`, all git-ignored).
    `anthropic_api_key` and `tailscale_authkey` must exist even if empty or
    compose refuses to start. Mint a **fresh** tailscale key — reusable,
    non-ephemeral, tagged (`TS_UP_EXTRA_ARGS=--advertise-tags=tag:vps`).
-5. **Give the bot an Anytype account.** Migrating `anytype-data` +
+6. **Give the bot an Anytype account.** Migrating `anytype-data` +
    `anytype-config` keeps the old identity, its API key, and its space
    membership. Re-creating is usually easier and costs only: re-inviting the
    bot to each space in `spaces.toml`, re-issuing the API key, and a full
@@ -186,19 +237,25 @@ that collide. Bring the VPS up with `GC_SERVE_AUTOSTART=0` until cutover.
    new node has an empty store, so the old token authenticates nothing. Save
    the output of `anytype auth create` into `anytype_account_key` this time:
    it is the difference between a two-minute recovery and repeating this.
-6. **Copy `logs/` if you want continuity.** It is git-ignored and lives in the
+7. **Copy `logs/` if you want continuity.** It is git-ignored and lives in the
    repo, not in a volume, so neither path carries it. It holds the turn diary
    and the per-chat cursors. Re-copy `logs/chat_cursor*.json` at the *moment*
    of cutover, after the old bot stops: a stale cursor makes the new bot
    re-answer everything the old one handled after the copy. A chat with no
    cursor at all skips its history rather than replaying it, so the failure
    mode of forgetting them is a dropped backlog, not a flood.
-7. **Keep `ports:` on `127.0.0.1`, keep `TZ`.** Both are already correct in
+8. **Keep `ports:` on `127.0.0.1`, keep `TZ`.** Both are already correct in
    compose. On the provider's firewall, SSH only — the tailnet is the access
    path.
-8. **Boot and check the four log lines above**, then verify: `pytest -q` and
+9. **Boot and check the four log lines above**, then verify: `pytest -q` and
    `ANYTYPE_E2E=1 pytest tests/e2e -q` against the new sidecar. The live suite
    find-or-creates its own `GC-E2E` space and resets it around each run.
+
+> **One-time hazard, on the deploy that introduced ADR 060.** That commit
+> untracks `spaces.toml` and `channels.toml`, so `git pull` **deletes** the
+> server's copies. Back them up on the server first and restore them straight
+> after — or take the downtime: the next boot mints a template and the
+> orchestrator waits, refusing to start, until you refill it.
 
 A server deployment differs from the workstation one in two committed ways:
 both services carry `restart: unless-stopped` (the boot chain is re-entrant, so

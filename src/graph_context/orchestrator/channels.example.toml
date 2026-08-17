@@ -1,0 +1,19 @@
+# Channel-bound spaces (ADR 017): each Discord channel gets its own
+# Anytype space, profile, and (optionally) project label / modes file.
+# Read at bot startup via GC_CHANNELS_FILE (set in docker-compose.yml);
+# mutually exclusive with the legacy GC_DISCORD_CHANNELS allowlist.
+#
+# THIS FILE IS DEPLOYMENT-SCOPED (ADR 060): git-ignored, one copy per host.
+# Unlike spaces.toml it is OPTIONAL and never minted — Discord is opt-in,
+# so a missing file (like a file with zero tables) means "Discord parked"
+# and the bot simply does not start. Copy this template into place at the
+# repo root as `channels.toml` when you want it.
+#
+# NEVER bind a space here AND in spaces.toml (Anytype chat, ADR 019) at
+# the same time: a space holds one SessionContext node, and two runtimes
+# would clobber each other's session snapshot.
+
+# The table key is the Discord channel id (an integer, unquoted).
+# [channels.123456789012345678]
+# space_id = "bafyrei…your-space-id…"
+# profile = "fiction"

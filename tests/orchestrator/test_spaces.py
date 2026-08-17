@@ -9,6 +9,7 @@ import pytest
 from graph_context.errors import GraphContextError
 from graph_context.interface.profiles import get_profile
 from graph_context.orchestrator.spaces import (
+    _EXAMPLE_FILE,
     SpaceBinding,
     load_space_bindings,
     served_chat_ids,
@@ -70,14 +71,19 @@ class TestLoadSpaceBindings:
         with pytest.raises(GraphContextError, match="nope"):
             load_space_bindings(path, None)
 
-    def test_missing_file_and_bad_toml_fail_loudly_with_the_path(
-        self, tmp_path: Path
-    ) -> None:
-        with pytest.raises(GraphContextError, match="cannot read"):
-            load_space_bindings(str(tmp_path / "absent.toml"), None)
+    def test_bad_toml_fails_loudly(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "not [valid toml")
         with pytest.raises(GraphContextError, match="not valid TOML"):
             load_space_bindings(path, None)
+
+    def test_an_unreadable_file_that_exists_names_the_path(
+        self, tmp_path: Path
+    ) -> None:
+        # A directory where the file should be: an OSError that is NOT
+        # "absent", so it keeps the read message instead of minting.
+        (tmp_path / "spaces.toml").mkdir()
+        with pytest.raises(GraphContextError, match="cannot read"):
+            load_space_bindings(str(tmp_path / "spaces.toml"), None)
 
     def test_an_empty_file_demands_at_least_one_table(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "# nothing bound\n")
@@ -119,6 +125,61 @@ class TestLoadSpaceBindings:
         )
         with pytest.raises(GraphContextError, match="mutually exclusive"):
             load_space_bindings(path, "fiction")
+
+
+class TestMintingAStarterFile:
+    """ADR 060: the file is git-ignored, so "absent" is a fresh host."""
+
+    def test_a_missing_file_is_written_from_the_template_and_still_fails(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "spaces.toml"
+        with pytest.raises(GraphContextError, match="wrote a starter template"):
+            load_space_bindings(str(path), None)
+        assert path.exists()
+        assert path.read_text() == _EXAMPLE_FILE.read_text()
+
+    def test_the_message_names_the_path_and_the_dev_prod_rule(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "nested" / "spaces.toml"
+        with pytest.raises(GraphContextError) as caught:
+            load_space_bindings(str(path), None)
+        message = str(caught.value)
+        assert str(path) in message
+        assert "git-ignored" in message and "exactly one" in message
+
+    def test_the_minted_template_is_itself_an_incomplete_config(
+        self, tmp_path: Path
+    ) -> None:
+        # The template binds nothing on purpose, so the SECOND boot fails on
+        # "at least one table" rather than serving a placeholder space id.
+        path = tmp_path / "spaces.toml"
+        with pytest.raises(GraphContextError):
+            load_space_bindings(str(path), None)
+        with pytest.raises(GraphContextError, match="at least one"):
+            load_space_bindings(str(path), None)
+
+    def test_an_uncreatable_path_fails_loudly_instead_of_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        # Absent AND unwritable (a read-only directory): the mint cannot
+        # help, so it says so rather than raising OSError out of startup.
+        directory = tmp_path / "readonly"
+        directory.mkdir()
+        directory.chmod(0o500)
+        try:
+            with pytest.raises(GraphContextError, match="could not be created"):
+                load_space_bindings(str(directory / "spaces.toml"), None)
+        finally:
+            directory.chmod(0o700)  # let tmp_path clean itself up
+
+    def test_a_broken_path_keeps_the_read_message(self, tmp_path: Path) -> None:
+        # A regular file where the parent directory should be. Not "absent"
+        # -- the path itself is wrong, so minting into it would be nonsense.
+        (tmp_path / "blocker").write_text("")
+        with pytest.raises(GraphContextError, match="cannot read"):
+            load_space_bindings(str(tmp_path / "blocker" / "spaces.toml"), None)
 
 
 class TestServedChatIds:

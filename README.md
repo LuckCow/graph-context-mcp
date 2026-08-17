@@ -1,55 +1,160 @@
 # graph-context-mcp
 
-An MCP server **and agentic orchestrator** exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it — and the assistant lives *inside* your Anytype spaces: it chats in-space, fires timed prompts ([scheduled events](#scheduled-events-and-automation-rules)), reacts to property changes with [automation rules](#scheduled-events-and-automation-rules) (including sandboxed Python scripts), and evolves your schema only with your 👍 ([schema proposals](#schema-changes-need-a-)).
-
-The stack, storage core up: an async `GraphRepository` port with two certified implementations (in-memory fake and `AnytypeGraphRepository`, with hydrate/resync and self-write suppression), an MCP stdio server exposing **thirteen tools**, and an **orchestrator harness** above it — a real Claude driver on your subscription or the Messages API, in-space activity modes that pin their own model, thinking level, web-search access, and verbosity ([ADR 033](docs/adr/033-per-mode-model-selection.md)/[035](docs/adr/035-in-space-only-activity-modes.md)/[037](docs/adr/037-mode-level-driver-options.md)), automatic per-turn provenance with a durable process-trace card ([ADR 038](docs/adr/038-turn-trace-on-the-intent-node.md)), semantic search with graph-aware ranking ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)/[016](docs/adr/016-graph-aware-ranking.md)), and chat transports for Anytype's own in-space chat ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)) and Discord.
+An MCP server **and agentic orchestrator** exposing a knowledge graph backed by [Anytype](https://developers.anytype.io/). The graph is the source of truth; the LLM builds it and writes from it — and the assistant lives *inside* your Anytype spaces: it chats in-space, fires timed prompts, reacts to property changes with automation rules (including sandboxed Python scripts), and evolves your schema only with your 👍. [What it does](#what-it-does) has the detail.
 
 **Space-reflecting ([ADR 006](docs/adr/006-space-reflecting-open-schema.md)):** the server reflects your *existing* Anytype space — native types (`character`, `event`, …) are nodes and every `objects`-format relation is a labelled edge. There is no closed `gc_` vocabulary; `gc_` keys survive only for infrastructure. Everything the server writes is a REAL Anytype property or the object body ([ADR 028](docs/adr/028-native-properties-everywhere.md)): summaries live in the built-in `description` property ([ADR 011](docs/adr/011-summary-in-builtin-description.md)), long-form descriptions in the body ([ADR 010](docs/adr/010-descriptions-in-the-body.md)) — visible, filterable, editable in the UI.
 
 Docs: [`docs/adr/`](docs/adr/) (decisions), [`docs/WORK_PACKAGES.md`](docs/WORK_PACKAGES.md) (roadmap + status), [`docs/TESTING.md`](docs/TESTING.md) (suites, live E2E, golden snapshots, behavioral evals, demo scripts), [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) (boot chain, secrets, state outside git, moving to another host).
 
+## Quick start
+
+Everything runs as one compose stack: the **`dev`** service (the orchestrator, plus the MCP server on demand) and the **`anytype`** sidecar (a headless Anytype node holding the bot account). From the host:
+
 ```bash
-pip install -e ".[dev]"    # Python >= 3.11
-pytest                     # mock-backed suite; no live server needed
+docker compose -f .devcontainer/docker-compose.yml up -d --build
 ```
 
-Try it without Anytype: `PYTHONPATH=src python scripts/demo_wp2_tools.py` drives the full tool loop in-process against the mock-backed repository.
+A fresh checkout also needs the [one-time sidecar bootstrap](#one-time-sidecar-bootstrap-bot-account) before the bot has an account to post from, and at least one space [shared with it](#sharing-spaces-with-the-bot).
 
-## Running the MCP server
+The `dev` container's boot sequence is, in a mandatory order: the egress firewall (it flushes all of netfilter, so nothing that installs rules may precede it) → tailscale → the orchestrator → `sleep infinity`, so a crashed server still leaves a container you can exec into. The orchestrator runs as the unprivileged `dev` user, never as root — root is exempt from the egress firewall so `tailscaled` can reach its control plane, and a root-run orchestrator would inherit that exemption and silently bypass the allowlist.
 
-The server speaks **stdio** (one process per client; no network port). Run it directly only for a quick local check:
+### Starting and stopping
 
+**The containers**, from the host — compose takes the *service* name (`dev`, `anytype`):
+
+```bash
+docker compose -f .devcontainer/docker-compose.yml up -d          # start the stack (add --build after dependency/Dockerfile changes)
+docker compose -f .devcontainer/docker-compose.yml up -d dev      # just the orchestrator service
+docker compose -f .devcontainer/docker-compose.yml stop dev       # stop it; `stop` alone stops the whole stack
+docker compose -f .devcontainer/docker-compose.yml restart dev    # full container restart: firewall → tailscale → orchestrator
+docker compose -f .devcontainer/docker-compose.yml ps             # what's up
+docker compose -f .devcontainer/docker-compose.yml down           # tear the stack down (named volumes survive)
 ```
-GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # dev: in-memory, nothing persists
+
+Both services carry `restart: unless-stopped`, so they come back after a host reboot — and stay down after an explicit `stop` until you `up` them again.
+
+**The orchestrator process**, inside the container — `docker exec` takes the *container* name. `gc-serve` is the process control, and **the answer to "I changed the code, now what"**:
+
+```bash
+docker exec graph-context-mcp-dev gc-serve restart   # pick up source edits
+docker exec graph-context-mcp-dev gc-serve start     # after a stop, or with GC_SERVE_AUTOSTART=0
+docker exec graph-context-mcp-dev gc-serve stop      # then run it in the foreground yourself
+docker exec graph-context-mcp-dev gc-serve status    # pid + last log lines
+docker exec -it graph-context-mcp-dev gc-serve logs  # tail -f
 ```
 
-The thirteen tools:
+The source is a bind mount and `PYTHONPATH` points into it, so a `gc-serve restart` is all any source change needs — no image rebuild, no `compose down/up`. Only dependency changes (`pyproject.toml`) or Dockerfile edits need `up -d --build`. Set `GC_SERVE_AUTOSTART=0` to boot without the server; logs go to `logs/serve.log`.
 
-- **Graph:** `create_node`, `update_node`, `edit_document` (hash-anchored single-section body edits, ADR 050), `get_node`, `explore`, `find_path`, `find_node`, `query`
-- **Session:** `context` (scratchpad + working set + cold-start `overview` map)
-- **Automation & schema:** `schedule` (timed prompts), `automation` (reactive rules), `schema` (draft type changes), `send_file`
+### Entry points
 
-Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
-
-Two surfaces worth calling out:
-
-- **One `properties` dict on the write tools ([ADR 042](docs/adr/042-unified-properties-surface.md)).** Scalars and relations share a single map on `create_node`/`update_node`, discriminated by what the space says the key IS: a key naming an existing `objects` relation takes a node id/name (or a list) and becomes link(s); everything else is a scalar. New keys are declared via `create_missing_properties` (format-explicit, type-attached so rules can watch them); the old `fields`/`links`/`create_missing_*` parameters answer with a redirect, never an opaque error.
-- **`query` runs ad-hoc filters *and* your saved Set views ([ADR 018](docs/adr/018-client-side-query-engine.md)).** Ad-hoc: ANDed `where` predicates, multi-key `order_by`, `linked_to` neighbor anchoring — all on the in-memory engine. `query(view=...)` compiles an Anytype Set view (the filters/sorts you maintain in the desktop UI) into the same engine.
-
-## Running the orchestrator (CLI / Discord / Anytype chat)
-
-The orchestrator is the agentic harness over the same tool surface: a driver decides, activity modes bind tools, provenance records each working turn. Every transport shares one runtime assembly (`orchestrator/bootstrap.py`) and differs only in its message loop.
-
-```
-python -m graph_context.orchestrator.serve                                  # everything: Anytype bot + Discord (if configured) + inspection server
-GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # keyboard loop; dev backend
-python -m graph_context.orchestrator.discord_bot                            # Discord bot standalone
+```bash
+python -m graph_context.orchestrator.serve                                  # what the container runs: Anytype bot + Discord (if configured) + inspection server
 python -m graph_context.orchestrator.anytype_chat_bot                       # Anytype in-space chat bot standalone
+python -m graph_context.orchestrator.discord_bot                            # Discord bot standalone
+python -m graph_context.orchestrator.inspect_server                         # inspection server standalone
+GC_BACKEND=memory PYTHONPATH=src python -m graph_context.orchestrator.cli   # keyboard loop; in-memory backend, nothing persists
+GC_BACKEND=memory PYTHONPATH=src python -m graph_context.interface.server   # bare MCP stdio server; quick local check
 ```
 
 `serve` is the consolidated entry point: one process running the Anytype chat bot (always), the Discord bot (only when the token file has content **and** at least one channel is bound — an empty secret file or a zero-table channels file is the "Discord off" switch), and the inspection server in a daemon thread. One transport's crash takes the whole process down loudly; restarts belong to the supervisor.
 
-`GC_DRIVER=anthropic_subscription` (default) talks to the model on your Claude subscription; `GC_DRIVER=anthropic_api` talks to it over the Anthropic Messages API instead — an explicit opt-in that bills API credits and requires `ANTHROPIC_API_KEY` (inline citations for web search are API-driver-only); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). `GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` set deployment defaults, but **the active mode outranks them**: each Activity Mode object can pin its model, thinking level, output cap, and search limits (below). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes); a turn that ran tools, searched, or produced thinking also cards its full background process on the reply via the intent node's `### gc:process` section ([ADR 038](docs/adr/038-turn-trace-on-the-intent-node.md)).
+The orchestrator is the agentic harness over the tool surface: a driver decides, activity modes bind tools, provenance records each working turn. Every transport shares one runtime assembly (`orchestrator/bootstrap.py`) and differs only in its message loop. The MCP server itself speaks **stdio** — one process per client, no network port.
+
+### Trying it without Anytype
+
+```bash
+pip install -e ".[dev]"                                            # Python >= 3.11
+PYTHONPATH=src python scripts/demo_wp2_tools.py                    # drives the full tool loop in-process, mock-backed
+```
+
+## Live Anytype backend
+
+`GC_BACKEND=anytype` (the default) talks to the **headless Anytype sidecar** — the `anytype` compose service running a bot account. The container already wires everything (`ANYTYPE_API_BASE_URL=http://anytype:31012`, `ANYTYPE_API_KEY_FILE`, `ANYTYPE_SPACE_ID`), and `docker exec` inherits it all, so the live backend needs **no `-e` flags**. Your desktop app is the *human* surface: it shares spaces with the bot over Anytype's sync network and never talks to this stack directly.
+
+### One-time sidecar bootstrap (bot account)
+
+The sidecar runs `anytype serve` with the API on port 31012 and the write rate limit disabled. Its identity/config (`~/.config/anytype`) and object store (`~/.anytype`) are named volumes, so they survive rebuilds; **both** mounts are required — with only one, a rebuild wipes the bot's keys. Setup, from the host:
+
+```bash
+# 1. Build + start the stack (the sidecar is part of it)
+docker compose -f .devcontainer/docker-compose.yml up -d --build
+
+# 2. Create the bot account (once) and an API key
+docker exec -it graph-context-mcp-anytype anytype auth create graph-context-bot
+docker exec -it graph-context-mcp-anytype anytype auth apikey create "graph-context"
+```
+
+Back up the **account key** printed by `auth create` to `.devcontainer/secrets/anytype_account_key` (it is the bot's identity), and paste the **API key** into `.devcontainer/secrets/anytype_api_key`. Then run `docker compose … up -d` once more so `dev` remounts the key (secret mounts go stale when the file's inode changes).
+
+### Sharing spaces with the bot
+
+For every space the bot should serve: create an invite link in the desktop app, then
+
+```bash
+docker exec -it graph-context-mcp-anytype anytype space join "<invite-link>"
+docker exec -it graph-context-mcp-anytype anytype space list   # wait until synced
+```
+
+approve the join request in the desktop app and grant **Editor**. Space ids are identical for every member, so copy them straight into `spaces.toml` (chat transport) or `channels.toml` (Discord) — never both for one space. Sanity check from the dev container:
+
+```bash
+curl -s http://anytype:31012/v1/spaces -H "Anytype-Version: 2025-11-08" \
+  -H "Authorization: Bearer $(cat /run/secrets/anytype_api_key)"
+```
+
+## Connecting Claude Desktop
+
+Claude Desktop runs on your **host**; the MCP server runs **inside the dev container**, so Claude Desktop starts it *inside the already-running container* over stdio with `docker exec -i`. With the container up, add this to Claude Desktop's config (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows: `%APPDATA%\Claude\claude_desktop_config.json`; a copy-paste entry lives at [`.devcontainer/claude_desktop_config.example.json`](.devcontainer/claude_desktop_config.example.json)) and restart it:
+
+```json
+{
+  "mcpServers": {
+    "graph-context": {
+      "command": "docker",
+      "args": [
+        "exec", "-i",
+        "-e", "GC_BACKEND=memory",
+        "graph-context-mcp-dev",
+        "python", "-m", "graph_context.interface.server"
+      ]
+    }
+  }
+}
+```
+
+You should see the thirteen tools in the tools menu. `docker` must be on Claude Desktop's `PATH`. This smoke-test entry pins `GC_BACKEND=memory` — nothing persists; drop that override to go live against the space, or add `-e ANYTYPE_SPACE_ID=…` to point at a different one.
+
+## Remote access over Tailscale
+
+The container can join a tailnet as its own node, which is how you reach the prose editor from a phone or run this on a VPS without exposing anything publicly. Put a **reusable, non-ephemeral, tagged** auth key in `.devcontainer/secrets/tailscale_authkey` (see [secrets/README.md](.devcontainer/secrets/README.md)) and rebuild. With the file empty — the default — nothing joins anything and the container behaves exactly as it did before.
+
+`start-tailscale.sh` runs `tailscaled` in **userspace networking** mode: no `/dev/net/tun`, and no iptables rules of its own, so it coexists with the egress firewall rather than fighting it. It then runs `tailscale serve`, which terminates TLS with a real certificate and proxies port 8765, so the inspection server is at `https://graph-context-mcp.<your-tailnet>.ts.net/` — which also gets the `GC_PROSE_TOKEN` off the wire in plaintext. That last step needs MagicDNS and HTTPS certificates enabled in the tailnet admin console (DNS tab); without them the node still joins and the port is still reachable by tailnet address. Tune with `TS_HOSTNAME`, `TS_SERVE_PORT` (off-value = join but publish nothing), and `TS_UP_EXTRA_ARGS` (e.g. `--advertise-tags=tag:vps --ssh`).
+
+Two deliberate limits. **Egress for `tailscaled` is granted by UID, not by destination**: its control plane is behind anycast, its DERP relay fleet rotates, and NAT traversal dials arbitrary peer UDP endpoints, so an IP allowlist would be stale within a week. Root gets unrestricted egress instead, and `/etc/sudoers.d/firewall` — two entries — is what keeps "root" meaning "tailscaled and nothing else". **Userspace mode is inbound-only in practice**: the container can be *reached* over the tailnet, but reaching *out* to tailnet peers needs `--socks5-server`, or TUN mode with `/dev/net/tun` mounted and `--netfilter-mode=off`.
+
+> **Never use `tailscale funnel` here.** Same command shape, but it publishes to the open internet, and the inspection server's reads — the entire turn diary, every prose document — are unauthenticated. `serve` is tailnet-only; that is the one you want. For the same reason, a public-facing VPS should pin the compose `ports:` back to `127.0.0.1` (or drop them entirely, since the tailnet path does not use them).
+
+## Dev and prod
+
+A workstation checkout and a VPS deployment run **identical builds** — same image, same compose file, same branch. They differ in one file, [`spaces.toml`](#served-spaces-spacestoml), which is git-ignored and lives one copy per host: the dev box binds a test space, the server binds the real ones, and no space id appears in both. That is the whole separation, and it has to be, because one bot account is usually a member of every space on both hosts ([ADR 060](docs/adr/060-deployment-scoped-space-bindings.md)).
+
+Drive the server from your **workstation shell** — not from inside the dev container, whose `tailscaled` is inbound-only, as above:
+
+```bash
+scripts/gc-prod status              # pid + the last log lines
+scripts/gc-prod logs                # tail -f the orchestrator log
+scripts/gc-prod deploy              # git pull + restart, health-checked
+scripts/gc-prod deploy --to <sha>   # roll back
+scripts/gc-prod shell               # a shell in the prod container
+```
+
+`gc-prod` is a thin SSH wrapper (`GC_PROD_SSH`, default the ssh-config alias `gc-prod`); the work is `scripts/deploy.sh` **on the server**, which refuses on a dirty tree, fast-forwards only, and picks its own restart depth — a touched `pyproject.toml` or `.devcontainer/**` rebuilds the image, anything else is `gc-serve restart` over the bind mount — then polls until the orchestrator answers. Promotion flow: work on `dev` → CI green → merge to `main` → `gc-prod deploy`. See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for the state that does not travel with a `git clone`.
+
+## Configuration
+
+### Driver and provenance
+
+`GC_DRIVER=anthropic_subscription` (default) talks to the model on your Claude subscription; `GC_DRIVER=anthropic_api` talks to it over the Anthropic Messages API instead — an explicit opt-in that bills API credits and requires `ANTHROPIC_API_KEY` (inline citations for web search are API-driver-only); `GC_DRIVER=manual` is the keyboard stand-in (`/tool <name> {json}`). `GC_DRIVER_MODEL` / `GC_DRIVER_EFFORT` set deployment defaults, but **the active mode outranks them** (below). Provenance is on by default (`GC_PROVENANCE=0` disables; `GC_STORE_LLM_INPUT=0` withholds prompt text from intent nodes); a turn that ran tools, searched, or produced thinking also cards its full background process on the reply via the intent node's `### gc:process` section ([ADR 038](docs/adr/038-turn-trace-on-the-intent-node.md)).
 
 ### Activity modes live in the space (ADR 035)
 
@@ -63,28 +168,20 @@ The space's **Activity Mode** objects are the ONLY live source of modes: every o
 - **Edits go live by themselves ([ADR 044](docs/adr/044-unified-change-tick-and-mode-auto-refresh.md)):** the bot's unified change tick (default 5s, `GC_CHANGE_TICK_SECONDS`) notices edited mode objects and reloads the registry — no `/mode`, no restart. `/mode` remains the unconditional reload.
 - The mode **new chats start in** is in-space too ([ADR 034](docs/adr/034-space-context-default-mode.md)): the bootstrap-seeded **Space Context** object carries a *Default mode* link — point it at an Activity Mode object (the seeder links the corpus's marked default for you). Empty = the alphabetically first mode; chats that already picked a mode with `/mode` keep it.
 
-### Anytype chat (the all-in path)
+### Served spaces (`spaces.toml`)
 
-The bot chats *inside* your Anytype spaces — the same store that holds the graph ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)). Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by space id, with optional `profile` / `project` / `modes_file` / `chat_id` / `exclude_chats`; every chat in a bound space is its own session/thread ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)), with live discovery of new chats and its own persisted mode. The chat cursor persists (`GC_CHAT_CURSOR`), so messages sent while the bot was down are answered on the next startup. The bot runs on its own headless node (the `anytype` compose sidecar) and posts as `graph-context-bot`. Never bind one space in both `spaces.toml` and `channels.toml`. Setup: see [Graduating to the live Anytype backend](#graduating-to-the-live-anytype-backend).
+Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by space id, with optional `profile` / `project` / `modes_file` / `chat_id` / `exclude_chats`. Every chat in a bound space is its own session/thread ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)), with live discovery of new chats and its own persisted mode. The chat cursor persists (`GC_CHAT_CURSOR`), so messages sent while the bot was down are answered on the next startup. Never bind one space in both `spaces.toml` and `channels.toml`.
 
-What a conversation gets:
+**The file is not in git** ([ADR 060](docs/adr/060-deployment-scoped-space-bindings.md)). It is deployment-scoped — one copy per host, naming the spaces *that* deployment serves — so a dev box and a production server can run identical builds and still answer different chats. Two orchestrators sharing a space would answer every message twice, and one bot account is typically a member of both hosts' spaces, so this file is the only thing keeping them apart: **a space id belongs in exactly one deployment's copy.** A first boot with no file mints one from the packaged template and stops with instructions:
 
-- **Real formatting ([ADR 036](docs/adr/036-chat-text-formatting-marks.md)):** outbound markdown converts to Anytype text marks — clickable links, bold/italic/code — with every referenced object attached as a card (the turn's intent node first, [ADR 038](docs/adr/038-turn-trace-on-the-intent-node.md)).
-- **Live turn activity ([ADR 029](docs/adr/029-live-turn-activity-streaming.md)):** while a turn runs, progress streams into one edited-in-place activity message at the mode's `activity_detail`; the reply posts fresh and the trace message is deleted once delivered (the turn log and the intent-node card keep the record).
-- **Files both ways ([ADR 032](docs/adr/032-chat-files-to-and-from-the-model.md)):** attach a text file or image and it reaches the model (text folds in fenced, images as native image blocks); the model's `send_file` tool uploads and attaches file cards on the reply.
-- **Self-titling chats ([ADR 031](docs/adr/031-chat-auto-titling-and-default-mode.md)):** after an untitled chat's first real exchange the bot names it; human titles are never overwritten.
-- **Capped live streams ([ADR 043](docs/adr/043-activity-capped-chat-streams.md)):** only the `GC_CHAT_STREAM_CAP` (default 20) most recently active chats per space hold live SSE streams; the rest hibernate but stay fully served — a new message wakes a chat within one rescan tick and is answered from catch-up. `0`/`off` streams everything.
+```
+[gc-serve] ERROR: exited immediately. …
+no spaces file at /workspaces/graph-context-mcp/spaces.toml -- wrote a starter
+template there. Uncomment its [spaces."..."] table, replace the id with the
+Anytype space THIS deployment should serve, then restart.
+```
 
-### Scheduled events and automation rules
-
-Both are **nodes in your space** — authored either by the LLM (the `schedule` / `automation` tools) or by you, directly in the Anytype UI (each type seeds an explainer object that walks through the fields). Only the Anytype bot executes them.
-
-- **Scheduled Events ([ADR 027](docs/adr/027-scheduled-events.md)):** a `gc_scheduled_event` node carries a schedule (one-shot local datetime or five-field cron), a prompt, a status select (Pending fires; flip Cancelled back to Pending to re-arm), and the target chat's session key. When due, the bot injects the prompt as a turn in that chat — at-most-once, with downtime collapsing to a single late fire. `GC_TIMEZONE` sets the local zone.
-- **Automation Rules ([ADR 039](docs/adr/039-reactive-rule-engine.md)):** a `gc_rule` node watches ONE scalar property on ONE type (built-ins like the modified stamp included) and runs an action on a value transition — `set property to now`, `set property value`, `uncheck others of type`, or **`run script`** ([ADR 040](docs/adr/040-sandboxed-script-action.md)): the rule body's first ```python block runs in a locked-down subprocess (no network, no filesystem, rlimits, `GC_RULE_SCRIPT_TIMEOUT_SECONDS` default 5s) against a read-only graph snapshot and queues up to 20 validated effects. Rules fire at-most-once per transition, never on restart, and never on the engine's own writes — **rules cannot cascade, by construction**. Failures land in `gc_rule_last_error`; the `automation` tool's `test` action dry-runs a rule through the real sandbox and reports `would set …` lines without applying anything.
-
-### Schema changes need a 👍 (ADR 041)
-
-The space's vocabulary stays yours. The `schema` tool lets the model **draft** a new type or new properties on an existing type — but the tool has no apply action. Each draft posts to the chat as its own message ("React 👍 to APPLY / 👎 to dismiss"); your 👍 applies it with no model turn in between, 👎 dismisses, and the bot's own reactions are ignored. Applying reuses same-name/same-format properties, refuses conflicts loudly, and registers the result live so the model can `create_node` against the new type immediately. Restart clears pending drafts (a stale 👍 is inert); Discord/CLI can draft but tell you to confirm in Anytype chat; the bare MCP server drafts but can never apply.
+`channels.toml` is git-ignored for the same reason, but is never minted: Discord is opt-in, so no file (like a file with no tables) simply means the Discord bot does not start. Copy `src/graph_context/orchestrator/channels.example.toml` to the repo root when you want it.
 
 ### Discord
 
@@ -103,113 +200,83 @@ modes_file = "ashfall-modes.toml"  # optional; the seed source for a mode-less s
 
 It connects outbound via the Gateway websocket, so it runs inside the firewalled devcontainer; the **Message Content** privileged intent must be enabled in the Discord developer portal or every message arrives empty.
 
-### Turn log & inspection server
-
-Every turn — user message, each model decision, every tool call with complete output, the mode/system prompt and per-turn context block the model actually received, per-decide token usage and cost, final replies — is written to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB, oldest entries drop).
-
-The inspection server ([ADR 025](docs/adr/025-inspection-server.md)) runs automatically inside `serve` (the devcontainer publishes it on the host at port 8765 — see [Running it in the container](#running-it-in-the-container) for who can reach that), or standalone via `python -m graph_context.orchestrator.inspect_server`. It is dependency-free, carries one shared section nav across its pages (any surface reaches any other; the site map lives in `static/nav.js`, so a new page is one entry there and one route), and serves three things: an **eval dashboard** at `/` (every case with its latest verdict and history, per-run grade/judge/prompt detail, one-click trial transcripts — `GC_EVAL_ROOT` points it at the artifacts, default `evals`), the **live turn-log viewer** at `/logs`, grouping the diary into one collapsible card per user request and live-tailing via SSE (filter by session/mode, search, errors-only), and the **prose editor** at `/prose` ([ADR 054](docs/adr/054-prose-editor-and-raw-indexing.md), building on [050](docs/adr/050-section-review-and-prose-page.md)–[053](docs/adr/053-in-page-prose-editing.md); mobile-friendly): one CodeMirror 6 editor over each tracked document's raw markdown — type anywhere and autosave coalesces the session into one revision, select text to set status/intent marks down to exact words (locked text is enforced verbatim against the model), with native browser spellcheck on (advisory only — autocorrect stays off so nothing rewrites your prose into the revision log), and human-typed words, review state, and per-paragraph blame rendered as live highlights that follow the text while you type, revision timelines with word-level diffs, and SSE-driven live updates when the bot edits a document you have open (`serve` only — the standalone server has no live spaces and shows an empty state). Reads need no auth; saving and marking are the server's only writes and need `GC_PROSE_TOKEN` set (or `GC_PROSE_TOKEN_FILE` pointing at a mounted secret — the devcontainer wires `.devcontainer/secrets/gc_prose_token`; neither set = the page is read-only) plus a same-origin request — the page asks for the token once and remembers it. Point the server elsewhere with `--log` / `--port` / `--eval-root` or `GC_LOG_VIEWER_HOST` / `GC_LOG_VIEWER_PORT`. No server needed for the diary either: open `src/graph_context/orchestrator/turn_log_viewer.html` directly in a browser and pick a `turns.jsonl` file (the nav is absent there — there is no server to navigate to).
-
-### Running it in the container
-
-The compose stack starts the orchestrator for you. The container's boot sequence is, in a mandatory order: the egress firewall (it flushes all of netfilter, so nothing that installs rules may precede it) → tailscale → the orchestrator → `sleep infinity`, so a crashed server still leaves a container you can exec into.
-
-`gc-serve` is the process control, and **the answer to "I changed the code, now what"**:
-
-```bash
-docker exec graph-context-mcp-dev gc-serve restart   # pick up source edits
-docker exec graph-context-mcp-dev gc-serve status    # pid + last log lines
-docker exec -it graph-context-mcp-dev gc-serve logs  # tail -f
-docker exec graph-context-mcp-dev gc-serve stop      # then run it in the foreground yourself
-```
-
-The source is a bind mount and `PYTHONPATH` points into it, so a restart is all any source change needs — no image rebuild, no `compose down/up`. Only dependency changes (`pyproject.toml`) or Dockerfile edits need `up -d --build`. Set `GC_SERVE_AUTOSTART=0` to boot without the server; logs go to `logs/serve.log`.
-
-The server runs as the unprivileged `dev` user, never as root — root is exempt from the egress firewall so that `tailscaled` can reach its control plane, and a root-run orchestrator would inherit that exemption and silently bypass the allowlist.
-
-### Remote access over Tailscale
-
-The container can join a tailnet as its own node, which is how you reach the prose editor from a phone or run this on a VPS without exposing anything publicly. Put a **reusable, non-ephemeral, tagged** auth key in `.devcontainer/secrets/tailscale_authkey` (see [secrets/README.md](.devcontainer/secrets/README.md)) and rebuild. With the file empty — the default — nothing joins anything and the container behaves exactly as it did before.
-
-`start-tailscale.sh` runs `tailscaled` in **userspace networking** mode: no `/dev/net/tun`, and no iptables rules of its own, so it coexists with the egress firewall rather than fighting it (the firewall stays safe to re-run at any time). It then runs `tailscale serve`, which terminates TLS with a real certificate and proxies port 8765, so the inspection server is at `https://graph-context-mcp.<your-tailnet>.ts.net/` — this also gets the `GC_PROSE_TOKEN` off the wire in plaintext. That last step needs MagicDNS and HTTPS certificates enabled in the tailnet admin console (DNS tab); without them the node still joins and the port is still reachable by tailnet address. Tune with `TS_HOSTNAME`, `TS_SERVE_PORT` (off-value = join but publish nothing), and `TS_UP_EXTRA_ARGS` (e.g. `--advertise-tags=tag:vps --ssh`).
-
-Two deliberate limits. **Egress for `tailscaled` is granted by UID, not by destination**: its control plane is behind anycast, its DERP relay fleet rotates, and NAT traversal dials arbitrary peer UDP endpoints, so an IP allowlist would be stale within a week and would fail as "the tailnet works from *some* networks". Root gets unrestricted egress instead, and `/etc/sudoers.d/firewall` — two entries — is what keeps "root" meaning "tailscaled and nothing else". **Userspace mode is inbound-only in practice**: the container can be *reached* over the tailnet, but reaching *out* to tailnet peers needs `--socks5-server`, or TUN mode with `/dev/net/tun` mounted and `--netfilter-mode=off`.
-
-Never use `tailscale funnel` here. Same command shape, but it publishes to the open internet, and the inspection server's reads — the entire turn diary, every prose document — are unauthenticated. `serve` is tailnet-only; that is the one you want. For the same reason, a public-facing VPS should pin the compose `ports:` back to `127.0.0.1` (or drop them entirely, since the tailnet path does not use them).
-
-## Connecting Claude Desktop (from the dev container)
-
-Claude Desktop runs on your **host**; the server runs **inside the dev container**, so Claude Desktop starts it *inside the already-running container* over stdio with `docker exec -i`.
-
-**1. Start the container** (it must be running before Claude Desktop launches the server):
-
-```
-docker compose -f .devcontainer/docker-compose.yml up -d --build
-```
-
-**2. Add the server to Claude Desktop's config** (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows: `%APPDATA%\Claude\claude_desktop_config.json`; a copy-paste entry lives at [`.devcontainer/claude_desktop_config.example.json`](.devcontainer/claude_desktop_config.example.json)):
-
-```json
-{
-  "mcpServers": {
-    "graph-context": {
-      "command": "docker",
-      "args": [
-        "exec", "-i",
-        "-e", "GC_BACKEND=memory",
-        "graph-context-mcp-dev",
-        "python", "-m", "graph_context.interface.server"
-      ]
-    }
-  }
-}
-```
-
-**3. Restart Claude Desktop.** You should see the thirteen tools in the tools menu. This first smoke test uses `GC_BACKEND=memory` — no Anytype, nothing persists. `docker` must be on Claude Desktop's `PATH`.
-
-### Graduating to the live Anytype backend
-
-`GC_BACKEND=anytype` (the default) talks to the **headless Anytype sidecar** — the `anytype` compose service running a bot account. The container already wires everything (`ANYTYPE_API_BASE_URL=http://anytype:31012`, `ANYTYPE_API_KEY_FILE`, `ANYTYPE_SPACE_ID`), and `docker exec` inherits it all, so the live backend needs **no `-e` flags**: drop the `GC_BACKEND=memory` override from the JSON above and you're live. To point at a different space, add `-e ANYTYPE_SPACE_ID=…`. Your desktop app is the *human* surface: it shares spaces with the bot over Anytype's sync network and never talks to this stack directly.
-
-#### One-time sidecar bootstrap (bot account)
-
-The sidecar runs `anytype serve` with the API on port 31012 and the write rate limit disabled. Its identity/config (`~/.config/anytype`) and object store (`~/.anytype`) are named volumes, so they survive rebuilds; **both** mounts are required — with only one, a rebuild wipes the bot's keys. Setup, from the host:
-
-```bash
-# 1. Build + start the stack (the sidecar is part of it)
-docker compose -f .devcontainer/docker-compose.yml up -d --build
-
-# 2. Create the bot account (once) and an API key
-docker exec -it graph-context-mcp-anytype anytype auth create graph-context-bot
-docker exec -it graph-context-mcp-anytype anytype auth apikey create "graph-context"
-```
-
-Back up the **account key** printed by `auth create` to `.devcontainer/secrets/anytype_account_key` (it is the bot's identity), and paste the **API key** into `.devcontainer/secrets/anytype_api_key`. Then run `docker compose … up -d` once more so `dev` remounts the key (secret mounts go stale when the file's inode changes).
-
-#### Sharing spaces with the bot
-
-For every space the bot should serve: create an invite link in the desktop app, then
-
-```bash
-docker exec -it graph-context-mcp-anytype anytype space join "<invite-link>"
-docker exec -it graph-context-mcp-anytype anytype space list   # wait until synced
-```
-
-approve the join request in the desktop app and grant **Editor**. Space ids are identical for every member, so copy them straight into `spaces.toml` (chat transport) or `channels.toml` (Discord) — never both for one space. Sanity check from the dev container:
-
-```bash
-curl -s http://anytype:31012/v1/spaces -H "Anytype-Version: 2025-11-08" \
-  -H "Authorization: Bearer $(cat /run/secrets/anytype_api_key)"
-```
-
-## Semantic search (GC_EMBEDDER)
+### Semantic search (`GC_EMBEDDER`)
 
 "Find the node I'm describing" — as a **derived projection**, never a new source of truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)). `GC_EMBEDDER` selects the embedder: `off` (default), `hash` (deterministic, used by the test suite), or `local` (sentence-transformers over the image-baked `BAAI/bge-small-en-v1.5`). Embeddings live in a disposable SQLite cache (`GC_SEMANTIC_CACHE`) keyed by `(node_id, content_hash, model)`.
 
 When enabled, `find_node` gains a third tier (exact → substring → semantic, hits labelled so the LLM knows it holds a fuzzy match) and `NodeNotFound` errors append "closest by meaning" candidates. Retrieval runs through the **Ranker** ([ADR 016](docs/adr/016-graph-aware-ranking.md)): semantic recall seeds, graph expansion recruits, spreading activation scores, and every hit carries a nameable evidence line. **Non-feature by decision:** semantic never silently resolves a mutation target — exact resolves, semantic *suggests*.
 
-## Domain profiles (GC_PROFILE) — deprecated
+### Domain profiles (`GC_PROFILE`) — deprecated
 
-*Deprecated ([ADR 035](docs/adr/035-in-space-only-activity-modes.md) / WP27) — don't build on them.* A profile (`fiction` default | `workspace` | `assistant`) once selected framing wholesale; what remains is the tool-docstring framing the LLM reads, type-key → role mappings, the timeline property (`gc_story_time` story numbers vs `event_date` real ISO dates), and **which starter mode corpus seeds a mode-less space**. Tool names and parameters are identical across profiles. The remainder will collapse to neutral defaults or move into space/deployment config; new configuration belongs on the Space Context object or in deployment config.
+*Deprecated ([ADR 035](docs/adr/035-in-space-only-activity-modes.md) / WP27) — don't build on them.* A profile (`fiction` default | `workspace` | `assistant`) once selected framing wholesale; what remains is the tool-docstring framing the LLM reads, type-key → role mappings, the timeline property (`gc_story_time` story numbers vs `event_date` real ISO dates), and **which starter mode corpus seeds a mode-less space**. Tool names and parameters are identical across profiles. New configuration belongs on the Space Context object or in deployment config.
+
+## What it does
+
+### The thirteen tools
+
+- **Graph:** `create_node`, `update_node`, `edit_document` (hash-anchored single-section body edits, [ADR 050](docs/adr/050-section-review-and-prose-page.md)), `get_node`, `explore`, `find_path`, `find_node`, `query`
+- **Session:** `context` (scratchpad + working set + cold-start `overview` map)
+- **Automation & schema:** `schedule` (timed prompts), `automation` (reactive rules), `schema` (draft type changes), `send_file`
+
+Every node parameter accepts a node **name** as well as an id (ambiguous names report their candidates); validation errors echo the allowed values — they are written for an LLM to self-correct. Tool docstrings are prompts (`interface/server.py`). **Cold start:** `context action="overview"` returns a derived entry-point map (per-type counts + highest-degree hubs) to seed the first `explore`/`get_node`/`focus`.
+
+Two surfaces worth calling out:
+
+- **One `properties` dict on the write tools ([ADR 042](docs/adr/042-unified-properties-surface.md)).** Scalars and relations share a single map on `create_node`/`update_node`, discriminated by what the space says the key IS: a key naming an existing `objects` relation takes a node id/name (or a list) and becomes link(s); everything else is a scalar. New keys are declared via `create_missing_properties` (format-explicit, type-attached so rules can watch them); the old `fields`/`links`/`create_missing_*` parameters answer with a redirect, never an opaque error.
+- **`query` runs ad-hoc filters *and* your saved Set views ([ADR 018](docs/adr/018-client-side-query-engine.md)).** Ad-hoc: ANDed `where` predicates, multi-key `order_by`, `linked_to` neighbor anchoring — all on the in-memory engine. `query(view=...)` compiles an Anytype Set view (the filters/sorts you maintain in the desktop UI) into the same engine.
+
+### In-space chat (the all-in path)
+
+The bot chats *inside* your Anytype spaces — the same store that holds the graph ([ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)) — running on its own headless node (the `anytype` sidecar) and posting as `graph-context-bot`. What a conversation gets:
+
+- **Real formatting ([ADR 036](docs/adr/036-chat-text-formatting-marks.md)):** outbound markdown converts to Anytype text marks — clickable links, bold/italic/code — with every referenced object attached as a card (the turn's intent node first, [ADR 038](docs/adr/038-turn-trace-on-the-intent-node.md)).
+- **Live turn activity ([ADR 029](docs/adr/029-live-turn-activity-streaming.md)):** while a turn runs, progress streams into one edited-in-place activity message at the mode's `activity_detail`; the reply posts fresh and the trace message is deleted once delivered (the turn log and the intent-node card keep the record).
+- **Files both ways ([ADR 032](docs/adr/032-chat-files-to-and-from-the-model.md)):** attach a text file or image and it reaches the model (text folds in fenced, images as native image blocks); the model's `send_file` tool uploads and attaches file cards on the reply.
+- **Self-titling chats ([ADR 031](docs/adr/031-chat-auto-titling-and-default-mode.md)):** after an untitled chat's first real exchange the bot names it; human titles are never overwritten.
+- **Capped live streams ([ADR 043](docs/adr/043-activity-capped-chat-streams.md)):** only the `GC_CHAT_STREAM_CAP` (default 20) most recently active chats per space hold live SSE streams; the rest hibernate but stay fully served — a new message wakes a chat within one rescan tick and is answered from catch-up. `0`/`off` streams everything.
+
+### Scheduled events and automation rules
+
+Both are **nodes in your space** — authored either by the LLM (the `schedule` / `automation` tools) or by you, directly in the Anytype UI (each type seeds an explainer object that walks through the fields). Only the Anytype bot executes them.
+
+- **Scheduled Events ([ADR 027](docs/adr/027-scheduled-events.md)):** a `gc_scheduled_event` node carries a schedule (one-shot local datetime or five-field cron), a prompt, a status select (Pending fires; flip Cancelled back to Pending to re-arm), and the target chat's session key. When due, the bot injects the prompt as a turn in that chat — at-most-once, with downtime collapsing to a single late fire. `GC_TIMEZONE` sets the local zone.
+- **Automation Rules ([ADR 039](docs/adr/039-reactive-rule-engine.md)):** a `gc_rule` node watches ONE scalar property on ONE type (built-ins like the modified stamp included) and runs an action on a value transition — `set property to now`, `set property value`, `uncheck others of type`, or **`run script`** ([ADR 040](docs/adr/040-sandboxed-script-action.md)): the rule body's first ```python block runs in a locked-down subprocess (no network, no filesystem, rlimits, `GC_RULE_SCRIPT_TIMEOUT_SECONDS` default 5s) against a read-only graph snapshot and queues up to 20 validated effects. Rules fire at-most-once per transition, never on restart, and never on the engine's own writes — **rules cannot cascade, by construction**. Failures land in `gc_rule_last_error`; the `automation` tool's `test` action dry-runs a rule through the real sandbox and reports `would set …` lines without applying anything.
+
+### Schema changes need a 👍 (ADR 041)
+
+The space's vocabulary stays yours. The `schema` tool lets the model **draft** a new type or new properties on an existing type — but the tool has no apply action. Each draft posts to the chat as its own message ("React 👍 to APPLY / 👎 to dismiss"); your 👍 applies it with no model turn in between, 👎 dismisses, and the bot's own reactions are ignored. Applying reuses same-name/same-format properties, refuses conflicts loudly, and registers the result live so the model can `create_node` against the new type immediately. Restart clears pending drafts (a stale 👍 is inert); Discord/CLI can draft but tell you to confirm in Anytype chat; the bare MCP server drafts but can never apply.
+
+### Turn log, inspection server, prose editor
+
+Every turn — user message, each model decision, every tool call with complete output, the mode/system prompt and per-turn context block the model actually received, per-decide token usage and cost, final replies — is written to a size-capped JSONL diary: `GC_TURN_LOG` sets the path (default `logs/turns.jsonl`; `0` disables), `GC_TURN_LOG_MAX_BYTES` the cap (default ~10 MB, oldest entries drop).
+
+The inspection server ([ADR 025](docs/adr/025-inspection-server.md)) runs inside `serve` (published on the host at port 8765) or standalone. It is dependency-free, carries one shared section nav across its pages (the site map lives in `static/nav.js`, so a new page is one entry there and one route), and serves three things:
+
+- **Eval dashboard** at `/` — every case with its latest verdict and history, per-run grade/judge/prompt detail, one-click trial transcripts (`GC_EVAL_ROOT` points it at the artifacts, default `evals`).
+- **Turn-log viewer** at `/logs` — the diary as one collapsible card per user request, live-tailing via SSE, filtered by session/mode, searchable, errors-only. No server needed either: open `src/graph_context/orchestrator/turn_log_viewer.html` directly in a browser and pick a `turns.jsonl` file.
+- **Prose editor** at `/prose` ([ADR 054](docs/adr/054-prose-editor-and-raw-indexing.md), building on [050](docs/adr/050-section-review-and-prose-page.md)–[053](docs/adr/053-in-page-prose-editing.md); mobile-friendly) — one CodeMirror 6 editor over each tracked document's raw markdown. Type anywhere and autosave coalesces the session into one revision; select text to set status/intent marks down to exact words (locked text is enforced verbatim against the model); human-typed words, review state, and per-paragraph blame render as live highlights that follow the text while you type; revision timelines carry word-level diffs; SSE pushes the bot's edits into a document you have open (`serve` only — the standalone server has no live spaces and shows an empty state). Native browser spellcheck is on, advisory only — autocorrect stays off so nothing rewrites your prose into the revision log.
+
+Reads need no auth; saving and marking are the server's only writes and need `GC_PROSE_TOKEN` set (or `GC_PROSE_TOKEN_FILE` pointing at a mounted secret — the devcontainer wires `.devcontainer/secrets/gc_prose_token`; neither set = the page is read-only) plus a same-origin request — the page asks for the token once and remembers it. Point the server elsewhere with `--log` / `--port` / `--eval-root` or `GC_LOG_VIEWER_HOST` / `GC_LOG_VIEWER_PORT`.
+
+## Development
+
+```bash
+pip install -e ".[dev]"        # Python >= 3.11
+
+pytest                         # full mock-backed suite; live E2E self-skips
+ruff check src tests evals     # lint
+mypy src                       # strict typing
+lint-imports                   # the layering rule (import-linter contracts in pyproject.toml)
+```
+
+Definition of Done = all four green; CI runs exactly these on every push. Two suites beyond the default run:
+
+```bash
+ANYTYPE_E2E=1 python -m pytest tests/e2e -q   # live E2E against the headless sidecar (find-or-creates a GC-E2E space, resets it around each run)
+python -m evals run                           # behavioral evals: live-model runs, graded — `--driver scripted` replays without a model
+```
+
+The eval harness is [ADR 024](docs/adr/024-eval-harness.md); its dashboard is the inspection server's `/` page. `tests/contract/` runs one suite against **both** repository implementations, so the in-memory fake is a certified stand-in for the Anytype adapter: any behavior added to the adapter lands in the fake too, with a test. Details in [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Architecture in one paragraph
 
@@ -310,6 +377,8 @@ interface  ──▶  application  ──▶  domain
 | `orchestrator/channels.py` | Channel→space bindings (`GC_CHANNELS_FILE`, [ADR 017](docs/adr/017-channel-bound-spaces.md)) | Plain parsing/validation; one channel per space, enforced at startup |
 | `orchestrator/discord_transport.py` + `discord_bot.py` | Discord adapter | Per-message policy is plain logic; only the composition-root shim imports discord.py |
 | `orchestrator/spaces.py` | Space→chat bindings (`GC_SPACES_FILE`, [ADR 019](docs/adr/019-anytype-chat-transport-and-headless-sidecar.md)/[021](docs/adr/021-per-chat-keyed-sessions.md)) | Table key IS the space id; serve-all-chats minus `exclude_chats`, or a `chat_id` pin |
+| `orchestrator/spaces.example.toml` + `channels.example.toml` | Packaged templates for the git-ignored binding files ([ADR 060](docs/adr/060-deployment-scoped-space-bindings.md)) | A missing `spaces.toml` is minted from one and startup still refuses — an unfilled form, not a missing one |
+| `scripts/deploy.sh` + `scripts/gc-prod` | Deploy/inspect a server deployment ([ADR 060](docs/adr/060-deployment-scoped-space-bindings.md)) | Runs on the HOST, outside the container; restart depth derived from the diff, not asked for |
 | `orchestrator/rendering.py` | Shared reply rendering | `render` prefixes + `chunk`ing, shared by the chat transports |
 | `orchestrator/anytype_chat_transport.py` + `anytype_chat_bot.py` | Anytype in-space chat adapter | Echo suppression, persisted cursor (offline catch-up), stream planning ([ADR 043](docs/adr/043-activity-capped-chat-streams.md)), reaction-confirmed applies, file upload/download; only the composition root touches infrastructure |
 | `orchestrator/turn_activity.py` | Live turn activity ([ADR 029](docs/adr/029-live-turn-activity-streaming.md)) | Folds decisions/tool results into one edited-in-place chat message per the active mode's `activity_detail`; deleted once the reply is delivered |

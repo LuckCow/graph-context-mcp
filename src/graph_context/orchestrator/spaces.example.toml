@@ -1,0 +1,42 @@
+# Space-bound chats (ADR 019/021): each served Anytype space gets ONE
+# runtime, and the bot serves EVERY chat in it as its own thread — its own
+# session context (scratchpad / working set / mode), persisted per chat.
+# Read at startup via GC_SPACES_FILE (set in docker-compose.yml). The table
+# key IS the space id, so one-binding-per-space holds by construction.
+#
+# THIS FILE IS DEPLOYMENT-SCOPED (ADR 060): git-ignored, one copy per host,
+# minted from the packaged template when absent. It is the ONLY thing that
+# separates a dev box from production — the bot account is shared, so both
+# hosts can reach every space and only this file decides which ones each
+# one answers in. A space id belongs in exactly one deployment's copy.
+#
+# Keys (all optional):
+#   profile        defaults to GC_PROFILE
+#   project        cosmetic label
+#   modes_file     the starter-mode SEED source (ADR 035): fills a space
+#                  that has no Activity Mode objects, then the space's
+#                  own objects are authoritative; overrides GC_MODES_FILE
+#                  (unset -> the profile's packaged corpus)
+#   chat_id        PIN: serve ONLY this chat, disable discovery (a
+#                  single-chat deployment). Mutually exclusive with
+#                  exclude_chats.
+#   exclude_chats  list of chat ids the bot ignores; serve everything else.
+#
+# The mode NEW chats start in is NOT set here (ADR 034): link an Activity
+# Mode object on the space's own "Space Context" object instead.
+#
+# By default (no chat_id pin) the bot serves all chats and picks up chats
+# created while it runs (GC_CHAT_RESCAN_SECONDS; default 60, off disables).
+# Each chat's session lives in its own gc_session_context node keyed by
+# gc_session_key (WP8/ADR 021); pre-WP8 unkeyed nodes are inert.
+#
+# NEVER bind a space here AND in channels.toml (Discord) at the same
+# time: two runtimes on one space would clobber each other's graph state.
+
+# Replace the table name with a real Anytype space id — the long
+# `bafyrei….` string from the space's URL or `GET /v1/spaces` — and
+# uncomment. At least one binding is required; the bot refuses to start
+# with none, because a chat bot serving nowhere is a misconfiguration
+# rather than a quiet no-op.
+# [spaces."bafyrei…your-space-id…"]  # a comment naming the space helps
+# profile = "fiction"

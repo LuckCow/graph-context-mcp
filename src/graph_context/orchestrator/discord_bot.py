@@ -76,8 +76,10 @@ def is_configured() -> bool:
 
     The devcontainer composes DISCORD_BOT_TOKEN_FILE and GC_CHANNELS_FILE
     unconditionally (and the secret file must exist for compose to start),
-    so the parked states are an EMPTY token file or a channels file with
-    zero tables. Anything past this gate fails loudly through ``run()``'s
+    so the parked states are an EMPTY token file, or a channels file with
+    zero tables, or -- since the file became deployment-scoped and
+    git-ignored (ADR 060) -- no channels file at all. Anything past this
+    gate fails loudly through ``run()``'s
     existing paths: an unreadable token file (a path was pointed at),
     invalid channel TOML, both channel shapes set, a token with NO channel
     shape at all.
