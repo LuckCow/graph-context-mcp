@@ -28,6 +28,7 @@ from graph_context.orchestrator.anthropic_driver import (  # noqa: E402
     DEFAULT_MODEL,
     AnthropicDriver,
     anthropic_tools,
+    mark_cache_tail,
     merged_turn,
     messages_from_transcript,
     thinking_params,
@@ -94,8 +95,14 @@ class TestTranscriptMapping:
             TranscriptEvent("user", "Where does she live?"),
         ])
         assert [m["role"] for m in messages] == ["user", "assistant", "user"]
-        assert messages[0]["content"] == "Who is Mira?"
-        assert messages[1]["content"] == "An exiled engineer."
+        # Block form even for plain text: the shape must not depend on
+        # whether a message happens to be the cache-breakpoint tail.
+        assert messages[0]["content"] == [
+            {"type": "text", "text": "Who is Mira?"}
+        ]
+        assert messages[1]["content"] == [
+            {"type": "text", "text": "An exiled engineer."}
+        ]
 
     def test_tool_calls_round_trip_as_native_blocks_with_matching_ids(self):
         call = ToolCall("get_node", {"node_id": "n1"}, id="toolu_1")
@@ -169,9 +176,10 @@ class TestTranscriptMapping:
                             tool_use_id="toolu_missing"),
         ])
         assert messages[1]["role"] == "user"
-        assert messages[1]["content"] == (
-            '<tool_result tool="get_node">\nMira.\n</tool_result>'
-        )
+        assert messages[1]["content"] == [{
+            "type": "text",
+            "text": '<tool_result tool="get_node">\nMira.\n</tool_result>',
+        }]
 
     def test_paired_and_orphan_results_in_one_run_both_survive(self):
         call = ToolCall("get_node", {"node_id": "n1"}, id="toolu_1")
@@ -185,7 +193,7 @@ class TestTranscriptMapping:
         ])
         paired, orphan = messages[2], messages[3]
         assert paired["content"][0]["tool_use_id"] == "toolu_1"
-        assert "<tool_result" in orphan["content"]
+        assert "<tool_result" in orphan["content"][0]["text"]
 
 
 class TestToolDefinitions:
@@ -424,11 +432,18 @@ class TestRequestShape:
         request = await self._decide(stub)
         assert request["model"] == DEFAULT_MODEL
         assert request["max_tokens"] == DEFAULT_MAX_TOKENS
-        assert request["system"] == assembled_system_prompt("Be terse.")
+        assert request["system"] == [{
+            "type": "text",
+            "text": assembled_system_prompt("Be terse."),
+            "cache_control": {"type": "ephemeral"},
+        }]
         assert request["thinking"] == {
             "type": "adaptive", "display": "summarized",
         }
-        assert request["messages"] == [{"role": "user", "content": "Hello"}]
+        assert request["messages"] == [{"role": "user", "content": [
+            {"type": "text", "text": "Hello",
+             "cache_control": {"type": "ephemeral"}},
+        ]}]
         assert [t["name"] for t in request["tools"]] == ["get_node"]
 
     async def test_no_sampling_parameters_are_sent(self, stub):
@@ -485,6 +500,129 @@ class TestRequestShape:
             await driver.decide([TranscriptEvent("user", "Hi")], {}, "")
 
 
+def _breakpoints(request: dict) -> int:
+    """How many cache_control markers a request carries, anywhere."""
+    return json.dumps(request, default=str).count('"cache_control"')
+
+
+class TestPromptCaching:
+    """Two breakpoints per request: the tools+system prefix, and the
+    transcript tail. Within a turn the transcript is append-only, so the
+    tail marker of decide k is what decide k+1 reads back -- the whole
+    point, since the prefix was previously re-sent at full price once per
+    decide (a 16-decide turn paid its ~80K-token prefix 16 times)."""
+
+    async def _decide(self, client, transcript, **options):
+        driver = AnthropicDriver(schemas={}, client=client)
+        await driver.decide(
+            transcript, {"get_node": "Fetch."}, "Be terse.",
+            options=DecideOptions(**options),
+        )
+        return client.requests
+
+    async def test_the_prefix_breakpoint_rides_the_system_block(self):
+        client = _StubClient(_response([_text_block("Hi.")]))
+        request = (await self._decide(
+            client, [TranscriptEvent("user", "Hello")]
+        ))[0]
+        assert request["system"][0]["cache_control"] == {"type": "ephemeral"}
+        # Marked on system, NOT on the tools: render order is
+        # tools -> system -> messages, so this one entry covers both.
+        assert not any("cache_control" in t for t in request["tools"])
+
+    async def test_exactly_two_breakpoints_are_sent(self):
+        """The API caps a request at 4; staying at 2 leaves headroom and
+        keeps the placement a property of the code, not of transcript
+        length."""
+        client = _StubClient(_response([_text_block("Hi.")]))
+        transcript = [
+            TranscriptEvent("user", "Who is Mira?"),
+            TranscriptEvent("assistant", "Checking.", tool_calls=(
+                ToolCall("get_node", {"node_id": "n1"}, id="toolu_1"),
+            )),
+            TranscriptEvent("tool", "Mira.", tool_name="get_node",
+                            tool_use_id="toolu_1"),
+        ]
+        request = (await self._decide(client, transcript))[0]
+        assert _breakpoints(request) == 2
+
+    async def test_the_tail_breakpoint_lands_on_the_last_block(self):
+        client = _StubClient(_response([_text_block("Hi.")]))
+        transcript = [
+            TranscriptEvent("user", "Who is Mira?"),
+            TranscriptEvent("assistant", "Checking.", tool_calls=(
+                ToolCall("get_node", {"node_id": "n1"}, id="toolu_1"),
+            )),
+            TranscriptEvent("tool", "Mira.", tool_name="get_node",
+                            tool_use_id="toolu_1"),
+        ]
+        messages = (await self._decide(client, transcript))[0]["messages"]
+        assert messages[-1]["content"][-1]["cache_control"] == {
+            "type": "ephemeral"
+        }
+        # ...and nowhere earlier in the transcript.
+        assert all(
+            "cache_control" not in block
+            for message in messages[:-1]
+            for block in message["content"]
+            if isinstance(block, dict)
+        )
+
+    async def test_a_growing_transcript_keeps_the_earlier_prefix_verbatim(self):
+        """The cache is a PREFIX match: decide k+1 only reads decide k's
+        entry if every byte before the old breakpoint is unchanged."""
+        client = _StubClient(_response([_text_block("Hi.")]))
+        first = [TranscriptEvent("user", "Who is Mira?")]
+        grown = [
+            *first,
+            TranscriptEvent("assistant", "Checking.", tool_calls=(
+                ToolCall("get_node", {"node_id": "n1"}, id="toolu_1"),
+            )),
+            TranscriptEvent("tool", "Mira.", tool_name="get_node",
+                            tool_use_id="toolu_1"),
+        ]
+        await self._decide(client, first)
+        await self._decide(client, grown)
+        earlier, later = client.requests[0], client.requests[1]
+        assert earlier["system"] == later["system"]
+        assert earlier["tools"] == later["tools"]
+        # The first turn's text survives byte-identically; only its
+        # breakpoint moved to the new tail.
+        assert later["messages"][0]["content"][0]["text"] == "Who is Mira?"
+        assert "cache_control" not in later["messages"][0]["content"][0]
+
+    async def test_the_resume_keeps_the_breakpoint_it_already_paid_for(self):
+        """A pause_turn resume appends the partial assistant content. The
+        existing marker must NOT move: the bytes before it are unchanged,
+        so it stays a valid read point -- and re-marking every resume
+        would blow past the API's 4-breakpoint cap."""
+        paused = _response(
+            [_text_block("Searching...")], stop_reason="pause_turn"
+        )
+        client = _SequenceClient([paused, _response([_text_block("Done.")])])
+        driver = AnthropicDriver(schemas={}, client=client)
+        await driver.decide(
+            [TranscriptEvent("user", "Hi")], {}, "",
+            options=DecideOptions(web_search=True),
+        )
+        resumed = client.requests[1]
+        assert resumed["messages"][0]["content"][-1]["cache_control"] == {
+            "type": "ephemeral"
+        }
+        assert _breakpoints(resumed) == 2
+
+    def test_marking_an_empty_message_list_is_a_no_op(self):
+        messages: list[dict] = []
+        mark_cache_tail(messages)
+        assert messages == []
+
+    def test_an_unmarkable_tail_block_degrades_instead_of_raising(self):
+        """The resume path appends provider SDK block models, not dicts."""
+        messages = [{"role": "assistant", "content": [_text_block("opaque")]}]
+        mark_cache_tail(messages)
+        assert not hasattr(messages[0]["content"][0], "cache_control")
+
+
 class TestSeamParity:
     """The diary seams answer from the same code paths decide() sends."""
 
@@ -503,7 +641,9 @@ class TestSeamParity:
                             tool_use_id="toolu_1"),
         ]
         rendered = driver.render_prompt(transcript)
-        assert json.loads(rendered) == messages_from_transcript(transcript)
+        expected = messages_from_transcript(transcript)
+        mark_cache_tail(expected)  # the diary shows the marker decide() sends
+        assert json.loads(rendered) == expected
 
 
 def _server_tool_use_block(id: str, query: str) -> SimpleNamespace:

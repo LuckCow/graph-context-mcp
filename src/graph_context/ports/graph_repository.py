@@ -188,6 +188,13 @@ class GraphRepository(Protocol):
         type plus relations the node itself already carries. Infra-role
         scopes and the seeded ``gc_edge_*`` vocabulary resolve
         space-wide.
+
+        A ``domain.schema.READ_ONLY_RELATIONS`` key never resolves, on
+        either backend: those relations reflect as edges on read but the
+        store refuses to be written through them, so offering the label
+        would route the write into an un-actionable store error. Declining
+        it here sends the key to the unmatched-key error instead, which
+        teaches the type's real (writable) vocabulary.
         """
         ...
 

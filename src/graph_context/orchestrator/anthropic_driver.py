@@ -75,6 +75,11 @@ DEFAULT_MAX_TOKENS = 16000
 # content appended. Bounded -- a turn that keeps pausing is cut off.
 _MAX_PAUSE_RESUMES = 5
 
+# Prompt-cache breakpoint marker. Default 5-minute TTL, not "1h": decides
+# within a turn land seconds apart, and the 2x write premium of the long
+# TTL never pays off for the scheduled turns that sit hours apart anyway.
+_EPHEMERAL = {"type": "ephemeral"}
+
 # Models whose web search tool supports dynamic filtering (the _20260209
 # variant); everything older takes the basic _20250305 tool. Prefix match:
 # dated snapshots and future point releases of these lines stay covered.
@@ -198,8 +203,21 @@ def messages_from_transcript(
     messages: list[dict[str, Any]] = []
     known_tool_use_ids: set[str] = set()
 
+    def text_content(text: str) -> list[dict[str, Any]]:
+        """Plain text as the single block the API normalizes it to.
+
+        Uniformly block-shaped ON PURPOSE, rather than the compact string
+        form: ``mark_cache_tail`` marks the last BLOCK, so a string tail
+        would have to be promoted, and the same message would then
+        serialize one way while it was the tail and another way once the
+        transcript grew past it. That is a byte change in the middle of
+        the cached prefix -- exactly the silent invalidator prompt
+        caching punishes, and an expensive one to notice.
+        """
+        return [{"type": "text", "text": text}]
+
     def append_user_text(text: str) -> None:
-        messages.append({"role": "user", "content": text})
+        messages.append({"role": "user", "content": text_content(text)})
 
     index = 0
     while index < len(events):
@@ -244,9 +262,13 @@ def messages_from_transcript(
             elif not messages:
                 # Orphaned reply half at the top of replayed history.
                 append_user_text("(conversation resumes mid-thread)")
-                messages.append({"role": "assistant", "content": event.text})
+                messages.append(
+                    {"role": "assistant", "content": text_content(event.text)}
+                )
             else:
-                messages.append({"role": "assistant", "content": event.text})
+                messages.append(
+                    {"role": "assistant", "content": text_content(event.text)}
+                )
             index += 1
             continue
         if event.kind == "tool":
@@ -293,6 +315,39 @@ def messages_from_transcript(
         append_user_text(event.text)
         index += 1
     return messages
+
+
+def mark_cache_tail(messages: list[dict[str, Any]]) -> None:
+    """Put a prompt-cache breakpoint on the last content block, in place.
+
+    Caching is a PREFIX match, and within a turn the transcript is
+    append-only (the pipeline appends one assistant decision plus its
+    tool results per iteration and never rewrites earlier entries), so a
+    breakpoint at the tail of decide *k* is exactly what decide *k+1*
+    reads: everything before the new decision bills at cache-read rates
+    instead of being re-processed whole. Before this, a 16-decide turn
+    re-sent its entire ~80K-token prefix 16 times at full price.
+
+    ``messages_from_transcript`` already emits every message in block
+    form, so the string branch is a guard rather than a normal path (see
+    its ``text_content`` for why the shape must not vary by position).
+
+    Non-dict blocks are skipped rather than mutated: the pause-resume
+    path appends the provider's own response content (SDK block models,
+    not dicts), and the breakpoint set before that append stays a valid
+    read point regardless. Degrading to one breakpoint is correct there;
+    crashing on an immutable block is not.
+    """
+    if not messages:
+        return
+    content = messages[-1].get("content")
+    if isinstance(content, str):
+        messages[-1]["content"] = [
+            {"type": "text", "text": content, "cache_control": _EPHEMERAL}
+        ]
+        return
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1]["cache_control"] = _EPHEMERAL
 
 
 def anthropic_tools(
@@ -533,8 +588,12 @@ class AnthropicDriver:
         # The diary shows the true wire shape: the same mapping decide()
         # sends, serialized -- except image data (WP23), which is redacted
         # to a size note; megabytes of base64 are noise the diary's budget
-        # would immediately evict everything else for.
+        # would immediately evict everything else for. The cache breakpoint
+        # is marked here too, so a diary entry stays byte-diffable against
+        # what went up -- that diff is how a cache miss gets traced to the
+        # prefix change that caused it.
         messages = messages_from_transcript(transcript)
+        mark_cache_tail(messages)
         for message in messages:
             content = message.get("content")
             if not isinstance(content, list):
@@ -564,17 +623,29 @@ class AnthropicDriver:
             # keeps requests cache-friendly across decides.
             tool_defs.append(web_search_tool(effective_model, options))
         messages = messages_from_transcript(transcript)
+        mark_cache_tail(messages)
         request: dict[str, Any] = {
             "model": effective_model,
             # ADR 037: the mode's cap wins over the constructor default.
             "max_tokens": options.max_tokens or self._max_tokens,
-            "system": assembled_system_prompt(goal),
+            # Two prompt-cache breakpoints (the API allows 4). Render order
+            # is tools -> system -> messages, so the marker on the system
+            # block caches the tools WITH it: one entry for the whole
+            # immutable prefix, which every decide of a turn otherwise
+            # re-reads at full price. The second sits at the transcript
+            # tail (mark_cache_tail). NOT the top-level cache_control
+            # shortcut: that auto-marks only the last cacheable block, so
+            # it would buy the transcript and miss the larger prefix.
+            "system": [
+                {
+                    "type": "text",
+                    "text": assembled_system_prompt(goal),
+                    "cache_control": _EPHEMERAL,
+                }
+            ],
             "tools": tool_defs,
             "messages": messages,
             # No temperature/top_p/top_k: removed on current models (400).
-            # Prompt caching deferred: once turn transcripts routinely
-            # exceed the model's cacheable minimum, a top-level
-            # cache_control={"type": "ephemeral"} is the one-kwarg upgrade.
             **thinking_params(options.thinking, effective_model, self._effort),
         }
         started = time.perf_counter()
@@ -586,6 +657,12 @@ class AnthropicDriver:
             # A server-tool turn paused mid-decision: re-send with the
             # partial assistant content appended; the server resumes where
             # it left off (no synthetic user nudge).
+            #
+            # The breakpoint set before the loop is NOT moved: appending
+            # leaves the bytes up to it identical, so it stays a valid
+            # read point and the resume re-reads the prefix at cache-read
+            # rates. Re-marking each resume would instead grow the request
+            # past the API's 4-breakpoint limit after enough pauses.
             messages = [
                 *messages,
                 {"role": "assistant", "content": responses[-1].content},

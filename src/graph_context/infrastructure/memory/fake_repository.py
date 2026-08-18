@@ -525,6 +525,11 @@ class InMemoryGraphRepository:
             raise ValueError(
                 "relation_label_for needs exactly one of on_type/on_node"
             )
+        if schema.is_read_only_relation(field_key):
+            # Store-owned on write even though it reads as edges: never
+            # offered as a writable label (contract parity with the Anytype
+            # adapter, where the real store 400s on such a write).
+            return None
         spec = self._relation_spec_for(field_key)
         if spec is None:
             return None

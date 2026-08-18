@@ -358,6 +358,44 @@ class FieldCatalogContract:
             is not None
         )
 
+    async def test_a_read_only_relation_never_resolves_as_writable(
+        self, catalog_repo
+    ):
+        """``links`` is attached to Item in both fixtures, so this is a
+        refusal DESPITE presence, not an unknown key.
+
+        The store owns it: it reflects as edges on read but 400s on a
+        direct write ("reserved system property"). Offering the label
+        would send the write to that un-actionable error -- which a live
+        turn then retried five times, burning a third of its tool budget.
+        """
+        for spelling in ("links", "Links", " LINKS "):
+            assert (
+                catalog_repo.relation_label_for(spelling, on_type="Item")
+                is None
+            )
+
+    async def test_a_read_only_relation_is_refused_on_update_too(
+        self, catalog_repo
+    ):
+        """The on_node (update) scope refuses it the same way -- the turn
+        that lost the budget alternated between create and update."""
+        node = await catalog_repo.create_node(
+            NodeDraft("Item", name="Ship it", summary="s.")
+        )
+        assert catalog_repo.relation_label_for("links", on_node=node.id) is None
+
+    async def test_a_read_only_relation_write_errors_instead_of_landing(
+        self, catalog_repo
+    ):
+        """The port-level backstop: a caller that skips the tool boundary
+        still gets a typed error rather than a store 400."""
+        with pytest.raises(UnknownFieldKey):
+            await catalog_repo.create_node(
+                NodeDraft("Item", name="Linked up", summary="s.",
+                          fields={"links": "Ship it"})
+            )
+
     async def test_relation_label_for_requires_exactly_one_scope(
         self, catalog_repo
     ):
@@ -855,9 +893,12 @@ class TestInMemoryFieldCatalog(FieldCatalogContract):
                 FieldSpec(name="Priority", format="number", key="priority"),
                 # Seeded starter vocabulary: bare-usable everywhere.
                 FieldSpec(name="knows", format="objects", key="gc_edge_knows"),
+                # Present and attached, but store-owned on write.
+                FieldSpec(name="links", format="objects", key="links"),
             ],
             attachments={
-                "Item": ("Due date", "Status", "Assignee", "Linked Projects"),
+                "Item": ("Due date", "Status", "Assignee", "Linked Projects",
+                         "links"),
             },
         )
 
@@ -893,6 +934,11 @@ class TestAnytypeFieldCatalog(FieldCatalogContract):
         await client.create_property(
             {"key": "priority", "name": "Priority", "format": "number"}
         )
+        # Present and attached like the real space's built-in, so the
+        # read-only refusal is proven against a relation that EXISTS.
+        await client.create_property(
+            {"key": "links", "name": "links", "format": "objects"}
+        )
         repository = AnytypeGraphRepository(client)
         await repository.hydrate()
         # Attach the bare-usable vocabulary to Item through the WP33 port
@@ -902,6 +948,7 @@ class TestAnytypeFieldCatalog(FieldCatalogContract):
             PropertyDraft(name="Status", format="select"),
             PropertyDraft(name="Assignee", format="objects"),
             PropertyDraft(name="Linked Projects", format="objects"),
+            PropertyDraft(name="links", format="objects"),
         ))
         yield repository
         await client.aclose()
