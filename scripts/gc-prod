@@ -1,0 +1,113 @@
+#!/bin/bash
+# Drive the production deployment from your workstation, over SSH.
+#
+#   gc-prod status              pid + the last log lines
+#   gc-prod logs                tail -f the orchestrator log (Ctrl-C to stop)
+#   gc-prod logs 500            ... starting from the last 500 lines
+#   gc-prod fetch               copy prod's serve.log + turns.jsonl into logs/prod/
+#   gc-prod fetch FILE...       ... just these files, by name under the log dir
+#   gc-prod deploy [ARGS...]    git pull + restart, on the server (scripts/deploy.sh)
+#   gc-prod restart             restart the orchestrator, no deploy
+#   gc-prod shell               an interactive shell IN the prod container
+#   gc-prod host                an interactive shell on the prod HOST
+#
+# Run this from the HOST shell (WSL), not from inside the devcontainer:
+# tailscaled runs there with --tun=userspace-networking and no SOCKS proxy,
+# so the container has no outbound tailnet path at all -- an ssh from inside
+# it cannot reach the VPS.
+#
+# Configuration, all overridable by env:
+#   GC_PROD_SSH        ssh target (default `gc-prod` -- define it in ~/.ssh/config)
+#   GC_PROD_DIR        the repo path on the server (default ~/graph-context-mcp)
+#   GC_PROD_CONTAINER  the container name (default graph-context-mcp-dev)
+#   GC_PROD_FETCH_DIR  where `fetch` lands (default <repo>/logs/prod, gitignored)
+#
+# A ~/.ssh/config alias keeps the host, user, key and port out of this file
+# and out of git:
+#
+#   Host gc-prod
+#       HostName <vps-host-or-tailnet-name>
+#       User     <you>
+
+set -uo pipefail
+
+TARGET="${GC_PROD_SSH:-gc-prod}"
+REMOTE_DIR="${GC_PROD_DIR:-~/graph-context-mcp}"
+CONTAINER="${GC_PROD_CONTAINER:-graph-context-mcp-dev}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FETCH_DIR="${GC_PROD_FETCH_DIR:-${REPO_ROOT}/logs/prod}"
+FETCH_DEFAULT=(serve.log turns.jsonl)
+
+# The header comment IS the help text, so the two cannot drift.
+usage() {
+    awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' \
+        "${BASH_SOURCE[0]}"
+}
+
+# -t allocates a tty so Ctrl-C reaches the remote process and `tail -f`
+# streams instead of buffering. Everything here is interactive, so every
+# call gets one.
+remote() { ssh -t "$TARGET" "$@"; }
+
+# `fetch` is the one non-interactive path: no -t, because a tty would translate
+# newlines and corrupt the bytes on the way into the local file. Writes via a
+# .part file so a failed transfer never leaves a half-copied log in place.
+fetch_one() {
+    local name="$1" dest="${FETCH_DIR}/$1"
+    mkdir -p "$(dirname "$dest")" || return 1
+    if ssh "$TARGET" "docker exec -i ${CONTAINER} cat logs/${name}" > "${dest}.part"; then
+        mv "${dest}.part" "$dest"
+        echo "[gc-prod] ${name} -> ${dest} ($(du -h "$dest" | cut -f1))"
+    else
+        rm -f "${dest}.part"
+        echo "[gc-prod] could not fetch logs/${name}" >&2
+        return 1
+    fi
+}
+
+case "${1:-status}" in
+    status)
+        remote "docker exec ${CONTAINER} gc-serve status"
+        ;;
+    logs)
+        # gc-serve logs is `tail -n 100 -f`; a line count re-tails deeper.
+        lines="${2:-}"
+        if [ -n "$lines" ]; then
+            remote "docker exec -i ${CONTAINER} tail -n ${lines} -f logs/serve.log"
+        else
+            remote "docker exec -i ${CONTAINER} gc-serve logs"
+        fi
+        ;;
+    fetch)
+        shift
+        files=("$@")
+        [ ${#files[@]} -eq 0 ] && files=("${FETCH_DEFAULT[@]}")
+        status=0
+        for name in "${files[@]}"; do
+            fetch_one "$name" || status=1
+        done
+        exit "$status"
+        ;;
+    deploy)
+        shift
+        # Args pass through to scripts/deploy.sh: --build, --to SHA, --force.
+        remote "cd ${REMOTE_DIR} && ./scripts/deploy.sh $*"
+        ;;
+    restart)
+        remote "docker exec ${CONTAINER} gc-serve restart"
+        ;;
+    shell)
+        remote "docker exec -it ${CONTAINER} bash"
+        ;;
+    host)
+        ssh "$TARGET"
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "[gc-prod] unknown command: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

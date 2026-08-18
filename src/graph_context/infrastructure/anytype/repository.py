@@ -89,6 +89,29 @@ def _slugify(label: str) -> str:
     return slug or "relation"
 
 
+def _rolled_back_error(node_id: NodeId, cause: Exception) -> GraphContextError:
+    """The composite-create failure, with the dead node id scrubbed out.
+
+    The consumer of every error string is an LLM. A store error names the
+    endpoint it failed on -- which embeds the id of the object that WAS
+    created before its relation PATCH failed. The rollback then archives
+    that object, so the id in the message points at nothing. A live turn
+    read the id out of exactly this error, called ``update_node`` on it,
+    got "no node matches", and spent two more tool calls working out what
+    had happened.
+
+    Scrubbing the id (rather than dropping the cause) keeps the part the
+    model can act on -- what was wrong with the write -- and removes the
+    part it cannot.
+    """
+    detail = str(cause).replace(str(node_id), "<removed>").strip()
+    return GraphContextError(
+        f"create_node failed while writing this node's relations: {detail} "
+        "-- the partly created node was REMOVED, so there is no new node "
+        "and no id to reuse. Fix the cause above and call create_node again."
+    )
+
+
 class AnytypeGraphRepository:
     """Write-through repository over the Anytype local API."""
 
@@ -189,6 +212,13 @@ class AnytypeGraphRepository:
             raise ValueError(
                 "relation_label_for needs exactly one of on_type/on_node"
             )
+        if schema.is_read_only_relation(field_key):
+            # Store-owned: it reflects as edges but refuses writes. Declining
+            # to offer it as a writable label routes the key into the
+            # unmatched-key error this repository already owns, which names
+            # the type's real vocabulary -- instead of letting the write
+            # through to an un-actionable server 400 the model then retries.
+            return None
         if on_node is not None:
             node = self._graph.node(on_node)  # NodeNotFound propagates
             key = self._scoped_relation_key(
@@ -409,9 +439,9 @@ class AnytypeGraphRepository:
                         node.id, payload, outgoing
                     )
                     self._track_watermark(patched_self)
-            except Exception:
+            except Exception as exc:
                 await self._rollback_create(node.id)
-                raise
+                raise _rolled_back_error(node.id, exc) from exc
 
             # Persisted everywhere -- now (and only now) mutate the index.
             self._graph.upsert_node(node)

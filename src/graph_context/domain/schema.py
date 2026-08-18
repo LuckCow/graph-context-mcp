@@ -173,6 +173,31 @@ def validate_type_name(name: str) -> None:
         )
 
 
+# Relation labels the STORE owns: they reflect as real edges on read, but
+# the backing store refuses a direct write. Kept in the domain (rather than
+# the Anytype quirk file) because both repository implementations answer to
+# it and the interface layer may not import an adapter -- the fake mirrors
+# it so `tests/contract` covers the same refusal on both backends.
+#
+# ``links`` is Anytype's derived outbound-reference set: an inline [[wiki]]
+# link in a body lands there, so reading it is load-bearing for traversal,
+# but writing it 400s with "property 'links' cannot be set directly as it
+# is a reserved system property". Before this, that server error came back
+# raw and un-actionable and the model retried it -- one live turn spent
+# five of its sixteen tool calls in that loop. Named relations are the
+# writable path.
+READ_ONLY_RELATIONS: frozenset[str] = frozenset({"links"})
+
+
+def is_read_only_relation(key: str) -> bool:
+    """Whether ``key`` names a store-owned, read-only relation.
+
+    Matched case-insensitively on the trimmed key, the way relation keys
+    and display names resolve everywhere else.
+    """
+    return key.strip().casefold() in READ_ONLY_RELATIONS
+
+
 def validate_infra_write(
     role: Role | None,
     type_name: str,

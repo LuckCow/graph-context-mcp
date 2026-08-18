@@ -4,6 +4,12 @@
 # Read at startup via GC_SPACES_FILE (set in docker-compose.yml). The table
 # key IS the space id, so one-binding-per-space holds by construction.
 #
+# THIS FILE IS DEPLOYMENT-SCOPED (ADR 060): git-ignored, one copy per host,
+# minted from the packaged template when absent. It is the ONLY thing that
+# separates a dev box from production — the bot account is shared, so both
+# hosts can reach every space and only this file decides which ones each
+# one answers in. A space id belongs in exactly one deployment's copy.
+#
 # Keys (all optional):
 #   profile        defaults to GC_PROFILE
 #   project        cosmetic label
@@ -27,11 +33,10 @@
 # NEVER bind a space here AND in channels.toml (Discord) at the same
 # time: two runtimes on one space would clobber each other's graph state.
 
-# The story world (moved here from channels.toml at the WP14 cutover).
-# Serves every chat as a separate story-arc thread.
-[spaces."bafyreibo7j5px5q7lodttgfnoeonyhobqhmitlp2erj5a3i3s5t6kvys5e.2lc7dwb79z2g4"] # TestWorld
-profile = "fiction"
-
-# Task tracking over the Todolist space. Serves every chat as its own list.
-[spaces."bafyreigkpfhl472fqwfg2f2bh4zdhixvlo2by24pc5xo7v34p6izub33tm.2lc7dwb79z2g4"] # Todolist
-profile = "assistant"
+# Replace the table name with a real Anytype space id — the long
+# `bafyrei….` string from the space's URL or `GET /v1/spaces` — and
+# uncomment. At least one binding is required; the bot refuses to start
+# with none, because a chat bot serving nowhere is a misconfiguration
+# rather than a quiet no-op.
+# [spaces."bafyrei…your-space-id…"]  # a comment naming the space helps
+# profile = "fiction"

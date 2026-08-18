@@ -115,7 +115,7 @@ CHAT_RESCAN_SECONDS = 3  # live-discovery poll (WP8); GC_CHAT_RESCAN_SECONDS
 # (S7), so a tight re-list costs nothing. Raise this when pointing at a
 # throttled desktop endpoint.
 STREAM_CAP = 20  # live SSE streams per space (WP35); GC_CHAT_STREAM_CAP
-# Every open stream pins one connection from the space client's httpx2
+# Every open stream pins one connection from the space client's httpx
 # pool (default 100) for its lifetime, shared with the request path --
 # uncapped, a space with ~90+ chats silently starves its own writes. 20
 # leaves ample headroom; hibernated chats wake within one rescan tick.

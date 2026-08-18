@@ -2902,6 +2902,54 @@ model turn on work the sandbox already does deterministically.
 
 ---
 
+## WP53 — Dev/prod separation: deployment-scoped bindings (ADR 060) — **shipped 2026-08-15**
+
+**Status:** complete. Production moved to a VPS and the dev box stayed,
+but the two were separated only by a habit: the dev orchestrator
+happened to be stopped. Same clone, same compose file, same committed
+`spaces.toml` — and, since the bot account was migrated rather than
+recreated, the same Anytype identity, a member of every production
+space. Any `docker compose up` (or a VS Code "Reopen in Container")
+started a second bot answering every production chat twice.
+
+* **`spaces.toml` and `channels.toml` left the index.** Git-ignored,
+  one copy per host, beside the secrets in `.gitignore`. Not secret —
+  they are deployment-scoped, and *which spaces this deployment serves*
+  is a property of the host, not source code. Builds stay identical:
+  the two deployments differ in exactly one file, and it is one git
+  cannot carry between them. This is why no guard is needed — a dev box
+  cannot serve a production space because its config does not name one.
+* **A missing spaces file is minted, then refused.**
+  `load_space_bindings` splits `FileNotFoundError` out of its `OSError`
+  arm, copies the packaged `spaces.example.toml` (resolved beside the
+  loader, the `mode_config.py` mode-seed pattern) with `x` mode so a
+  boot race never clobbers, and raises the fill-me-in prompt. Startup
+  still fails — a bot bound to nothing is a misconfiguration, the same
+  judgment `bootstrap.py` already makes. The template binds no space, so
+  the second boot fails on "at least one table" rather than serving a
+  placeholder id.
+* **`channels_declared` treats absent as parked.** Discord is opt-in, so
+  a missing file says what a zero-table file has said since the WP14
+  cutover; unreadable and malformed still defer to
+  `load_channel_bindings`' loud error, which keeps owning the message.
+  Nothing is minted — there is nothing to fill in.
+* **`scripts/deploy.sh` + `scripts/gc-prod`.** The former runs on the
+  server (git + docker, neither in the container): refuses on a dirty
+  tree, fast-forwards only, and *derives* its restart depth from
+  `git diff --name-only` — `pyproject.toml`/`.devcontainer/**` rebuild
+  the image, everything else is `gc-serve restart` over the bind mount.
+  Then it polls `gc-serve status` and tails `serve.log` on failure.
+  `--to <sha>` rolls back. The latter is the SSH front end
+  (`status | logs | deploy | restart | shell | host`), run from the
+  workstation shell — never from inside the devcontainer, whose
+  tailscaled is userspace-networking with no SOCKS proxy (ADR 059) and
+  therefore has no outbound tailnet path at all.
+* **Known, accepted:** both nodes still join the tailnet under the same
+  default `TS_HOSTNAME`, so the second registers as
+  `graph-context-mcp-1`. Identical builds is what keeps that unfixed.
+
+---
+
 ## Sequencing
 
 ```

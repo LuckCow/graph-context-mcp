@@ -28,9 +28,15 @@ change. ``exclude_chats`` opts specific chats out; ``chat_id`` pins to a
 single chat and disables discovery (they are mutually exclusive). One
 binding per space is structural (the table key IS the space id, so TOML
 rejects duplicates); per-chat sessions are keyed nodes (WP8, ADR 021).
-Like ``channels.py`` this stays plain logic over primitives -- no httpx2,
+Like ``channels.py`` this stays plain logic over primitives -- no httpx,
 no infrastructure -- and bad config fails LOUDLY at startup, naming the
 file, space, and field.
+
+The file itself is DEPLOYMENT-SCOPED (ADR 060): git-ignored, one copy per
+host, minted from ``spaces.example.toml`` beside this module when it is
+absent. It is the only thing separating a dev box from production -- the
+bot account is shared, so both can reach every space and only this file
+decides which ones each answers in.
 """
 
 from __future__ import annotations
@@ -48,6 +54,10 @@ from graph_context.interface.profiles import DomainProfile
 _BINDING_KEYS = {
     "profile", "project", "modes_file", "chat_id", "exclude_chats",
 }
+
+# The packaged template a missing file is minted from (ADR 060), resolved
+# beside this module the way mode_config.py resolves its mode seeds.
+_EXAMPLE_FILE = Path(__file__).parent / "spaces.example.toml"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +87,48 @@ def served_chat_ids(
     return tuple(cid for cid in listed if cid not in excluded)
 
 
+def _mint_example(path: Path) -> str:
+    """Write the starter template to ``path``; return the message to raise.
+
+    Deployment-scoped config (ADR 060) is git-ignored, so a fresh clone
+    genuinely has no spaces file -- an unfilled form, not a corrupt one.
+    Minting turns "cannot read" into "here is the form", with the
+    template's own comments as the instructions. The caller still fails:
+    a chat bot serving nowhere is a misconfiguration, not a quiet no-op.
+
+    ``x`` mode never clobbers. We only arrive here on FileNotFoundError,
+    but two boots racing on one directory must not have the loser
+    overwrite the winner's freshly written (or freshly edited) file.
+    """
+    try:
+        template = _EXAMPLE_FILE.read_text()
+    except OSError as err:
+        return (
+            f"no spaces file at {path}, and the packaged template at "
+            f"{_EXAMPLE_FILE} could not be read either ({err}); create "
+            f'{path} by hand with one [spaces."<anytype-space-id>"] table'
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x") as handle:
+            handle.write(template)
+    except OSError as err:
+        return (
+            f"no spaces file at {path} and it could not be created "
+            f"({err}); create it by hand with one "
+            f'[spaces."<anytype-space-id>"] table -- see '
+            f"{_EXAMPLE_FILE.name} in the package for every key"
+        )
+    return (
+        f"no spaces file at {path} -- wrote a starter template there. "
+        'Uncomment its [spaces."..."] table, replace the id with the '
+        "Anytype space THIS deployment should serve, then restart. The "
+        "file is deployment-scoped and git-ignored: a dev box and "
+        "production each keep their own, and a space id belongs in "
+        "exactly one of them."
+    )
+
+
 def load_space_bindings(
     path: str, default_profile: str | None
 ) -> tuple[SpaceBinding, ...]:
@@ -88,6 +140,8 @@ def load_space_bindings(
     """
     try:
         data = tomllib.loads(Path(path).read_text())
+    except FileNotFoundError:
+        raise GraphContextError(_mint_example(Path(path))) from None
     except OSError as err:
         raise GraphContextError(f"cannot read GC_SPACES_FILE at {path}: {err}") from None
     except tomllib.TOMLDecodeError as err:

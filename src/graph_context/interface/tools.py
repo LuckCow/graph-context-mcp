@@ -1,6 +1,6 @@
 """Tool implementations: the v1 MCP surface, SDK-free.
 
-``server.py`` registers thin MCP tool wrappers around these functions;
+``server.py`` registers thin FastMCP wrappers around these functions;
 keeping the implementations here (plain async functions over a
 :class:`Services` bundle) means they are testable in-process without an
 MCP client, and the SDK never leaks below the composition root.
@@ -705,12 +705,21 @@ _RETIRED_WRITE_PARAMS = {
 def _reject_retired_params(supplied: dict[str, Any]) -> None:
     """ADR 042 replaced the fields/links surface; a replayed transcript
     or an old habit gets a self-correcting redirect, never an opaque
-    internal error."""
+    internal error.
+
+    The retired names are deliberately absent from the tools' declared
+    signatures -- a declared parameter is a PUBLISHED one -- so they
+    arrive as stray keyword arguments, which is also how a plain typo
+    arrives. Both get named back rather than an internal error.
+    """
     used = {k: v for k, v in supplied.items() if v is not None}
     if not used:
         return
     notes = "; ".join(
-        f"'{key}' was replaced -- {_RETIRED_WRITE_PARAMS[key]}" for key in used
+        f"'{key}' was replaced -- {_RETIRED_WRITE_PARAMS[key]}"
+        if key in _RETIRED_WRITE_PARAMS
+        else f"'{key}' is not a parameter of this tool"
+        for key in used
     )
     raise GraphContextError(notes)
 
@@ -726,18 +735,13 @@ async def create_node_tool(
     properties: dict[str, Any] | None = None,
     icon: str = "",
     create_missing_properties: dict[str, Any] | None = None,
-    # Retired params (ADR 042): explicit so an old-shape call gets a
-    # redirect instead of guarded's opaque internal error.
-    fields: dict[str, Any] | None = None,
-    links: list[dict[str, Any]] | None = None,
-    create_missing_relations: bool | None = None,
-    create_missing_fields: dict[str, str] | None = None,
+    # Retired params (ADR 042) are ABSORBED, never declared: the drivers
+    # derive their tool schemas from this signature, so a declared
+    # parameter is one the model is taught to send. The redirect below
+    # still answers an old-shape call.
+    **retired: Any,
 ) -> str:
-    _reject_retired_params({
-        "fields": fields, "links": links,
-        "create_missing_relations": create_missing_relations,
-        "create_missing_fields": create_missing_fields,
-    })
+    _reject_retired_params(retired)
     scalars, parsed_links, declarations = await _parse_properties(
         services, properties, create_missing_properties,
         on_type=_parse_node_type(type),
@@ -775,18 +779,10 @@ async def update_node_tool(
     properties: dict[str, Any] | None = None,
     remove_links: list[dict[str, Any]] | None = None,
     create_missing_properties: dict[str, Any] | None = None,
-    # Retired params (ADR 042): explicit so an old-shape call gets a
-    # redirect instead of guarded's opaque internal error.
-    fields: dict[str, Any] | None = None,
-    add_links: list[dict[str, Any]] | None = None,
-    create_missing_relations: bool | None = None,
-    create_missing_fields: dict[str, str] | None = None,
+    # Retired params (ADR 042): absorbed, not declared -- see create_node.
+    **retired: Any,
 ) -> str:
-    _reject_retired_params({
-        "fields": fields, "add_links": add_links,
-        "create_missing_relations": create_missing_relations,
-        "create_missing_fields": create_missing_fields,
-    })
+    _reject_retired_params(retired)
     node_id = await _resolve(services, node_id)
     removals = [
         Edge(

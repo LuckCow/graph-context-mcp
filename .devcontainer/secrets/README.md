@@ -22,3 +22,16 @@ container comes up exactly as it did before tailscale existed.
 
 Rotation: replace the file content and restart the stack; nothing caches
 keys beyond process lifetime.
+
+## Its non-secret sibling
+
+`spaces.toml` at the repo root is git-ignored for a related but different
+reason ([ADR 060](../../docs/adr/060-deployment-scoped-space-bindings.md)): it
+is not a secret — a space id is just an identifier — but it is
+**deployment-scoped**, one copy per host, naming the Anytype spaces *this*
+deployment serves. Since the dev box and the VPS share one bot account, that
+file is the only thing keeping two orchestrators off the same chats, which it
+cannot be if git carries it between them. A missing one is minted from a
+packaged template on first boot, with instructions inside. `channels.toml` (the
+Discord equivalent) is the same, except that absent simply means "Discord
+parked" and nothing is minted.

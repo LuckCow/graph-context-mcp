@@ -62,9 +62,16 @@ relations in a single map, discriminated by what the space says the key
 IS: a key naming an existing `objects` relation takes a node id/name
 (or a list) and becomes link(s); everything else is a scalar value.
 `fields`, `links`, `add_links`, `create_missing_relations`, and
-`create_missing_fields` are retired — kept as implementation-only dead
-parameters that raise a self-correcting redirect (replayed transcripts
-and stale habits must not hit an opaque error). On update, relation
+`create_missing_fields` are retired — absorbed by a `**kwargs` catch-all
+that raises a self-correcting redirect (replayed transcripts and stale
+habits must not hit an opaque error). **Amended 2026-08-17:** they were
+originally kept as declared implementation-only parameters, which the
+MCP wrappers hid by hand — but the orchestrator's drivers derive their
+tool schemas from the IMPLEMENTATION signatures, so both drivers
+published the retired vocabulary to the model beside the surface that
+replaced it. A declared parameter is a published one; absorbing them
+instead makes "retired" mean the same thing on every surface, and a
+mistyped parameter now gets named back instead of an opaque error. On update, relation
 entries **APPEND** (a wholesale replace would silently destroy targets
 the model never saw — the A4 clobber ADR 009 exists to prevent);
 `remove_links` stays for removals, and reassignment is documented as
@@ -136,9 +143,11 @@ guarantee carries over by construction — its own writes bump the stamp
   and watch it") is one write with `scope: "type"` plus one 👍.
 * The de38192f56dc payload — boolean value, already-existing declared
   key — succeeds cleanly.
-* The MCP wrappers advertise only the new surface; the tool
-  implementations keep the retired params as redirects
-  (`tests/interface/test_server_wrappers.py` pins both halves).
+* No published surface advertises the retired params — neither the MCP
+  wrappers nor the drivers' derived schemas — while an old-shape call
+  still gets its redirect (`tests/interface/test_server_wrappers.py`
+  pins both signatures, `tests/orchestrator/test_claude_driver.py` pins
+  the derived schemas).
 * `WriteOutcome` (node + drafted proposals + warnings) replaces the
   bare `Node` return of `NodeWriter`; the pipeline's existing
   `drain_drafted` posts writer-originated confirms with no changes.

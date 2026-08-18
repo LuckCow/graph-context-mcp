@@ -30,7 +30,7 @@ import sys
 import time
 from typing import Any
 
-import httpx2
+import httpx
 
 from graph_context.domain.models import NodeDraft
 from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -70,7 +70,7 @@ def _base() -> str:
     ).rstrip("/")
 
 
-def show(label: str, response: httpx2.Response, clip: int = 2500) -> Any:
+def show(label: str, response: httpx.Response, clip: int = 2500) -> Any:
     print(f"\n--- {label}\n    {response.request.method} "
           f"{response.request.url.path}?{response.request.url.query.decode()}"
           f" -> {response.status_code}")
@@ -86,7 +86,7 @@ def show(label: str, response: httpx2.Response, clip: int = 2500) -> Any:
 
 class Spike:
     def __init__(self) -> None:
-        self.http = httpx2.Client(
+        self.http = httpx.Client(
             base_url=_base(),
             headers={
                 "Authorization": f"Bearer {_key()}",

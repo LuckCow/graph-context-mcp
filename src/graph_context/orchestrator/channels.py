@@ -73,12 +73,20 @@ def channels_declared(path: str) -> bool:
 
     The consolidated server's dormancy probe: a channels file with ZERO
     tables means "Discord parked" (the WP14 cutover left exactly that),
-    not a broken config. Unreadable/invalid files return True so the
-    caller proceeds into :func:`load_channel_bindings`, which names the
-    problem loudly -- the error message lives in one place.
+    not a broken config. So does a file that is not there at all -- the
+    file is deployment-scoped and git-ignored (ADR 060), and Discord is
+    opt-in, so its ABSENCE is the same statement its emptiness is. It is
+    never minted for that reason: there is nothing to fill in.
+
+    Every other failure returns True so the caller proceeds into
+    :func:`load_channel_bindings`, which names the problem loudly -- an
+    unreadable or malformed file is a broken config, and the error
+    message for it lives in one place.
     """
     try:
         data = tomllib.loads(Path(path).read_text())
+    except FileNotFoundError:
+        return False  # not "broken", just parked -- see the docstring
     except (OSError, tomllib.TOMLDecodeError):
         return True  # defer to load_channel_bindings' precise loud error
     channels = data.get("channels")

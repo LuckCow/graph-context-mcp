@@ -431,6 +431,12 @@ SYSTEM_RELATION_DENYLIST: frozenset[str] = frozenset(
     {"backlinks", "creator", "last_modified_by", PROP_DEFAULT_MODE}
 )
 
+# NOTE: ``links`` is deliberately NOT quarantined above. It reads as real
+# edges (an inline [[wiki]] link in a body is a `links` entry -- dropping
+# it would lose traversal) but refuses direct writes. That read-yes/write-no
+# split lives in ``domain.schema.READ_ONLY_RELATIONS``, which both
+# repository implementations answer to; this denylist is read-side only.
+
 _VALUE_FIELD = {
     "text": "text",
     "number": "number",

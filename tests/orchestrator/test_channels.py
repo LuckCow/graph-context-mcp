@@ -14,7 +14,7 @@ import pytest
 
 from graph_context.errors import GraphContextError
 from graph_context.orchestrator import bootstrap
-from graph_context.orchestrator.channels import load_channel_bindings
+from graph_context.orchestrator.channels import channels_declared, load_channel_bindings
 
 CHANNEL_A = 1523551542123298896
 CHANNEL_B = 1523551542123298897
@@ -122,6 +122,31 @@ def _memory_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GC_CHANNELS_FILE", raising=False)
     monkeypatch.delenv("GC_PROFILE", raising=False)
     monkeypatch.delenv("GC_MODES_FILE", raising=False)
+
+
+class TestChannelsDeclared:
+    """The dormancy probe: is Discord bound, or parked?"""
+
+    def test_a_bound_channel_is_declared(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, f'[channels.{CHANNEL_A}]\nspace_id = "space-a"\n')
+        assert channels_declared(path) is True
+
+    def test_zero_tables_is_parked(self, tmp_path: Path) -> None:
+        assert channels_declared(_write(tmp_path, "# nothing bound\n")) is False
+
+    def test_no_file_at_all_is_parked(self, tmp_path: Path) -> None:
+        # ADR 060 made the file deployment-scoped and git-ignored, so a
+        # fresh host simply has none. Discord is opt-in: absent says the
+        # same thing empty says, and there is nothing to mint.
+        assert channels_declared(str(tmp_path / "absent.toml")) is False
+
+    def test_a_broken_file_defers_to_the_loud_loader(self, tmp_path: Path) -> None:
+        # Unreadable or malformed is a BROKEN config, not a parked one --
+        # True sends the caller into load_channel_bindings, which owns the
+        # error message.
+        assert channels_declared(_write(tmp_path, "not [valid toml")) is True
+        (tmp_path / "dir.toml").mkdir()
+        assert channels_declared(str(tmp_path / "dir.toml")) is True
 
 
 @pytest.mark.usefixtures("_memory_env")

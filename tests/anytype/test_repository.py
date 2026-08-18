@@ -1,12 +1,17 @@
 """Space-reflecting writes: type/relation resolution, reuse vs approval,
 custom-relation and inline-link reads."""
 
+import re
+
 import pytest
 
 from graph_context.domain.models import LinkSpec, NodeDraft, PropertyDeclaration
-from graph_context.errors import UnknownNodeType, UnknownRelationLabel
+from graph_context.errors import (
+    GraphContextError,
+    UnknownNodeType,
+    UnknownRelationLabel,
+)
 from graph_context.infrastructure.anytype import mapping
-from graph_context.infrastructure.anytype.config import AnytypeApiError
 from graph_context.infrastructure.anytype.repository import AnytypeGraphRepository
 
 CHAR = NodeDraft("Character", name="Mira", summary="Engineer.")
@@ -100,7 +105,10 @@ class TestFreshRelationSettleWindow:
             NodeDraft("Character", name="Adnan", summary="Boss.")
         )
         before = repository.graph.node_count()
-        with pytest.raises(AnytypeApiError):
+        # Not the raw AnytypeApiError: once the node is rolled back this is
+        # no longer a passthrough store failure, and the store's message
+        # names an endpoint containing the now-archived object's id.
+        with pytest.raises(GraphContextError) as err:
             await repository.create_node(
                 NodeDraft("Character", name="Mary", summary="Marketer."),
                 links=[LinkSpec("inspired_by", other=target.id)],
@@ -109,6 +117,34 @@ class TestFreshRelationSettleWindow:
                 },
             )
         assert repository.graph.node_count() == before  # rolled back
+        message = str(err.value)
+        assert "inspired_by" in message  # the actionable cause survives
+        assert "REMOVED" in message  # ...and says so, so no id gets reused
+
+    async def test_a_rolled_back_create_never_names_the_dead_node_id(
+        self, mock, client, repo
+    ) -> None:
+        """The store's message embeds the created object's id in the
+        endpoint it failed on; the rollback then archives that object. A
+        live turn scraped the id out of this error and called update_node
+        on it, losing two more tool calls to "no node matches"."""
+        repository, _ = await self._settling_repo(mock, client)
+        mock.property_settle_patches = 10
+        target = await repository.create_node(
+            NodeDraft("Character", name="Adnan", summary="Boss.")
+        )
+        with pytest.raises(GraphContextError) as err:
+            await repository.create_node(
+                NodeDraft("Character", name="Mary", summary="Marketer."),
+                links=[LinkSpec("inspired_by", other=target.id)],
+                create_missing={
+                    "inspired_by": PropertyDeclaration("inspired_by", "objects")
+                },
+            )
+        message = str(err.value)
+        assert "<removed>" in message  # the scrub found an id and took it out
+        assert "/objects/any-" not in message  # no live-looking endpoint id
+        assert not re.search(r"\bany-\d+\b", message)
 
 
 class TestCustomAndInlineReads:

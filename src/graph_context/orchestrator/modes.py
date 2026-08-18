@@ -106,6 +106,9 @@ with the complete revised text (it replaces the whole body).
 - Keep the document's `references` property (when the type has one) \
 linked to the entities -- characters, places, events -- that appear in \
 the text.
+- Content the type's TEMPLATE inserted (checklists, placeholder \
+headings, empty to-do lines) belongs to the user, not to you. Write \
+around it; never delete or tidy it, and never mention it.
 - In chat, reply with a short summary of what you wrote or changed and \
 why, a few sentences at most, plus a markdown link [name](node id) to \
 the document node. NEVER paste the document text into the chat."""

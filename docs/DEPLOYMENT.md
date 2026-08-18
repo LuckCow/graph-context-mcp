@@ -10,7 +10,9 @@ secret is and how to obtain it), [TESTING.md](TESTING.md) (what "verified"
 means), [adr/025](adr/025-inspection-server.md) (the inspection server),
 [adr/019](adr/019-anytype-chat-transport-and-headless-sidecar.md) (the
 headless sidecar), [adr/059](adr/059-tailscaled-egress-by-uid.md) (why root is exempt
-from the egress policy, and why the boot chain cannot hang).
+from the egress policy, and why the boot chain cannot hang),
+[adr/060](adr/060-deployment-scoped-space-bindings.md) (why the space bindings
+are not in git).
 
 ## What actually runs
 
@@ -65,15 +67,56 @@ recognizing:
 [gc-serve] already running (pid N)        # or: running (pid N) -- logs: ...
 ```
 
+## Dev and prod
+
+The two deployments run **identical builds** — same image, same compose file,
+same branch. They differ in exactly one thing: `spaces.toml`, which is
+git-ignored and lives one copy per host ([ADR 060](adr/060-deployment-scoped-space-bindings.md)).
+The dev box binds a test space; the VPS binds the production spaces; no space
+id appears in both.
+
+That file is the *entire* separation, because the bot account was migrated
+rather than recreated: both hosts run the same Anytype identity, so both can
+reach every space. Nothing but the binding decides which chats each one
+answers — and when `spaces.toml` was committed, both answered all of them.
+
+Driving prod from your workstation shell (**not** from inside the
+devcontainer — tailscaled there is userspace-networking with no SOCKS proxy,
+so it has no outbound tailnet path at all):
+
+```bash
+scripts/gc-prod status              # pid + the last log lines
+scripts/gc-prod logs                # tail -f the orchestrator log
+scripts/gc-prod deploy              # git pull + restart, health-checked
+scripts/gc-prod deploy --to <sha>   # roll back
+scripts/gc-prod shell               # a shell in the prod container
+```
+
+`gc-prod` is a thin SSH wrapper (target from `GC_PROD_SSH`, default the
+ssh-config alias `gc-prod`); the work happens in `scripts/deploy.sh` **on the
+server**, which refuses on a dirty tree, fast-forwards only, and picks its own
+restart depth: a touched `pyproject.toml` or `.devcontainer/**` rebuilds the
+image, anything else is just `gc-serve restart`, since source is a bind mount.
+It then polls until the orchestrator answers and tails `serve.log` if it does
+not. Promotion flow: work on `dev` → CI green → merge to `main` → `gc-prod
+deploy`.
+
 ## State that does NOT travel
 
-Everything below is a named Docker volume on the host. `git clone` on a new
-box gets you none of it. **This is the migration checklist.**
+`git clone` on a new box gets you none of this. **This is the migration
+checklist.** Config first:
+
+| File | Holds | If lost |
+|---|---|---|
+| `spaces.toml` | Which Anytype spaces THIS deployment serves (ADR 060) | The orchestrator mints a template from the packaged example and refuses to start until you fill it in. Restoring it wrong is worse than losing it: a copy of the *other* deployment's file makes two bots answer one set of chats. |
+| `channels.toml` | The same, for Discord channels (ADR 017) | Nothing — an absent file means "Discord parked", the same as a file with zero tables. Copy `src/graph_context/orchestrator/channels.example.toml` to the repo root when you want it back. |
+
+Then the named Docker volumes:
 
 | Volume | Holds | If lost |
 |---|---|---|
 | `anytype-data` (`/root/.anytype`) + `anytype-config` (`/root/.config/anytype`) | The bot account's identity, config, and API-key store | The bot loses its account **and** its membership in every space. Recover from the `anytype_account_key` secret, then re-issue the API key. Both volumes are needed — the CLI splits state across them, and a rebuild wiped them once. |
-| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path | The orchestrator has no model. See [Model access](#model-access). |
+| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path, which compose selects | The orchestrator has no model at all: this volume *is* the authentication. Log in once on the new host, or switch that deployment to `GC_DRIVER: anthropic_api` and give it a key. See [Model access](#model-access). |
 | `tailscale-state` (`/var/lib/tailscale`) | The tailnet node identity | The node re-registers from the auth key, leaving a dead duplicate behind. Use a **reusable, non-ephemeral** key. |
 
 The graph itself is **not** in this list: it lives in Anytype and syncs over
@@ -81,9 +124,11 @@ Anytype's network. What you are migrating is the machinery that reads it.
 
 ## Model access
 
-Two paths, selected by `GC_DRIVER`:
+Two paths, selected by `GC_DRIVER` — compose selects the subscription, and
+the choice is per deployment, so a host that cannot carry an OAuth login can
+switch without any other change:
 
-**Subscription (current default).** `GC_DRIVER` unset or
+**Subscription (the default, and what compose sets).** `GC_DRIVER` unset or
 `anthropic_subscription` (aliases: `claude`, `subscription`). Runs
 `claude-agent-sdk` over the bundled Claude Code CLI, billed to the Claude
 plan. Authentication comes from the OAuth login persisted in the
@@ -97,7 +142,7 @@ fresh host, either log in interactively once, or mint a token with
 > volume. Wiring it to `CLAUDE_CODE_OAUTH_TOKEN` would give the headless path
 > a fresh host actually needs.
 
-**API (planned).** `GC_DRIVER=anthropic_api` (aliases: `anthropic`, `api`)
+**API (opt-in).** `GC_DRIVER=anthropic_api` (aliases: `anthropic`, `api`)
 plus `ANTHROPIC_API_KEY`, and the `anthropic` extra installed. Bills API
 credits, not the subscription — bootstrap refuses to start without an
 explicit key rather than silently falling back to an OAuth profile, so the
@@ -148,25 +193,85 @@ date stamp. `GC_TIMEZONE` overrides it independently if the two must differ.
 
 ## Moving to a VPS
 
-1. Land and push the working tree; confirm CI is green. The box deploys from
-   git, so anything uncommitted does not exist there.
-2. Provision secrets (see `secrets/README.md`). `tailscale_authkey` must be
-   **reusable**, **non-ephemeral**, and ideally **tagged** (`tag:vps` via
-   `TS_UP_EXTRA_ARGS=--advertise-tags=tag:vps`).
-3. Recover the Anytype bot identity from `anytype_account_key`, then
-   `anytype auth apikey create` and write `anytype_api_key`.
-4. Decide the model path *before* first boot (see above); the subscription
-   path needs an interactive login or a minted token on a headless box.
-5. Keep `ports:` on `127.0.0.1`. Keep `TZ`.
-6. Build, boot, and check the four log lines above.
-7. Verify: `pytest -q`, then `ANYTYPE_E2E=1 pytest tests/e2e -q` against the
-   new sidecar. The live suite find-or-creates its own `GC-E2E` space and
-   resets it around each run.
+Compose is self-sufficient: `devcontainer.json` carries only VS Code glue
+(`service`, `workspaceFolder`, `remoteUser`), while everything load-bearing —
+the `NET_ADMIN`/`NET_RAW` capabilities the firewall needs, `user: dev`, and the
+boot chain — lives in the compose file. Headless is therefore just:
+
+```bash
+docker compose -f .devcontainer/docker-compose.yml up -d --build
+```
+
+**Two orchestrators must never share a space.** Both instances answer the same
+Anytype chats, so a second running stack means every message is answered twice
+— two bots holding two independent route locks. Two Anytype *nodes* on one
+account is fine (that is just sync); it is the two orchestrators that collide.
+During a migration, bring the VPS up with `GC_SERVE_AUTOSTART=0` until
+cutover; *after* one, [ADR 060](adr/060-deployment-scoped-space-bindings.md) is
+what keeps it from recurring — the surviving dev box binds its own test space
+in its own git-ignored `spaces.toml`, so there is no shared space left to
+collide over.
+
+1. **Push first, confirm CI.** The box deploys from git; anything uncommitted
+   does not exist there.
+2. **Host prep.** Docker Engine + compose plugin, git. Budget disk and RAM for
+   the build: torch (CPU wheel), sentence-transformers, Node, and a Playwright
+   Chromium add up to several GB, and the build will OOM on a 1 GB box. The
+   build needs unrestricted network — the egress firewall applies only *inside*
+   the container at runtime.
+3. **Clone as uid 1000.** The repo is bind-mounted and the container runs as
+   `dev` (uid/gid 1000). A mismatch means the container cannot write `logs/`,
+   the turn diary, or prose saves: `sudo chown -R 1000:1000 .`
+4. **Copy `spaces.toml`** (git-ignored since ADR 060) — or let the first boot
+   mint a template and fill it in there. Whichever you do, the new host's
+   bindings and the old host's must not overlap unless the old host is being
+   retired.
+5. **Copy secrets** (`.devcontainer/secrets/`, all git-ignored).
+   `anthropic_api_key` and `tailscale_authkey` must exist even if empty or
+   compose refuses to start. Mint a **fresh** tailscale key — reusable,
+   non-ephemeral, tagged (`TS_UP_EXTRA_ARGS=--advertise-tags=tag:vps`).
+6. **Give the bot an Anytype account.** Migrating `anytype-data` +
+   `anytype-config` keeps the old identity, its API key, and its space
+   membership. Re-creating is usually easier and costs only: re-inviting the
+   bot to each space in `spaces.toml`, re-issuing the API key, and a full
+   re-sync. **The API key must be re-issued** because it is a bearer token for
+   *that node's* local API, minted into the key store in `anytype-config` — a
+   new node has an empty store, so the old token authenticates nothing. Save
+   the output of `anytype auth create` into `anytype_account_key` this time:
+   it is the difference between a two-minute recovery and repeating this.
+7. **Copy `logs/` if you want continuity.** It is git-ignored and lives in the
+   repo, not in a volume, so neither path carries it. It holds the turn diary
+   and the per-chat cursors. Re-copy `logs/chat_cursor*.json` at the *moment*
+   of cutover, after the old bot stops: a stale cursor makes the new bot
+   re-answer everything the old one handled after the copy. A chat with no
+   cursor at all skips its history rather than replaying it, so the failure
+   mode of forgetting them is a dropped backlog, not a flood.
+8. **Keep `ports:` on `127.0.0.1`, keep `TZ`.** Both are already correct in
+   compose. On the provider's firewall, SSH only — the tailnet is the access
+   path.
+9. **Boot and check the four log lines above**, then verify: `pytest -q` and
+   `ANYTYPE_E2E=1 pytest tests/e2e -q` against the new sidecar. The live suite
+   find-or-creates its own `GC-E2E` space and resets it around each run.
+
+> **One-time hazard, on the deploy that introduced ADR 060.** That commit
+> untracks `spaces.toml` and `channels.toml`, so `git pull` **deletes** the
+> server's copies. Back them up on the server first and restore them straight
+> after — or take the downtime: the next boot mints a template and the
+> orchestrator waits, refusing to start, until you refill it.
+
+Compose is committed and shared, so a server and a workstation run it
+identically — including `restart: unless-stopped` on both services, which is
+what brings the stack back after a host reboot (the boot chain is re-entrant,
+so that is always safe). The one thing a server has to solve for itself is
+[model access](#model-access): `GC_DRIVER` selects the subscription, whose
+OAuth login lives in the `claude-config` volume and does not travel, so a new
+host either logs in once or switches that deployment to `anthropic_api` with a
+key.
 
 What is *not* on the VPS: the Anytype **desktop** app. `host.docker.internal`
-and port `31009` exist for the desktop's local API, which is a human
-convenience on a workstation; the headless sidecar at `anytype:31012` is the
-only backend a server needs.
+and port `31009` exist for the desktop's local API, a human convenience on a
+workstation; the headless sidecar at `anytype:31012` is the only backend a
+server needs.
 
 ## Troubleshooting
 

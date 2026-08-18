@@ -21,6 +21,17 @@ venv/
 dist/
 build/
 
+# --- Deployment-scoped config (ADR 060) ---
+# Not secret, but per-HOST: which Anytype spaces THIS deployment serves.
+# The bot account is shared between the dev box and the VPS, so both can
+# reach every space and only these files decide which ones each answers
+# in -- committing them is what let one repo serve two deployments and
+# answer every production chat twice. spaces.toml is minted from the
+# packaged template on first boot; channels.toml is optional (absent =
+# Discord parked). Anchored so the packaged *.example.toml stay tracked.
+/spaces.toml
+/channels.toml
+
 # --- Runtime output ---
 logs/
 evals/runs/

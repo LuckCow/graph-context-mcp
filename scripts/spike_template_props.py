@@ -30,7 +30,7 @@ import os
 import sys
 from typing import Any
 
-import httpx2
+import httpx
 
 API_VERSION = "2025-11-08"
 DEFAULT_SPACE = "Todolist"
@@ -56,7 +56,7 @@ def _base() -> str:
 
 class Probe:
     def __init__(self, space_name: str) -> None:
-        self.http = httpx2.Client(
+        self.http = httpx.Client(
             base_url=_base(),
             headers={
                 "Authorization": f"Bearer {_key()}",
@@ -135,7 +135,7 @@ class Probe:
         for oid in self.created:
             try:
                 self.http.delete(self._sp(f"/objects/{oid}"))
-            except httpx2.HTTPError as exc:
+            except httpx.HTTPError as exc:
                 print(f"  cleanup failed for {oid}: {exc}")
         print(f"cleaned up {len(self.created)} object(s)")
 

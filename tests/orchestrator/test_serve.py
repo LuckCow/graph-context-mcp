@@ -72,12 +72,25 @@ class TestDiscordConfiguredGate:
         monkeypatch.setenv("GC_DISCORD_CHANNELS", "42")
         assert discord_bot.is_configured() is True
 
-    def test_an_unreadable_channels_file_defers_to_the_loud_path(
+    def test_no_channels_file_at_all_means_parked(
         self, tmp_path, monkeypatch, token_file
     ) -> None:
-        # The gate stays True so run() reaches load_channel_bindings,
-        # whose error names the file -- the message lives in one place.
+        # ADR 060 made the file deployment-scoped and git-ignored, so a
+        # fresh host simply has none. Discord is opt-in: absent says what
+        # zero tables says, and there is nothing to mint.
         monkeypatch.setenv("GC_CHANNELS_FILE", str(tmp_path / "gone.toml"))
+        monkeypatch.delenv("GC_DISCORD_CHANNELS", raising=False)
+        assert discord_bot.is_configured() is False
+
+    def test_a_malformed_channels_file_defers_to_the_loud_path(
+        self, tmp_path, monkeypatch, token_file
+    ) -> None:
+        # Broken is not parked. The gate stays True so run() reaches
+        # load_channel_bindings, whose error names the file -- the
+        # message lives in one place.
+        channels = tmp_path / "channels.toml"
+        channels.write_text("not [valid toml")
+        monkeypatch.setenv("GC_CHANNELS_FILE", str(channels))
         monkeypatch.delenv("GC_DISCORD_CHANNELS", raising=False)
         assert discord_bot.is_configured() is True
 
