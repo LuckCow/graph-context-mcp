@@ -31,7 +31,7 @@ edit flushes them (the closing delete supersedes anything unflushed).
 An activity edit failure never fails the turn: every PATCH degrades to a
 logged warning.
 
-Pure logic like the transport itself: no httpx2, no infrastructure
+Pure logic like the transport itself: no httpx, no infrastructure
 imports; the send/edit primitives arrive from the composition root.
 """
 

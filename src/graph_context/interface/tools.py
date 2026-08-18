@@ -1,6 +1,6 @@
 """Tool implementations: the v1 MCP surface, SDK-free.
 
-``server.py`` registers thin MCP tool wrappers around these functions;
+``server.py`` registers thin FastMCP wrappers around these functions;
 keeping the implementations here (plain async functions over a
 :class:`Services` bundle) means they are testable in-process without an
 MCP client, and the SDK never leaks below the composition root.

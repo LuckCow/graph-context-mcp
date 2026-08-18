@@ -1,7 +1,7 @@
 """Console logging setup shared by every entry point.
 
 One knob: ``GC_LOG_LEVEL`` (default ``INFO``; any standard level name).
-httpx2 logs every request at INFO -- useful when debugging the wire,
+httpx logs every request at INFO -- useful when debugging the wire,
 noise the rest of the time -- so unless the deployment asks for DEBUG
 the HTTP client loggers are capped at WARNING. The INFO channel stays
 for events worth a human's glance: turns, scheduled fires, prose saves,
@@ -14,8 +14,7 @@ import logging
 import os
 
 #: Loggers whose per-request chatter belongs to DEBUG runs only.
-#: ``httpx`` stays listed: the anthropic SDK still ships its own client.
-_HTTP_LOGGERS = ("httpx2", "httpx", "httpcore")
+_HTTP_LOGGERS = ("httpx", "httpcore")
 
 
 def configure_logging() -> None:

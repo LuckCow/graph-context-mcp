@@ -1,6 +1,6 @@
 """Client behavior: pagination, retry, error translation, budgets."""
 
-import httpx2
+import httpx
 import pytest
 
 from graph_context.errors import GraphContextError
@@ -53,18 +53,18 @@ class TestRetry:
 class TestTransportErrors:
     async def test_transport_failures_translate_to_api_error(self):
         # Connection refused / timeout must surface as the one error family
-        # the rest of the system catches, never a raw httpx2 exception.
-        def refuse(request: httpx2.Request) -> httpx2.Response:
-            raise httpx2.ConnectError("connection refused", request=request)
+        # the rest of the system catches, never a raw httpx exception.
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
 
         config = AnytypeConfig(api_key="test", space_id="sp1")
-        client = AnytypeClient(config, transport=httpx2.MockTransport(refuse))
+        client = AnytypeClient(config, transport=httpx.MockTransport(refuse))
         try:
             with pytest.raises(AnytypeApiError) as excinfo:
                 await client.get_space()
             assert excinfo.value.status == 0
             assert excinfo.value.code == "transport"
-            assert isinstance(excinfo.value.__cause__, httpx2.ConnectError)
+            assert isinstance(excinfo.value.__cause__, httpx.ConnectError)
         finally:
             await client.aclose()
 

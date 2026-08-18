@@ -28,7 +28,7 @@ change. ``exclude_chats`` opts specific chats out; ``chat_id`` pins to a
 single chat and disables discovery (they are mutually exclusive). One
 binding per space is structural (the table key IS the space id, so TOML
 rejects duplicates); per-chat sessions are keyed nodes (WP8, ADR 021).
-Like ``channels.py`` this stays plain logic over primitives -- no httpx2,
+Like ``channels.py`` this stays plain logic over primitives -- no httpx,
 no infrastructure -- and bad config fails LOUDLY at startup, naming the
 file, space, and field.
 

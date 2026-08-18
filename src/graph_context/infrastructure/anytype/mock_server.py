@@ -1,6 +1,6 @@
 """MockAnytype: an in-process simulator of the Anytype local API.
 
-Stands in for a live server as an ``httpx2.MockTransport`` handler. Its
+Stands in for a live server as an ``httpx.MockTransport`` handler. Its
 behavior is pinned to what the **WP1 spike measured** against a real
 instance (API version 2025-11-08, 2026-06-21), so the test suite means
 something:
@@ -80,7 +80,7 @@ from datetime import UTC, datetime
 from itertools import count
 from typing import Any
 
-import httpx2
+import httpx
 
 from graph_context.infrastructure.anytype.marks import utf16_len
 
@@ -135,7 +135,7 @@ _CONDITIONS: dict[str, Callable[[str, str], bool]] = {
 
 
 def _parse_multipart_file(
-    request: httpx2.Request,
+    request: httpx.Request,
 ) -> tuple[str | None, bytes | None]:
     """The ``file`` field of a multipart upload (C10), or ``(None, None)``
     when the request carries none -- the live server's 400 case."""
@@ -263,10 +263,10 @@ class MockAnytype:
     # -- transport ---------------------------------------------------------
 
     @property
-    def transport(self) -> httpx2.MockTransport:
-        return httpx2.MockTransport(self._handle_async)
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self._handle_async)
 
-    async def _handle_async(self, request: httpx2.Request) -> httpx2.Response:
+    async def _handle_async(self, request: httpx.Request) -> httpx.Response:
         # Fidelity: real I/O always suspends the calling task. Without this
         # yield every mock request completes atomically and in-process
         # concurrency bugs (lost read-modify-write updates, ADR 009) are
@@ -274,11 +274,11 @@ class MockAnytype:
         await asyncio.sleep(0)
         return self.handle(request)
 
-    def handle(self, request: httpx2.Request) -> httpx2.Response:
+    def handle(self, request: httpx.Request) -> httpx.Response:
         self.request_log.append((request.method, request.url.path))
         if self._fail_queue:
             status, body = self._fail_queue.pop(0)
-            return httpx2.Response(status, json=body)
+            return httpx.Response(status, json=body)
         path = request.url.path
         if _SPACES.match(path):  # global, not space-scoped
             return self._handle_spaces(request)
@@ -556,7 +556,7 @@ class MockAnytype:
 
     # -- route handlers -------------------------------------------------------
 
-    def _handle_objects(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_objects(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             # Hydrate sweep: unfiltered, archived hidden, large pages honored.
             # Participants are hidden too (S11): the live list NEVER returns
@@ -579,7 +579,7 @@ class MockAnytype:
             # the adapter's PATCH-after-create contract is enforced in CI.
             for entry in body.get("properties", []):
                 if entry.get("format") == "objects":
-                    return httpx2.Response(400, json={
+                    return httpx.Response(400, json={
                         "code": "bad_request",
                         "message": f'bad input: unknown property key: '
                                    f'"{entry.get("key")}"',
@@ -617,10 +617,10 @@ class MockAnytype:
                 "markdown": _strip_fence_language(markdown),
             }
             self._stamp(self._objects[object_id], PROP_CREATED)
-            return httpx2.Response(201, json={"object": self._objects[object_id]})
+            return httpx.Response(201, json={"object": self._objects[object_id]})
         return self._error(405, "method_not_allowed")
 
-    def _handle_search(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_search(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method != "POST":
             return self._error(405, "method_not_allowed")
         body = json.loads(request.content) if request.content else {}
@@ -643,7 +643,7 @@ class MockAnytype:
             _without_markdown(items), request.url.params, cap=self.max_page_limit
         )
 
-    def _handle_object(self, request: httpx2.Request, match: re.Match[str]) -> httpx2.Response:
+    def _handle_object(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         obj = self._objects.get(match.group("obj"))
         if obj is None:
             chat = self._chats.get(match.group("obj"))
@@ -653,17 +653,17 @@ class MockAnytype:
                 # answers the envelope, PATCH {"name"} renames (the next
                 # /chats re-list reflects it).
                 if request.method == "GET":
-                    return httpx2.Response(200, json={"object": chat})
+                    return httpx.Response(200, json={"object": chat})
                 if request.method == "PATCH":
                     body = json.loads(request.content)
                     if "name" in body:
                         chat["name"] = body["name"]
-                    return httpx2.Response(200, json={"object": chat})
+                    return httpx.Response(200, json={"object": chat})
             template = self._templates_by_id.get(match.group("obj"))
             if template is not None and request.method == "GET":
                 # Templates answer the single-object GET like any object,
                 # markdown carrying their body scaffold (live-confirmed).
-                return httpx2.Response(200, json={"object": {
+                return httpx.Response(200, json={"object": {
                     "id": template["id"],
                     "name": template["name"],
                     "type": {"key": "template"},
@@ -674,14 +674,14 @@ class MockAnytype:
                 }})
             return self._error(404, "object_not_found")
         if request.method == "GET":
-            return httpx2.Response(200, json={"object": self._exported(obj)})
+            return httpx.Response(200, json={"object": self._exported(obj)})
         if request.method == "PATCH":
             body = json.loads(request.content)
             for entry in body.get("properties", []):
                 key = entry.get("key", "")
                 if self._settling.get(key, 0) > 0:  # settle window still open
                     self._settling[key] -= 1
-                    return httpx2.Response(400, json={
+                    return httpx.Response(400, json={
                         "code": "bad_request",
                         "message": f'bad input: unknown property key: "{key}"',
                         "object": "error", "status": 400,
@@ -707,21 +707,21 @@ class MockAnytype:
                     _flatten_first_line_heading(body["markdown"])
                 )
             self._stamp(obj, PROP_LAST_MODIFIED)
-            return httpx2.Response(200, json={"object": obj})
+            return httpx.Response(200, json={"object": obj})
         if request.method == "DELETE":
             obj["archived"] = True
             self._stamp(obj, PROP_LAST_MODIFIED)
-            return httpx2.Response(200, json={"object": obj})
+            return httpx.Response(200, json={"object": obj})
         return self._error(405, "method_not_allowed")
 
-    def _handle_space(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_space(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
-        return httpx2.Response(
+        return httpx.Response(
             200, json={"space": {"id": self.space_id, "name": self.space_name}}
         )
 
-    def _handle_spaces(self, request: httpx2.Request) -> httpx2.Response:
+    def _handle_spaces(self, request: httpx.Request) -> httpx.Response:
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
         return self._paginated(
@@ -730,7 +730,7 @@ class MockAnytype:
             request.url.params,
         )
 
-    def _handle_members(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_members(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
         return self._paginated(list(self.members), request.url.params)
@@ -738,8 +738,8 @@ class MockAnytype:
     # -- list/view routes (WP13; quirks V1-V5 in view_catalog.py, spike S9) --
 
     def _handle_list_views(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
         list_id = match.group("list")
@@ -748,8 +748,8 @@ class MockAnytype:
         return self._paginated(list(self._set_views[list_id]), request.url.params)
 
     def _handle_list_view_objects(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
         list_id = match.group("list")
@@ -767,13 +767,13 @@ class MockAnytype:
 
     # -- file routes (WP23; quirk C10, pinned by spike S13) ------------------
 
-    def _handle_files(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_files(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         # C10: no list route -- GET /files 404s live.
         if request.method != "POST":
             return self._error(404, "not_found")
         filename, content = _parse_multipart_file(request)
         if filename is None or content is None:
-            return httpx2.Response(400, json={
+            return httpx.Response(400, json={
                 "object": "error", "status": 400, "code": "bad_request",
                 "message": "missing file in request",
             })
@@ -783,12 +783,12 @@ class MockAnytype:
             stem or filename, content, media=media, extension=extension
         )
         # C10: FLAT response, no envelope.
-        return httpx2.Response(200, json={
+        return httpx.Response(200, json={
             "object_id": file_id, "name": stem or filename, "media": media,
             "extension": extension, "size_in_bytes": len(content),
         })
 
-    def _handle_file(self, request: httpx2.Request, match: re.Match[str]) -> httpx2.Response:
+    def _handle_file(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         if request.method != "GET":
             return self._error(404, "not_found")
         stored = self._file_bytes.get(match.group("file"))
@@ -796,7 +796,7 @@ class MockAnytype:
             return self._error(404, "file_not_found")
         content, media = stored
         # C10: the raw bytes directly, Content-Type as the media source.
-        return httpx2.Response(200, content=content,
+        return httpx.Response(200, content=content,
                               headers={"Content-Type": media})
 
     def seed_file(
@@ -818,7 +818,7 @@ class MockAnytype:
 
     # -- chat routes (WP14; quirks C1-C5 in chat.py, pinned by spike S10) ----
 
-    def _handle_chats(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_chats(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             # C13: the listing carries the server-maintained
             # last_message_date property (generic object shape), absent
@@ -843,12 +843,12 @@ class MockAnytype:
         if request.method == "POST":
             body = json.loads(request.content)
             chat_id = self.seed_chat(str(body.get("name", "")))
-            return httpx2.Response(201, json={"object": self._chats[chat_id]})
+            return httpx.Response(201, json={"object": self._chats[chat_id]})
         return self._error(405, "method_not_allowed")
 
     def _handle_chat_messages(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         chat_id = match.group("chat")
         if chat_id not in self._chats:
             return self._error(404, "chat_not_found")
@@ -856,7 +856,7 @@ class MockAnytype:
             # C2: a recency WINDOW, oldest-first -- bare `messages` key, no
             # pagination block, offset ignored (live-confirmed, S10).
             limit = int(request.url.params.get("limit", 100))
-            return httpx2.Response(
+            return httpx.Response(
                 200, json={"messages": self._chat_messages[chat_id][-limit:]}
             )
         if request.method == "POST":
@@ -875,12 +875,12 @@ class MockAnytype:
                 attachments=raw_attachments, marks=body.get("marks"),
             )
             # C1: flat message_id, no envelope key.
-            return httpx2.Response(201, json={"message_id": message["id"]})
+            return httpx.Response(201, json={"message_id": message["id"]})
         return self._error(405, "method_not_allowed")
 
     def _marks_error(
         self, text: str, marks: Any
-    ) -> httpx2.Response | None:
+    ) -> httpx.Response | None:
         """C11 (spike S14): a non-list ``marks`` 400s (Go unmarshal); a
         range that is negative, inverted, or past the text's UTF-16
         length 500s ("failed to add chat message"). Mark ``type``
@@ -899,8 +899,8 @@ class MockAnytype:
         return None
 
     def _handle_chat_message(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         chat_id, message_id = match.group("chat"), match.group("msg")
         if chat_id not in self._chats:
             return self._error(404, "chat_not_found")
@@ -931,18 +931,18 @@ class MockAnytype:
             self._notify_chat(
                 chat_id, {"kind": "message_updated", "message": message}
             )
-            return httpx2.Response(200, json={})
+            return httpx.Response(200, json={})
         if request.method == "DELETE":
             messages.remove(message)
             self._notify_chat(
                 chat_id, {"kind": "message_deleted", "message": message}
             )
-            return httpx2.Response(200, json={})
+            return httpx.Response(200, json={})
         return self._error(405, "method_not_allowed")
 
     def _handle_chat_reactions(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         """C12 (spike S15): POST toggles the calling ACCOUNT's reaction;
         the 200 body is empty; open streams see ``reactions_updated``."""
         if request.method != "POST":
@@ -962,11 +962,11 @@ class MockAnytype:
         if not emoji:
             return self._error(400, "bad_request")
         self._toggle_reaction(chat_id, message, emoji, self.api_identity)
-        return httpx2.Response(200)
+        return httpx.Response(200)
 
     def _handle_chat_stream(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         chat_id = match.group("chat")
         if request.method != "GET":
             return self._error(405, "method_not_allowed")
@@ -995,13 +995,13 @@ class MockAnytype:
             finally:
                 self._chat_listeners[chat_id].remove(queue)
 
-        return httpx2.Response(
+        return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=frames()
         )
 
     def _handle_templates(
-        self, request: httpx2.Request, match: re.Match[str]
-    ) -> httpx2.Response:
+        self, request: httpx.Request, match: re.Match[str]
+    ) -> httpx.Response:
         """A type's templates, addressed by type OBJECT id (like the live
         route). The list view carries id/name only; body + defaults are the
         server-side apply state, read only when the template is applied."""
@@ -1016,7 +1016,7 @@ class MockAnytype:
         ]
         return self._paginated(listed, request.url.params)
 
-    def _handle_types(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_types(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             return self._paginated(list(self._types.values()), request.url.params)
         body = json.loads(request.content)
@@ -1041,13 +1041,13 @@ class MockAnytype:
         self._types[body["key"]] = {
             "id": self._new_id(), **body, "properties": type_properties,
         }
-        return httpx2.Response(201, json={"type": self._types[body["key"]]})
+        return httpx.Response(201, json={"type": self._types[body["key"]]})
 
     def _reuse_conflict(
         self,
         entries: list[dict[str, Any]],
         on_type: tuple[str, ...],
-    ) -> httpx2.Response | None:
+    ) -> httpx.Response | None:
         """Quirk A11 (amended 2026-07-19): a type POST/PATCH entry naming
         an ``objects``-format space property NOT already on the type 400s
         "already exists" unless the entry carries the property's ``id``;
@@ -1068,7 +1068,7 @@ class MockAnytype:
                 )
         return None
 
-    def _handle_type(self, request: httpx2.Request, match: re.Match[str]) -> httpx2.Response:
+    def _handle_type(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         """Single type by object ID: GET, and PATCH with quirk A11 --
         an updated ``properties`` list replaces the type's fields
         WHOLESALE (live-confirmed 2026-07-15, spike_type_update); new
@@ -1081,7 +1081,7 @@ class MockAnytype:
         if entry is None:
             return self._error(404, "object_not_found")
         if request.method == "GET":
-            return httpx2.Response(200, json={"type": entry})
+            return httpx.Response(200, json={"type": entry})
         if request.method != "PATCH":
             return self._error(405, "method_not_allowed")
         body = json.loads(request.content)
@@ -1103,9 +1103,9 @@ class MockAnytype:
                 {**prop, "id": self._properties[prop["key"]]["id"]}
                 for prop in body["properties"]
             ]
-        return httpx2.Response(200, json={"type": entry})
+        return httpx.Response(200, json={"type": entry})
 
-    def _handle_properties(self, request: httpx2.Request, _: re.Match[str]) -> httpx2.Response:
+    def _handle_properties(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         if request.method == "GET":
             return self._paginated(list(self._properties.values()), request.url.params)
         body = json.loads(request.content)
@@ -1123,9 +1123,9 @@ class MockAnytype:
             # fresh SCALAR property is immediately usable in POST /objects
             # and PATCH (live-confirmed 2026-07-10, ADR 023 spike).
             self._settling[body["key"]] = self.property_settle_patches
-        return httpx2.Response(201, json={"property": self._properties[body["key"]]})
+        return httpx.Response(201, json={"property": self._properties[body["key"]]})
 
-    def _handle_property(self, request: httpx2.Request, match: re.Match[str]) -> httpx2.Response:
+    def _handle_property(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         """Single property by object ID. DELETE detaches the field from
         every type that carries it (live-confirmed 2026-07-15) and frees
         the key for re-creation under a new format (quirk A12)."""
@@ -1137,7 +1137,7 @@ class MockAnytype:
         if prop is None:
             return self._error(404, "object_not_found")
         if request.method == "GET":
-            return httpx2.Response(200, json={"property": prop})
+            return httpx.Response(200, json={"property": prop})
         if request.method != "DELETE":
             return self._error(405, "method_not_allowed")
         del self._properties[prop["key"]]
@@ -1147,9 +1147,9 @@ class MockAnytype:
                 p for p in entry.get("properties", [])
                 if p.get("key") != prop["key"]
             ]
-        return httpx2.Response(200, json={"property": prop})
+        return httpx.Response(200, json={"property": prop})
 
-    def _handle_tags(self, request: httpx2.Request, match: re.Match[str]) -> httpx2.Response:
+    def _handle_tags(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         """Select/multi_select options (ADR 012). Addressed by property ID --
         the live route 404s on a property KEY ("invalid property id")."""
         prop = next(
@@ -1157,7 +1157,7 @@ class MockAnytype:
             None,
         )
         if prop is None:
-            return httpx2.Response(404, json={
+            return httpx.Response(404, json={
                 "code": "object_not_found", "message": "invalid property id",
                 "object": "error", "status": 404,
             })
@@ -1168,7 +1168,7 @@ class MockAnytype:
             body = json.loads(request.content)
             if not body.get("color"):
                 # CreateTagRequest.Color is REQUIRED (live-confirmed).
-                return httpx2.Response(400, json={
+                return httpx.Response(400, json={
                     "code": "bad_request", "object": "error", "status": 400,
                     "message": "Key: 'CreateTagRequest.Color' Error:Field "
                                "validation for 'Color' failed on the "
@@ -1183,12 +1183,12 @@ class MockAnytype:
             tags.append(tag)
             if self.tag_settle_writes > 0:
                 self._tag_settling[tag["key"]] = self.tag_settle_writes
-            return httpx2.Response(201, json={"tag": tag})
+            return httpx.Response(201, json={"tag": tag})
         return self._error(405, "method_not_allowed")
 
     def _resolve_select_values(
         self, entries: list[dict[str, Any]]
-    ) -> httpx2.Response | None:
+    ) -> httpx.Response | None:
         """Validate + normalize select/multi_select entries in a write.
 
         Live behavior (ADR 012 spikes): the value must reference an EXISTING
@@ -1218,7 +1218,7 @@ class MockAnytype:
                     self._tag_settling[tag["key"]] -= 1
                     tag = None  # settle window still open: reject as invalid
                 if tag is None:
-                    return httpx2.Response(400, json={
+                    return httpx.Response(400, json={
                         "code": "bad_request", "object": "error", "status": 400,
                         "message": f'bad input: invalid select option for '
                                    f'"{entry.get("key")}": {raw}',
@@ -1229,7 +1229,7 @@ class MockAnytype:
                 for raw in entry.get("multi_select") or []:
                     tag = find(raw, tags)
                     if tag is None:
-                        return httpx2.Response(400, json={
+                        return httpx.Response(400, json={
                             "code": "bad_request", "object": "error", "status": 400,
                             "message": f'bad input: invalid multi_select option '
                                        f'for "{entry.get("key")}": {raw}',
@@ -1240,7 +1240,7 @@ class MockAnytype:
 
     def _resolve_date_values(
         self, entries: list[dict[str, Any]]
-    ) -> httpx2.Response | None:
+    ) -> httpx.Response | None:
         """Validate + normalize date-format entries in a write.
 
         Live behavior (WP31 R2 probe, 2026-07-19): a date property
@@ -1314,13 +1314,13 @@ class MockAnytype:
         return {**obj, "markdown": f"{description}\n{obj.get('markdown', '')}"}
 
     def _paginated(
-        self, items: list[dict[str, Any]], params: httpx2.QueryParams, *, cap: int | None = None
-    ) -> httpx2.Response:
+        self, items: list[dict[str, Any]], params: httpx.QueryParams, *, cap: int | None = None
+    ) -> httpx.Response:
         offset = int(params.get("offset", 0))
         requested = int(params.get("limit", 100))
         limit = min(requested, cap) if cap is not None else requested
         page = items[offset : offset + limit]
-        return httpx2.Response(200, json={
+        return httpx.Response(200, json={
             "data": page,
             "pagination": {
                 "total": len(items), "offset": offset, "limit": limit,
@@ -1348,8 +1348,8 @@ class MockAnytype:
     @staticmethod
     def _error(
         status: int, code: str, message: str | None = None
-    ) -> httpx2.Response:
-        return httpx2.Response(status, json={
+    ) -> httpx.Response:
+        return httpx.Response(status, json={
             "code": code, "message": message or code.replace("_", " "),
             "object": "error", "status": status,
         })

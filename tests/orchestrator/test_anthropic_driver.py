@@ -489,10 +489,10 @@ class TestRequestShape:
 
             async def _create(self, **kwargs):
                 import anthropic
-                import httpx2
+                import httpx
 
                 raise anthropic.APIConnectionError(
-                    request=httpx2.Request("POST", "https://api.anthropic.com")
+                    request=httpx.Request("POST", "https://api.anthropic.com")
                 )
 
         driver = AnthropicDriver(schemas={}, client=_FailingClient())

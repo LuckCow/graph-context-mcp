@@ -5,8 +5,13 @@ description = "MCP server exposing a knowledge graph (story worlds, work knowled
 requires-python = ">=3.11"
 dependencies = [
     # domain stays dependency-free; these are infrastructure/interface-only
-    "httpx2>=2.5,<3",
-    "mcp>=2,<3",
+    "httpx>=0.27,<1",
+    # Capped below 2 on purpose: claude-agent-sdk's in-process MCP servers
+    # (the subscription driver's whole tool surface) are written against
+    # mcp 1.x's low-level Server -- the `list_tools`/`call_tool` decorators
+    # and the `request_handlers` dict, both removed in v2. The SDK declares
+    # an unbounded `mcp>=1.23`, so nothing but this cap holds the line.
+    "mcp>=1.2,<2",
     "sentence-transformers>=3",   # ADR 014: local embedder, model baked into the image
 ]
 

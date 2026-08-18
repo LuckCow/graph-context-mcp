@@ -1,10 +1,9 @@
-"""The MCP wrappers stay in lockstep with the tool implementations.
+"""The FastMCP wrappers stay in lockstep with the tool implementations.
 
 Found live (WP15): `context` gained `text`/`detail` in ``tools.py`` but the
-hand-written wrapper in ``server.py`` kept the old parameter list -- and the
-tool schema is derived from the wrapper's signature, so an undeclared
-argument **can never reach** the implementation: the LLM's `note` text
-vanished without an error. The unit suite couldn't see
+hand-written wrapper in ``server.py`` kept the old parameter list -- and
+FastMCP **silently drops** arguments the wrapper doesn't declare, so the
+LLM's `note` text vanished without an error. The unit suite couldn't see
 it because it drives ``tools.py`` directly; only the real MCP surface
 showed it. This test makes the drift unrepresentable: every parameter of
 each tool implementation (minus ``services``) must appear on its wrapper
@@ -49,31 +48,8 @@ def test_wrapper_signature_matches_the_implementation(tool_name: str) -> None:
     implementation = getattr(tools, f"{tool_name}_tool")
     assert _api_params(wrapper, "ctx") == _api_params(implementation, "services"), (
         f"server.{tool_name} and tools.{tool_name}_tool have drifted; "
-        "the tool schema comes from the wrapper's signature, so update the "
+        "FastMCP silently drops undeclared arguments, so update the "
         "wrapper whenever the tool implementation's surface changes"
-    )
-
-
-async def test_ctx_never_reaches_the_published_tool_schema() -> None:
-    """`ctx` is injected by the SDK, never asked of the model.
-
-    The SDK picks the context parameter by ANNOTATION
-    (``find_context_parameter``): an annotation it doesn't recognize
-    silently demotes ``ctx`` to an ordinary tool argument, so the schema
-    would ask the LLM to supply a Context it has no way to produce. That
-    fails no import and no signature check -- only the published schema
-    shows it. Pinned when mcp 2 made Context's lifespan type parameter
-    default to ``dict[str, Any]`` and the annotations had to change.
-    """
-    published = await server.mcp.list_tools()
-    assert {t.name for t in published} == set(TOOL_NAMES)
-    leaked = [
-        t.name for t in published
-        if "ctx" in (t.input_schema or {}).get("properties", {})
-    ]
-    assert not leaked, (
-        f"{leaked} advertise `ctx` as a tool parameter; the wrapper's "
-        "Context annotation is no longer recognized by the MCP SDK"
     )
 
 
@@ -86,3 +62,27 @@ def test_wrappers_never_advertise_retired_params() -> None:
             ).parameters.values()
         }
         assert not wrapper_params & _RETIRED_IMPL_ONLY
+
+
+async def test_ctx_never_reaches_the_published_tool_schema() -> None:
+    """`ctx` is injected by the SDK, never asked of the model.
+
+    FastMCP picks the context parameter by ANNOTATION: an annotation it
+    doesn't recognize silently demotes ``ctx`` to an ordinary tool
+    argument, so the schema would ask the LLM to supply a Context it has
+    no way to produce. That fails no import and no signature check --
+    only the published schema shows it. Worth pinning because the
+    annotation is exactly what a version migration rewrites: the mcp 2
+    attempt reparametrized every one of these, and the revert put them
+    back.
+    """
+    published = await server.mcp.list_tools()
+    assert {t.name for t in published} == set(TOOL_NAMES)
+    leaked = [
+        t.name for t in published
+        if "ctx" in (t.inputSchema or {}).get("properties", {})
+    ]
+    assert not leaked, (
+        f"{leaked} advertise `ctx` as a tool parameter; the wrapper's "
+        "Context annotation is no longer recognized by the MCP SDK"
+    )

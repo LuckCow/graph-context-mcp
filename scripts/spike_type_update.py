@@ -30,7 +30,7 @@ import os
 import sys
 import time
 
-import httpx2
+import httpx
 
 API_VERSION = "2025-11-08"
 SPACE_NAME = "GC-E2E"
@@ -62,7 +62,7 @@ def main() -> None:
 
     def request(method: str, path: str, **kw):
         for attempt in range(8):
-            r = httpx2.request(method, f"{base}{path}", headers=headers,
+            r = httpx.request(method, f"{base}{path}", headers=headers,
                               timeout=30, **kw)
             if r.status_code not in (429, 500, 502, 503, 504):
                 return r
