@@ -22,10 +22,10 @@ import pytest
 from graph_context.interface import server, tools
 from graph_context.interface.profiles import TOOL_NAMES
 
-# ADR 042: the write tools keep the RETIRED params as explicit
-# implementation-only arguments (an old-shape call gets a self-correcting
-# redirect instead of an opaque error). They are deliberately absent from
-# the MCP wrappers -- the schema must not advertise them.
+# ADR 042: the write tools ABSORB the retired params through a **kwargs
+# catch-all rather than declaring them (an old-shape call gets a
+# self-correcting redirect instead of an opaque error). A catch-all
+# declares no argument, so it is not part of either surface.
 _RETIRED_IMPL_ONLY = frozenset(tools._RETIRED_WRITE_PARAMS)
 
 
@@ -38,7 +38,7 @@ def _api_params(fn: object, skip_first: str) -> list[tuple[str, object, str]]:
     return [
         (p.name, p.default, " ".join(str(p.annotation).split()))
         for p in params[1:]
-        if p.name not in _RETIRED_IMPL_ONLY
+        if p.kind is not inspect.Parameter.VAR_KEYWORD
     ]
 
 
@@ -53,15 +53,19 @@ def test_wrapper_signature_matches_the_implementation(tool_name: str) -> None:
     )
 
 
-def test_wrappers_never_advertise_retired_params() -> None:
+def test_neither_surface_advertises_retired_params() -> None:
+    """ADR 042's retired names must reach neither the wrapper nor the
+    implementation signature: both are published surfaces (the MCP
+    schema comes from one, the drivers' derived schemas from the other),
+    and a published retired param teaches the model to send it."""
     for tool_name in ("create_node", "update_node"):
-        wrapper_params = {
-            p.name
-            for p in inspect.signature(
-                getattr(server, tool_name)
-            ).parameters.values()
-        }
-        assert not wrapper_params & _RETIRED_IMPL_ONLY
+        for fn in (getattr(server, tool_name), getattr(tools, f"{tool_name}_tool")):
+            declared = {
+                p.name
+                for p in inspect.signature(fn).parameters.values()
+                if p.kind is not inspect.Parameter.VAR_KEYWORD
+            }
+            assert not declared & _RETIRED_IMPL_ONLY, fn
 
 
 async def test_ctx_never_reaches_the_published_tool_schema() -> None:

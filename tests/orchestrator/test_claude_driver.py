@@ -15,6 +15,7 @@ pytest.importorskip("claude_agent_sdk")
 
 from claude_agent_sdk import ResultMessage  # noqa: E402
 
+from graph_context.interface import tools  # noqa: E402
 from graph_context.orchestrator import modes  # noqa: E402
 from graph_context.orchestrator.claude_driver import (  # noqa: E402
     WEB_SEARCH_TOOL,
@@ -71,6 +72,22 @@ class TestSchemaDerivation:
             assert schema["type"] == "object", name
             assert schema["additionalProperties"] is False, name
             assert schema["properties"], name
+
+    def test_derived_schemas_never_advertise_retired_params(self):
+        """Found live: the MCP wrappers omit ADR 042's retired params,
+        but the drivers derive schemas from the IMPLEMENTATIONS, so the
+        retired vocabulary was published to the model beside the surface
+        that replaced it -- the redirect teaching the old shape."""
+        retired = set(tools._RETIRED_WRITE_PARAMS)
+        for name, fn in modes.full_surface().items():
+            published = set(derive_schema(fn)["properties"])
+            assert not published & retired, name
+
+    def test_a_catch_all_never_becomes_a_published_parameter(self):
+        async def sample(services, name: str, **retired) -> str:
+            return ""
+
+        assert list(derive_schema(sample)["properties"]) == ["name"]
 
 
 class TestToolRegistration:
