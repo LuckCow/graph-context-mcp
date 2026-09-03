@@ -161,15 +161,17 @@ class TestAnytypeLiveRepository(GraphRepositoryContract):
         motto_key = repo.registry.field_property(motto).key
         assert node.fields[motto_key] == "hold fast"
         # A11: the addition must not strip the create-time properties.
-        await repo.add_type_properties(
+        _, attached = await repo.add_type_properties(
             type_name, (PropertyDraft(name=gauge, format="number"),)
         )
+        assert attached == (gauge,)  # names what it actually landed (ADR 061)
         names = {s.name for s in repo.field_catalog().get(type_name, ())}
         assert {motto, gauge} <= names
         # Retry safety + the A12 conflict, live.
-        await repo.add_type_properties(
+        _, attached = await repo.add_type_properties(
             type_name, (PropertyDraft(name=gauge, format="number"),)
         )
+        assert attached == ()  # already on the type -- honest no-op
         with pytest.raises(SchemaChangeConflict, match="immutable"):
             await repo.add_type_properties(
                 type_name, (PropertyDraft(name=gauge, format="date"),)

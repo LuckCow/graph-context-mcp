@@ -527,6 +527,42 @@ class FieldCatalogContract:
         }
         assert "Assignee" not in rendered
 
+    async def test_relation_catalog_lists_a_types_attached_relations(
+        self, catalog_repo
+    ):
+        """The sibling surface the overview merges in (ADR 042): the
+        type's own writable relations, tagged ``objects``, so the model
+        can see and reuse them instead of re-proposing."""
+        item = {s.name: s.format for s in catalog_repo.relation_catalog()["Item"]}
+        assert item == {"Assignee": "objects", "Linked Projects": "objects"}
+
+    async def test_relation_catalog_excludes_read_only_relations(
+        self, catalog_repo
+    ):
+        """``links`` is attached to Item and reads as edges, but the store
+        refuses to be written through it -- like ``relation_label_for``,
+        the catalog never offers it."""
+        everywhere = {
+            s.name
+            for specs in catalog_repo.relation_catalog().values()
+            for s in specs
+        }
+        assert "links" not in everywhere
+
+    async def test_relation_catalog_buckets_unattached_space_relations(
+        self, catalog_repo
+    ):
+        """An ``objects`` relation no type carries surfaces under
+        ``"(any type)"`` (attachable via a declaration), never bare on a
+        type; scalars and ``gc_`` starters stay out."""
+        any_type = {
+            s.name for s in catalog_repo.relation_catalog().get("(any type)", ())
+        }
+        assert "Linked Project" in any_type
+        assert "Linked Projects" not in any_type  # it IS attached to Item
+        assert "Priority" not in any_type  # a scalar
+        assert "knows" not in any_type  # a gc_edge_* starter
+
     async def test_unmatched_key_on_create_errors_with_guidance(self, catalog_repo):
         with pytest.raises(UnknownFieldKey) as err:
             await catalog_repo.create_node(
@@ -1092,6 +1128,28 @@ class SchemaChangeContract:
         )
         specs = schema_repo.field_catalog().get("Faction", ())
         assert sum(1 for s in specs if s.name == "Motto") == 1
+
+    async def test_add_type_properties_reports_what_it_actually_attached(
+        self, schema_repo
+    ):
+        """The WP33 loop fix: the return names only the properties this
+        call landed -- empty when they were all already there -- so the
+        caller reports an honest no-op instead of a phantom success."""
+        await schema_repo.create_type(
+            "Faction", properties=(PropertyDraft(name="Motto", format="text"),)
+        )
+        name, attached = await schema_repo.add_type_properties(
+            "Faction", (
+                PropertyDraft(name="Motto", format="text"),
+                PropertyDraft(name="Influence", format="number"),
+            )
+        )
+        assert name == "Faction"
+        assert attached == ("Influence",)  # Motto was already on the type
+        name, attached = await schema_repo.add_type_properties(
+            "Faction", (PropertyDraft(name="Motto", format="text"),)
+        )
+        assert attached == ()
 
     async def test_readding_under_another_format_conflicts(self, schema_repo):
         await schema_repo.create_type(

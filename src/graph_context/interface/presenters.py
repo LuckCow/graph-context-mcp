@@ -31,18 +31,22 @@ EXCERPT_CHARS = 300  # provenance excerpts; tune by dogfooding
 def render_overview(
     overview: GraphOverview,
     field_catalog: Mapping[str, tuple[FieldSpec, ...]] | None = None,
+    relation_catalog: Mapping[str, tuple[FieldSpec, ...]] | None = None,
 ) -> str:
     """Render the cold-start entry-point map (``context action='overview'``).
 
     Ids are the last token before the colon on every hub line, so the LLM
     can copy one straight into ``explore`` / ``get_node`` / ``hold``.
 
-    ``field_catalog`` (ADR 023) appends each type's scalar properties --
-    the vocabulary create/update ``properties`` keys should reuse.
-    Rendered even for zero-instance types (that is exactly when the
-    guidance matters) and on an empty graph.
+    ``field_catalog`` (ADR 023) and ``relation_catalog`` (ADR 042) list
+    each type's properties -- scalars and ``objects`` relations alike --
+    as the vocabulary create/update ``properties`` keys should reuse.
+    They render in one block per type; relations carry the ``(objects)``
+    tag so their value shape (a node id/name) is clear. Rendered even for
+    zero-instance types (that is exactly when the guidance matters) and on
+    an empty graph.
     """
-    catalog_lines = _render_field_catalog(field_catalog)
+    catalog_lines = _render_field_catalog(field_catalog, relation_catalog)
     if overview.total_story_nodes == 0:
         return "\n".join(
             [
@@ -69,15 +73,20 @@ def render_overview(
 
 
 def _render_field_catalog(
-    catalog: Mapping[str, tuple[FieldSpec, ...]] | None,
+    fields: Mapping[str, tuple[FieldSpec, ...]] | None,
+    relations: Mapping[str, tuple[FieldSpec, ...]] | None = None,
 ) -> list[str]:
-    if not catalog:
+    """One "properties by type" block from the scalar and relation
+    catalogs merged: per type, scalars first, then ``objects`` relations
+    (ADR 042 -- both are ``properties`` keys)."""
+    fields = fields or {}
+    relations = relations or {}
+    if not fields and not relations:
         return []
     lines = ["properties by type (usable as properties keys on create/update):"]
-    for type_name in sorted(catalog):
-        rendered = ", ".join(
-            f"{spec.name} ({spec.format})" for spec in catalog[type_name]
-        )
+    for type_name in sorted(fields.keys() | relations.keys()):
+        specs = (*fields.get(type_name, ()), *relations.get(type_name, ()))
+        rendered = ", ".join(f"{s.name} ({s.format})" for s in specs)
         if type_name == "(any type)":
             lines.append(
                 f"- (any type) -- space-level, not yet on a type; usable "

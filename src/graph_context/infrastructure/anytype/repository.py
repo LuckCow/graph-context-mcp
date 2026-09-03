@@ -276,6 +276,36 @@ class AnytypeGraphRepository:
             catalog["(any type)"] = unclaimed
         return catalog
 
+    def relation_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
+        """Writable ``objects`` relations per non-infra type (ADR 006 +
+        ADR 042): the sibling of :meth:`field_catalog` for edges. Since
+        ADR 042 a relation label is usable as a ``properties`` key just
+        like a scalar, so the overview lists both together -- hiding the
+        type's relations is what drove the WP33 re-proposal loop. Kept a
+        separate method because the rule engine consumes ``field_catalog``
+        and must stay scalar-only. ``"(any type)"`` carries space
+        relations no type claims (attachable via a declaration)."""
+        catalog: dict[str, tuple[FieldSpec, ...]] = {}
+        for type_key, info in self._registry.types_by_key.items():
+            role = self._registry.role_for(type_key)
+            if role in schema.INFRA_ROLES and role not in include_roles:
+                continue
+            rels = self._registry.attached_relations(type_key)
+            if rels:
+                catalog[info.name] = tuple(
+                    FieldSpec(name=p.name, format=p.format, key=p.key)
+                    for p in rels
+                )
+        unattached = tuple(
+            FieldSpec(name=p.name, format=p.format, key=p.key)
+            for p in self._registry.unattached_relations()
+        )
+        if unattached:
+            catalog["(any type)"] = unattached
+        return catalog
+
     # -- sync -------------------------------------------------------------
 
     async def hydrate(self) -> None:
@@ -610,7 +640,7 @@ class AnytypeGraphRepository:
 
     async def add_type_properties(
         self, type_identifier: str, properties: Sequence[PropertyDraft]
-    ) -> str:
+    ) -> tuple[str, tuple[str, ...]]:
         key = self._registry.type_key_for(type_identifier)
         if key is None:
             raise UnknownNodeType(
@@ -631,6 +661,7 @@ class AnytypeGraphRepository:
                     if label:
                         on_type[str(label).strip().lower()] = entry
             additions: list[dict[str, Any]] = []
+            added_names: list[str] = []
             for draft in properties:
                 held = on_type.get(draft.name.strip().lower()) or on_type.get(
                     _slugify(draft.name)
@@ -646,8 +677,11 @@ class AnytypeGraphRepository:
                         )
                     continue  # already attached with this format: no-op
                 additions.append(self._property_entry(draft))
+                added_names.append(draft.name)
             if not additions:
-                return listed.name
+                # Every proposed property was already on the type: an
+                # honest no-op, not a silent success (WP33 loop fix).
+                return listed.name, ()
             # Quirk A11: the properties list replaces the type's fields
             # wholesale, so the full fetched list rides along with the
             # additions; name/plural_name/layout are resent verbatim
@@ -673,7 +707,7 @@ class AnytypeGraphRepository:
             "attached %d propert%s to type %r (WP33 user-confirmed change)",
             len(additions), "y" if len(additions) == 1 else "ies", info.name,
         )
-        return info.name
+        return info.name, tuple(added_names)
 
     def _property_entry(self, draft: PropertyDraft) -> dict[str, Any]:
         """One proposed property as a type-payload entry: reuse an existing

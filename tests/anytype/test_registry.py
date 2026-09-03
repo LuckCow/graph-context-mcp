@@ -202,3 +202,39 @@ class TestTypeScopedMatchers:
         keys = {p.key for p in reg.attached_relations("task")}
         assert keys == {"linked_projects"}  # backlinks stays hidden
         assert reg.attached_relation_key("task", "Backlinks") is None
+
+    def test_attached_relations_exclude_read_only_relations(self) -> None:
+        """``links`` reads as edges but the store refuses writes through it
+        -- it never joins the bare-usable / overview vocabulary."""
+        reg = SpaceRegistry(
+            types_by_key={
+                "task": TypeInfo("task", "Task", properties=(
+                    PropertyInfo("linked_projects", "Linked Projects", "objects"),
+                    PropertyInfo("links", "links", "objects"),
+                )),
+            },
+        )
+        assert {p.key for p in reg.attached_relations("task")} == {
+            "linked_projects"
+        }
+
+    def test_unattached_relations_bucket_excludes_claimed_and_gc(self) -> None:
+        reg = SpaceRegistry(
+            types_by_key={
+                "task": TypeInfo("task", "Task", properties=(
+                    PropertyInfo("linked_projects", "Linked Projects", "objects"),
+                )),
+            },
+            properties_by_key={
+                "linked_projects": PropertyInfo(
+                    "linked_projects", "Linked Projects", "objects"
+                ),
+                "linked_project": PropertyInfo(
+                    "linked_project", "Linked Project", "objects"
+                ),
+                "priority": PropertyInfo("priority", "Priority", "number"),
+                "gc_edge_knows": PropertyInfo("gc_edge_knows", "knows", "objects"),
+                "links": PropertyInfo("links", "links", "objects"),
+            },
+        )
+        assert {p.key for p in reg.unattached_relations()} == {"linked_project"}

@@ -211,6 +211,25 @@ class GraphRepository(Protocol):
         """
         ...
 
+    def relation_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
+        """Writable ``objects`` relations per type display name -- the
+        sibling of :meth:`field_catalog` for edges.
+
+        Since ADR 042 a relation label is usable as a ``properties`` key
+        exactly like a scalar, so the overview lists both (hiding a type's
+        relations drove the WP33 re-proposal loop). Kept separate from
+        ``field_catalog`` because the rule engine consumes that one and
+        must stay scalar-only. Excludes ``domain.schema.READ_ONLY_RELATIONS``
+        (``links``) and the system denylist -- only relations a write can
+        actually go through. ``"(any type)"`` carries space relations no
+        type claims (attachable via a ``create_missing_properties``
+        declaration). Same ``include_roles`` rule as ``field_catalog``;
+        may be empty for backends without a space schema.
+        """
+        ...
+
     async def create_type(
         self,
         name: str,
@@ -239,7 +258,7 @@ class GraphRepository(Protocol):
 
     async def add_type_properties(
         self, type_identifier: str, properties: Sequence[PropertyDraft]
-    ) -> str:
+    ) -> tuple[str, tuple[str, ...]]:
         """Attach new properties to an existing type (WP33; objects
         drafts legal per ADR 042, same semantics as :meth:`create_type`).
 
@@ -251,7 +270,12 @@ class GraphRepository(Protocol):
         adapter resends the fetched list plus the additions). Same reuse/
         conflict semantics as :meth:`create_type`; a draft already on the
         type with a matching format is a no-op, so a confirmed proposal
-        can be retried safely. Returns the type's display name.
+        can be retried safely.
+
+        Returns ``(type display name, names of the properties this call
+        actually attached)``. The second element is empty when every
+        proposed property was already on the type -- the caller reports an
+        honest "no change" instead of a phantom success (WP33 loop fix).
         """
         ...
 
