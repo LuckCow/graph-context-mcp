@@ -20,6 +20,7 @@ Single file / test: `pytest tests/unit/test_traversal.py -k explore` (pythonpath
 | `tests/anytype` | Adapter specifics: mapping, registry, sync, client, mock-server fidelity |
 | `tests/application` / `tests/interface` / `tests/orchestrator` | Use-cases, tool surface + presenters, harness pipeline/transports |
 | `tests/semantic` | Embedders, semantic index, ranker; ranking eval golden at `tests/semantic/ranking_eval.toml` |
+| `tests/imports` | The directory import source (ADR 062): cached decodes, torn mid-write reads, a vanished directory. The mapper's fixtures are one real RuneLite export set under `tests/fixtures/runescape/` |
 | `tests/evals` | The eval harness's own plumbing, scripted (no model): dataset validation, grader honesty, every shipped case's reference script replayed |
 | `tests/e2e` | The contract suite against a **real** Anytype server; self-skips unless `ANYTYPE_E2E=1` |
 

@@ -2950,6 +2950,53 @@ started a second bot answering every production chat twice.
 
 ---
 
+## WP54 — External snapshot imports: the game as a source of change (ADR 062) — **shipped 2026-09-06**
+
+**Status:** complete. The RuneScape test space's RuneLite plugin writes
+the character's state as JSON exports; the bot now mirrors them into
+native nodes and the existing Automation Rule engine fires on what the
+game changed. No second diff engine: the exports are upstream of the
+graph the way Anytype UI edits are.
+
+* **Pure planner + mapper** (`domain/imports.py`, `domain/runescape.py`).
+  `plan()` diffs desired nodes against the LIVE index: creates for what
+  the graph lacks, CHANGE-ONLY updates for values that differ, absence
+  writes (`absent_fields`) only for types a decoded document covered.
+  Values compare in read-back form through `domain.fields.lookup` — the
+  rule engine's read rule, lifted so the two cannot disagree. The
+  mapper turns six documents into seven types (~315 nodes on the real
+  export set): slot-keyed equipment (all eleven worn slots always
+  exist), per-name inventory holdings (zeroed on leaving the bag, never
+  deleted), tier-level combat achievements. Fixtures are one real
+  export set under `tests/fixtures/runescape/`.
+* **Port + adapter** (`ports/import_source.py`,
+  `infrastructure/imports/filesystem.py`). `read()` returns the current
+  decoded documents; the directory adapter re-decodes only files whose
+  `(mtime_ns, size)` moved, keeps the last good decode across a torn
+  mid-write read, and is loud only when the directory is missing.
+* **`SnapshotImporter`** (`application/snapshot_importer.py`).
+  `ensure_types` mints through the ADR 041 port methods (retry-safe
+  retrofit); `run_tick` reads, maps (a rejected document is skipped),
+  plans, applies straight to the repository — no `NodeWriter`, no
+  journal. Contract-tested on the open fake, the type-scoped fake, and
+  the mock-backed Anytype adapter.
+* **The game is the ground truth.** Reconciling graph-vs-source every
+  tick, as the change tick's FIRST listener (`imports` ahead of
+  `rules`), means a human's edit to an imported node is written back
+  before the rule engine diffs — never a transition, never a double
+  fire. Considered and rejected: source-vs-source diffing, where the
+  edit would stick until the game moved that leaf.
+* **Config is host config.** `import_dir` in the git-ignored
+  `spaces.toml` (ADR 060), `GC_IMPORT_DIR` on the single-runtime paths.
+  Bootstrap mints the types and runs the seed pass before any tick —
+  the engine's first baseline holds the game's values, nothing fires
+  on boot.
+* **Deferred, named in the ADR:** per-task combat achievement nodes; a
+  Character-hub relation set; a second export format (the `ImportFormat`
+  seam exists, the binding key does not name one).
+
+---
+
 ## Sequencing
 
 ```
