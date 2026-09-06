@@ -359,6 +359,7 @@ async def _assemble_runtime(
     space_id: str | None = None,
     project: str | None = None,
     modes_file: str | None = None,
+    import_dir: str | None = None,
 ) -> Runtime:
     """One fully wired runtime: services, provenance, mode registry.
 
@@ -378,6 +379,7 @@ async def _assemble_runtime(
     built = await composition.build_runtime(
         profile, journal=journal, space_id=space_id, project=project,
         modes_file=modes_file or os.environ.get("GC_MODES_FILE"),
+        import_dir=import_dir,
     )
     services = built.services
     recorder = (
@@ -396,6 +398,22 @@ async def _assemble_runtime(
     # guard (sessions derive through services_for AFTER this point; the
     # bare MCP server never sets it -- no guard there, per ADR 049).
     services.historian = historian
+    # WP54 (ADR 062): mirror the external exports BEFORE any tick runs.
+    # Types mint once (retrofit on later starts); the first pass writes
+    # every node the space lacks. The rule engine has not baselined yet,
+    # so this seed can never read as transitions -- nothing fires on
+    # boot, exactly like a restart with no importer.
+    importer = built.importer
+    if importer is not None:
+        minted = await importer.ensure_types()
+        if minted:
+            logger.info("import types created: %s", ", ".join(minted))
+        report = await importer.run_tick()
+        logger.info(
+            "import seed: %d created, %d updated from %d document(s)"
+            "%s", report.created, report.updated, report.documents,
+            f"; {len(report.failed)} failed" if report.failed else "",
+        )
 
     async def reload_registry() -> modes.ModeRegistry:
         return modes.load_registry(
@@ -407,7 +425,7 @@ async def _assemble_runtime(
     orchestrator = Orchestrator(
         services=services, driver=driver, profile=profile,
         registry=registry, provenance=recorder, historian=historian,
-        model_name=model_name,
+        importer=importer, model_name=model_name,
         reload_registry=reload_registry, turn_log=turn_log,
         services_for=built.services_for,  # WP8: per-session-key Services
     )
@@ -440,7 +458,10 @@ async def build_orchestrator() -> Runtime:
     turn_log = build_turn_log()
     driver, model_name, help_line = build_driver(turn_log)
     return await _assemble_runtime(
-        profile, driver, model_name, help_line, turn_log
+        profile, driver, model_name, help_line, turn_log,
+        # ADR 062: the single-runtime paths (CLI, Discord allowlist) take
+        # the directory from the environment; space bindings name theirs.
+        import_dir=os.environ.get("GC_IMPORT_DIR"),
     )
 
 
@@ -560,7 +581,7 @@ async def build_space_runtimes(
             runtime = await _assemble_runtime(
                 binding.profile, driver, model_name, help_line, turn_log,
                 space_id=binding.space_id, project=binding.project,
-                modes_file=binding.modes_file,
+                modes_file=binding.modes_file, import_dir=binding.import_dir,
             )
         except GraphContextError as err:
             await composition.run_teardown(teardown)  # close what already built

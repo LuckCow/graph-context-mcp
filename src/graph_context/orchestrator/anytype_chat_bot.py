@@ -66,6 +66,9 @@ from pathlib import Path
 from graph_context import composition
 from graph_context.application.rule_engine import describe_firing, describe_problem
 from graph_context.application.scheduler import DueEvent
+from graph_context.application.snapshot_importer import (
+    describe_report as describe_import,
+)
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import (
     AnytypeChatClient,
@@ -832,12 +835,22 @@ async def _watch_changes(
 def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
     """The unified tick's reactions, in order (ADR 044).
 
-    Rules run first -- reaction latency is their 5s contract (ADR 039) --
+    Imports run first (WP54, ADR 062): the game's exports are written
+    into the graph BEFORE the rule engine diffs it, so a rule fires on
+    the game's value and a human's edit to an imported node is clobbered
+    before it can read as a transition (a no-op when nothing is bound).
+    Then rules -- reaction latency is their 5s contract (ADR 039) --
     then the mode-registry refresh (fingerprint-gated, free on the
     no-change tick), then the revision historian (WP41: compares changed
     tracked nodes to its baselines; free when nothing tracked changed).
     Names are for the watcher's per-listener failure logs.
     """
+
+    async def imports(_changed: frozenset[str]) -> None:
+        report = await route.orchestrator.import_tick()
+        if report is not None:
+            for line in describe_import(report):
+                logger.info("%s", line)
 
     async def rules(_changed: frozenset[str]) -> None:
         report = await route.orchestrator.rule_tick()
@@ -857,7 +870,10 @@ def _change_listeners(route: ChannelRoute) -> list[tuple[str, ChangeListener]]:
         # WP41 (ADR 049): human edits to tracked nodes become revisions.
         await route.orchestrator.history_tick(changed)
 
-    return [("rules", rules), ("modes", refresh_modes), ("history", history)]
+    return [
+        ("imports", imports), ("rules", rules),
+        ("modes", refresh_modes), ("history", history),
+    ]
 
 
 async def run(prose: ProseBridge | None = None) -> None:

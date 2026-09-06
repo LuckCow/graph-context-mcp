@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
+import os
 from pathlib import Path
 
 import pytest
 
-from graph_context.domain.models import NodeDraft
+from graph_context.domain.models import NodeDraft, PropertyDraft
 from graph_context.domain.session import SessionState
 from graph_context.errors import GraphContextError
 from graph_context.infrastructure.anytype.chat import AnytypeChatClient
@@ -528,6 +530,87 @@ class TestChangeWatcher:
                     rules.FIELD_RUN_NOW
                 ) != "false":
                     await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    def test_imports_react_before_rules(self) -> None:
+        """ADR 062: the game's values must be in the graph before the
+        rule engine diffs it, so the listener order is load-bearing."""
+        route, _ = self._route()
+        names = [name for name, _ in _change_listeners(route)]
+        assert names[:2] == ["imports", "rules"]
+
+    async def test_a_changed_export_file_fires_a_rule_and_a_human_edit_never_does(
+        self, tmp_path: Path
+    ) -> None:
+        """ADR 062 end to end: the plugin rewrites character.json, the
+        imports listener writes the new level, the rules listener fires
+        on it in the same tick. A human bumping the level in Anytype is
+        reconciled BEFORE the diff, so the engine never sees it."""
+        from graph_context.application.snapshot_importer import SnapshotImporter
+        from graph_context.domain import rules
+        from graph_context.domain.fields import lookup
+        from graph_context.domain.runescape import RuneScapeExports
+        from graph_context.infrastructure.imports.filesystem import (
+            DirectoryImportSource,
+        )
+
+        def export(level: int, mtime_ns: int) -> None:
+            path = tmp_path / "character.json"
+            path.write_text(json.dumps({
+                "account_name": "LuckCow",
+                "stats": {"Attack": {
+                    "real_level": level, "boosted_level": level, "experience": 1,
+                }},
+            }))
+            os.utime(path, ns=(mtime_ns, mtime_ns))
+
+        route, repository = self._route()
+        await repository.create_node(NodeDraft(
+            type="gc_rule", name="on level", summary="s",
+            fields={
+                rules.FIELD_TARGET_TYPE: "Skill",
+                rules.FIELD_WATCH_PROPERTY: "Level",
+                rules.FIELD_CONDITION: "Changed",
+                rules.FIELD_ACTION: "Set property value",
+                rules.FIELD_ACTION_PROPERTY: "Leveled",
+                rules.FIELD_ACTION_VALUE: "yes",
+            },
+        ))
+        export(82, 1_000)
+        importer = SnapshotImporter(
+            repository, DirectoryImportSource(tmp_path), RuneScapeExports()
+        )
+        await importer.ensure_types()
+        # A human-owned property beside the imported ones: the rule marks
+        # it and the importer, which never writes it, leaves it alone.
+        await repository.add_type_properties("Skill", [PropertyDraft("Leveled", "text")])
+        await importer.run_tick()  # the bootstrap's startup seed
+        route.orchestrator.importer = importer
+
+        def attack():  # type: ignore[no-untyped-def]
+            (node,) = repository.graph.find_by_name("Attack", node_type="Skill")
+            return node
+
+        def field(name: str) -> str:  # the shared read rule: keys may be slugs
+            return lookup(attack().fields, name)
+
+        watcher = self._watch(route)
+        try:
+            await asyncio.sleep(0.05)  # let the baseline tick land
+            await repository.update_node(attack().id, fields={"Level": "99"})
+            await asyncio.sleep(0.1)  # several ticks: clobbered, never fired
+            assert field("Level") == "82"
+            assert field("Leveled") == ""
+            export(83, 2_000)
+            try:
+                async with asyncio.timeout(5):
+                    while field("Leveled") != "yes":
+                        await asyncio.sleep(0.01)
+            except TimeoutError:
+                pytest.fail(f"rule never marked the skill; fields={dict(attack().fields)}")
+            assert field("Level") == "83"
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)

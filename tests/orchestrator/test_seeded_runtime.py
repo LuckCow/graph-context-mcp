@@ -62,6 +62,35 @@ async def test_a_modes_file_replaces_the_packaged_corpus(tmp_path) -> None:
     await composition.run_teardown(built.teardown)
 
 
+async def test_an_import_dir_wires_the_snapshot_importer(tmp_path) -> None:
+    """ADR 062: the runtime carries an importer over the bound directory
+    (the bootstrap seeds and ticks it); none bound, none built."""
+    (tmp_path / "character.json").write_text(
+        '{"account_name": "LuckCow", "stats": {"Attack": '
+        '{"real_level": 82, "boosted_level": 82, "experience": 1}}}'
+    )
+    built = await composition.build_runtime(
+        get_profile("fiction"), import_dir=str(tmp_path)
+    )
+    assert built.importer is not None
+    await built.importer.ensure_types()
+    report = await built.importer.run_tick()
+    assert report.created == 2  # the character + one skill
+    assert built.services.repository.graph.find_by_name("Attack", node_type="Skill")
+    await composition.run_teardown(built.teardown)
+
+    bare = await composition.build_runtime(get_profile("fiction"))
+    assert bare.importer is None
+    await composition.run_teardown(bare.teardown)
+
+
+async def test_a_missing_import_dir_fails_startup_loudly(tmp_path) -> None:
+    with pytest.raises(GraphContextError, match="import_dir"):
+        await composition.build_runtime(
+            get_profile("fiction"), import_dir=str(tmp_path / "nowhere")
+        )
+
+
 async def test_a_broken_seed_corpus_fails_startup_loudly(tmp_path) -> None:
     path = tmp_path / "broken.toml"
     path.write_text("[modes.broken]\nmutating = true\n")  # no goal

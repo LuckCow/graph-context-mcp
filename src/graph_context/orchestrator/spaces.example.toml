@@ -21,6 +21,13 @@
 #                  single-chat deployment). Mutually exclusive with
 #                  exclude_chats.
 #   exclude_chats  list of chat ids the bot ignores; serve everything else.
+#   import_dir     a directory of RuneLite JSON exports (character, quests,
+#                  diaries, combat_achievements, equipment, inventory) the
+#                  space MIRRORS (ADR 062): nodes are created on first
+#                  boot and reconciled change-only every change tick, so
+#                  Automation Rules fire on what the game changed. The
+#                  game is the ground truth -- edits to imported nodes in
+#                  Anytype are written back on the next tick.
 #
 # The mode NEW chats start in is NOT set here (ADR 034): link an Activity
 # Mode object on the space's own "Space Context" object instead.

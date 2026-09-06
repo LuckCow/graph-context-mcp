@@ -47,6 +47,22 @@ class TestLoadSpaceBindings:
         assert binding.modes_file == "todo.toml"
         assert binding.chat_id == "bafychat"
 
+    def test_import_dir_is_kept_verbatim_and_defaults_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        """ADR 062: which host directory a space mirrors is deployment
+        config, so it lives here beside the other per-host keys."""
+        path = _write(tmp_path, f'[spaces."{SPACE}"]\nimport_dir = "/data/rs"\n')
+        (binding,) = load_space_bindings(path, default_profile=None)
+        assert binding.import_dir == "/data/rs"
+        bare = _write(tmp_path, f'[spaces."{SPACE}"]\n')
+        assert load_space_bindings(bare, default_profile=None)[0].import_dir is None
+
+    def test_an_empty_import_dir_is_refused(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, f'[spaces."{SPACE}"]\nimport_dir = "  "\n')
+        with pytest.raises(GraphContextError, match="import_dir"):
+            load_space_bindings(path, default_profile=None)
+
     def test_retired_default_mode_key_points_at_the_space_context(
         self, tmp_path: Path
     ) -> None:
