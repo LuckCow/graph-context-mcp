@@ -1,0 +1,134 @@
+{
+  "exported_at": "2026-09-06T17:28:32.913204300-04:00",
+  "plugin_version": "0.6.0",
+  "session_id": "47eb661f-910f-4ffa-95d2-82e92e434776",
+  "reason": "stat_changed",
+  "account_name": "LuckCow",
+  "world": 369,
+  "game_state": "LOGGED_IN",
+  "world_types": [
+    "MEMBERS"
+  ],
+  "stats": {
+    "Attack": {
+      "real_level": 82,
+      "boosted_level": 81,
+      "experience": 2439484
+    },
+    "Defence": {
+      "real_level": 70,
+      "boosted_level": 70,
+      "experience": 737658
+    },
+    "Strength": {
+      "real_level": 96,
+      "boosted_level": 103,
+      "experience": 10257196
+    },
+    "Hitpoints": {
+      "real_level": 92,
+      "boosted_level": 92,
+      "experience": 6727523
+    },
+    "Ranged": {
+      "real_level": 92,
+      "boosted_level": 82,
+      "experience": 6655643
+    },
+    "Prayer": {
+      "real_level": 69,
+      "boosted_level": 69,
+      "experience": 714728
+    },
+    "Magic": {
+      "real_level": 86,
+      "boosted_level": 81,
+      "experience": 3724574
+    },
+    "Cooking": {
+      "real_level": 77,
+      "boosted_level": 77,
+      "experience": 1554329
+    },
+    "Woodcutting": {
+      "real_level": 69,
+      "boosted_level": 69,
+      "experience": 732189
+    },
+    "Fletching": {
+      "real_level": 65,
+      "boosted_level": 65,
+      "experience": 483961
+    },
+    "Fishing": {
+      "real_level": 70,
+      "boosted_level": 70,
+      "experience": 781815
+    },
+    "Firemaking": {
+      "real_level": 60,
+      "boosted_level": 60,
+      "experience": 276185
+    },
+    "Crafting": {
+      "real_level": 72,
+      "boosted_level": 72,
+      "experience": 908972
+    },
+    "Smithing": {
+      "real_level": 71,
+      "boosted_level": 71,
+      "experience": 839568
+    },
+    "Mining": {
+      "real_level": 69,
+      "boosted_level": 69,
+      "experience": 711447
+    },
+    "Herblore": {
+      "real_level": 58,
+      "boosted_level": 58,
+      "experience": 225622
+    },
+    "Agility": {
+      "real_level": 72,
+      "boosted_level": 72,
+      "experience": 967368
+    },
+    "Thieving": {
+      "real_level": 62,
+      "boosted_level": 62,
+      "experience": 346148
+    },
+    "Slayer": {
+      "real_level": 63,
+      "boosted_level": 63,
+      "experience": 376361
+    },
+    "Farming": {
+      "real_level": 72,
+      "boosted_level": 72,
+      "experience": 939430
+    },
+    "Runecraft": {
+      "real_level": 50,
+      "boosted_level": 50,
+      "experience": 103461
+    },
+    "Hunter": {
+      "real_level": 64,
+      "boosted_level": 64,
+      "experience": 437319
+    },
+    "Construction": {
+      "real_level": 52,
+      "boosted_level": 52,
+      "experience": 124544
+    },
+    "Sailing": {
+      "real_level": 1,
+      "boosted_level": 1,
+      "experience": 0
+    }
+  }
+}

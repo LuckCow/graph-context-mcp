@@ -1,0 +1,391 @@
+{
+  "exported_at": "2026-09-06T17:03:51.624769900-04:00",
+  "plugin_version": "0.6.0",
+  "session_id": "47eb661f-910f-4ffa-95d2-82e92e434776",
+  "reason": "startup",
+  "summary": {
+    "tiers_complete": 7,
+    "tiers_possible": 48,
+    "note": "tasks_done counts are always available; named task lists require opening the diary journal in-game"
+  },
+  "diaries": {
+    "Ardougne": {
+      "easy": {
+        "complete": true,
+        "tasks_done": 10
+      },
+      "medium": {
+        "complete": true,
+        "tasks_done": 12
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 1
+      }
+    },
+    "Desert": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 0
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Falador": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 4
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 5
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Fremennik": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 3
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 0
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Kandarin": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 1
+      }
+    },
+    "Karamja": {
+      "easy": {
+        "complete": true,
+        "tasks_done": 2,
+        "tasks": [
+          {
+            "name": "Pick 5 bananas from the plantation east of the volcano",
+            "complete": false
+          },
+          {
+            "name": "Use the rope swing to reach Moss Giant Island north-west of Karamja",
+            "complete": false
+          },
+          {
+            "name": "Mine gold from the rocks on the north-west peninsula",
+            "complete": false
+          },
+          {
+            "name": "Travel to Port Sarim by boat from Musa Point",
+            "complete": false
+          },
+          {
+            "name": "Travel to Ardougne by charter ship from Musa Point",
+            "complete": false
+          },
+          {
+            "name": "Explore Cairn Island to the west of Karamja",
+            "complete": true
+          },
+          {
+            "name": "Fish at the south end of Karamja island",
+            "complete": false
+          },
+          {
+            "name": "Collect 5 seaweed from Karamja",
+            "complete": false
+          },
+          {
+            "name": "Enter the TzHaar Fight Cave",
+            "complete": true
+          },
+          {
+            "name": "Kill a Jogre in Pothole Dungeon",
+            "complete": false
+          }
+        ]
+      },
+      "medium": {
+        "complete": true,
+        "tasks_done": 6,
+        "tasks": [
+          {
+            "name": "Claim a ticket from the Agility Arena in Brimhaven",
+            "complete": false
+          },
+          {
+            "name": "Discover the hidden wall in the dungeon below the volcano",
+            "complete": true
+          },
+          {
+            "name": "Visit the Isle of Crandor via the dungeon below the volcano",
+            "complete": true
+          },
+          {
+            "name": "Use Vigroy and Hajedy's cart service",
+            "complete": false
+          },
+          {
+            "name": "Earn 100% favour in the Tai Bwo Wannai Cleanup",
+            "complete": false
+          },
+          {
+            "name": "Cook a spider on a stick",
+            "complete": false
+          },
+          {
+            "name": "Mine a red topaz from a gem rock",
+            "complete": true
+          },
+          {
+            "name": "Cut a log from a teak tree",
+            "complete": false
+          },
+          {
+            "name": "Cut a log from a mahogany tree",
+            "complete": false
+          },
+          {
+            "name": "Catch a karambwan",
+            "complete": false
+          },
+          {
+            "name": "Exchange gems for a machete with Gabooty",
+            "complete": false
+          },
+          {
+            "name": "Use the gnome glider to travel to Karamja",
+            "complete": false
+          },
+          {
+            "name": "Grow a healthy fruit tree in the patch near Brimhaven",
+            "complete": true
+          },
+          {
+            "name": "Trap a horned graahk",
+            "complete": false
+          },
+          {
+            "name": "Chop the vines to gain access to Brimhaven Dungeon",
+            "complete": true
+          },
+          {
+            "name": "Cross the lava using stepping stones within Brimhaven Dungeon",
+            "complete": true
+          },
+          {
+            "name": "Climb the stairs within Brimhaven Dungeon",
+            "complete": false
+          },
+          {
+            "name": "Charter the Lady of the Waves from Cairn Isle to Port Khazard",
+            "complete": false
+          },
+          {
+            "name": "Charter a ship from the shipyard in the far east of Karamja",
+            "complete": false
+          }
+        ]
+      },
+      "hard": {
+        "complete": true,
+        "tasks_done": 3,
+        "tasks": [
+          {
+            "name": "Become the champion of the Fight Pits",
+            "complete": false
+          },
+          {
+            "name": "Kill TzTok-Jad in the TzHaar Fight Cave",
+            "complete": true
+          },
+          {
+            "name": "Eat an Oomlie wrap",
+            "complete": false
+          },
+          {
+            "name": "Craft some nature runes from essence",
+            "complete": false
+          },
+          {
+            "name": "Cook a karambwan thoroughly",
+            "complete": false
+          },
+          {
+            "name": "Kill a deathwing in the dungeon under the Kharazi Jungle",
+            "complete": true
+          },
+          {
+            "name": "Use the crossbow shortcut south of the volcano",
+            "complete": false
+          },
+          {
+            "name": "Collect 5 palm leaves",
+            "complete": false
+          },
+          {
+            "name": "Be assigned a Slayer task by Duradel in Shilo Village",
+            "complete": false
+          },
+          {
+            "name": "Kill a metal dragon in Brimhaven Dungeon",
+            "complete": true
+          }
+        ]
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 1
+      }
+    },
+    "Kourend & Kebos": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 3
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Lumbridge & Draynor": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 3
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 3
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Morytania": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 2
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 3
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 0
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Varrock": {
+      "easy": {
+        "complete": true,
+        "tasks_done": 3
+      },
+      "medium": {
+        "complete": true,
+        "tasks_done": 1
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Western Provinces": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 14
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 13
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 1
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    },
+    "Wilderness": {
+      "easy": {
+        "complete": false,
+        "tasks_done": 4
+      },
+      "medium": {
+        "complete": false,
+        "tasks_done": 6
+      },
+      "hard": {
+        "complete": false,
+        "tasks_done": 3
+      },
+      "elite": {
+        "complete": false,
+        "tasks_done": 0
+      }
+    }
+  }
+}
