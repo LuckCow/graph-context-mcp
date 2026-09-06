@@ -815,9 +815,15 @@ class InMemoryGraphRepository:
                 domain_fields.parse_number(field, value)
             )
         if spec.format in {"select", "multi_select"}:
-            names = domain_fields.split_multi_select(value)
+            # An existing option matched case-insensitively is the one the
+            # value lands on, and its stored spelling is what reads back --
+            # the adapter's _resolve_tag rule (domain.fields.same_option).
+            names = [
+                domain_fields.canonical_option(name, spec.options)
+                for name in domain_fields.split_multi_select(value)
+            ]
             self._register_options(spec, names)
-            return ", ".join(names) if spec.format == "multi_select" else value.strip()
+            return ", ".join(names)
         if spec.format == "date":
             # Live reads every date back as the UTC instant (bare date ->
             # midnight UTC); naive timestamps error (R2).

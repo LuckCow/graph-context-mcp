@@ -135,6 +135,27 @@ what the game changed.
   `GC_IMPORT_DIR` on the single-runtime paths (CLI, memory backend).
   The bare MCP server builds nothing: it has no tick.
 
+### Amendment (2026-09-06, first live run): select values compare under the store's option identity
+
+The first live seed reused the space's existing `Status` select (the
+Space Setup session had minted one, with `Not Started` / `In Progress`).
+The adapter's `_resolve_tag` matched our `Not started` to that tag
+case-insensitively — correct, never a case-variant twin — and the value
+read back under the tag's own spelling. The planner compared strings
+and rewrote 83 quests every tick.
+
+The rule "an option name resolves to the existing option matching it
+case-insensitively, and reads back in that option's spelling" now lives
+once, in `domain.fields.same_option` / `canonical_option`, and three
+consumers apply it: the adapter's `_resolve_tag` (unchanged behavior,
+shared helper), the in-memory fake's select normalization (which had
+stored the written spelling verbatim — a fake/adapter parity gap the
+contract suite now pins on the seeded `Status` select), and the
+planner's change-only compare for `select`/`multi_select`. The
+importer test reproduces the incident on the mock-backed adapter: a
+pre-existing title-cased tag, one create, and a second tick that must
+write nothing.
+
 ## Consequences
 
 * The write volume is bounded by what the game changes: one XP leaf per

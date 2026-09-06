@@ -337,6 +337,22 @@ class FieldCatalogContract:
             label = catalog_repo.relation_label_for(spelling, on_type="Item")
             assert label is not None and label.lower() == "assignee"
 
+    async def test_a_select_write_lands_on_the_existing_option_and_reads_back_its_spelling(
+        self, catalog_repo
+    ):
+        """ADR 062's live incident: an option name written in another
+        case resolves to the EXISTING tag (never a case-variant twin) and
+        reads back under the tag's own spelling -- identically on both
+        backends, so a change-only writer sees one value."""
+        item = await catalog_repo.create_node(NodeDraft(
+            "Item", name="Ticket", summary="s", fields={"Status": "in progress"},
+        ))
+        assert item.fields["status"] == "In Progress"
+        options = next(
+            s.options for s in catalog_repo.field_catalog()["Item"] if s.name == "Status"
+        )
+        assert [o for o in options if o.lower() == "in progress"] in ([], ["In Progress"])
+
     async def test_relation_label_for_is_none_for_scalars_and_unknowns(
         self, catalog_repo
     ):

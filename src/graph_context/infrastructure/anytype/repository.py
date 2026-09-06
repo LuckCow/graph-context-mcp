@@ -1341,9 +1341,12 @@ class AnytypeGraphRepository:
                 "non-empty option name; clearing an option is not supported "
                 "yet -- set a different one or edit it in Anytype"
             )
-        target = value.strip().lower()
         async for tag in self._client.list_tags(info.id):
-            if target in (str(tag.get("name", "")).lower(), str(tag.get("key", "")).lower()):
+            # domain.fields.same_option: the ONE option-identity rule (the
+            # fake and the import planner apply it too).
+            if domain_fields.same_option(value, str(tag.get("name", ""))) or (
+                domain_fields.same_option(value, str(tag.get("key", "")))
+            ):
                 return str(tag["key"])
         created = await self._client.create_tag(
             info.id,

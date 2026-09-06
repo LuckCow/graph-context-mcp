@@ -201,10 +201,17 @@ def _changed_fields(
         current = domain_fields.lookup(node.fields, keys.get(name.casefold(), name))
         if not current:
             current = domain_fields.lookup(node.fields, name)
-        if not current and formats.get(name.casefold()) == "checkbox":
+        fmt = formats.get(name.casefold())
+        if not current and fmt == "checkbox":
             current = "false"
-        if current != value:
-            changed[name] = value
+        if fmt in {"select", "multi_select"}:
+            # A select write resolves to the existing option under the
+            # store's identity rule and reads back in ITS spelling.
+            if domain_fields.same_option(current, value):
+                continue
+        elif current == value:
+            continue
+        changed[name] = value
     return changed
 
 

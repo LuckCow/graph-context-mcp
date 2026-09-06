@@ -243,6 +243,40 @@ class TestReconcile:
         assert len(report.skipped) == 1 and "bank" in report.skipped[0]
 
 
+class TestReusedSelectOptions:
+    async def test_a_pre_existing_title_cased_option_does_not_rewrite_every_tick(
+        self,
+    ) -> None:
+        """The live incident (2026-09-06): the RuneScape space already had
+        a Status select with 'Not Started'; create_type reused it, the
+        write resolved to that tag, and 83 quests were rewritten on every
+        tick because the planner compared 'Not started' != 'Not Started'."""
+        mock = MockAnytype()
+        config = AnytypeConfig(api_key="test", space_id=mock.space_id, page_limit=10)
+        client = AnytypeClient(config, transport=mock.transport, sleep=_noop_sleep)
+        await ensure_schema(client)
+        status = await client.create_property(
+            {"key": "status", "name": "Status", "format": "select"}
+        )
+        await client.create_tag(status["id"], {"name": "Not Started", "color": "grey"})
+        repo = AnytypeGraphRepository(client)
+        await repo.hydrate()
+
+        class QuestFormat:
+            types = (ImportType("Quest", "Quests", (PropertyDraft("Status", "select"),)),)
+
+            def nodes_for(self, document: ImportDocument) -> DocumentNodes:
+                return DocumentNodes((ImportNode("Quest", "Q", {"Status": "Not started"}),))
+
+        importer = SnapshotImporter(repo, ListSource(ImportDocument("q", {})), QuestFormat())
+        await importer.ensure_types()
+        assert (await importer.run_tick()).created == 1
+        (quest,) = repo.graph.find_by_name("Q", node_type="Quest")
+        assert quest.fields["status"] == "Not Started"  # the existing tag won
+        assert not (await importer.run_tick()).wrote
+        await client.aclose()
+
+
 class TestFailures:
     async def test_one_failed_write_does_not_stop_the_pass(self) -> None:
         class Flaky(InMemoryGraphRepository):

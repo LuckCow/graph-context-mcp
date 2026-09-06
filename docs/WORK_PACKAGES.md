@@ -2991,6 +2991,16 @@ graph the way Anytype UI edits are.
   Bootstrap mints the types and runs the seed pass before any tick —
   the engine's first baseline holds the game's values, nothing fires
   on boot.
+* **Live-certified the same day**, with one incident: the RuneScape
+  space's pre-existing `Status` select was reused and our `Not started`
+  resolved (correctly) to its `Not Started` tag — and the planner then
+  rewrote 83 quests every tick comparing strings. The select-option
+  identity rule (case-insensitive match, read back in the existing
+  option's spelling) moved into `domain.fields.same_option` /
+  `canonical_option`, applied by the adapter's `_resolve_tag`, the fake's
+  normalization (a parity gap: it had stored the written spelling
+  verbatim — contract-pinned now), and the planner's compare. After the
+  fix the seed is a 0/0 no-op and ticks are silent.
 * **Deferred, named in the ADR:** per-task combat achievement nodes; a
   Character-hub relation set; a second export format (the `ImportFormat`
   seam exists, the binding key does not name one).

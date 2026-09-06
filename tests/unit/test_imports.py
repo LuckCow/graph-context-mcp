@@ -104,6 +104,21 @@ class TestPlan:
         want = ImportNode("Skill", "Attack", {"Boosted level": "81"})
         assert plan([want], (boosted,), [], _index(held), catalog).empty
 
+    def test_a_select_value_compares_under_the_stores_option_identity(self) -> None:
+        """The live incident: the space already held a Status select with
+        'Not Started'; the write of 'Not started' landed on that tag and
+        read back title-cased -- 83 quests rewritten every tick."""
+        quest = ImportType(
+            name="Quest", plural="Quests",
+            properties=(PropertyDraft("Status", "select"),),
+        )
+        held = _node("n1", "Quest", "Below Ice Mountain", Status="Not Started")
+        want = ImportNode("Quest", "Below Ice Mountain", {"Status": "Not started"})
+        assert plan([want], (quest,), [], _index(held), {}).empty
+        moved = ImportNode("Quest", "Below Ice Mountain", {"Status": "In progress"})
+        (update,) = plan([moved], (quest,), [], _index(held), {}).updates
+        assert dict(update.fields) == {"Status": "In progress"}
+
     def test_an_absent_checkbox_reads_as_false(self) -> None:
         """The adapter drops unticked checkboxes from Node.fields; writing
         "false" onto absence would be a phantom change every tick."""
