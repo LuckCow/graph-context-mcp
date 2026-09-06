@@ -92,6 +92,18 @@ class TestPlan:
         want = ImportNode("Skill", "Attack", {"Level": "82", "Experience": "100"})
         assert plan([want], TYPES, [], _index(held), catalog).empty
 
+    def test_a_verbatim_display_name_key_still_compares(self) -> None:
+        """The open-vocabulary backend stores under the display name even
+        when its catalog reports a slug key: no phantom update."""
+        held = _node("n1", "Skill", "Attack", **{"Boosted level": "81"})
+        catalog = {"Skill": (FieldSpec("Boosted level", "number", key="boosted_level"),)}
+        boosted = ImportType(
+            name="Skill", plural="Skills",
+            properties=(PropertyDraft("Boosted level", "number"),),
+        )
+        want = ImportNode("Skill", "Attack", {"Boosted level": "81"})
+        assert plan([want], (boosted,), [], _index(held), catalog).empty
+
     def test_an_absent_checkbox_reads_as_false(self) -> None:
         """The adapter drops unticked checkboxes from Node.fields; writing
         "false" onto absence would be a phantom change every tick."""

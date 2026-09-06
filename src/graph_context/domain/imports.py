@@ -195,7 +195,12 @@ def _changed_fields(
     keys = _store_keys(spec.name, catalog)
     changed: dict[str, str] = {}
     for name, value in wanted.items():
-        current = node.fields.get(keys.get(name.casefold(), name), "")
+        # The store key first (the adapter stores under raw keys), then
+        # the display name (the open-vocabulary backend stores verbatim);
+        # both through the shared read rule, like the rule engine.
+        current = domain_fields.lookup(node.fields, keys.get(name.casefold(), name))
+        if not current:
+            current = domain_fields.lookup(node.fields, name)
         if not current and formats.get(name.casefold()) == "checkbox":
             current = "false"
         if current != value:

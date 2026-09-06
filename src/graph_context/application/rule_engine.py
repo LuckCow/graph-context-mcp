@@ -1115,17 +1115,9 @@ class RuleEngine:
 
     @staticmethod
     def _field_of(fields: Mapping[str, str], key: str) -> str:
-        """A fields value by exact key, else case-insensitive match, else
-        "" — absence IS the false/empty value (the adapter drops unticked
-        checkboxes and empty values from ``Node.fields``)."""
-        value = fields.get(key)
-        if value is not None:
-            return value
-        wanted = key.strip().lower()
-        for stored, stored_value in fields.items():
-            if stored.strip().lower() == wanted:
-                return stored_value
-        return ""
+        """The shared read rule (``domain.fields.lookup``): absence IS
+        the false/empty value."""
+        return domain_fields.lookup(fields, key)
 
     # -- actions -----------------------------------------------------------
 

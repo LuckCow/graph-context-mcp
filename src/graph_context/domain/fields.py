@@ -11,6 +11,7 @@ for the in-memory fake).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from graph_context.errors import GraphContextError
@@ -81,3 +82,19 @@ def split_multi_select(value: str) -> list[str]:
 def render_number(number: float) -> str:
     """Numbers read back untrailed: 1200.0 -> "1200", 1.5 -> "1.5"."""
     return str(int(number)) if number.is_integer() else str(number)
+
+
+def lookup(fields: Mapping[str, str], key: str) -> str:
+    """The one READ rule for a ``fields`` value: exact key, else a
+    case-insensitive key match, else ``""`` -- absence IS the empty/false
+    value (the adapter drops unticked checkboxes and empty values from
+    ``Node.fields``). Shared by the rule engine's watch reads and the
+    import planner's change-only compare, so both see one value."""
+    value = fields.get(key)
+    if value is not None:
+        return value
+    wanted = key.strip().casefold()
+    for stored, stored_value in fields.items():
+        if stored.strip().casefold() == wanted:
+            return stored_value
+    return ""
