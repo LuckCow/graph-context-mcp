@@ -218,7 +218,14 @@ collide over.
    the build: torch (CPU wheel), sentence-transformers, Node, and a Playwright
    Chromium add up to several GB, and the build will OOM on a 1 GB box. The
    build needs unrestricted network — the egress firewall applies only *inside*
-   the container at runtime.
+   the container at runtime. **Add a swap file** (2 GB is enough): with no
+   swap, a memory spike makes the kernel thrash instead of failing, and the
+   first thing to stop answering is sshd — the box then needs a reboot from
+   the provider's console. Compose caps both containers (`mem_limit`, 2 GB
+   dev / 1 GB anytype) so a runaway process is killed inside its container
+   instead; a host of a different size overrides `GC_DEV_MEM_LIMIT` /
+   `GC_ANYTYPE_MEM_LIMIT` in the git-ignored `.devcontainer/.env` (`0` = no
+   ceiling, what a workstation running the editor and test suite wants).
 3. **Clone as uid 1000.** The repo is bind-mounted and the container runs as
    `dev` (uid/gid 1000). A mismatch means the container cannot write `logs/`,
    the turn diary, or prose saves: `sudo chown -R 1000:1000 .`

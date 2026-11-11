@@ -24,6 +24,16 @@ services:
     # boot` no-ops on a running server), so a restart is always safe.
     restart: unless-stopped
 
+    # Hard memory ceiling for this container. Over it, the kernel kills a
+    # process INSIDE the container; without one, a runaway process starves
+    # the whole host (sshd included). Per-host, via the git-ignored
+    # .devcontainer/.env that compose reads beside this file:
+    #   GC_DEV_MEM_LIMIT=2g   (default) sized for a ~4 GB server
+    #   GC_DEV_MEM_LIMIT=8g   any docker size: 512m, 3g, ...
+    #   GC_DEV_MEM_LIMIT=0    no ceiling (a workstation running the editor
+    #                         server, test suite and browsers in here)
+    mem_limit: ${GC_DEV_MEM_LIMIT:-2g}
+
     # Required for the iptables/ipset egress firewall.
     cap_add:
       - NET_ADMIN
@@ -163,6 +173,9 @@ services:
       context: ./anytype
     container_name: graph-context-mcp-anytype
     restart: unless-stopped
+    # Memory ceiling, same mechanism and .env override as dev's above:
+    #   GC_ANYTYPE_MEM_LIMIT=1g (default) | any docker size | 0 = no ceiling
+    mem_limit: ${GC_ANYTYPE_MEM_LIMIT:-1g}
     environment:
       # Local bot node: the server-side write throttle (~1 req/s, spike
       # S7) protects nothing here -- disable it.
