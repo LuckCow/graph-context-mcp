@@ -69,6 +69,22 @@ class TestTransportErrors:
             await client.aclose()
 
 
+    async def test_a_timeout_names_itself_despite_its_empty_message(self):
+        # httpx timeouts stringify to "" -- the log line must still say
+        # WHICH failure it was.
+        def stall(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("", request=request)
+
+        config = AnytypeConfig(api_key="test", space_id="sp1")
+        client = AnytypeClient(config, transport=httpx.MockTransport(stall))
+        try:
+            with pytest.raises(AnytypeApiError) as excinfo:
+                await client.get_space()
+            assert "ReadTimeout" in str(excinfo.value)
+        finally:
+            await client.aclose()
+
+
 class TestConfigFromEnv:
     def test_an_explicit_space_id_overrides_the_environment(
         self, monkeypatch: pytest.MonkeyPatch

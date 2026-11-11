@@ -810,6 +810,39 @@ class TestServeLoop:
             serve.cancel()
             await asyncio.gather(serve, return_exceptions=True)
 
+    async def test_a_failed_startup_catch_up_retries_instead_of_ending_the_task(
+        self, tmp_path: Path
+    ) -> None:
+        mock = MockAnytype()
+        cursor_path = str(tmp_path / "cursor.json")
+        chat_client, chat_id, handler = _wired_chat(
+            mock, [LLMTurn(reply="caught up")], ChatCursor(cursor_path)
+        )
+        mock.post_chat_message_directly(chat_id, "human", "seen before")
+        handler.cursor.fast_forward(
+            chat_id, mock.chat_messages(chat_id)[-1]["order_id"]
+        )
+        mock.post_chat_message_directly(chat_id, "human", "sent while offline")
+        mock.fail_next(1, status=404)  # the catch-up's first read fails
+        serve = asyncio.ensure_future(
+            _serve_chat(handler, chat_client, chat_id, handler.cursor)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    assert not serve.done()  # the failure never escaped
+                    texts = [
+                        m["content"]["text"]
+                        for m in mock.chat_messages(chat_id)
+                        if m["creator"] == mock.api_member_id
+                    ]
+                    if texts == ["caught up"]:
+                        break
+                    await asyncio.sleep(0.01)
+        finally:
+            serve.cancel()
+            await asyncio.gather(serve, return_exceptions=True)
+
     async def test_offline_messages_are_answered_on_startup(
         self, tmp_path: Path
     ) -> None:

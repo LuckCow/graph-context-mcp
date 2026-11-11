@@ -531,12 +531,21 @@ async def _serve_chat(
 ) -> None:
     space_id = chat_client.space_id
     marks = set() if busy is None else busy
-    with _busy(marks, chat_id):
-        await _catch_up(handler, chat_client, chat_id, cursor, titler)
+    caught_up = False
     delay = 1.0
     while True:
         try:
             with _busy(marks, chat_id):
+                # Inside the reconnect loop on purpose: a slow or
+                # unreachable API at boot must back off and retry, not
+                # escape into the bot's TaskGroup and end the process
+                # (live-caught on a just-restarted host). The cursor gate
+                # makes a re-run turn-free for anything already answered.
+                if not caught_up:
+                    await _catch_up(
+                        handler, chat_client, chat_id, cursor, titler
+                    )
+                    caught_up = True
                 await _sweep_confirms(handler, chat_client, chat_id)
             async for event in chat_client.stream(chat_id):
                 delay = 1.0  # a live stream resets the backoff
