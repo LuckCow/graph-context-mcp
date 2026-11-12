@@ -8,6 +8,9 @@
 #   gc-prod fetch FILE...       ... just these files, by name under the log dir
 #   gc-prod deploy [ARGS...]    git pull + restart, on the server (scripts/deploy.sh)
 #   gc-prod restart             restart the orchestrator, no deploy
+#   gc-prod token               install a new Claude subscription token: paste
+#                               the output of `claude setup-token` (run it on
+#                               this workstation) at the prompt, or pipe it in
 #   gc-prod shell               an interactive shell IN the prod container
 #   gc-prod host                an interactive shell on the prod HOST
 #
@@ -95,6 +98,27 @@ case "${1:-status}" in
         ;;
     restart)
         remote "docker exec ${CONTAINER} gc-serve restart"
+        ;;
+    token)
+        # Read without echo (a pipe works too), so the token reaches neither
+        # the screen, the shell history, nor a command line in `ps`.
+        if [ -t 0 ]; then
+            read -r -s -p "[gc-prod] paste the token from \`claude setup-token\`: " token
+            echo
+        else
+            read -r token
+        fi
+        token="${token//[[:space:]]/}"
+        [ -n "$token" ] || { echo "[gc-prod] no token given" >&2; exit 1; }
+        # Written IN PLACE (cat >, never a rename): the container sees the
+        # secret through a single-file bind mount, which follows the inode --
+        # a replaced file would stay invisible until the container is
+        # recreated.
+        printf '%s\n' "$token" | ssh "$TARGET" \
+            "umask 077; cat > ${REMOTE_DIR}/.devcontainer/secrets/claude_oauth_token" \
+            || { echo "[gc-prod] could not write the token on ${TARGET}" >&2; exit 1; }
+        echo "[gc-prod] token installed; restarting the orchestrator"
+        remote "docker exec ${CONTAINER} gc-serve restart && docker exec ${CONTAINER} grep 'subscription auth' logs/serve.log | tail -n 1"
         ;;
     shell)
         remote "docker exec -it ${CONTAINER} bash"

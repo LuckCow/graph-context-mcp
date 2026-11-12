@@ -108,6 +108,16 @@ if [ "$BUILD" = "0" ] && [ "$OLD" != "$NEW" ]; then
 fi
 
 if [ "$BUILD" = "1" ]; then
+    # Compose refuses to start over a missing secret file, and an EMPTY one
+    # is each optional secret's documented "not configured" state -- so a
+    # secret that is new in this range must not take the deployment down.
+    for optional in anthropic_api_key claude_oauth_token tailscale_authkey; do
+        secret="$(dirname "$COMPOSE_FILE")/secrets/${optional}"
+        if [ ! -e "$secret" ]; then
+            say "creating empty secret ${optional} (not configured on this host)"
+            ( umask 077; : > "$secret" ) || die "cannot create ${secret}"
+        fi
+    done
     say "docker compose up -d --build"
     docker compose -f "$COMPOSE_FILE" up -d --build || die "compose build/up failed"
 else

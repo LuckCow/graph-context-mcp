@@ -87,6 +87,7 @@ so it has no outbound tailnet path at all):
 ```bash
 scripts/gc-prod status              # pid + the last log lines
 scripts/gc-prod logs                # tail -f the orchestrator log
+scripts/gc-prod token               # install a fresh `claude setup-token` token
 scripts/gc-prod deploy              # git pull + restart, health-checked
 scripts/gc-prod deploy --to <sha>   # roll back
 scripts/gc-prod shell               # a shell in the prod container
@@ -116,7 +117,7 @@ Then the named Docker volumes:
 | Volume | Holds | If lost |
 |---|---|---|
 | `anytype-data` (`/root/.anytype`) + `anytype-config` (`/root/.config/anytype`) | The bot account's identity, config, and API-key store | The bot loses its account **and** its membership in every space. Recover from the `anytype_account_key` secret, then re-issue the API key. Both volumes are needed — the CLI splits state across them, and a rebuild wiped them once. |
-| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path, which compose selects | The orchestrator has no model at all: this volume *is* the authentication. Log in once on the new host, or switch that deployment to `GC_DRIVER: anthropic_api` and give it a key. See [Model access](#model-access). |
+| `claude-config` (`/home/dev/.claude`) | The Claude Code OAuth login — i.e. all model access on the subscription path, which compose selects | Nothing, if the host has a token in `secrets/claude_oauth_token` (the recommended setup — `scripts/gc-prod token`). With an empty token file this volume *is* the authentication, and the orchestrator has no model until you log in on the new host. See [Model access](#model-access). |
 | `tailscale-state` (`/var/lib/tailscale`) | The tailnet node identity | The node re-registers from the auth key, leaving a dead duplicate behind. Use a **reusable, non-ephemeral** key. |
 
 The graph itself is **not** in this list: it lives in Anytype and syncs over
@@ -131,16 +132,30 @@ switch without any other change:
 **Subscription (the default, and what compose sets).** `GC_DRIVER` unset or
 `anthropic_subscription` (aliases: `claude`, `subscription`). Runs
 `claude-agent-sdk` over the bundled Claude Code CLI, billed to the Claude
-plan. Authentication comes from the OAuth login persisted in the
-`claude-config` volume — which is why that volume is on the list above. On a
-fresh host, either log in interactively once, or mint a token with
-`claude setup-token` on a machine that is already logged in.
+plan. The credential is one of two things:
 
-> **Known gap:** `.devcontainer/secrets/claude_oauth_token` is documented in
-> `secrets/README.md` but is wired to nothing — it is not in compose's
-> `secrets:` list and no code reads it. Auth today comes *only* from the
-> volume. Wiring it to `CLAUDE_CODE_OAUTH_TOKEN` would give the headless path
-> a fresh host actually needs.
+- **A token file (what a server should use).** `claude setup-token`, run on
+  any machine that is logged in, prints a long-lived token. Put it in
+  `.devcontainer/secrets/claude_oauth_token` (compose mounts it; bootstrap
+  reads `CLAUDE_OAUTH_TOKEN_FILE`) and the driver hands it to the CLI child
+  as `CLAUDE_CODE_OAUTH_TOKEN` — to that child only, never the orchestrator's
+  own environment. From the workstation it is one command:
+
+  ```bash
+  claude setup-token        # on the workstation; copy the token it prints
+  scripts/gc-prod token     # paste it; writes the file on the server, restarts
+  ```
+
+  Nothing interactive ever runs on the server, which matters on a small box:
+  an interactive `claude` session there is the heaviest thing it would ever
+  run. When replies turn into `Failed to authenticate`, repeat the two
+  commands.
+- **The stored login (an empty token file).** The OAuth login persisted in
+  the `claude-config` volume, made by running `claude` → `/login` inside the
+  container. That volume does not travel between hosts.
+
+The startup log says which one is in force (`subscription auth: …`). A
+configured token wins over a stored login.
 
 **API (opt-in).** `GC_DRIVER=anthropic_api` (aliases: `anthropic`, `api`)
 plus `ANTHROPIC_API_KEY`, and the `anthropic` extra installed. Bills API
@@ -270,10 +285,10 @@ Compose is committed and shared, so a server and a workstation run it
 identically — including `restart: unless-stopped` on both services, which is
 what brings the stack back after a host reboot (the boot chain is re-entrant,
 so that is always safe). The one thing a server has to solve for itself is
-[model access](#model-access): `GC_DRIVER` selects the subscription, whose
-OAuth login lives in the `claude-config` volume and does not travel, so a new
-host either logs in once or switches that deployment to `anthropic_api` with a
-key.
+[model access](#model-access): `GC_DRIVER` selects the subscription, and a
+stored OAuth login lives in the `claude-config` volume and does not travel —
+so a new host gets a token (`scripts/gc-prod token`), or switches that
+deployment to `anthropic_api` with a key.
 
 What is *not* on the VPS: the Anytype **desktop** app. `host.docker.internal`
 and port `31009` exist for the desktop's local API, a human convenience on a
@@ -304,5 +319,6 @@ Re-run `sudo init-firewall.sh` if a Claude path misbehaves.
 immediately after `up`, sometimes before the first netmap lands. Re-check with
 `tailscale status`: a `-` in that column means online.
 
-**Model calls fail on a fresh host.** The `claude-config` volume did not come
-with you. See [Model access](#model-access).
+**Model calls fail on a fresh host.** It has no credential: the token file is
+empty and the `claude-config` volume did not come with you. Run
+`scripts/gc-prod token`. See [Model access](#model-access).

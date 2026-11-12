@@ -132,6 +132,13 @@ class TestSessionCapabilityBoundary:
         assert options.tools == []
         assert options.tools is not None
 
+    def test_an_oauth_token_rides_the_cli_childs_environment(self):
+        options = self._options(oauth_token="tok-123")
+        assert options.env == {"CLAUDE_CODE_OAUTH_TOKEN": "tok-123"}
+
+    def test_no_token_adds_nothing_to_the_childs_environment(self):
+        assert self._options().env == {}
+
     def test_only_the_gc_server_is_registered(self):
         assert list(self._options().mcp_servers) == ["gc"]
 

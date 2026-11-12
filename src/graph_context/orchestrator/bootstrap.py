@@ -154,6 +154,25 @@ def _resolve_anthropic_key() -> str | None:
     return os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
 
 
+def _resolve_claude_oauth_token() -> str | None:
+    """The subscription driver's long-lived token (``claude setup-token``),
+    from the file at ``CLAUDE_OAUTH_TOKEN_FILE``; None when unconfigured.
+
+    File-only, like the secrets above. An EMPTY file is the supported
+    "this deployment authenticates from the stored CLI login" state
+    (compose requires the file to exist), so it is not an error.
+    """
+    path = os.environ.get("CLAUDE_OAUTH_TOKEN_FILE", "").strip()
+    if not path:
+        return None
+    try:
+        return Path(path).read_text().strip() or None
+    except OSError as err:
+        raise GraphContextError(
+            f"could not read CLAUDE_OAUTH_TOKEN_FILE at {path}: {err}"
+        ) from None
+
+
 def build_driver(turn_log: TurnLog | None = None) -> tuple[LLMDriver, str, str]:
     """GC_DRIVER resolution -> (driver, attribution model name, help line).
 
@@ -187,9 +206,16 @@ def build_driver(turn_log: TurnLog | None = None) -> tuple[LLMDriver, str, str]:
                 "container rebuild installs the [orchestrator] extra); "
                 "GC_DRIVER=manual runs without it"
             ) from err
+        oauth_token = _resolve_claude_oauth_token()
+        logger.info(
+            "subscription auth: %s",
+            "the token in CLAUDE_OAUTH_TOKEN_FILE" if oauth_token
+            else "the CLI's stored login (no token file configured)",
+        )
         driver = ClaudeAgentDriver(
             model=model, effort=effort,  # type: ignore[arg-type]
             on_result=turn_log.usage if turn_log else None,
+            oauth_token=oauth_token,
         )
         help_line = (
             "talking to the model on your Claude subscription; /mode [name] "
