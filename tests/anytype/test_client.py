@@ -85,6 +85,29 @@ class TestTransportErrors:
             await client.aclose()
 
 
+class TestLoopbackHost:
+    async def test_a_non_loopback_base_url_still_passes_the_origin_guard(
+        self, mock
+    ):
+        # The sidecar is dialed by its compose service name, but the API
+        # serves only a loopback Host (403 "request origin is not allowed").
+        config = AnytypeConfig(
+            api_key="test", space_id=mock.space_id,
+            base_url="http://anytype:31012",
+        )
+        client = AnytypeClient(config, transport=mock.transport)
+        try:
+            await client.get_space()
+        finally:
+            await client.aclose()
+
+    def test_the_host_keeps_the_base_urls_port(self):
+        config = AnytypeConfig(
+            api_key="k", space_id="s", base_url="http://anytype:31012"
+        )
+        assert config.host_header == "localhost:31012"
+
+
 class TestConfigFromEnv:
     def test_an_explicit_space_id_overrides_the_environment(
         self, monkeypatch: pytest.MonkeyPatch

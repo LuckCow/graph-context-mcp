@@ -68,6 +68,7 @@ class AnytypeClient:
             transport=transport,
             headers={
                 "Authorization": f"Bearer {config.api_key}",
+                "Host": config.host_header,
                 "Anytype-Version": config.api_version,
                 "Content-Type": "application/json",
             },

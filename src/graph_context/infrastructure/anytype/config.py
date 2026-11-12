@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from graph_context.errors import GraphContextError
 
@@ -48,6 +49,17 @@ class AnytypeConfig:
     max_retries: int = 3
     backoff_base_seconds: float = 0.25
     timeout_seconds: float = 10.0
+
+    @property
+    def host_header(self) -> str:
+        """The ``Host`` every request carries: loopback, on the base URL's
+        port. The API refuses any other host name with ``403 request
+        origin is not allowed`` (its DNS-rebinding guard; live-caught on
+        anytype-cli v0.5.2) -- and a compose service name (``anytype``) or
+        ``host.docker.internal`` is exactly such a name. Servers that
+        predate the guard ignore the header."""
+        port = urlsplit(self.base_url).port
+        return f"localhost:{port}" if port else "localhost"
 
     @classmethod
     def from_env(cls, space_id: str | None = None) -> AnytypeConfig:
