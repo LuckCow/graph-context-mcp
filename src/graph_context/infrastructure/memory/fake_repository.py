@@ -385,9 +385,10 @@ class InMemoryGraphRepository:
 
     async def add_type_properties(
         self, type_identifier: str, properties: Sequence[PropertyDraft]
-    ) -> str:
+    ) -> tuple[str, tuple[str, ...]]:
         display = self._existing_type_name(type_identifier)
         specs = self._type_props.setdefault(display, [])
+        added_names: list[str] = []
         for draft in properties:
             target = draft.name.strip().lower()
             held = next(
@@ -405,7 +406,10 @@ class InMemoryGraphRepository:
                     )
                 continue
             specs.append(self._adopt_property_draft(draft))
-        return display
+            added_names.append(draft.name)
+        # An empty tuple is an honest no-op (every property was already on
+        # the type) -- contract parity with the adapter (WP33 loop fix).
+        return display, tuple(added_names)
 
     def _existing_type_name(self, identifier: str) -> str:
         target = identifier.strip().lower()
@@ -605,6 +609,50 @@ class InMemoryGraphRepository:
             catalog["(any type)"] = unclaimed
         return catalog
 
+    def relation_catalog(
+        self, include_roles: frozenset[Role] = frozenset()
+    ) -> Mapping[str, tuple[FieldSpec, ...]]:
+        """Writable ``objects`` relations per type -- the sibling of
+        :meth:`field_catalog` for edges (ADR 042: a relation label is a
+        ``properties`` key too). Same three modes; ``links`` and other
+        read-only relations are excluded, matching ``relation_label_for``
+        and the adapter's ``attached_relations``."""
+        def _writable(spec: FieldSpec) -> bool:
+            return spec.format == "objects" and not schema.is_read_only_relation(
+                spec.key or spec.name
+            )
+
+        if not self._field_specs:
+            return {
+                name: tuple(s for s in own if _writable(s))
+                for name, own in self._type_props.items()
+                if any(_writable(s) for s in own)
+            }
+        offerable = tuple(s for s in self._field_specs if _writable(s))
+        if not self._scoped:
+            return {
+                name: offerable
+                for name in sorted(self.known_node_types(include_roles))
+            }
+        catalog: dict[str, tuple[FieldSpec, ...]] = {}
+        claimed: set[str] = set()
+        for name, own in self._type_props.items():
+            role = schema.resolve_role(name, self._role_overrides)
+            if role in schema.INFRA_ROLES and role not in include_roles:
+                continue
+            specs = tuple(s for s in own if _writable(s))
+            claimed.update((s.key or s.name).strip().lower() for s in specs)
+            if specs:
+                catalog[name] = specs
+        unclaimed = tuple(
+            s for s in offerable
+            if (s.key or s.name).strip().lower() not in claimed
+            and not s.key.startswith("gc_")
+        )
+        if unclaimed:
+            catalog["(any type)"] = unclaimed
+        return catalog
+
     # -- field routing (ADR 023) -------------------------------------------
 
     def _resolve_fields(
@@ -767,9 +815,15 @@ class InMemoryGraphRepository:
                 domain_fields.parse_number(field, value)
             )
         if spec.format in {"select", "multi_select"}:
-            names = domain_fields.split_multi_select(value)
+            # An existing option matched case-insensitively is the one the
+            # value lands on, and its stored spelling is what reads back --
+            # the adapter's _resolve_tag rule (domain.fields.same_option).
+            names = [
+                domain_fields.canonical_option(name, spec.options)
+                for name in domain_fields.split_multi_select(value)
+            ]
             self._register_options(spec, names)
-            return ", ".join(names) if spec.format == "multi_select" else value.strip()
+            return ", ".join(names)
         if spec.format == "date":
             # Live reads every date back as the UTC instant (bare date ->
             # midnight UTC); naive timestamps error (R2).

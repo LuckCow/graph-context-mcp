@@ -170,3 +170,49 @@ class TestBooleanKnobs:
         assert _knob_on("GC_PROVENANCE") is True
         monkeypatch.delenv("GC_PROVENANCE")
         assert _knob_on("GC_PROVENANCE") is True  # default-on
+
+
+class TestSubscriptionToken:
+    """The subscription driver's credential comes from a token FILE when
+    one is configured, so a host never needs an interactive CLI login."""
+
+    def _built_with(self, monkeypatch) -> dict[str, object]:  # type: ignore[no-untyped-def]
+        """Run build_driver and return what it constructed the driver with."""
+        pytest.importorskip("claude_agent_sdk")
+        from graph_context.orchestrator import claude_driver
+
+        seen: dict[str, object] = {}
+
+        class Recording:
+            def __init__(self, **kwargs: object) -> None:
+                seen.update(kwargs)
+
+        monkeypatch.setattr(claude_driver, "ClaudeAgentDriver", Recording)
+        monkeypatch.setenv("GC_DRIVER", "anthropic_subscription")
+        build_driver()
+        return seen
+
+    def test_a_token_file_becomes_the_drivers_credential(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        secret = tmp_path / "claude_oauth_token"
+        secret.write_text("tok-123\n")
+        monkeypatch.setenv("CLAUDE_OAUTH_TOKEN_FILE", str(secret))
+        assert self._built_with(monkeypatch)["oauth_token"] == "tok-123"
+
+    def test_an_empty_token_file_leaves_the_stored_login_in_charge(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        secret = tmp_path / "claude_oauth_token"
+        secret.write_text("")
+        monkeypatch.setenv("CLAUDE_OAUTH_TOKEN_FILE", str(secret))
+        assert self._built_with(monkeypatch)["oauth_token"] is None
+
+    def test_an_unreadable_token_file_fails_loudly_at_startup(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        pytest.importorskip("claude_agent_sdk")
+        monkeypatch.setenv("GC_DRIVER", "anthropic_subscription")
+        monkeypatch.setenv("CLAUDE_OAUTH_TOKEN_FILE", str(tmp_path / "absent"))
+        with pytest.raises(GraphContextError, match="CLAUDE_OAUTH_TOKEN_FILE"):
+            build_driver()

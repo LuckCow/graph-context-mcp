@@ -554,6 +554,7 @@ class TestFieldCatalogSurface:
 
         repository = InMemoryGraphRepository(field_catalog=[
             FieldSpec(name="Due date", format="date", key="due_date"),
+            FieldSpec(name="Blocked by", format="objects", key="blocked_by"),
         ])
         return build_services(repository, SessionState(project="t"))
 
@@ -562,6 +563,12 @@ class TestFieldCatalogSurface:
         out = await tools.context_tool(services, action="overview")
         assert "properties by type" in out
         assert "Due date (date)" in out
+
+    async def test_overview_lists_relations_tagged_objects(self) -> None:
+        """ADR 042: relations share the properties block with scalars so
+        the model can see and reuse them (the WP33 re-proposal loop)."""
+        out = await tools.context_tool(self._services(), action="overview")
+        assert "Blocked by (objects)" in out
 
     async def test_unmatched_field_key_errors_with_guidance(self) -> None:
         services = self._services()

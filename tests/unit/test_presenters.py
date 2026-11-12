@@ -115,4 +115,30 @@ class TestOverview:
 
     def test_absent_catalog_renders_nothing_extra(self) -> None:
         overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
-        assert "properties by type" not in render_overview(overview, {})
+        assert "properties by type" not in render_overview(overview, {}, {})
+
+    def test_relations_render_in_the_properties_block_tagged_objects(self) -> None:
+        """ADR 042: a type's relations share the one 'properties by type'
+        block with its scalars, scalars first, relations tagged (objects)
+        so the value shape (a node id/name) is clear."""
+        overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
+        text = render_overview(
+            overview,
+            {"Goal": (FieldSpec(name="Status", format="select", key="status"),)},
+            {"Goal": (
+                FieldSpec(name="Parent Goal", format="objects", key="parent_goal"),
+            )},
+        )
+        assert "- Goal: Status (select), Parent Goal (objects)" in text
+
+    def test_relation_only_type_still_renders(self) -> None:
+        overview = GraphOverview(total_story_nodes=0, type_counts=(), hubs=())
+        text = render_overview(
+            overview,
+            None,
+            {"Goal": (
+                FieldSpec(name="Parent Goal", format="objects", key="parent_goal"),
+            )},
+        )
+        assert "properties by type" in text
+        assert "- Goal: Parent Goal (objects)" in text

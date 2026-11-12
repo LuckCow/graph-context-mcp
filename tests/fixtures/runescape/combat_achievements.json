@@ -1,0 +1,3240 @@
+{
+  "exported_at": "2026-09-06T17:03:51.626770400-04:00",
+  "plugin_version": "0.6.0",
+  "session_id": "47eb661f-910f-4ffa-95d2-82e92e434776",
+  "reason": "startup",
+  "summary": {
+    "total_tasks_completed": 20,
+    "total_tiers_completed": 1,
+    "named_data_available": true
+  },
+  "tiers": {
+    "easy": {
+      "complete": true,
+      "tasks_completed": 2,
+      "tasks_total": 41,
+      "tasks": [
+        {
+          "id": 0,
+          "name": "Noxious Foe",
+          "complete": true
+        },
+        {
+          "id": 1,
+          "name": "Barrows Novice",
+          "complete": false
+        },
+        {
+          "id": 2,
+          "name": "Defence? What Defence?",
+          "complete": false
+        },
+        {
+          "id": 3,
+          "name": "Big, Black and Fiery",
+          "complete": false
+        },
+        {
+          "id": 4,
+          "name": "The Demonic Punching Bag",
+          "complete": false
+        },
+        {
+          "id": 5,
+          "name": "Bryophyta Novice",
+          "complete": false
+        },
+        {
+          "id": 6,
+          "name": "Protection from Moss",
+          "complete": false
+        },
+        {
+          "id": 7,
+          "name": "Preparation Is Key",
+          "complete": false
+        },
+        {
+          "id": 8,
+          "name": "A Slow Death",
+          "complete": false
+        },
+        {
+          "id": 9,
+          "name": "Fighting as Intended II",
+          "complete": false
+        },
+        {
+          "id": 10,
+          "name": "Deranged Archaeologist Novice",
+          "complete": false
+        },
+        {
+          "id": 11,
+          "name": "The Walking Volcano",
+          "complete": false
+        },
+        {
+          "id": 12,
+          "name": "Into the Den of Giants",
+          "complete": false
+        },
+        {
+          "id": 13,
+          "name": "A Greater Foe",
+          "complete": false
+        },
+        {
+          "id": 14,
+          "name": "Not So Great After All",
+          "complete": false
+        },
+        {
+          "id": 15,
+          "name": "A Demon's Best Friend",
+          "complete": false
+        },
+        {
+          "id": 16,
+          "name": "Obor Novice",
+          "complete": false
+        },
+        {
+          "id": 17,
+          "name": "Sleeping Giant",
+          "complete": false
+        },
+        {
+          "id": 18,
+          "name": "Fighting as Intended",
+          "complete": false
+        },
+        {
+          "id": 19,
+          "name": "King Black Dragon Novice",
+          "complete": false
+        },
+        {
+          "id": 20,
+          "name": "A Scaley Encounter",
+          "complete": false
+        },
+        {
+          "id": 21,
+          "name": "Shayzien Protector",
+          "complete": false
+        },
+        {
+          "id": 22,
+          "name": "Giant Mole Novice",
+          "complete": false
+        },
+        {
+          "id": 23,
+          "name": "Sarachnis Novice",
+          "complete": false
+        },
+        {
+          "id": 24,
+          "name": "Wintertodt Novice",
+          "complete": false
+        },
+        {
+          "id": 25,
+          "name": "Mummy!",
+          "complete": false
+        },
+        {
+          "id": 26,
+          "name": "Handyman",
+          "complete": false
+        },
+        {
+          "id": 27,
+          "name": "Cosy",
+          "complete": false
+        },
+        {
+          "id": 28,
+          "name": "A Slithery Encounter",
+          "complete": false
+        },
+        {
+          "id": 29,
+          "name": "Tempoross Novice",
+          "complete": false
+        },
+        {
+          "id": 30,
+          "name": "Master of Buckets",
+          "complete": false
+        },
+        {
+          "id": 31,
+          "name": "Calm Before the Storm",
+          "complete": false
+        },
+        {
+          "id": 32,
+          "name": "Fire in the Hole!",
+          "complete": false
+        },
+        {
+          "id": 33,
+          "name": "Scurrius Novice",
+          "complete": true
+        },
+        {
+          "id": 34,
+          "name": "Sit Rat",
+          "complete": false
+        },
+        {
+          "id": 35,
+          "name": "One by one",
+          "complete": false
+        },
+        {
+          "id": 36,
+          "name": "Elemental Company",
+          "complete": false
+        },
+        {
+          "id": 37,
+          "name": "Let them fight",
+          "complete": false
+        },
+        {
+          "id": 38,
+          "name": "Shellbane Adept",
+          "complete": false
+        },
+        {
+          "id": 39,
+          "name": "Dry Cleaning",
+          "complete": false
+        },
+        {
+          "id": 40,
+          "name": "Brutus Novice",
+          "complete": false
+        }
+      ]
+    },
+    "medium": {
+      "complete": false,
+      "tasks_completed": 0,
+      "tasks_total": 60,
+      "tasks": [
+        {
+          "id": 41,
+          "name": "Sit Back and Relax",
+          "complete": false
+        },
+        {
+          "id": 42,
+          "name": "Barrows Champion",
+          "complete": false
+        },
+        {
+          "id": 43,
+          "name": "Can't Touch Me",
+          "complete": false
+        },
+        {
+          "id": 44,
+          "name": "Pray for Success",
+          "complete": false
+        },
+        {
+          "id": 45,
+          "name": "Brutal, Big, Black and Firey",
+          "complete": false
+        },
+        {
+          "id": 46,
+          "name": "Bryophyta Champion",
+          "complete": false
+        },
+        {
+          "id": 47,
+          "name": "Quick Cutter",
+          "complete": false
+        },
+        {
+          "id": 48,
+          "name": "Demonic Weakening",
+          "complete": false
+        },
+        {
+          "id": 49,
+          "name": "Demonbane Weaponry",
+          "complete": false
+        },
+        {
+          "id": 50,
+          "name": "Chaos Fanatic Champion",
+          "complete": false
+        },
+        {
+          "id": 51,
+          "name": "Sorry, What Was That?",
+          "complete": false
+        },
+        {
+          "id": 52,
+          "name": "Crazy Archaeologist Champion",
+          "complete": false
+        },
+        {
+          "id": 53,
+          "name": "Mage of the Ruins",
+          "complete": false
+        },
+        {
+          "id": 54,
+          "name": "I'd Rather Not Learn",
+          "complete": false
+        },
+        {
+          "id": 55,
+          "name": "Deranged Archaeologist Champion",
+          "complete": false
+        },
+        {
+          "id": 56,
+          "name": "Mage of the Swamp",
+          "complete": false
+        },
+        {
+          "id": 57,
+          "name": "I'd Rather Be Illiterate",
+          "complete": false
+        },
+        {
+          "id": 58,
+          "name": "A Smashing Time",
+          "complete": false
+        },
+        {
+          "id": 59,
+          "name": "Obor Champion",
+          "complete": false
+        },
+        {
+          "id": 60,
+          "name": "Back to the Wall",
+          "complete": false
+        },
+        {
+          "id": 61,
+          "name": "Squashing the Giant",
+          "complete": false
+        },
+        {
+          "id": 62,
+          "name": "King Black Dragon Champion",
+          "complete": false
+        },
+        {
+          "id": 63,
+          "name": "Claw Clipper",
+          "complete": false
+        },
+        {
+          "id": 64,
+          "name": "Hide Penetration",
+          "complete": false
+        },
+        {
+          "id": 65,
+          "name": "Antifire Protection",
+          "complete": false
+        },
+        {
+          "id": 66,
+          "name": "Master of Broad Weaponry",
+          "complete": false
+        },
+        {
+          "id": 67,
+          "name": "Giant Mole Champion",
+          "complete": false
+        },
+        {
+          "id": 68,
+          "name": "Avoiding Those Little Arms",
+          "complete": false
+        },
+        {
+          "id": 69,
+          "name": "Dagannoth Prime Champion",
+          "complete": false
+        },
+        {
+          "id": 70,
+          "name": "Dagannoth Rex Champion",
+          "complete": false
+        },
+        {
+          "id": 71,
+          "name": "A Frozen King",
+          "complete": false
+        },
+        {
+          "id": 72,
+          "name": "Sarachnis Champion",
+          "complete": false
+        },
+        {
+          "id": 73,
+          "name": "Newspaper Enthusiast",
+          "complete": false
+        },
+        {
+          "id": 74,
+          "name": "A Frozen Foe from the Past",
+          "complete": false
+        },
+        {
+          "id": 75,
+          "name": "Dagannoth Supreme Champion",
+          "complete": false
+        },
+        {
+          "id": 76,
+          "name": "Wintertodt Champion",
+          "complete": false
+        },
+        {
+          "id": 77,
+          "name": "Can We Fix It?",
+          "complete": false
+        },
+        {
+          "id": 78,
+          "name": "Leaving No One Behind",
+          "complete": false
+        },
+        {
+          "id": 79,
+          "name": "Skotizo Champion",
+          "complete": false
+        },
+        {
+          "id": 80,
+          "name": "Tempoross Champion",
+          "complete": false
+        },
+        {
+          "id": 81,
+          "name": "The Lone Angler",
+          "complete": false
+        },
+        {
+          "id": 82,
+          "name": "Scurrius Champion",
+          "complete": false
+        },
+        {
+          "id": 83,
+          "name": "Perfect Scurrius",
+          "complete": false
+        },
+        {
+          "id": 84,
+          "name": "Efficient Pest Control",
+          "complete": false
+        },
+        {
+          "id": 85,
+          "name": "Lunar Triplet",
+          "complete": false
+        },
+        {
+          "id": 86,
+          "name": "Perilous Novice",
+          "complete": false
+        },
+        {
+          "id": 87,
+          "name": "Back to Our Roots",
+          "complete": false
+        },
+        {
+          "id": 88,
+          "name": "Moons of Peril Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 89,
+          "name": "Hueycoatl Champion",
+          "complete": false
+        },
+        {
+          "id": 90,
+          "name": "You're a wizard",
+          "complete": false
+        },
+        {
+          "id": 91,
+          "name": "Amoxliatl Champion",
+          "complete": false
+        },
+        {
+          "id": 92,
+          "name": "Temotli Triumph",
+          "complete": false
+        },
+        {
+          "id": 93,
+          "name": "Royal Titan Champion",
+          "complete": false
+        },
+        {
+          "id": 94,
+          "name": "Royal Titan Adept",
+          "complete": false
+        },
+        {
+          "id": 95,
+          "name": "It takes too long",
+          "complete": false
+        },
+        {
+          "id": 96,
+          "name": "Shellbane Veteran",
+          "complete": false
+        },
+        {
+          "id": 97,
+          "name": "Perfect Shellbane",
+          "complete": false
+        },
+        {
+          "id": 98,
+          "name": "Shellbane Speedrunner",
+          "complete": false
+        },
+        {
+          "id": 99,
+          "name": "Brutus Champion",
+          "complete": false
+        },
+        {
+          "id": 100,
+          "name": "Beef vs Beef",
+          "complete": false
+        }
+      ]
+    },
+    "hard": {
+      "complete": false,
+      "tasks_completed": 4,
+      "tasks_total": 85,
+      "tasks": [
+        {
+          "id": 101,
+          "name": "Abyssal Adept",
+          "complete": false
+        },
+        {
+          "id": 102,
+          "name": "They Grow Up Too Fast",
+          "complete": false
+        },
+        {
+          "id": 103,
+          "name": "Don't Whip Me",
+          "complete": false
+        },
+        {
+          "id": 104,
+          "name": "Don't Stop Moving",
+          "complete": false
+        },
+        {
+          "id": 105,
+          "name": "Kree'arra Adept",
+          "complete": false
+        },
+        {
+          "id": 106,
+          "name": "Airborne Showdown",
+          "complete": false
+        },
+        {
+          "id": 107,
+          "name": "General Graardor Adept",
+          "complete": false
+        },
+        {
+          "id": 108,
+          "name": "Ourg Freezer",
+          "complete": false
+        },
+        {
+          "id": 109,
+          "name": "General Showdown",
+          "complete": false
+        },
+        {
+          "id": 110,
+          "name": "Just Like That",
+          "complete": false
+        },
+        {
+          "id": 111,
+          "name": "Faithless Crypt Run",
+          "complete": false
+        },
+        {
+          "id": 112,
+          "name": "Callisto Adept",
+          "complete": false
+        },
+        {
+          "id": 113,
+          "name": "Skotizo Adept",
+          "complete": false
+        },
+        {
+          "id": 114,
+          "name": "Chaos Elemental Adept",
+          "complete": false
+        },
+        {
+          "id": 115,
+          "name": "Hoarder",
+          "complete": false
+        },
+        {
+          "id": 116,
+          "name": "The Flincher",
+          "complete": false
+        },
+        {
+          "id": 117,
+          "name": "Chaos Fanatic Adept",
+          "complete": false
+        },
+        {
+          "id": 118,
+          "name": "Praying to the Gods",
+          "complete": false
+        },
+        {
+          "id": 119,
+          "name": "Crazy Archaeologist Adept",
+          "complete": false
+        },
+        {
+          "id": 120,
+          "name": "Grotesque Guardians Adept",
+          "complete": false
+        },
+        {
+          "id": 121,
+          "name": "Don't Look at the Eclipse",
+          "complete": false
+        },
+        {
+          "id": 122,
+          "name": "Prison Break",
+          "complete": false
+        },
+        {
+          "id": 123,
+          "name": "Granite Footwork",
+          "complete": false
+        },
+        {
+          "id": 124,
+          "name": "Heal No More",
+          "complete": false
+        },
+        {
+          "id": 125,
+          "name": "Static Awareness",
+          "complete": false
+        },
+        {
+          "id": 126,
+          "name": "Hespori Adept",
+          "complete": false
+        },
+        {
+          "id": 127,
+          "name": "Hesporisn't",
+          "complete": false
+        },
+        {
+          "id": 128,
+          "name": "Weed Whacker",
+          "complete": false
+        },
+        {
+          "id": 129,
+          "name": "Kalphite Queen Adept",
+          "complete": true
+        },
+        {
+          "id": 130,
+          "name": "Chitin Penetrator",
+          "complete": true
+        },
+        {
+          "id": 131,
+          "name": "Who Is the King Now?",
+          "complete": false
+        },
+        {
+          "id": 132,
+          "name": "Kraken Adept",
+          "complete": false
+        },
+        {
+          "id": 133,
+          "name": "Unnecessary Optimisation",
+          "complete": false
+        },
+        {
+          "id": 134,
+          "name": "Krakan't Hurt Me",
+          "complete": false
+        },
+        {
+          "id": 135,
+          "name": "Why Are You Running?",
+          "complete": false
+        },
+        {
+          "id": 136,
+          "name": "Whack-a-Mole",
+          "complete": false
+        },
+        {
+          "id": 137,
+          "name": "Nightmare Adept",
+          "complete": false
+        },
+        {
+          "id": 138,
+          "name": "Dagannoth Prime Adept",
+          "complete": false
+        },
+        {
+          "id": 139,
+          "name": "Dagannoth Rex Adept",
+          "complete": false
+        },
+        {
+          "id": 140,
+          "name": "Ready to Pounce",
+          "complete": false
+        },
+        {
+          "id": 141,
+          "name": "Inspect Repellent",
+          "complete": false
+        },
+        {
+          "id": 142,
+          "name": "Commander Zilyana Adept",
+          "complete": false
+        },
+        {
+          "id": 143,
+          "name": "Commander Showdown",
+          "complete": false
+        },
+        {
+          "id": 144,
+          "name": "Scorpia Adept",
+          "complete": false
+        },
+        {
+          "id": 145,
+          "name": "I Can't Reach That",
+          "complete": false
+        },
+        {
+          "id": 146,
+          "name": "Guardians No More",
+          "complete": false
+        },
+        {
+          "id": 147,
+          "name": "Zulrah Adept",
+          "complete": true
+        },
+        {
+          "id": 148,
+          "name": "Dagannoth Supreme Adept",
+          "complete": false
+        },
+        {
+          "id": 149,
+          "name": "Theatre of Blood: SM Adept",
+          "complete": false
+        },
+        {
+          "id": 150,
+          "name": "Venenatis Adept",
+          "complete": false
+        },
+        {
+          "id": 151,
+          "name": "Vet'ion Adept",
+          "complete": false
+        },
+        {
+          "id": 152,
+          "name": "Why Fletch?",
+          "complete": false
+        },
+        {
+          "id": 153,
+          "name": "K'ril Tsutsaroth Adept",
+          "complete": false
+        },
+        {
+          "id": 154,
+          "name": "Yarr No More",
+          "complete": false
+        },
+        {
+          "id": 155,
+          "name": "Demonic Showdown",
+          "complete": false
+        },
+        {
+          "id": 156,
+          "name": "Demonbane Weaponry II",
+          "complete": false
+        },
+        {
+          "id": 157,
+          "name": "Dress Like You Mean It",
+          "complete": false
+        },
+        {
+          "id": 158,
+          "name": "Why Cook?",
+          "complete": false
+        },
+        {
+          "id": 159,
+          "name": "Novice Tomb Explorer",
+          "complete": false
+        },
+        {
+          "id": 160,
+          "name": "Novice Tomb Looter",
+          "complete": false
+        },
+        {
+          "id": 161,
+          "name": "Movin' on up",
+          "complete": false
+        },
+        {
+          "id": 162,
+          "name": "Confident Raider",
+          "complete": false
+        },
+        {
+          "id": 163,
+          "name": "Phantom Muspah Adept",
+          "complete": false
+        },
+        {
+          "id": 164,
+          "name": "Perilous Dancer",
+          "complete": false
+        },
+        {
+          "id": 165,
+          "name": "Fortified",
+          "complete": false
+        },
+        {
+          "id": 166,
+          "name": "Betrayal",
+          "complete": false
+        },
+        {
+          "id": 167,
+          "name": "Moons of Peril Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 168,
+          "name": "Fat of the Land",
+          "complete": false
+        },
+        {
+          "id": 169,
+          "name": "The Clone Zone",
+          "complete": false
+        },
+        {
+          "id": 170,
+          "name": "Perilous Champion",
+          "complete": false
+        },
+        {
+          "id": 171,
+          "name": "Hueycoatl Adept",
+          "complete": false
+        },
+        {
+          "id": 172,
+          "name": "Pillar Lover",
+          "complete": false
+        },
+        {
+          "id": 173,
+          "name": "I'm your son",
+          "complete": false
+        },
+        {
+          "id": 174,
+          "name": "Amoxliatl Adept",
+          "complete": false
+        },
+        {
+          "id": 175,
+          "name": "Amoxliatl Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 176,
+          "name": "Nagua Negation",
+          "complete": false
+        },
+        {
+          "id": 177,
+          "name": "Kemo Makti",
+          "complete": false
+        },
+        {
+          "id": 178,
+          "name": "Totally Shattered",
+          "complete": false
+        },
+        {
+          "id": 179,
+          "name": "Perfect Royal Titans",
+          "complete": false
+        },
+        {
+          "id": 180,
+          "name": "Royal Titan Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 181,
+          "name": "Titan Killer",
+          "complete": false
+        },
+        {
+          "id": 182,
+          "name": "I need room",
+          "complete": true
+        },
+        {
+          "id": 183,
+          "name": "Shellbane Survivor",
+          "complete": false
+        },
+        {
+          "id": 184,
+          "name": "Featherweight Fighter",
+          "complete": false
+        },
+        {
+          "id": 185,
+          "name": "Smarter than a Cow",
+          "complete": false
+        }
+      ]
+    },
+    "elite": {
+      "complete": false,
+      "tasks_completed": 1,
+      "tasks_total": 162,
+      "tasks": [
+        {
+          "id": 186,
+          "name": "Abyssal Veteran",
+          "complete": false
+        },
+        {
+          "id": 187,
+          "name": "Respiratory Runner",
+          "complete": false
+        },
+        {
+          "id": 188,
+          "name": "Demonic Rebound",
+          "complete": false
+        },
+        {
+          "id": 189,
+          "name": "Perfect Sire",
+          "complete": false
+        },
+        {
+          "id": 190,
+          "name": "Kree'arra Veteran",
+          "complete": false
+        },
+        {
+          "id": 191,
+          "name": "General Graardor Veteran",
+          "complete": false
+        },
+        {
+          "id": 192,
+          "name": "Ourg Freezer II",
+          "complete": false
+        },
+        {
+          "id": 193,
+          "name": "Reflecting on This Encounter",
+          "complete": false
+        },
+        {
+          "id": 194,
+          "name": "Callisto Veteran",
+          "complete": false
+        },
+        {
+          "id": 195,
+          "name": "Demon Evasion",
+          "complete": false
+        },
+        {
+          "id": 196,
+          "name": "Up for the Challenge",
+          "complete": false
+        },
+        {
+          "id": 197,
+          "name": "Cerberus Veteran",
+          "complete": false
+        },
+        {
+          "id": 198,
+          "name": "Ghost Buster",
+          "complete": false
+        },
+        {
+          "id": 199,
+          "name": "Unrequired Antifire",
+          "complete": false
+        },
+        {
+          "id": 200,
+          "name": "Anti-Bite Mechanics",
+          "complete": false
+        },
+        {
+          "id": 201,
+          "name": "Chaos Elemental Veteran",
+          "complete": false
+        },
+        {
+          "id": 202,
+          "name": "Corporeal Beast Veteran",
+          "complete": false
+        },
+        {
+          "id": 203,
+          "name": "Hot on Your Feet",
+          "complete": false
+        },
+        {
+          "id": 204,
+          "name": "Finding the Weak Spot",
+          "complete": false
+        },
+        {
+          "id": 205,
+          "name": "Chicken Killer",
+          "complete": false
+        },
+        {
+          "id": 206,
+          "name": "If Gorillas Could Fly",
+          "complete": false
+        },
+        {
+          "id": 207,
+          "name": "Hitting Them Where It Hurts",
+          "complete": false
+        },
+        {
+          "id": 208,
+          "name": "Galvek Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 209,
+          "name": "Grotesque Guardians Veteran",
+          "complete": false
+        },
+        {
+          "id": 210,
+          "name": "Done before Dusk",
+          "complete": false
+        },
+        {
+          "id": 211,
+          "name": "Perfect Grotesque Guardians",
+          "complete": false
+        },
+        {
+          "id": 212,
+          "name": "Grotesque Guardians Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 213,
+          "name": "From Dusk...",
+          "complete": false
+        },
+        {
+          "id": 214,
+          "name": "Corrupted Gauntlet Veteran",
+          "complete": false
+        },
+        {
+          "id": 215,
+          "name": "3, 2, 1 - Mage",
+          "complete": false
+        },
+        {
+          "id": 216,
+          "name": "Gauntlet Veteran",
+          "complete": false
+        },
+        {
+          "id": 217,
+          "name": "3, 2, 1 - Range",
+          "complete": false
+        },
+        {
+          "id": 218,
+          "name": "Egniol Diet",
+          "complete": false
+        },
+        {
+          "id": 219,
+          "name": "Crystalline Warrior",
+          "complete": false
+        },
+        {
+          "id": 220,
+          "name": "Wolf Puncher",
+          "complete": false
+        },
+        {
+          "id": 221,
+          "name": "Glough Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 222,
+          "name": "Plant-Based Diet",
+          "complete": false
+        },
+        {
+          "id": 223,
+          "name": "Hespori Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 224,
+          "name": "Alchemical Veteran",
+          "complete": false
+        },
+        {
+          "id": 225,
+          "name": "Fight Caves Veteran",
+          "complete": false
+        },
+        {
+          "id": 226,
+          "name": "Facing Jad Head-on",
+          "complete": false
+        },
+        {
+          "id": 227,
+          "name": "Kalphite Queen Veteran",
+          "complete": false
+        },
+        {
+          "id": 228,
+          "name": "Insect Deflection",
+          "complete": false
+        },
+        {
+          "id": 229,
+          "name": "Prayer Smasher",
+          "complete": false
+        },
+        {
+          "id": 230,
+          "name": "Ten-tacles",
+          "complete": false
+        },
+        {
+          "id": 231,
+          "name": "Mimic Veteran",
+          "complete": false
+        },
+        {
+          "id": 232,
+          "name": "Hard Hitter",
+          "complete": false
+        },
+        {
+          "id": 233,
+          "name": "Nightmare Veteran",
+          "complete": false
+        },
+        {
+          "id": 234,
+          "name": "Explosion!",
+          "complete": false
+        },
+        {
+          "id": 235,
+          "name": "Sleep Tight",
+          "complete": false
+        },
+        {
+          "id": 236,
+          "name": "Nightmare (Solo) Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 237,
+          "name": "Nightmare (5-Scale) Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 238,
+          "name": "Death to the Seer King",
+          "complete": false
+        },
+        {
+          "id": 239,
+          "name": "From One King to Another",
+          "complete": false
+        },
+        {
+          "id": 240,
+          "name": "Death to the Warrior King",
+          "complete": false
+        },
+        {
+          "id": 241,
+          "name": "Toppling the Diarchy",
+          "complete": false
+        },
+        {
+          "id": 242,
+          "name": "Commander Zilyana Veteran",
+          "complete": false
+        },
+        {
+          "id": 243,
+          "name": "Reminisce",
+          "complete": false
+        },
+        {
+          "id": 244,
+          "name": "Scorpia Veteran",
+          "complete": false
+        },
+        {
+          "id": 245,
+          "name": "Fragment of Seren Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 246,
+          "name": "Zulrah Veteran",
+          "complete": false
+        },
+        {
+          "id": 247,
+          "name": "Snake Rebound",
+          "complete": false
+        },
+        {
+          "id": 248,
+          "name": "Snake. Snake!? Snaaaaaake!",
+          "complete": false
+        },
+        {
+          "id": 249,
+          "name": "Zulrah Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 250,
+          "name": "Death to the Archer King",
+          "complete": false
+        },
+        {
+          "id": 251,
+          "name": "Rapid Succession",
+          "complete": false
+        },
+        {
+          "id": 252,
+          "name": "Anticoagulants",
+          "complete": false
+        },
+        {
+          "id": 253,
+          "name": "Appropriate Tools",
+          "complete": false
+        },
+        {
+          "id": 254,
+          "name": "They Won't Expect This",
+          "complete": false
+        },
+        {
+          "id": 255,
+          "name": "Chally Time",
+          "complete": false
+        },
+        {
+          "id": 256,
+          "name": "Nylocas, On the Rocks",
+          "complete": false
+        },
+        {
+          "id": 257,
+          "name": "Just To Be Safe",
+          "complete": false
+        },
+        {
+          "id": 258,
+          "name": "Don't Look at Me!",
+          "complete": false
+        },
+        {
+          "id": 259,
+          "name": "No-Pillar",
+          "complete": false
+        },
+        {
+          "id": 260,
+          "name": "Attack, Step, Wait",
+          "complete": false
+        },
+        {
+          "id": 261,
+          "name": "Pass It On",
+          "complete": false
+        },
+        {
+          "id": 262,
+          "name": "Theatre of Blood Veteran",
+          "complete": false
+        },
+        {
+          "id": 263,
+          "name": "Thermonuclear Veteran",
+          "complete": false
+        },
+        {
+          "id": 264,
+          "name": "Hazard Prevention",
+          "complete": false
+        },
+        {
+          "id": 265,
+          "name": "Spec'd Out",
+          "complete": false
+        },
+        {
+          "id": 266,
+          "name": "Venenatis Veteran",
+          "complete": false
+        },
+        {
+          "id": 267,
+          "name": "Vet'eran",
+          "complete": false
+        },
+        {
+          "id": 268,
+          "name": "Vorkath Veteran",
+          "complete": true
+        },
+        {
+          "id": 269,
+          "name": "Stick 'em With the Pointy End",
+          "complete": false
+        },
+        {
+          "id": 270,
+          "name": "Zombie Destroyer",
+          "complete": false
+        },
+        {
+          "id": 271,
+          "name": "Dust Seeker",
+          "complete": false
+        },
+        {
+          "id": 272,
+          "name": "Chambers of Xeric Veteran",
+          "complete": false
+        },
+        {
+          "id": 273,
+          "name": "Perfectly Balanced",
+          "complete": false
+        },
+        {
+          "id": 274,
+          "name": "Together We'll Fall",
+          "complete": false
+        },
+        {
+          "id": 275,
+          "name": "Redemption Enthusiast",
+          "complete": false
+        },
+        {
+          "id": 276,
+          "name": "Mutta-diet",
+          "complete": false
+        },
+        {
+          "id": 277,
+          "name": "Dancing with Statues",
+          "complete": false
+        },
+        {
+          "id": 278,
+          "name": "Undying Raid Team",
+          "complete": false
+        },
+        {
+          "id": 279,
+          "name": "Shayzien Specialist",
+          "complete": false
+        },
+        {
+          "id": 280,
+          "name": "Cryo No More",
+          "complete": false
+        },
+        {
+          "id": 281,
+          "name": "Blizzard Dodger",
+          "complete": false
+        },
+        {
+          "id": 282,
+          "name": "Kill It with Fire",
+          "complete": false
+        },
+        {
+          "id": 283,
+          "name": "Zalcano Veteran",
+          "complete": false
+        },
+        {
+          "id": 284,
+          "name": "Perfect Zalcano",
+          "complete": false
+        },
+        {
+          "id": 285,
+          "name": "Team Player",
+          "complete": false
+        },
+        {
+          "id": 286,
+          "name": "The Spurned Hero",
+          "complete": false
+        },
+        {
+          "id": 287,
+          "name": "K'ril Tsutsaroth Veteran",
+          "complete": false
+        },
+        {
+          "id": 288,
+          "name": "Demonic Defence",
+          "complete": false
+        },
+        {
+          "id": 289,
+          "name": "The Bane of Demons",
+          "complete": false
+        },
+        {
+          "id": 290,
+          "name": "Half-Way There",
+          "complete": false
+        },
+        {
+          "id": 291,
+          "name": "A Near Miss!",
+          "complete": false
+        },
+        {
+          "id": 292,
+          "name": "The II Jad Challenge",
+          "complete": false
+        },
+        {
+          "id": 293,
+          "name": "TzHaar-Ket-Rak's Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 294,
+          "name": "Facing Jad Head-on III",
+          "complete": false
+        },
+        {
+          "id": 295,
+          "name": "Phosani's Veteran",
+          "complete": false
+        },
+        {
+          "id": 296,
+          "name": "Nex Veteran",
+          "complete": false
+        },
+        {
+          "id": 297,
+          "name": "Nex Survivors",
+          "complete": false
+        },
+        {
+          "id": 298,
+          "name": "Novice Tomb Raider",
+          "complete": false
+        },
+        {
+          "id": 299,
+          "name": "Tomb Explorer",
+          "complete": false
+        },
+        {
+          "id": 300,
+          "name": "Expert Tomb Explorer",
+          "complete": false
+        },
+        {
+          "id": 301,
+          "name": "Hardcore Raiders",
+          "complete": false
+        },
+        {
+          "id": 302,
+          "name": "Hardcore Tombs",
+          "complete": false
+        },
+        {
+          "id": 303,
+          "name": "Helpful spirit who?",
+          "complete": false
+        },
+        {
+          "id": 304,
+          "name": "Dropped the ball",
+          "complete": false
+        },
+        {
+          "id": 305,
+          "name": "No skipping allowed",
+          "complete": false
+        },
+        {
+          "id": 306,
+          "name": "Down Do Specs",
+          "complete": false
+        },
+        {
+          "id": 307,
+          "name": "Perfect Het",
+          "complete": false
+        },
+        {
+          "id": 308,
+          "name": "Perfect Apmeken",
+          "complete": false
+        },
+        {
+          "id": 309,
+          "name": "Perfect Crondis",
+          "complete": false
+        },
+        {
+          "id": 310,
+          "name": "I'm in a rush",
+          "complete": false
+        },
+        {
+          "id": 311,
+          "name": "Phantom Muspah Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 312,
+          "name": "Phantom Muspah Veteran",
+          "complete": false
+        },
+        {
+          "id": 313,
+          "name": "Can't Escape",
+          "complete": false
+        },
+        {
+          "id": 314,
+          "name": "Versatile Drainer",
+          "complete": false
+        },
+        {
+          "id": 315,
+          "name": "Duke Sucellus Adept",
+          "complete": false
+        },
+        {
+          "id": 316,
+          "name": "Vardorvis Adept",
+          "complete": false
+        },
+        {
+          "id": 317,
+          "name": "Whisperer Adept",
+          "complete": false
+        },
+        {
+          "id": 318,
+          "name": "Leviathan Adept",
+          "complete": false
+        },
+        {
+          "id": 319,
+          "name": "Duke Sucellus Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 320,
+          "name": "Vardorvis Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 321,
+          "name": "Whisperer Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 322,
+          "name": "Leviathan Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 323,
+          "name": "Tentacular",
+          "complete": false
+        },
+        {
+          "id": 324,
+          "name": "High Hitter",
+          "complete": false
+        },
+        {
+          "id": 325,
+          "name": "Furball",
+          "complete": false
+        },
+        {
+          "id": 326,
+          "name": "Denied",
+          "complete": false
+        },
+        {
+          "id": 327,
+          "name": "I was here first!",
+          "complete": false
+        },
+        {
+          "id": 328,
+          "name": "Unending Torment",
+          "complete": false
+        },
+        {
+          "id": 329,
+          "name": "Through Fire and Flames",
+          "complete": false
+        },
+        {
+          "id": 330,
+          "name": "Two Times the Torment",
+          "complete": false
+        },
+        {
+          "id": 331,
+          "name": "Rapid Reload",
+          "complete": false
+        },
+        {
+          "id": 332,
+          "name": "Araxxor Veteran",
+          "complete": false
+        },
+        {
+          "id": 333,
+          "name": "Relaxxor",
+          "complete": false
+        },
+        {
+          "id": 334,
+          "name": "Araxxor Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 335,
+          "name": "Hueycoatl Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 336,
+          "name": "Hueycoatl Veteran",
+          "complete": false
+        },
+        {
+          "id": 337,
+          "name": "Perfect Hueycoatl",
+          "complete": false
+        },
+        {
+          "id": 338,
+          "name": "Amoxliatl Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 339,
+          "name": "Without Ralos' Light",
+          "complete": false
+        },
+        {
+          "id": 340,
+          "name": "No time to pray",
+          "complete": false
+        },
+        {
+          "id": 341,
+          "name": "Yama Adept",
+          "complete": false
+        },
+        {
+          "id": 342,
+          "name": "Yama Speed-Trialist",
+          "complete": false
+        },
+        {
+          "id": 343,
+          "name": "Back so soon?",
+          "complete": false
+        },
+        {
+          "id": 344,
+          "name": "Doom Adept",
+          "complete": false
+        },
+        {
+          "id": 345,
+          "name": "Exposed Doom",
+          "complete": false
+        },
+        {
+          "id": 346,
+          "name": "Doom Crawler",
+          "complete": false
+        },
+        {
+          "id": 347,
+          "name": "Brutus Speed-Trialist",
+          "complete": false
+        }
+      ]
+    },
+    "master": {
+      "complete": false,
+      "tasks_completed": 2,
+      "tasks_total": 168,
+      "tasks": [
+        {
+          "id": 348,
+          "name": "Collateral Damage",
+          "complete": false
+        },
+        {
+          "id": 349,
+          "name": "Swoop No More",
+          "complete": false
+        },
+        {
+          "id": 350,
+          "name": "Precise Positioning",
+          "complete": false
+        },
+        {
+          "id": 351,
+          "name": "Cerberus Master",
+          "complete": false
+        },
+        {
+          "id": 352,
+          "name": "Arooo No More",
+          "complete": false
+        },
+        {
+          "id": 353,
+          "name": "Corporeal Beast Master",
+          "complete": false
+        },
+        {
+          "id": 354,
+          "name": "Perfect Grotesque Guardians II",
+          "complete": false
+        },
+        {
+          "id": 355,
+          "name": "Grotesque Guardians Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 356,
+          "name": "... 'til Dawn",
+          "complete": false
+        },
+        {
+          "id": 357,
+          "name": "Corrupted Gauntlet Master",
+          "complete": false
+        },
+        {
+          "id": 358,
+          "name": "Perfect Corrupted Hunllef",
+          "complete": false
+        },
+        {
+          "id": 359,
+          "name": "Defence Doesn't Matter II",
+          "complete": false
+        },
+        {
+          "id": 360,
+          "name": "Corrupted Warrior",
+          "complete": false
+        },
+        {
+          "id": 361,
+          "name": "Corrupted Gauntlet Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 362,
+          "name": "Gauntlet Master",
+          "complete": false
+        },
+        {
+          "id": 363,
+          "name": "Perfect Crystalline Hunllef",
+          "complete": false
+        },
+        {
+          "id": 364,
+          "name": "Defence Doesn't Matter",
+          "complete": false
+        },
+        {
+          "id": 365,
+          "name": "Gauntlet Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 366,
+          "name": "Hespori Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 367,
+          "name": "Alchemical Master",
+          "complete": false
+        },
+        {
+          "id": 368,
+          "name": "Unrequired Antipoisons",
+          "complete": false
+        },
+        {
+          "id": 369,
+          "name": "Lightning Lure",
+          "complete": false
+        },
+        {
+          "id": 370,
+          "name": "Don't Flame Me",
+          "complete": false
+        },
+        {
+          "id": 371,
+          "name": "Mixing Correctly",
+          "complete": false
+        },
+        {
+          "id": 372,
+          "name": "The Flame Skipper",
+          "complete": false
+        },
+        {
+          "id": 373,
+          "name": "Alcleanical Hydra",
+          "complete": false
+        },
+        {
+          "id": 374,
+          "name": "Alchemical Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 375,
+          "name": "Working Overtime",
+          "complete": false
+        },
+        {
+          "id": 376,
+          "name": "Fight Caves Master",
+          "complete": false
+        },
+        {
+          "id": 377,
+          "name": "Denying the Healers",
+          "complete": false
+        },
+        {
+          "id": 378,
+          "name": "You Didn't Say Anything About a Bat",
+          "complete": false
+        },
+        {
+          "id": 379,
+          "name": "Fight Caves Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 380,
+          "name": "One Hundred Tentacles",
+          "complete": false
+        },
+        {
+          "id": 381,
+          "name": "Nightmare Master",
+          "complete": false
+        },
+        {
+          "id": 382,
+          "name": "Perfect Nightmare",
+          "complete": false
+        },
+        {
+          "id": 383,
+          "name": "Nightmare (Solo) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 384,
+          "name": "Nightmare (5-Scale) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 385,
+          "name": "Moving Collateral",
+          "complete": false
+        },
+        {
+          "id": 386,
+          "name": "Zulrah Master",
+          "complete": false
+        },
+        {
+          "id": 387,
+          "name": "Perfect Zulrah",
+          "complete": false
+        },
+        {
+          "id": 388,
+          "name": "Zulrah Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 389,
+          "name": "Can't Drain This",
+          "complete": false
+        },
+        {
+          "id": 390,
+          "name": "Perfect Maiden",
+          "complete": false
+        },
+        {
+          "id": 391,
+          "name": "Two-Down",
+          "complete": false
+        },
+        {
+          "id": 392,
+          "name": "Perfect Bloat",
+          "complete": false
+        },
+        {
+          "id": 393,
+          "name": "Perfect Nylocas",
+          "complete": false
+        },
+        {
+          "id": 394,
+          "name": "A Timely Snack",
+          "complete": false
+        },
+        {
+          "id": 395,
+          "name": "Perfect Sotetseg",
+          "complete": false
+        },
+        {
+          "id": 396,
+          "name": "Can You Dance?",
+          "complete": false
+        },
+        {
+          "id": 397,
+          "name": "Perfect Xarpus",
+          "complete": false
+        },
+        {
+          "id": 398,
+          "name": "Pop It",
+          "complete": false
+        },
+        {
+          "id": 399,
+          "name": "Perfect Verzik",
+          "complete": false
+        },
+        {
+          "id": 400,
+          "name": "Back in My Day...",
+          "complete": false
+        },
+        {
+          "id": 401,
+          "name": "Theatre (Trio) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 402,
+          "name": "Theatre (4-Scale) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 403,
+          "name": "Theatre (5-Scale) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 404,
+          "name": "Theatre of Blood Master",
+          "complete": false
+        },
+        {
+          "id": 405,
+          "name": "Vorkath Master",
+          "complete": false
+        },
+        {
+          "id": 406,
+          "name": "The Walk",
+          "complete": false
+        },
+        {
+          "id": 407,
+          "name": "Dodging the Dragon",
+          "complete": false
+        },
+        {
+          "id": 408,
+          "name": "Vorkath Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 409,
+          "name": "Extended Encounter",
+          "complete": false
+        },
+        {
+          "id": 410,
+          "name": "Chambers of Xeric: CM Master",
+          "complete": false
+        },
+        {
+          "id": 411,
+          "name": "Immortal Raid Team",
+          "complete": false
+        },
+        {
+          "id": 412,
+          "name": "Immortal Raider",
+          "complete": false
+        },
+        {
+          "id": 413,
+          "name": "Chambers of Xeric: CM (Solo) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 414,
+          "name": "Chambers of Xeric: CM (5-Scale) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 415,
+          "name": "Chambers of Xeric: CM (Trio) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 416,
+          "name": "Chambers of Xeric Master",
+          "complete": false
+        },
+        {
+          "id": 417,
+          "name": "No Time for Death",
+          "complete": false
+        },
+        {
+          "id": 418,
+          "name": "Putting It Olm on the Line",
+          "complete": false
+        },
+        {
+          "id": 419,
+          "name": "A Not So Special Lizard",
+          "complete": false
+        },
+        {
+          "id": 420,
+          "name": "Stop Drop and Roll",
+          "complete": false
+        },
+        {
+          "id": 421,
+          "name": "Anvil No More",
+          "complete": false
+        },
+        {
+          "id": 422,
+          "name": "Undying Raider",
+          "complete": false
+        },
+        {
+          "id": 423,
+          "name": "Playing with Lasers",
+          "complete": false
+        },
+        {
+          "id": 424,
+          "name": "Perfect Olm (Solo)",
+          "complete": false
+        },
+        {
+          "id": 425,
+          "name": "Perfect Olm (Trio)",
+          "complete": false
+        },
+        {
+          "id": 426,
+          "name": "Blind Spot",
+          "complete": false
+        },
+        {
+          "id": 427,
+          "name": "Chambers of Xeric (Solo) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 428,
+          "name": "Chambers of Xeric (Trio) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 429,
+          "name": "Chambers of Xeric (5-Scale) Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 430,
+          "name": "Nibblers, Begone!",
+          "complete": false
+        },
+        {
+          "id": 431,
+          "name": "The IV Jad Challenge",
+          "complete": false
+        },
+        {
+          "id": 432,
+          "name": "TzHaar-Ket-Rak's Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 433,
+          "name": "Facing Jad Head-on IV",
+          "complete": false
+        },
+        {
+          "id": 434,
+          "name": "Supplies? Who Needs 'em?",
+          "complete": false
+        },
+        {
+          "id": 435,
+          "name": "Multi-Style Specialist",
+          "complete": false
+        },
+        {
+          "id": 436,
+          "name": "Hard Mode? Completed It",
+          "complete": false
+        },
+        {
+          "id": 437,
+          "name": "Theatre of Blood: SM Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 438,
+          "name": "Phosani's Master",
+          "complete": false
+        },
+        {
+          "id": 439,
+          "name": "Phosani's Speedchaser",
+          "complete": false
+        },
+        {
+          "id": 440,
+          "name": "Crush Hour",
+          "complete": false
+        },
+        {
+          "id": 441,
+          "name": "I Would Simply React",
+          "complete": false
+        },
+        {
+          "id": 442,
+          "name": "Dreamland Express",
+          "complete": false
+        },
+        {
+          "id": 443,
+          "name": "Nex Master",
+          "complete": false
+        },
+        {
+          "id": 444,
+          "name": "A siphon will solve this",
+          "complete": false
+        },
+        {
+          "id": 445,
+          "name": "Contain this!",
+          "complete": false
+        },
+        {
+          "id": 446,
+          "name": "There is no escape!",
+          "complete": false
+        },
+        {
+          "id": 447,
+          "name": "Nex Trio",
+          "complete": false
+        },
+        {
+          "id": 448,
+          "name": "Shadows Move...",
+          "complete": false
+        },
+        {
+          "id": 449,
+          "name": "You are not prepared",
+          "complete": false
+        },
+        {
+          "id": 450,
+          "name": "Tomb Looter",
+          "complete": false
+        },
+        {
+          "id": 451,
+          "name": "Tomb Raider",
+          "complete": false
+        },
+        {
+          "id": 452,
+          "name": "Tombs Speed Runner",
+          "complete": false
+        },
+        {
+          "id": 453,
+          "name": "Something of an expert myself",
+          "complete": false
+        },
+        {
+          "id": 454,
+          "name": "Expert Tomb Looter",
+          "complete": false
+        },
+        {
+          "id": 455,
+          "name": "Ba-Bananza",
+          "complete": false
+        },
+        {
+          "id": 456,
+          "name": "Rockin' around the croc",
+          "complete": false
+        },
+        {
+          "id": 457,
+          "name": "Doesn't bug me",
+          "complete": false
+        },
+        {
+          "id": 458,
+          "name": "All out of medics",
+          "complete": false
+        },
+        {
+          "id": 459,
+          "name": "Better get movin'",
+          "complete": false
+        },
+        {
+          "id": 460,
+          "name": "Warden't you believe it",
+          "complete": false
+        },
+        {
+          "id": 461,
+          "name": "Resourceful Raider",
+          "complete": true
+        },
+        {
+          "id": 462,
+          "name": "But... Damage",
+          "complete": false
+        },
+        {
+          "id": 463,
+          "name": "Chompington",
+          "complete": false
+        },
+        {
+          "id": 464,
+          "name": "Fancy feet",
+          "complete": true
+        },
+        {
+          "id": 465,
+          "name": "Perfect Akkha",
+          "complete": false
+        },
+        {
+          "id": 466,
+          "name": "Perfect Ba-Ba",
+          "complete": false
+        },
+        {
+          "id": 467,
+          "name": "Perfect Zebak",
+          "complete": false
+        },
+        {
+          "id": 468,
+          "name": "Perfect Scabaras",
+          "complete": false
+        },
+        {
+          "id": 469,
+          "name": "Perfect Kephri",
+          "complete": false
+        },
+        {
+          "id": 470,
+          "name": "Perfect Wardens",
+          "complete": false
+        },
+        {
+          "id": 471,
+          "name": "More than just a ranged weapon",
+          "complete": false
+        },
+        {
+          "id": 472,
+          "name": "Essence Farmer",
+          "complete": false
+        },
+        {
+          "id": 473,
+          "name": "Phantom Muspah Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 474,
+          "name": "Phantom Muspah Master",
+          "complete": false
+        },
+        {
+          "id": 475,
+          "name": "Walk Straight Pray True",
+          "complete": false
+        },
+        {
+          "id": 476,
+          "name": "Space is Tight",
+          "complete": false
+        },
+        {
+          "id": 477,
+          "name": "Perfect Whisperer",
+          "complete": false
+        },
+        {
+          "id": 478,
+          "name": "Duke Sucellus Master",
+          "complete": false
+        },
+        {
+          "id": 479,
+          "name": "Vardorvis Master",
+          "complete": false
+        },
+        {
+          "id": 480,
+          "name": "Whisperer Master",
+          "complete": false
+        },
+        {
+          "id": 481,
+          "name": "Leviathan Master",
+          "complete": false
+        },
+        {
+          "id": 482,
+          "name": "Duke Sucellus Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 483,
+          "name": "Vardorvis Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 484,
+          "name": "Whisperer Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 485,
+          "name": "Leviathan Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 486,
+          "name": "Cold Feet",
+          "complete": false
+        },
+        {
+          "id": 487,
+          "name": "Perfect Duke Sucellus",
+          "complete": false
+        },
+        {
+          "id": 488,
+          "name": "Serpentine Solo",
+          "complete": false
+        },
+        {
+          "id": 489,
+          "name": "Perfect Leviathan",
+          "complete": false
+        },
+        {
+          "id": 490,
+          "name": "Budget Cutter",
+          "complete": false
+        },
+        {
+          "id": 491,
+          "name": "Perfect Vardorvis",
+          "complete": false
+        },
+        {
+          "id": 492,
+          "name": "Sportsmanship",
+          "complete": false
+        },
+        {
+          "id": 493,
+          "name": "I Brought Mine Too",
+          "complete": false
+        },
+        {
+          "id": 494,
+          "name": "Showboating",
+          "complete": false
+        },
+        {
+          "id": 495,
+          "name": "One-off",
+          "complete": false
+        },
+        {
+          "id": 496,
+          "name": "Colosseum Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 497,
+          "name": "Three Times the Thrashing",
+          "complete": false
+        },
+        {
+          "id": 498,
+          "name": "Araxxor Master",
+          "complete": false
+        },
+        {
+          "id": 499,
+          "name": "Araxxor Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 500,
+          "name": "Perfect Araxxor",
+          "complete": false
+        },
+        {
+          "id": 501,
+          "name": "Let it seep in",
+          "complete": false
+        },
+        {
+          "id": 502,
+          "name": "Araxyte Betrayal",
+          "complete": false
+        },
+        {
+          "id": 503,
+          "name": "Arachnid Lover",
+          "complete": false
+        },
+        {
+          "id": 504,
+          "name": "Is it a bird?",
+          "complete": false
+        },
+        {
+          "id": 505,
+          "name": "Hueycoatl Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 506,
+          "name": "Yama Veteran",
+          "complete": false
+        },
+        {
+          "id": 507,
+          "name": "Yama Speed-Chaser",
+          "complete": false
+        },
+        {
+          "id": 508,
+          "name": "No toppings, no drinks, thanks",
+          "complete": false
+        },
+        {
+          "id": 509,
+          "name": "Shadow dancer",
+          "complete": false
+        },
+        {
+          "id": 510,
+          "name": "Fire fighter",
+          "complete": false
+        },
+        {
+          "id": 511,
+          "name": "Doom Veteran",
+          "complete": false
+        },
+        {
+          "id": 512,
+          "name": "Mokhaiotl Drift",
+          "complete": false
+        },
+        {
+          "id": 513,
+          "name": "Grub Patrol",
+          "complete": false
+        },
+        {
+          "id": 514,
+          "name": "Mine's Better",
+          "complete": false
+        },
+        {
+          "id": 515,
+          "name": "Doom Chaser",
+          "complete": false
+        }
+      ]
+    },
+    "grandmaster": {
+      "complete": false,
+      "tasks_completed": 11,
+      "tasks_total": 121,
+      "tasks": [
+        {
+          "id": 516,
+          "name": "The Worst Ranged Weapon",
+          "complete": false
+        },
+        {
+          "id": 517,
+          "name": "Feather Hunter",
+          "complete": false
+        },
+        {
+          "id": 518,
+          "name": "Defence Matters",
+          "complete": false
+        },
+        {
+          "id": 519,
+          "name": "Keep Away",
+          "complete": false
+        },
+        {
+          "id": 520,
+          "name": "Ourg Killer",
+          "complete": false
+        },
+        {
+          "id": 521,
+          "name": "Grotesque Guardians Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 522,
+          "name": "Corrupted Gauntlet Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 523,
+          "name": "Egniol Diet II",
+          "complete": false
+        },
+        {
+          "id": 524,
+          "name": "Wolf Puncher II",
+          "complete": false
+        },
+        {
+          "id": 525,
+          "name": "Corrupted Gauntlet Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 526,
+          "name": "Gauntlet Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 527,
+          "name": "No Pressure",
+          "complete": false
+        },
+        {
+          "id": 528,
+          "name": "Alchemical Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 529,
+          "name": "Denying the Healers II",
+          "complete": false
+        },
+        {
+          "id": 530,
+          "name": "No Time for a Drink",
+          "complete": false
+        },
+        {
+          "id": 531,
+          "name": "Fight Caves Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 532,
+          "name": "Terrible Parent",
+          "complete": false
+        },
+        {
+          "id": 533,
+          "name": "A Long Trip",
+          "complete": false
+        },
+        {
+          "id": 534,
+          "name": "Nightmare (Solo) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 535,
+          "name": "Nightmare (5-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 536,
+          "name": "Animal Whisperer",
+          "complete": false
+        },
+        {
+          "id": 537,
+          "name": "Peach Conjurer",
+          "complete": false
+        },
+        {
+          "id": 538,
+          "name": "Zulrah Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 539,
+          "name": "Theatre of Blood Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 540,
+          "name": "Perfect Theatre",
+          "complete": false
+        },
+        {
+          "id": 541,
+          "name": "Morytania Only",
+          "complete": false
+        },
+        {
+          "id": 542,
+          "name": "Theatre (Duo) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 543,
+          "name": "Theatre (Trio) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 544,
+          "name": "Theatre (4-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 545,
+          "name": "Theatre (5-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 546,
+          "name": "Faithless Encounter",
+          "complete": false
+        },
+        {
+          "id": 547,
+          "name": "The Fremennik Way",
+          "complete": false
+        },
+        {
+          "id": 548,
+          "name": "Vorkath Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 549,
+          "name": "Chambers of Xeric: CM Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 550,
+          "name": "Chambers of Xeric: CM (Solo) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 551,
+          "name": "Chambers of Xeric: CM (5-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 552,
+          "name": "Chambers of Xeric: CM (Trio) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 553,
+          "name": "Chambers of Xeric Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 554,
+          "name": "Chambers of Xeric (Solo) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 555,
+          "name": "Chambers of Xeric (Trio) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 556,
+          "name": "Chambers of Xeric (5-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 557,
+          "name": "Demon Whisperer",
+          "complete": false
+        },
+        {
+          "id": 558,
+          "name": "Ash Collector",
+          "complete": false
+        },
+        {
+          "id": 559,
+          "name": "Inferno Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 560,
+          "name": "The Floor Is Lava",
+          "complete": false
+        },
+        {
+          "id": 561,
+          "name": "Playing with Jads",
+          "complete": false
+        },
+        {
+          "id": 562,
+          "name": "No Luck Required",
+          "complete": false
+        },
+        {
+          "id": 563,
+          "name": "Wasn't Even Close",
+          "complete": false
+        },
+        {
+          "id": 564,
+          "name": "Budget Setup",
+          "complete": false
+        },
+        {
+          "id": 565,
+          "name": "Nibbler Chaser",
+          "complete": false
+        },
+        {
+          "id": 566,
+          "name": "Facing Jad Head-on II",
+          "complete": false
+        },
+        {
+          "id": 567,
+          "name": "Jad? What Are You Doing Here?",
+          "complete": false
+        },
+        {
+          "id": 568,
+          "name": "Inferno Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 569,
+          "name": "The VI Jad Challenge",
+          "complete": false
+        },
+        {
+          "id": 570,
+          "name": "TzHaar-Ket-Rak's Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 571,
+          "name": "It Wasn't a Fluke",
+          "complete": false
+        },
+        {
+          "id": 572,
+          "name": "Stop Right There!",
+          "complete": false
+        },
+        {
+          "id": 573,
+          "name": "Personal Space",
+          "complete": false
+        },
+        {
+          "id": 574,
+          "name": "Royal Affairs",
+          "complete": false
+        },
+        {
+          "id": 575,
+          "name": "Harder Mode I",
+          "complete": false
+        },
+        {
+          "id": 576,
+          "name": "Harder Mode II",
+          "complete": false
+        },
+        {
+          "id": 577,
+          "name": "Nylo Sniper",
+          "complete": false
+        },
+        {
+          "id": 578,
+          "name": "Team Work Makes the Dream Work",
+          "complete": false
+        },
+        {
+          "id": 579,
+          "name": "Harder Mode III",
+          "complete": false
+        },
+        {
+          "id": 580,
+          "name": "Pack Like a Yak",
+          "complete": false
+        },
+        {
+          "id": 581,
+          "name": "Theatre: HM (Trio) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 582,
+          "name": "Theatre: HM (4-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 583,
+          "name": "Theatre: HM (5-Scale) Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 584,
+          "name": "Theatre of Blood: HM Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 585,
+          "name": "Phosani's Grandmaster",
+          "complete": false
+        },
+        {
+          "id": 586,
+          "name": "Perfect Phosani's Nightmare",
+          "complete": false
+        },
+        {
+          "id": 587,
+          "name": "Phosani's Speedrunner",
+          "complete": false
+        },
+        {
+          "id": 588,
+          "name": "Can't Wake Up",
+          "complete": true
+        },
+        {
+          "id": 589,
+          "name": "Nex Duo",
+          "complete": true
+        },
+        {
+          "id": 590,
+          "name": "I should see a doctor",
+          "complete": true
+        },
+        {
+          "id": 591,
+          "name": "Perfect Nex",
+          "complete": false
+        },
+        {
+          "id": 592,
+          "name": "Tombs Speed Runner II",
+          "complete": false
+        },
+        {
+          "id": 593,
+          "name": "Tombs Speed Runner III",
+          "complete": false
+        },
+        {
+          "id": 594,
+          "name": "Amascut's Remnant",
+          "complete": true
+        },
+        {
+          "id": 595,
+          "name": "Maybe I'm the boss.",
+          "complete": true
+        },
+        {
+          "id": 596,
+          "name": "Expert Tomb Raider",
+          "complete": false
+        },
+        {
+          "id": 597,
+          "name": "Akkhan't Do it",
+          "complete": true
+        },
+        {
+          "id": 598,
+          "name": "All Praise Zebak",
+          "complete": true
+        },
+        {
+          "id": 599,
+          "name": "Perfection of Het",
+          "complete": false
+        },
+        {
+          "id": 600,
+          "name": "Perfection of Apmeken",
+          "complete": false
+        },
+        {
+          "id": 601,
+          "name": "Perfection of Crondis",
+          "complete": false
+        },
+        {
+          "id": 602,
+          "name": "Perfection of Scabaras",
+          "complete": false
+        },
+        {
+          "id": 603,
+          "name": "Insanity",
+          "complete": false
+        },
+        {
+          "id": 604,
+          "name": "Phantom Muspah Manipulator",
+          "complete": false
+        },
+        {
+          "id": 605,
+          "name": "Phantom Muspah Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 606,
+          "name": "Duke Sucellus Sleeper",
+          "complete": false
+        },
+        {
+          "id": 607,
+          "name": "Vardorvis Sleeper",
+          "complete": false
+        },
+        {
+          "id": 608,
+          "name": "Whispered",
+          "complete": false
+        },
+        {
+          "id": 609,
+          "name": "Leviathan Sleeper",
+          "complete": false
+        },
+        {
+          "id": 610,
+          "name": "Duke Sucellus Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 611,
+          "name": "Vardorvis Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 612,
+          "name": "Whisperer Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 613,
+          "name": "Leviathan Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 614,
+          "name": "Axe Enthusiast",
+          "complete": false
+        },
+        {
+          "id": 615,
+          "name": "Unconventional",
+          "complete": false
+        },
+        {
+          "id": 616,
+          "name": "Dark Memories",
+          "complete": false
+        },
+        {
+          "id": 617,
+          "name": "Mirror Image",
+          "complete": false
+        },
+        {
+          "id": 618,
+          "name": "Colosseum Grand Champion",
+          "complete": false
+        },
+        {
+          "id": 619,
+          "name": "Slow Dancing in the Sand",
+          "complete": false
+        },
+        {
+          "id": 620,
+          "name": "Perfect Footwork",
+          "complete": false
+        },
+        {
+          "id": 621,
+          "name": "Reinforcements",
+          "complete": false
+        },
+        {
+          "id": 622,
+          "name": "Colosseum Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 623,
+          "name": "Araxxor Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 624,
+          "name": "Perfect Araxxor 2",
+          "complete": false
+        },
+        {
+          "id": 625,
+          "name": "Swimming in Venom",
+          "complete": false
+        },
+        {
+          "id": 626,
+          "name": "Hueycoatl Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 627,
+          "name": "Contractually Unbound",
+          "complete": false
+        },
+        {
+          "id": 628,
+          "name": "Yama Speed-Runner",
+          "complete": false
+        },
+        {
+          "id": 629,
+          "name": "Contract Choreographer",
+          "complete": false
+        },
+        {
+          "id": 630,
+          "name": "It's Dark Down Here",
+          "complete": false
+        },
+        {
+          "id": 631,
+          "name": "Perfect Doom",
+          "complete": false
+        },
+        {
+          "id": 632,
+          "name": "The Praying Mantis",
+          "complete": true
+        },
+        {
+          "id": 633,
+          "name": "Duel of Mokhaiotl",
+          "complete": true
+        },
+        {
+          "id": 634,
+          "name": "Darkness Is Your Ally?",
+          "complete": false
+        },
+        {
+          "id": 635,
+          "name": "Doom Racer",
+          "complete": true
+        },
+        {
+          "id": 636,
+          "name": "Mopping up",
+          "complete": true
+        }
+      ]
+    }
+  }
+}

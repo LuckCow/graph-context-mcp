@@ -164,8 +164,12 @@ class SpaceRegistry:
         return None
 
     def attached_relations(self, type_key: str) -> tuple[PropertyInfo, ...]:
-        """The type's attached ``objects`` relations (denylist honored) --
-        the bare-usable edge vocabulary an unmatched-key error teaches."""
+        """The type's attached ``objects`` relations that a write can go
+        through -- the bare-usable edge vocabulary an unmatched-key error
+        teaches and the overview lists. Excludes the system denylist and
+        ``READ_ONLY_RELATIONS`` (``links``): those reflect as edges on
+        read but the store refuses to be written through them, so
+        ``relation_label_for`` never offers them either."""
         info = self.types_by_key.get(type_key)
         if info is None:
             return ()
@@ -173,6 +177,29 @@ class SpaceRegistry:
             prop for prop in info.properties
             if prop.format == "objects"
             and prop.key not in mapping.SYSTEM_RELATION_DENYLIST
+            and not schema.is_read_only_relation(prop.key)
+        )
+
+    def unattached_relations(self) -> tuple[PropertyInfo, ...]:
+        """Space ``objects`` relations that no type carries -- the
+        overview's ``"(any type)"`` bucket (discoverable, attachable via
+        an explicit ``create_missing_properties`` declaration, ADR 047).
+        Same exclusions as :meth:`attached_relations`, plus ``gc_`` keys
+        (the seeded ``gc_edge_*`` starters and other infra surfaces are
+        not generic story vocabulary), sorted by key for a stable render."""
+        claimed = {
+            prop.key
+            for info in self.types_by_key.values()
+            for prop in info.properties
+        }
+        return tuple(
+            info
+            for key, info in sorted(self.properties_by_key.items())
+            if info.format == "objects"
+            and key not in claimed
+            and key not in mapping.SYSTEM_RELATION_DENYLIST
+            and not schema.is_read_only_relation(key)
+            and not key.startswith(mapping.GC_PREFIX)
         )
 
     def known_edge_labels(self) -> frozenset[str]:

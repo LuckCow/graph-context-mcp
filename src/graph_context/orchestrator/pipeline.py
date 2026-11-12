@@ -52,6 +52,7 @@ from graph_context.application.mutation_journal import MutationRecord
 from graph_context.application.node_historian import NodeHistorian
 from graph_context.application.rule_engine import RuleTickReport, describe_report
 from graph_context.application.scheduler import SchedulerTick
+from graph_context.application.snapshot_importer import ImportReport, SnapshotImporter
 from graph_context.domain.model_choice import model_id
 from graph_context.domain.models import Node
 from graph_context.errors import GraphContextError, NodeNotFound
@@ -306,6 +307,11 @@ class Orchestrator:
     # list) records one attributed body revision at the turn boundary,
     # and history_tick records human edits the change tick surfaces.
     historian: NodeHistorian | None = None
+    # WP54 (ADR 062): the external-snapshot importer -- when wired, the
+    # change tick's FIRST listener reconciles the graph against the
+    # game's exports before the rule engine diffs. None = no import
+    # surface (no import_dir bound; the bare MCP server; tests).
+    importer: SnapshotImporter | None = None
     turn_log: TurnLog | None = None
     # ADR 015 amendment: re-reads every config source (profile defaults,
     # GC_MODES_FILE, in-space Activity Mode objects). None (tests, no
@@ -383,6 +389,18 @@ class Orchestrator:
         like ``rule_tick``: one engine per space, so its baseline stays
         coherent no matter which session asked."""
         return await self.services.rules.run_now(identifier, trigger)
+
+    async def import_tick(self) -> ImportReport | None:
+        """Reconcile imported nodes against the external exports (WP54,
+        ADR 062). The change tick's first listener calls this after its
+        resync under the route lock, BEFORE the rule tick, so the game's
+        values are what the rule engine diffs -- a human's edit to an
+        imported node is written back here and never read as a
+        transition. The shared bundle, like ``rule_tick``: imports belong
+        to the space. None = no importer wired."""
+        if self.importer is None:
+            return None
+        return await self.importer.run_tick()
 
     async def history_tick(self, changed: frozenset[str]) -> None:
         """Record human revisions for changed tracked nodes (WP41, ADR

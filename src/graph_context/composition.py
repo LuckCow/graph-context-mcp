@@ -56,6 +56,7 @@ from graph_context.application.mutation_journal import MutationJournal
 from graph_context.application.ranker import Ranker
 from graph_context.application.semantic_projector import SemanticProjector
 from graph_context.application.session_registry import SessionRegistry
+from graph_context.application.snapshot_importer import SnapshotImporter
 from graph_context.errors import GraphContextError
 from graph_context.interface import mode_config
 from graph_context.interface.profiles import DomainProfile
@@ -94,6 +95,11 @@ class BuiltRuntime:
     teardown: list[TeardownHook]
     services_for: Callable[[str], Awaitable[Services]]
     session_labels: dict[str, str]
+    # WP54 (ADR 062): the external-snapshot importer over ``import_dir``,
+    # or None when the runtime mirrors nothing. Built here (the source
+    # adapter is infrastructure); the orchestrator's bootstrap seeds and
+    # ticks it -- the bare MCP server has no tick and leaves it unused.
+    importer: SnapshotImporter | None = None
 
 
 async def build_runtime(
@@ -104,6 +110,7 @@ async def build_runtime(
     project: str | None = None,
     session_key: str | None = None,
     modes_file: str | None = None,
+    import_dir: str | None = None,
 ) -> BuiltRuntime:
     """Build the full service bundle for one runtime.
 
@@ -196,6 +203,7 @@ async def build_runtime(
             teardown=teardown,
             services_for=_session_seam(base, registry),
             session_labels=session_labels,
+            importer=_build_importer(memory_repo, import_dir),
         )
 
     from graph_context.infrastructure.anytype.client import AnytypeClient
@@ -284,7 +292,27 @@ async def build_runtime(
         teardown=teardown,
         services_for=_session_seam(base, registry),
         session_labels=session_labels,
+        importer=_build_importer(repository, import_dir),
     )
+
+
+def _build_importer(
+    repository: GraphRepository, import_dir: str | None
+) -> SnapshotImporter | None:
+    """The ADR 062 importer over a directory of RuneLite exports, or
+    None when no directory is bound. The directory must exist NOW --
+    a typo in host config is a startup error, not a quiet no-op."""
+    if not import_dir or not import_dir.strip():
+        return None
+    from pathlib import Path
+
+    from graph_context.domain.runescape import RuneScapeExports
+    from graph_context.infrastructure.imports.filesystem import (
+        DirectoryImportSource,
+    )
+
+    source = DirectoryImportSource(Path(import_dir.strip()))
+    return SnapshotImporter(repository, source, RuneScapeExports())
 
 
 def _build_script_runner() -> SubprocessScriptRunner:

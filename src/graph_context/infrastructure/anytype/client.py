@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+def _describe(err: httpx.HTTPError) -> str:
+    """Name the failure: httpx's timeouts (read, connect, pool) carry an
+    EMPTY message, so the class name is the only thing that tells a slow
+    server from an exhausted connection pool in the log."""
+    detail = str(err)
+    name = type(err).__name__
+    return f"{name}: {detail}" if detail else name
+
+
 def _unwrap(payload: dict[str, Any], key: str) -> dict[str, Any]:
     """Pull the single envelope key (``object``/``type``/``property``) the
     write endpoints wrap their result in, typed as a dict (the JSON decoder
@@ -59,6 +68,7 @@ class AnytypeClient:
             transport=transport,
             headers={
                 "Authorization": f"Bearer {config.api_key}",
+                "Host": config.host_header,
                 "Anytype-Version": config.api_version,
                 "Content-Type": "application/json",
             },
@@ -113,7 +123,9 @@ class AnytypeClient:
                 # Transport-level failure (connection refused, timeout, ...):
                 # translate so callers see one error family, per the module
                 # contract. status=0 marks "no HTTP response at all".
-                raise AnytypeApiError(0, "transport", str(err), path) from err
+                raise AnytypeApiError(
+                    0, "transport", _describe(err), path
+                ) from err
             if response.status_code < 400:
                 return response
             error = self._to_error(response, path)
@@ -451,7 +463,9 @@ class AnytypeClient:
                 async for line in response.aiter_lines():
                     yield line
         except httpx.HTTPError as err:
-            raise AnytypeApiError(0, "transport", str(err), path) from err
+            raise AnytypeApiError(
+                0, "transport", _describe(err), path
+            ) from err
 
     def stream_chat_messages(
         self, chat_id: str, *, heartbeat_seconds: int = 30

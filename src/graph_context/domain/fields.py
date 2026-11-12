@@ -11,6 +11,7 @@ for the in-memory fake).
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 from graph_context.errors import GraphContextError
@@ -78,6 +79,44 @@ def split_multi_select(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def same_option(a: str, b: str) -> bool:
+    """The one select-option identity rule: names match case-insensitively.
+
+    The store resolves a written option name to an EXISTING tag this way
+    (the adapter's ``_resolve_tag``), so a write of ``"in progress"`` onto
+    a property holding ``"In Progress"`` lands on that tag and reads back
+    under its canonical spelling. Everything that asks "is this the same
+    option?" -- the fake's normalization, the import planner's change-only
+    compare -- goes through here so no consumer sees a phantom change.
+    """
+    return a.strip().casefold() == b.strip().casefold()
+
+
+def canonical_option(value: str, options: Sequence[str]) -> str:
+    """The existing option ``value`` resolves to (its stored spelling),
+    else ``value`` itself -- what a select write reads back as."""
+    for option in options:
+        if same_option(option, value):
+            return option
+    return value.strip()
+
+
 def render_number(number: float) -> str:
     """Numbers read back untrailed: 1200.0 -> "1200", 1.5 -> "1.5"."""
     return str(int(number)) if number.is_integer() else str(number)
+
+
+def lookup(fields: Mapping[str, str], key: str) -> str:
+    """The one READ rule for a ``fields`` value: exact key, else a
+    case-insensitive key match, else ``""`` -- absence IS the empty/false
+    value (the adapter drops unticked checkboxes and empty values from
+    ``Node.fields``). Shared by the rule engine's watch reads and the
+    import planner's change-only compare, so both see one value."""
+    value = fields.get(key)
+    if value is not None:
+        return value
+    wanted = key.strip().casefold()
+    for stored, stored_value in fields.items():
+        if stored.strip().casefold() == wanted:
+            return stored_value
+    return ""

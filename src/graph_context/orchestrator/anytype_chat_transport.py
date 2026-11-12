@@ -876,7 +876,7 @@ class AnytypeChatTurnHandler:
                 ))
                 return
             try:
-                proposal, type_name = await services.proposals.apply(
+                proposal, type_name, attached = await services.proposals.apply(
                     services.repository, proposal_id
                 )
             except GraphContextError as err:
@@ -896,11 +896,18 @@ class AnytypeChatTurnHandler:
                 f"{len(proposal.properties)} propert"
                 f"{'y' if len(proposal.properties) == 1 else 'ies'}."
             )
-        else:
-            added = ", ".join(d.name for d in proposal.properties)
+        elif attached:
             outcome = (
                 f"\N{WHITE HEAVY CHECK MARK} applied {proposal.id}: "
-                f"{type_name!r} now carries {added}."
+                f"{type_name!r} now carries {', '.join(attached)}."
+            )
+        else:
+            # Every proposed property was already on the type -- say so,
+            # so the model stops re-proposing it (WP33 loop fix).
+            already = ", ".join(d.name for d in proposal.properties)
+            outcome = (
+                f"\N{WHITE HEAVY CHECK MARK} {proposal.id}: {type_name!r} "
+                f"already carries {already} -- no change."
             )
         self.sent.add(await send(outcome, ()))
         logger.info(

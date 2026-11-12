@@ -1,0 +1,178 @@
+{
+  "exported_at": "2026-09-06T17:08:56.173621600-04:00",
+  "plugin_version": "0.6.0",
+  "session_id": "47eb661f-910f-4ffa-95d2-82e92e434776",
+  "reason": "item_container_changed",
+  "kind": "inventory",
+  "item_count": 28,
+  "items": [
+    {
+      "slot": 0,
+      "id": 28997,
+      "quantity": 1,
+      "name": "Dual macuahuitl"
+    },
+    {
+      "slot": 1,
+      "id": 1275,
+      "quantity": 1,
+      "name": "Rune pickaxe"
+    },
+    {
+      "slot": 2,
+      "id": 12791,
+      "quantity": 1,
+      "name": "Rune pouch"
+    },
+    {
+      "slot": 3,
+      "id": 1625,
+      "quantity": 1,
+      "name": "Uncut opal"
+    },
+    {
+      "slot": 4,
+      "id": 5074,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 5,
+      "id": 1625,
+      "quantity": 1,
+      "name": "Uncut opal"
+    },
+    {
+      "slot": 6,
+      "id": 22798,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 7,
+      "id": 1623,
+      "quantity": 1,
+      "name": "Uncut sapphire"
+    },
+    {
+      "slot": 8,
+      "id": 1621,
+      "quantity": 1,
+      "name": "Uncut emerald"
+    },
+    {
+      "slot": 9,
+      "id": 5071,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 10,
+      "id": 2347,
+      "quantity": 1,
+      "name": "Hammer"
+    },
+    {
+      "slot": 11,
+      "id": 1755,
+      "quantity": 1,
+      "name": "Chisel"
+    },
+    {
+      "slot": 12,
+      "id": 1611,
+      "quantity": 1,
+      "name": "Jade"
+    },
+    {
+      "slot": 13,
+      "id": 22798,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 14,
+      "id": 1625,
+      "quantity": 1,
+      "name": "Uncut opal"
+    },
+    {
+      "slot": 15,
+      "id": 1623,
+      "quantity": 1,
+      "name": "Uncut sapphire"
+    },
+    {
+      "slot": 16,
+      "id": 5075,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 17,
+      "id": 5074,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 18,
+      "id": 1623,
+      "quantity": 1,
+      "name": "Uncut sapphire"
+    },
+    {
+      "slot": 19,
+      "id": 1623,
+      "quantity": 1,
+      "name": "Uncut sapphire"
+    },
+    {
+      "slot": 20,
+      "id": 5318,
+      "quantity": 1779,
+      "name": "Potato seed"
+    },
+    {
+      "slot": 21,
+      "id": 1629,
+      "quantity": 1,
+      "name": "Uncut red topaz"
+    },
+    {
+      "slot": 22,
+      "id": 1619,
+      "quantity": 1,
+      "name": "Uncut ruby"
+    },
+    {
+      "slot": 23,
+      "id": 1621,
+      "quantity": 1,
+      "name": "Uncut emerald"
+    },
+    {
+      "slot": 24,
+      "id": 1617,
+      "quantity": 1,
+      "name": "Uncut diamond"
+    },
+    {
+      "slot": 25,
+      "id": 1629,
+      "quantity": 1,
+      "name": "Uncut red topaz"
+    },
+    {
+      "slot": 26,
+      "id": 22798,
+      "quantity": 1,
+      "name": "Bird nest"
+    },
+    {
+      "slot": 27,
+      "id": 5074,
+      "quantity": 1,
+      "name": "Bird nest"
+    }
+  ]
+}

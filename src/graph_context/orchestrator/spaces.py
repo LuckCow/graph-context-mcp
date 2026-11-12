@@ -15,6 +15,9 @@ file, keyed by the space id itself::
     chat_id       = "bafyre..."    # optional PIN: serve ONLY this chat,
                                     # no discovery (single-chat deployments)
     exclude_chats = ["bafyre..."]  # optional; chat ids the bot ignores
+    import_dir    = "/data/rs"     # optional; a directory of RuneLite
+                                    # JSON exports reconciled into the
+                                    # space every change tick (ADR 062)
 
 The mode NEW chats start in is NOT declared here (ADR 034, retiring
 WP21's ``default_mode`` key): it lives in the space itself, on the Space
@@ -53,6 +56,7 @@ from graph_context.interface.profiles import DomainProfile
 
 _BINDING_KEYS = {
     "profile", "project", "modes_file", "chat_id", "exclude_chats",
+    "import_dir",
 }
 
 # The packaged template a missing file is minted from (ADR 060), resolved
@@ -70,6 +74,10 @@ class SpaceBinding:
     modes_file: str | None = None
     chat_id: str | None = None  # pin: serve only this chat (no discovery)
     exclude_chats: tuple[str, ...] = ()
+    # ADR 062: a host directory of export documents the space mirrors.
+    # Host config like everything here -- which machine's game files a
+    # space reflects is a deployment fact, not source.
+    import_dir: str | None = None
 
 
 def served_chat_ids(
@@ -202,6 +210,7 @@ def _binding_from_mapping(
         modes_file=body.get("modes_file"),
         chat_id=body.get("chat_id"),
         exclude_chats=exclude_chats,
+        import_dir=body.get("import_dir"),
     )
 
 

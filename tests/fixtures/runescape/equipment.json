@@ -1,0 +1,64 @@
+{
+  "exported_at": "2026-09-06T17:19:04.651859800-04:00",
+  "plugin_version": "0.6.0",
+  "session_id": "47eb661f-910f-4ffa-95d2-82e92e434776",
+  "reason": "item_container_changed",
+  "kind": "equipment",
+  "item_count": 9,
+  "items": [
+    {
+      "slot": 0,
+      "id": 29047,
+      "quantity": 1,
+      "name": "Blood moon helm"
+    },
+    {
+      "slot": 1,
+      "id": 6570,
+      "quantity": 1,
+      "name": "Fire cape"
+    },
+    {
+      "slot": 2,
+      "id": 1725,
+      "quantity": 1,
+      "name": "Amulet of strength"
+    },
+    {
+      "slot": 3,
+      "id": 28997,
+      "quantity": 1,
+      "name": "Dual macuahuitl"
+    },
+    {
+      "slot": 4,
+      "id": 29043,
+      "quantity": 1,
+      "name": "Blood moon chestplate"
+    },
+    {
+      "slot": 7,
+      "id": 29045,
+      "quantity": 1,
+      "name": "Blood moon tassets"
+    },
+    {
+      "slot": 9,
+      "id": 7462,
+      "quantity": 1,
+      "name": "Barrows gloves"
+    },
+    {
+      "slot": 10,
+      "id": 11840,
+      "quantity": 1,
+      "name": "Dragon boots"
+    },
+    {
+      "slot": 12,
+      "id": 11773,
+      "quantity": 1,
+      "name": "Berserker ring (i)"
+    }
+  ]
+}

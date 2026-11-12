@@ -180,9 +180,12 @@ class SchemaProposals:
 
     async def apply(
         self, repository: GraphRepository, proposal_id: str
-    ) -> tuple[SchemaProposal, str]:
-        """Execute a user-confirmed proposal; returns it with the type's
-        display name as the backend reports it.
+    ) -> tuple[SchemaProposal, str, tuple[str, ...]]:
+        """Execute a user-confirmed proposal; returns it, the type's
+        display name as the backend reports it, and the property names the
+        change ACTUALLY landed (empty for an extend proposal whose
+        properties were all already on the type -- the caller reports "no
+        change" rather than a phantom success).
 
         HARNESS-ONLY (ADR 041 v2): the one caller is the Anytype
         transport's reaction handler -- the schema tool exposes no apply
@@ -195,12 +198,13 @@ class SchemaProposals:
                 plural=proposal.plural,
                 properties=proposal.properties,
             )
+            attached = tuple(d.name for d in proposal.properties)
         else:
-            type_name = await repository.add_type_properties(
+            type_name, attached = await repository.add_type_properties(
                 proposal.type_name, proposal.properties
             )
         del self._pending[proposal.id]
-        return proposal, type_name
+        return proposal, type_name, attached
 
     def _stash(self, proposal: SchemaProposal) -> SchemaProposal:
         self._pending[proposal.id] = proposal

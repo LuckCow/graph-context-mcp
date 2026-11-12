@@ -170,7 +170,7 @@ The space's **Activity Mode** objects are the ONLY live source of modes: every o
 
 ### Served spaces (`spaces.toml`)
 
-Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by space id, with optional `profile` / `project` / `modes_file` / `chat_id` / `exclude_chats`. Every chat in a bound space is its own session/thread ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)), with live discovery of new chats and its own persisted mode. The chat cursor persists (`GC_CHAT_CURSOR`), so messages sent while the bot was down are answered on the next startup. Never bind one space in both `spaces.toml` and `channels.toml`.
+Served spaces are declared in `spaces.toml` (`GC_SPACES_FILE`), keyed by space id, with optional `profile` / `project` / `modes_file` / `chat_id` / `exclude_chats` / `import_dir` (a directory of RuneLite JSON exports the space mirrors — nodes are seeded on boot and reconciled change-only every change tick, so Automation Rules fire on what the game changed; the game is the ground truth, [ADR 062](docs/adr/062-external-snapshot-imports.md)). Every chat in a bound space is its own session/thread ([ADR 021](docs/adr/021-per-chat-keyed-sessions.md)), with live discovery of new chats and its own persisted mode. The chat cursor persists (`GC_CHAT_CURSOR`), so messages sent while the bot was down are answered on the next startup. Never bind one space in both `spaces.toml` and `channels.toml`.
 
 **The file is not in git** ([ADR 060](docs/adr/060-deployment-scoped-space-bindings.md)). It is deployment-scoped — one copy per host, naming the spaces *that* deployment serves — so a dev box and a production server can run identical builds and still answer different chats. Two orchestrators sharing a space would answer every message twice, and one bot account is typically a member of both hosts' spaces, so this file is the only thing keeping them apart: **a space id belongs in exactly one deployment's copy.** A first boot with no file mints one from the packaged template and stops with instructions:
 
@@ -310,6 +310,7 @@ interface  ──▶  application  ──▶  domain
 | `domain/session.py` | `FocusStack`, `RecentHistory`, `SessionState` | Working *set* not a pointer; pinning; top never evicted |
 | `domain/scheduling.py` | Schedule parsing + next-fire math ([ADR 027](docs/adr/027-scheduled-events.md)) | Dependency-free cron + one-shot datetimes; recurring events arm on first fire |
 | `domain/rules.py` | Automation Rule vocabulary + matching ([ADR 039](docs/adr/039-reactive-rule-engine.md)) | Pure `parse_rule_fields`/`condition_met`; lenient status select; errors echo the allowed words |
+| `domain/imports.py` + `domain/runescape.py` | External-snapshot desired state + planner; the RuneLite mapper ([ADR 062](docs/adr/062-external-snapshot-imports.md)) | Creates + change-only updates against the live index; the game is the ground truth; one scalar per watchable leaf |
 | `domain/attribution.py` | Generation-provenance property keys ([ADR 028](docs/adr/028-native-properties-everywhere.md)) | Who/what/when stamps as REAL properties, never a JSON side-channel |
 | `domain/activity.py` + `domain/model_choice.py` + `domain/thinking_choice.py` | Mode-level vocabularies ([ADR 029](docs/adr/029-live-turn-activity-streaming.md)/[033](docs/adr/033-per-mode-model-selection.md)/[037](docs/adr/037-mode-level-driver-options.md)) | Activity detail levels, canonical model choices, thinking levels |
 | `ports/graph_repository.py` | Persistence contract | Composite-create **rollback contract**; `fetch_body`; `create_type`/`add_type_properties` for confirmed schema changes ([ADR 041](docs/adr/041-schema-proposals.md)) |
@@ -318,6 +319,7 @@ interface  ──▶  application  ──▶  domain
 | `ports/space_context_store.py` | Space-settings singleton contract ([ADR 034](docs/adr/034-space-context-default-mode.md)) | Payloads carry the default-mode link targets; the loader owns the singleton rule |
 | `ports/view_catalog.py` | Saved Set views, compiled and runnable ([ADR 018](docs/adr/018-client-side-query-engine.md)) | A view is a saved query the human maintains; implementations compile, never re-query |
 | `ports/script_runner.py` | Sandboxed script execution contract ([ADR 040](docs/adr/040-sandboxed-script-action.md)) | Script + snapshot in, queued effects out; every failure is a legible `gc_rule_last_error` message |
+| `ports/import_source.py` | Where export documents come from ([ADR 062](docs/adr/062-external-snapshot-imports.md)) | The CURRENT decoded documents every call; cheap when unchanged, a torn read keeps the last good decode |
 | `ports/semantic.py` | `Embedder` + `SemanticIndex` contracts | Embeddings are a cache keyed by content hash + model, never truth ([ADR 014](docs/adr/014-semantic-search-as-derived-projection.md)) |
 | `application/node_writer.py` | `create_node` / `update_node` use-case | Owns the summary-staleness rule; touches focus |
 | `application/node_reader.py` | `get_node` use-case | Grouped edges + `include_provenance` excerpts |
@@ -325,6 +327,7 @@ interface  ──▶  application  ──▶  domain
 | `application/querier.py` | `query` use-case | Ad-hoc predicates straight off the tool surface, or a compiled saved view |
 | `application/scheduler.py` | Scheduled Events use-case ([ADR 027](docs/adr/027-scheduled-events.md)) | Fire = mark the node, then inject a turn; at-most-once, downtime collapses to one late fire |
 | `application/rule_engine.py` | `RuleEngine` tick over Automation Rules ([ADR 039](docs/adr/039-reactive-rule-engine.md)) | In-memory baseline diff: transitions not states; the engine's own writes never trigger rules |
+| `application/snapshot_importer.py` | `SnapshotImporter` reconciles the graph against exports ([ADR 062](docs/adr/062-external-snapshot-imports.md)) | The change tick's FIRST listener: the game's values land before the rule engine diffs; mints types via the ADR 041 port methods |
 | `application/schema_proposals.py` | Draft ledger for schema changes ([ADR 041](docs/adr/041-schema-proposals.md)) | Session-scoped, cap 5, drafts not records; apply happens only after a human 👍 |
 | `application/capture_recorder.py` | Capture service (orchestrator-called) | Policy-typed artifacts ([ADR 015](docs/adr/015-configurable-activity-modes.md)); native types are first-class, only `gc_prose` keeps infra hiding |
 | `application/mutation_journal.py` | Writers report created/modified ids at the source | `NullJournal` in the MCP server; drained per turn in the orchestrator |
@@ -337,6 +340,7 @@ interface  ──▶  application  ──▶  domain
 | `infrastructure/memory/` | In-memory repository, session/mode/space-context stores, view catalog | Reference impls; certified by `tests/contract` |
 | `infrastructure/semantic/` | Hash + sentence-transformers embedders; memory + SQLite index | `GC_EMBEDDER` selects; the SQLite cache file is disposable |
 | `infrastructure/sandbox/` | The script sandbox ([ADR 040](docs/adr/040-sandboxed-script-action.md)) | `bootstrap.py` = the rlimited `python -I -S` child (stdlib-only, importable for tests); `runner.py` spawns, caps, and kills it |
+| `infrastructure/imports/` | Directory-of-JSON `ImportSource` ([ADR 062](docs/adr/062-external-snapshot-imports.md)) | Re-decodes only files whose `(mtime_ns, size)` moved; mid-write reads keep the previous export |
 | `infrastructure/anytype/client.py` | Async httpx client | Auth, version pin, pagination, bounded retry; `request_count` for budget asserts |
 | `infrastructure/anytype/mapping.py` | The quirk quarantine | All representation assumptions (A1–A14) live here |
 | `infrastructure/anytype/registry.py` | `SpaceRegistry`: the space's live types/relations | Resolves requested types & relation labels to existing keys; unknown labels surface for approval |

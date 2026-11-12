@@ -362,6 +362,7 @@ def session_options(
     can_use_tool: CanUseTool,
     cli_path: str | None,
     web_search: bool = False,
+    oauth_token: str | None = None,
 ) -> ClaudeAgentOptions:
     """The session's capability boundary, in one place.
 
@@ -377,6 +378,12 @@ def session_options(
       loads user/project/local settings from the host filesystem, which
       can inject extra MCP servers, permission grants, and hooks into
       the session.
+
+    ``oauth_token`` (a ``claude setup-token`` credential) rides the CLI
+    child's environment ONLY -- never the orchestrator's own, where every
+    other subprocess (rule-script sandbox included) would inherit it. The
+    CLI prefers it over a stored login; None leaves the stored login as
+    the sole credential.
     """
     return ClaudeAgentOptions(
         mcp_servers={_SERVER_NAME: server},
@@ -387,7 +394,12 @@ def session_options(
         effort=effort,
         can_use_tool=can_use_tool,
         cli_path=cli_path,
+        env={OAUTH_TOKEN_ENV: oauth_token} if oauth_token else {},
     )
+
+
+# The Claude Code CLI's own name for a long-lived subscription token.
+OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 class ClaudeAgentDriver:
@@ -404,7 +416,9 @@ class ClaudeAgentDriver:
         cli_path: str | None = None,
         schemas: Mapping[str, Mapping[str, Any]] | None = None,
         on_result: Callable[[DecideUsage], None] | None = None,
+        oauth_token: str | None = None,
     ) -> None:
+        self._oauth_token = oauth_token
         self._model = model
         self._effort = effort
         self._cli_path = cli_path
@@ -452,6 +466,7 @@ class ClaudeAgentDriver:
             can_use_tool=permission_gate(options.web_search),
             cli_path=self._cli_path,
             web_search=options.web_search,
+            oauth_token=self._oauth_token,
         )
         harvest = BlockHarvest()
         last_result: ResultMessage | None = None

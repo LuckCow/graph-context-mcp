@@ -197,6 +197,9 @@ def _strip_fence_language(markdown: str) -> str:
     return _FENCE_LANGUAGE.sub(r"\1", markdown)
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1"})
+
+
 class MockAnytype:
     """Stateful fake of one Anytype instance holding one or more spaces."""
 
@@ -276,6 +279,14 @@ class MockAnytype:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.request_log.append((request.method, request.url.path))
+        # The DNS-rebinding guard (anytype-cli v0.5.2): only a loopback
+        # Host is served, whatever address the request arrived on.
+        host = request.headers.get("host", "").rsplit(":", 1)[0]
+        if host not in _LOOPBACK_HOSTS:
+            return httpx.Response(403, json={
+                "object": "error", "status": 403, "code": "forbidden",
+                "message": "request origin is not allowed",
+            })
         if self._fail_queue:
             status, body = self._fail_queue.pop(0)
             return httpx.Response(status, json=body)

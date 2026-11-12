@@ -91,9 +91,10 @@ class TestDraftedDrain:
     async def test_apply_executes_a_confirmed_draft(self, proposals, repo):
         # apply is HARNESS-only (the reaction handler); no gate here.
         proposal = proposals.propose_type(repo, "Faction", properties=(MOTTO,))
-        applied, type_name = await proposals.apply(repo, proposal.id)
+        applied, type_name, attached = await proposals.apply(repo, proposal.id)
         assert applied is proposal
         assert type_name == "Faction"
+        assert attached == ("Motto",)
         assert "Faction" in repo.known_node_types()
         assert proposals.pending() == ()
 
@@ -101,10 +102,26 @@ class TestDraftedDrain:
 class TestApplyAndCancel:
     async def test_apply_extends_an_existing_type(self, proposals, repo):
         proposal = proposals.propose_fields(repo, "Character", (MOTTO,))
-        _, type_name = await proposals.apply(repo, proposal.id)
+        _, type_name, attached = await proposals.apply(repo, proposal.id)
         assert type_name == "Character"
+        assert attached == ("Motto",)
         specs = repo.field_catalog().get("Character", ())
         assert any(s.name == "Motto" for s in specs)
+
+    async def test_apply_reports_no_change_when_property_already_attached(
+        self, proposals, repo
+    ):
+        # The WP33 loop fix: re-proposing a property the type already
+        # carries applies cleanly but reports an empty change list, so the
+        # transport can say "no change" instead of a phantom success.
+        await proposals.apply(
+            repo, proposals.propose_fields(repo, "Character", (MOTTO,)).id
+        )
+        _, type_name, attached = await proposals.apply(
+            repo, proposals.propose_fields(repo, "Character", (MOTTO,)).id
+        )
+        assert type_name == "Character"
+        assert attached == ()
 
     async def test_apply_unknown_id_lists_pending(self, proposals, repo):
         proposals.propose_type(repo, "Faction")

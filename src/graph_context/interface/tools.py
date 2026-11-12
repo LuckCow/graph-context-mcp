@@ -227,12 +227,16 @@ async def context_tool(
     if action in {"overview", "map"}:
         # Derived cold-start map: per-type counts + highest-degree hub nodes,
         # each with an id to start exploring from, plus the space's property
-        # catalog (ADR 023) so writes reuse existing properties as fields
-        # keys. Empty graph -> guidance, not an error (a fresh session
-        # should get something actionable).
+        # catalog -- scalars (ADR 023) and objects relations (ADR 042) -- so
+        # writes reuse existing properties/relations as `properties` keys.
+        # Empty graph -> guidance, not an error (a fresh session should get
+        # something actionable).
         return presenters.render_overview(
             build_overview(graph),
             services.repository.field_catalog(
+                include_roles=services.visible_infra_roles
+            ),
+            services.repository.relation_catalog(
                 include_roles=services.visible_infra_roles
             ),
         )
